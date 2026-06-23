@@ -92,6 +92,13 @@ jobs:
             cd /opt/abcd-control
             echo "📁 Directorio: $(pwd)"
 
+            if [ -d .git ]; then
+              echo "📥 Actualizando código desde origin/main"
+              git pull --ff-only origin main || git pull origin main
+            else
+              echo "⚠️ No se encontró repositorio git en /opt/abcd-control"
+            fi
+
             if [ -f scripts/deploy.sh ]; then
               echo "✅ Encontrado scripts/deploy.sh"
               chmod +x scripts/deploy.sh
