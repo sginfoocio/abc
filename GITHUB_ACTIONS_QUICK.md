@@ -10,6 +10,38 @@ Cada vez que hagas push a `main`, tu app se actualiza automáticamente en produc
 
 ---
 
+## 🔧 SETUP SERVIDOR (PRIMERO - Una sola vez)
+
+**En el servidor (como root):**
+
+```bash
+# Descargar y ejecutar script de setup
+curl -fsSL https://raw.githubusercontent.com/diagonaleyewear/abc/main/scripts/server-setup.sh | sudo bash
+
+# Sigue las instrucciones del script
+```
+
+El script hace:
+- ✅ Instala Docker y Docker Compose
+- ✅ Clona el repositorio
+- ✅ Crea archivo `.env`
+- ✅ Configura permisos
+
+**Después, edita .env con credenciales reales:**
+
+```bash
+sudo nano /opt/abcd-control/.env
+
+# Rellena:
+DB_HOST=10.3.0.13
+DB_PORT=5432
+DB_NAME=DiagonalDBProd
+DB_USER=user_sg_informatica
+DB_PASSWORD=<tu-password-real>
+```
+
+---
+
 ## PASO 1️⃣: Generar SSH Key en el Servidor (5 min)
 
 **En el servidor SSH:**

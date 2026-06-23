@@ -67,9 +67,18 @@ jobs:
           port: ${{ secrets.SERVER_PORT }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
+            set -e
+            echo "🚀 Iniciando deploy desde GitHub Actions..."
             cd /opt/abcd-control
+            echo "📁 Directorio: $(pwd)"
+            
+            # Asegurar permisos del script
             chmod +x scripts/deploy.sh
+            
+            # Ejecutar script de deploy
             ./scripts/deploy.sh
+            
+            echo "✅ Deploy completado exitosamente"
 
   tests:
     runs-on: ubuntu-latest

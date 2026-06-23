@@ -1,20 +1,16 @@
 from __future__ import annotations
 
-from io import BytesIO
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import streamlit as st
 
-from db_loader import load_odoo_dataframe
 from engine import load_input_file, run_abcd_engine
 
 
 APP_TITLE = "📦 Control ABCD de Productos"
 APP_ICON = "📊"
 LOCAL_INPUT_NAME = "input.xlsx"
-DATA_SOURCE_OPTIONS = ["Excel", "Base de Datos"]
 
 
 def configure_page() -> None:
@@ -25,104 +21,26 @@ def configure_page() -> None:
     )
 
 
-def load_excel_dataframe(uploaded_file_bytes: bytes | None, local_path: str) -> pd.DataFrame:
-    if uploaded_file_bytes is not None:
-        return load_input_file(BytesIO(uploaded_file_bytes))
+@st.cache_data
+def load_data(uploaded_file, local_path: Path) -> pd.DataFrame:
+    if uploaded_file is not None:
+        return load_input_file(uploaded_file)
 
-    path = Path(local_path)
-    if path.exists():
-        return load_input_file(path)
+    if local_path.exists():
+        return load_input_file(local_path)
 
     raise FileNotFoundError(
-        "No se encontró input.xlsx y no se ha subido ningún archivo."
+        "No se encontró input.xlsx y no se ha subido ningún archivo." 
     )
 
 
-def load_data(uploaded_file, local_path: Path, data_source: str) -> pd.DataFrame:
-    if data_source == "Excel":
-        uploaded_file_bytes = uploaded_file.read() if uploaded_file is not None else None
-        return load_excel_dataframe(uploaded_file_bytes, str(local_path))
-
-    if data_source == "Base de Datos":
-        return load_odoo_dataframe()
-
-    raise ValueError(f"Origen de datos desconocido: {data_source}")
-
-
-def prepare_dataframe(
-    raw_df: pd.DataFrame,
-    days_without_sales_for_d: int,
-    reference_date: pd.Timestamp,
-) -> pd.DataFrame:
-    df = run_abcd_engine(raw_df, days_without_sales_for_d, reference_date)
-
-    if "PVO sin descuento" not in df.columns:
-        df["PVO sin descuento"] = df["PVO"]
-
-    return add_weekly_rotation_index(df, reference_date)
-
-
-def add_weekly_rotation_index(
-    df: pd.DataFrame,
-    reference_date: pd.Timestamp,
-) -> pd.DataFrame:
-    df = df.copy()
-    if "Indice_de_Rotacion_Semanal" in df.columns:
-        return df
-
-    today = (
-        pd.Timestamp(reference_date).normalize()
-        if reference_date is not None
-        else pd.Timestamp.today().normalize()
-    )
-
-    if "Ventas_7_Dias" in df.columns:
-        df["Indice_de_Rotacion_Semanal"] = (
-            df["Ventas_7_Dias"] / df["Stock"].replace({0: np.nan})
-        )
-    else:
-        df["Última Venta"] = pd.to_datetime(df["Última Venta"], errors="coerce")
-        days_since_last_sale = (today - df["Última Venta"].dt.normalize()).dt.days
-        df["Indice_de_Rotacion_Semanal"] = np.where(
-            df["Stock"] > 0,
-            np.where(
-                df["Última Venta"].notna(),
-                np.where(days_since_last_sale > 0, 7 / days_since_last_sale, 7.0),
-                0.0,
-            ),
-            np.nan,
-        )
-
-    return df
+@st.cache_data
+def prepare_dataframe(raw_df: pd.DataFrame) -> pd.DataFrame:
+    return run_abcd_engine(raw_df)
 
 
 def format_currency(value: float) -> str:
-    if pd.isna(value):
-        return ""
-
-    try:
-        amount = float(value)
-    except (TypeError, ValueError):
-        return str(value)
-
-    formatted = f"{amount:,.2f}"
-    formatted = formatted.replace(",", "X").replace(".", ",").replace("X", ".")
-    return f"{formatted} €"
-
-
-def dataframe_to_csv(dataframe: pd.DataFrame) -> bytes:
-    csv_text = dataframe.to_csv(sep=";", decimal=",", index=False)
-    return csv_text.encode("utf-8")
-
-
-def save_snapshot(dataframe: pd.DataFrame, analysis_date: pd.Timestamp) -> Path:
-    snapshot_dir = Path(__file__).resolve().parent / "snapshots"
-    snapshot_dir.mkdir(parents=True, exist_ok=True)
-    snapshot_df = dataframe.copy()
-    snapshot_df["Fecha_Analisis"] = analysis_date.strftime("%Y-%m-%d")
-    snapshot_path = snapshot_dir / f"abc_snapshot_{analysis_date.strftime('%Y%m%d')}.csv"
-    snapshot_df.to_csv(snapshot_path, sep=";", decimal=",", index=False, encoding="utf-8")
-    return snapshot_path
+    return f"{value:,.0f} €"
 
 
 def style_table(df: pd.DataFrame) -> pd.DataFrame.style:
@@ -150,19 +68,7 @@ def style_table(df: pd.DataFrame) -> pd.DataFrame.style:
     styled = df.style
     styled = styled.map(abcd_style, subset=["ABCD"])
     styled = styled.map(alert_style, subset=["Alerta"])
-    styled = styled.format(
-        {
-            "PVO": lambda v: format_currency(v),
-            "PVO sin descuento": lambda v: format_currency(v),
-            "Capital_Bloqueado (€)": lambda v: format_currency(v),
-            "Capital sin dto": lambda v: format_currency(v),
-            "Indice_de_Rotacion_Semanal": lambda v: (
-                ""
-                if pd.isna(v)
-                else f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-            ),
-        }
-    )
+    styled = styled.format({"Capital_Bloqueado (€)": "{0:,.0f}"})
     styled = styled.set_properties(**{"text-align": "center"})
     return styled
 
@@ -210,9 +116,8 @@ def filter_dataframe(
 
 def render_kpis(df: pd.DataFrame) -> None:
     total_products = len(df)
-    products_with_stock = df[df["Stock"] > 0]
-    total_blocked = products_with_stock["Capital_Bloqueado (€)"].sum()
-    blocked_d = products_with_stock.loc[products_with_stock["ABCD"] == "D", "Capital_Bloqueado (€)"].sum()
+    total_blocked = df["Capital_Bloqueado (€)"].sum()
+    blocked_d = df.loc[df["ABCD"] == "D", "Capital_Bloqueado (€)"].sum()
     red_alerts = len(df[df["Alerta"] == "🔴 LIQUIDAR"])
     orange_alerts = len(df[df["Alerta"] == "🟠 REVISAR"])
 
@@ -240,29 +145,22 @@ def render_secondary_views(df: pd.DataFrame) -> None:
         d_products = df[df["ABCD"] == "D"].sort_values(
             by="Capital_Bloqueado (€)", ascending=False
         )
-        d_view = d_products[
-            [
-                "ABCD",
-                "Marca",
-                "Cód Barras",
-                "Stock",
-                "Motivo",
-                "Capital_Bloqueado (€)",
-                "Primera Compra",
-                "Última Compra",
-                "Última Venta",
-                "Fecha_Revision",
-                "Dias_para_D",
-                "Alerta",
-                "Accion_Recomendada",
-            ]
-        ]
-        st.dataframe(d_view, use_container_width=True)
-        st.download_button(
-            "Descargar productos D",
-            dataframe_to_csv(d_view),
-            file_name="productos_d.csv",
-            mime="text/csv",
+        st.dataframe(
+            d_products[
+                [
+                    "ABCD",
+                    "Marca",
+                    "Cód Barras",
+                    "Stock",
+                    "Motivo",
+                    "Capital_Bloqueado (€)",
+                    "Fecha_Revision",
+                    "Dias_para_D",
+                    "Alerta",
+                    "Accion_Recomendada",
+                ]
+            ],
+            use_container_width=True,
         )
 
     with right:
@@ -280,64 +178,12 @@ def render_secondary_views(df: pd.DataFrame) -> None:
                     "Motivo",
                     "Dias_para_D",
                     "Capital_Bloqueado (€)",
-                    "Primera Compra",
-                    "Última Compra",
-                    "Última Venta",
                     "Alerta",
                     "Accion_Recomendada",
                 ]
             ],
             use_container_width=True,
         )
-
-
-def render_top_50_d(df: pd.DataFrame) -> None:
-    st.divider()
-    st.subheader("🏷️ Top 50 referencias D por capital bloqueado")
-    d_products = df[df["ABCD"] == "D"].sort_values(
-        by="Capital_Bloqueado (€)", ascending=False
-    ).head(50)
-
-    if d_products.empty:
-        st.info("No hay productos D para mostrar en el top 50.")
-        return
-
-    total_capital_top_50 = d_products["Capital_Bloqueado (€)"].sum()
-    total_capital_top_50_sin_dto = (d_products["PVO sin descuento"] * d_products["Stock"]).sum()
-
-    c1, c2 = st.columns(2)
-    c1.metric("Capital bloqueado top 50", format_currency(total_capital_top_50))
-    c2.metric("Capital top 50 sin dto", format_currency(total_capital_top_50_sin_dto))
-
-    top_50_view = d_products.copy()
-    top_50_view["PVO sin descuento"] = top_50_view["PVO sin descuento"]
-    top_50_view["Capital sin dto"] = top_50_view["PVO sin descuento"] * top_50_view["Stock"]
-    top_50_view = top_50_view[
-        [
-            "Cód Barras",
-            "Stock",
-            "PVO",
-            "PVO sin descuento",
-            "Capital sin dto",
-            "Primera Compra",
-            "Última Venta",
-            "Capital_Bloqueado (€)",
-            "Indice_de_Rotacion_Semanal",
-        ]
-    ].rename(
-        columns={
-            "Cód Barras": "Referencia",
-            "Indice_de_Rotacion_Semanal": "Indice de Rotación Semanal",
-        }
-    )
-
-    st.dataframe(top_50_view, use_container_width=True)
-    st.download_button(
-        "Descargar top 50 D",
-        dataframe_to_csv(top_50_view),
-        file_name="top_50_d.csv",
-        mime="text/csv",
-    )
 
 
 def main() -> None:
@@ -347,70 +193,26 @@ def main() -> None:
 
     project_dir = Path(__file__).resolve().parent
     local_input = project_dir / LOCAL_INPUT_NAME
+    if local_input.exists():
+        st.sidebar.success(f"Cargando datos locales desde `{LOCAL_INPUT_NAME}`")
 
     st.sidebar.header("⚙️ Origen de datos")
-    days_without_sales_for_d = st.sidebar.number_input(
-        "Días sin ventas para marcar como D",
-        min_value=1,
-        value=90,
-        step=1,
-        help="Si un producto no tiene ventas durante este número de días, pasa a D.",
+    uploaded_file = st.sidebar.file_uploader(
+        "Sube un Excel de productos (input.xlsx)", type=["xlsx"]
     )
-    analysis_date = st.sidebar.date_input(
-        "Fecha del análisis",
-        value=pd.Timestamp.today().date(),
-        help="Selecciona la fecha para calcular la clasificación ABCD.",
-    )
-    data_source = st.sidebar.radio(
-        "Selecciona el origen de los datos",
-        DATA_SOURCE_OPTIONS,
-        index=0,
-    )
-
-    if data_source == "Excel":
-        if local_input.exists():
-            st.sidebar.warning("🟡 Usando archivo local de Excel")
-        else:
-            st.sidebar.error("🔴 No hay archivo local disponible; sube un Excel")
-        uploaded_file = st.sidebar.file_uploader(
-            "Sube un Excel de productos (input.xlsx)", type=["xlsx"]
-        )
-        sidebar_status_placeholder = None
-    else:
-        sidebar_status_placeholder = st.sidebar.empty()
-        sidebar_status_placeholder.info("🟡 Conectando a la base de datos Odoo de producción...")
-        uploaded_file = None
 
     try:
-        raw_df = load_data(uploaded_file, local_input, data_source)
-        if data_source == "Base de Datos" and sidebar_status_placeholder is not None:
-            sidebar_status_placeholder.success(
-                "🟢 Conectado a la base de datos Odoo de producción"
-            )
+        raw_df = load_data(uploaded_file, local_input)
     except FileNotFoundError as error:
         st.info(str(error))
-        st.stop()
-    except Exception as error:
-        if data_source == "Base de Datos" and sidebar_status_placeholder is not None:
-            sidebar_status_placeholder.error(f"🔴 Error de conexión: {error}")
-        st.error(f"No se pudo cargar la base de datos: {error}")
         st.stop()
 
     try:
         with st.spinner("Ejecutando motor ABCD..."):
-            df = prepare_dataframe(
-                raw_df,
-                days_without_sales_for_d,
-                pd.Timestamp(analysis_date),
-            )
+            df = prepare_dataframe(raw_df)
     except ValueError as error:
         st.error(str(error))
         st.stop()
-
-    st.sidebar.markdown("---")
-    if st.sidebar.button("Guardar snapshot del análisis"):
-        snapshot_path = save_snapshot(df, pd.Timestamp(analysis_date))
-        st.sidebar.success(f"Snapshot guardado: {snapshot_path.name}")
 
     render_kpis(df)
 
@@ -423,7 +225,6 @@ def main() -> None:
         render_main_table(filtered_df)
 
     render_secondary_views(df)
-    render_top_50_d(df)
 
 
 if __name__ == "__main__":

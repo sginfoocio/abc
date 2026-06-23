@@ -41,7 +41,10 @@ RewriteCond %{HTTP:Connection} upgrade [NC]
 RewriteRule ^/(.*)$ "ws://192.168.1.55:8501/$1" [P,L]
 ProxyPass /.well-known/acme-challenge/ !
 <Location />
-    ProxyPass http://192.168.1.55/ timeout=3600
+    <RequireAll>
+        Require ip 188.227.143.110
+    </RequireAll>
+    ProxyPass http://192.168.1.55:8501/ timeout=3600
     ProxyPassReverse http://192.168.1.55:8501/
     ProxyAddHeaders On
     RequestHeader set X-Real-IP %{REMOTE_ADDR}s
