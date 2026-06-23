@@ -10,28 +10,25 @@ Cada vez que hagas push a `main`, tu app se actualiza automáticamente en produc
 
 ---
 
-## PASO 1️⃣: Generar SSH Key (5 min)
+## PASO 1️⃣: Generar SSH Key en el Servidor (5 min)
 
-**En PowerShell (Windows):**
-
-```powershell
-# Generar clave
-ssh-keygen -t ed25519 -f $env:USERPROFILE\.ssh\abcd_deploy -N ""
-
-# Ver clave PRIVADA (para GitHub)
-type $env:USERPROFILE\.ssh\abcd_deploy
-
-# Ver clave PÚBLICA (para servidor)
-type $env:USERPROFILE\.ssh\abcd_deploy.pub
-```
-
-**En Mac/Linux:**
+**En el servidor SSH:**
 
 ```bash
+# Conectar al servidor
+ssh -p 2224 rubensg@188.227.145.193
+
+# Generar clave EN el servidor
 ssh-keygen -t ed25519 -f ~/.ssh/abcd_deploy -N ""
-cat ~/.ssh/abcd_deploy      # PRIVADA
-cat ~/.ssh/abcd_deploy.pub  # PÚBLICA
+
+# Ver clave PRIVADA (COPIAR para GitHub Secrets)
+cat ~/.ssh/abcd_deploy
+
+# Ver clave PÚBLICA (quedará en authorized_keys)
+cat ~/.ssh/abcd_deploy.pub
 ```
+
+**Copiar el contenido de la clave PRIVADA** (todo desde `-----BEGIN OPENSSH PRIVATE KEY-----` hasta `-----END OPENSSH PRIVATE KEY-----`) para usarlo en GitHub Secrets.
 
 ---
 
@@ -77,34 +74,29 @@ b3BlbnNzaC1rZXktdjEAAAAABG5vbmUtbm9uZS1ub25lAAAAAAAAADIAAAAjZWNkc2E...
 
 ---
 
-## PASO 3️⃣: Autorizar Clave en Servidor (5 min)
+## PASO 3️⃣: Autorizar Clave en Servidor (2 min)
 
-**SSH al servidor:**
-
-```bash
-ssh -p 2224 rubensg@188.227.145.193
-```
-
-**Agregar clave pública:**
+**En el servidor (ya debes estar conectado vía SSH):**
 
 ```bash
+# Agregar clave pública a authorized_keys
 mkdir -p ~/.ssh
 chmod 700 ~/.ssh
 
-# PEGAR AQUÍ contenido de ~/.ssh/abcd_deploy.pub
-cat >> ~/.ssh/authorized_keys << 'EOF'
-ssh-ed25519 AAAA... tu-email@example.com
-EOF
-
+cat ~/.ssh/abcd_deploy.pub >> ~/.ssh/authorized_keys
 chmod 600 ~/.ssh/authorized_keys
+
+# Verificar que se agregó
+cat ~/.ssh/authorized_keys
 ```
 
-**Verificar que funciona:**
+**Verificar que funciona desde tu máquina local:**
 
-```bash
-exit
-ssh -p 2224 -i ~/.ssh/abcd_deploy rubensg@188.227.145.193
-# Si te conecta sin pedir password, ¡está bien!
+```powershell
+# En PowerShell
+ssh -p 2224 -i C:\Users\Ruben\.ssh\abcd_deploy rubensg@188.227.145.193
+
+# Si se conecta sin pedir password, ¡está bien!
 ```
 
 ---
@@ -184,9 +176,11 @@ docker-compose logs -f abcd-app --tail=20
 
 ## ✅ Checklist
 
-- [ ] SSH key generada (`abcd_deploy` + `abcd_deploy.pub`)
-- [ ] GitHub Secrets creados (4 secrets)
-- [ ] Clave pública agregada al servidor (~/.ssh/authorized_keys)
+- [ ] SSH al servidor: `ssh -p 2224 rubensg@188.227.145.193`
+- [ ] Clave SSH generada EN el servidor (`~/.ssh/abcd_deploy`)
+- [ ] Clave pública agregada a `~/.ssh/authorized_keys` en servidor
+- [ ] Clave privada copiada a GitHub Secret: `SERVER_SSH_KEY`
+- [ ] 3 secrets más configurados (SERVER_HOST, SERVER_USER, SERVER_PORT)
 - [ ] SSH test funciona: `ssh -p 2224 -i ~/.ssh/abcd_deploy rubensg@servidor`
 - [ ] Primera vez push a GitHub
 - [ ] GitHub Actions corrió exitosamente
