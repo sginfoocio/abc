@@ -38,11 +38,11 @@ ProxyRequests Off
 RewriteEngine On
 RewriteCond %{HTTP:Upgrade} websocket [NC]
 RewriteCond %{HTTP:Connection} upgrade [NC]
-RewriteRule ^/(.*)$ "ws://127.0.0.1:8501/$1" [P,L]
-
+RewriteRule ^/(.*)$ "ws://192.168.1.55:8501/$1" [P,L]
+ProxyPass /.well-known/acme-challenge/ !
 <Location />
-    ProxyPass http://127.0.0.1:8501/ timeout=3600
-    ProxyPassReverse http://127.0.0.1:8501/
+    ProxyPass http://192.168.1.55/ timeout=3600
+    ProxyPassReverse http://192.168.1.55:8501/
     ProxyAddHeaders On
     RequestHeader set X-Real-IP %{REMOTE_ADDR}s
     RequestHeader set X-Forwarded-For %{REMOTE_ADDR}s
@@ -51,8 +51,8 @@ RewriteRule ^/(.*)$ "ws://127.0.0.1:8501/$1" [P,L]
 </Location>
 
 <Location /_stcore/stream>
-    ProxyPass ws://127.0.0.1:8501/_stcore/stream
-    ProxyPassReverse ws://127.0.0.1:8501/_stcore/stream
+    ProxyPass ws://192.168.1.55:8501/_stcore/stream
+    ProxyPassReverse ws://192.168.1.55:8501/_stcore/stream
 </Location>
 ```
 

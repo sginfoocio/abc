@@ -17,7 +17,19 @@ env/
 # Environment variables / secrets
 .env
 .env.local
+.env.*.local
+.env.prod
 db_config_local.py
+secrets.toml
+
+# SSH Keys
+*.key
+*.pem
+*_key
+*_key.pub
+ssh_key*
+id_rsa*
+id_ed25519*
 
 # Database dumps and sensitive data
 database/*.sql
@@ -26,13 +38,24 @@ database/*.csv
 # Logs
 *.log
 logs/
+/var/log/
 
 # OS
 .DS_Store
 Thumbs.db
+.AppleDouble
+.LSOverride
 
 # VS Code
 .vscode/
+*.sublime-project
+*.sublime-workspace
+
+# IDE
+.idea/
+*.swp
+*.swo
+*~
 
 # Snapshots (large data files)
 snapshots/
@@ -40,3 +63,5 @@ snapshots/
 # Temp files
 tmp_*.py
 inicio
+*.tmp
+backup_*.py

@@ -36,7 +36,33 @@ cat DEPLOYMENT_ISPCONFIG.md
 
 ---
 
-### 📍 **OPCIÓN 2: Servidor Linux sin ISPConfig**
+### 📍 **OPCIÓN 2: Auto-Deploy con GitHub Actions** ✨ (Mejor si colaboras)
+
+**Tiempo:** ~20 minutos setup
+
+```bash
+# Ver guía de setup:
+cat GITHUB_SETUP.md
+
+# O guía completa:
+cat GITHUB_DEPLOY.md
+```
+
+**Ventajas:**
+- ✅ Push código → Auto-deploy en 2-3 min
+- ✅ CI/CD integrado
+- ✅ Tests automáticos
+- ✅ Historial de cambios
+- ✅ Colaboración fácil
+
+**Cómo funciona:**
+```
+git push → GitHub Actions → SSH al servidor → Deploy automático
+```
+
+---
+
+### 📍 **OPCIÓN 3: Servidor Linux sin ISPConfig**
 
 **Tiempo:** ~40 minutos
 
@@ -54,7 +80,7 @@ cat DEPLOYMENT_GUIDE.md   # Busca "Opción 2"
 
 ---
 
-### 📍 **OPCIÓN 3: Heroku (Quick & Easy)**
+### 📍 **OPCIÓN 4: Heroku (Quick & Easy)**
 
 **Tiempo:** ~10 minutos
 
@@ -72,7 +98,7 @@ cat DEPLOYMENT_GUIDE.md   # Busca "Opción 3"
 
 ---
 
-### 📍 **OPCIÓN 4: AWS/Google Cloud (Enterprise)**
+### 📍 **OPCIÓN 5: AWS/Google Cloud (Enterprise)**
 
 ```bash
 cat DEPLOYMENT_GUIDE.md   # Busca "Opción 4"
@@ -85,7 +111,9 @@ cat DEPLOYMENT_GUIDE.md   # Busca "Opción 4"
 | Archivo | Para Qué |
 |---------|----------|
 | **QUICKSTART_ISPCONFIG.md** | ⭐ Los 5 pasos rápidos (ISPConfig) |
+| **GITHUB_SETUP.md** | ⭐ Setup GitHub + Auto-Deploy |
 | **DEPLOYMENT_ISPCONFIG.md** | Guía completa + troubleshooting (ISPConfig) |
+| **GITHUB_DEPLOY.md** | Guía completa CI/CD con GitHub Actions |
 | **DEPLOYMENT_GUIDE.md** | Todas las opciones de deployment |
 | **DOCKER_README.md** | Explicación técnica de Docker |
 | **GUIA_APP_ENHANCED.md** | Cómo usar la aplicación |
@@ -220,10 +248,23 @@ docker-compose up -d
 
 ## 🚦 Siguientes Pasos
 
-1. ✅ **Hoy:** Elige tu opción de deployment (ISPConfig/Linux/Heroku)
+1. ✅ **Hoy:** Elige tu opción de deployment
+   - ISPConfig → [QUICKSTART_ISPCONFIG.md](QUICKSTART_ISPCONFIG.md)
+   - GitHub + Auto-Deploy → [GITHUB_SETUP.md](GITHUB_SETUP.md)
+   - Otro → [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md)
+
 2. ⏳ **Mañana:** Deploy usando la guía correspondiente
+   - ~35 min para ISPConfig
+   - ~20 min para GitHub Setup
+   - ~40 min para Linux manual
+
 3. 🧪 **Después:** Testear en producción
+   - Búsqueda de productos
+   - Reportes ABCD
+   - Análisis detallado
+
 4. 📚 **Capacitar:** Mostrar a equipo cómo usar la app
+   - Ver [GUIA_APP_ENHANCED.md](GUIA_APP_ENHANCED.md)
 
 ---
 
@@ -294,7 +335,16 @@ Sistema desarrollado para **Diagonal Eyewear** - Gestión inteligente de inventa
 
 ```
 ISPConfig → QUICKSTART_ISPCONFIG.md
+GitHub + Auto-Deploy → GITHUB_SETUP.md
 Linux sin ISPConfig → DEPLOYMENT_GUIDE.md (Opción 1 o 2)
 Heroku → DEPLOYMENT_GUIDE.md (Opción 3)
 AWS/Cloud → DEPLOYMENT_GUIDE.md (Opción 4)
 ```
+
+---
+
+## 🎯 Deployment Recomendado
+
+**Para producción rápida:** ISPConfig (35 min)
+**Para colaboración:** GitHub Actions (20 min) + ISPConfig/Linux
+**Para máximo control:** Linux sin ISPConfig (40 min)
