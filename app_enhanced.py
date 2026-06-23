@@ -422,10 +422,11 @@ elif page == "📈 Reportes ABCD":
         with col2:
             # Top 10 por capital
             top10 = filtered.nlargest(10, 'Capital_Bloqueado (€)')
-            fig = px.barh(
+            fig = px.bar(
                 top10,
                 x='Capital_Bloqueado (€)',
                 y='Marca',
+                orientation='h',
                 title="Top 10 Capital Bloqueado",
                 labels={'Capital_Bloqueado (€)': 'Capital (€)'}
             )
