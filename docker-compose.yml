@@ -13,6 +13,8 @@ services:
       - DB_NAME=${DB_NAME}
       - DB_USER=${DB_USER}
       - DB_PASSWORD=${DB_PASSWORD}
+      - APP_USERNAME=${APP_USERNAME}
+      - APP_PASSWORD=${APP_PASSWORD}
       
       # Configuración de Streamlit
       - STREAMLIT_SERVER_HEADLESS=true

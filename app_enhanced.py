@@ -3,6 +3,8 @@ from __future__ import annotations
 from io import BytesIO
 from pathlib import Path
 from datetime import datetime, timedelta
+import hmac
+import os
 
 import numpy as np
 import pandas as pd
@@ -21,6 +23,8 @@ from db_config import load_db_config
 
 APP_TITLE = "📦 Control ABCD de Productos"
 APP_ICON = "📊"
+AUTH_USERNAME_ENV = "APP_USERNAME"
+AUTH_PASSWORD_ENV = "APP_PASSWORD"
 
 st.set_page_config(
     page_title=APP_TITLE,
@@ -45,6 +49,44 @@ def get_db_engine():
 def load_data_cached():
     """Carga datos con cache"""
     return load_odoo_dataframe()
+
+def _get_auth_credentials() -> tuple[str, str]:
+    """Obtiene credenciales desde variables de entorno."""
+    username = os.getenv(AUTH_USERNAME_ENV, "")
+    password = os.getenv(AUTH_PASSWORD_ENV, "")
+    return username, password
+
+def _render_login() -> None:
+    st.title(APP_TITLE)
+    st.subheader("Acceso restringido")
+
+    expected_user, expected_password = _get_auth_credentials()
+    if not expected_user or not expected_password:
+        st.error(
+            f"Autenticación no configurada. Define {AUTH_USERNAME_ENV} y {AUTH_PASSWORD_ENV}."
+        )
+        st.stop()
+
+    with st.form("login_form", clear_on_submit=False):
+        username = st.text_input("Usuario")
+        password = st.text_input("Contraseña", type="password")
+        submitted = st.form_submit_button("Entrar")
+
+    if submitted:
+        valid_user = hmac.compare_digest(username, expected_user)
+        valid_password = hmac.compare_digest(password, expected_password)
+        if valid_user and valid_password:
+            st.session_state["authenticated"] = True
+            st.session_state["auth_user"] = username
+            st.rerun()
+        st.error("Usuario o contraseña incorrectos")
+
+    st.stop()
+
+def require_authentication() -> None:
+    """Bloquea la app hasta que el usuario se autentique."""
+    if not st.session_state.get("authenticated", False):
+        _render_login()
 
 def get_product_stockout_periods(product_id: int, engine) -> list:
     """Obtiene períodos de agotamiento de un producto"""
@@ -112,8 +154,16 @@ def get_product_stockout_periods(product_id: int, engine) -> list:
 # SIDEBAR
 # ==============================================================================
 
+require_authentication()
+
 with st.sidebar:
     st.title("⚙️ Configuración")
+
+    st.caption(f"Sesión: {st.session_state.get('auth_user', 'usuario')}")
+    if st.button("Cerrar sesión"):
+        st.session_state["authenticated"] = False
+        st.session_state.pop("auth_user", None)
+        st.rerun()
     
     page = st.radio(
         "Selecciona una opción:",
