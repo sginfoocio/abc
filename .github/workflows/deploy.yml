@@ -91,12 +91,21 @@ jobs:
             echo "🚀 Iniciando deploy desde GitHub Actions..."
             cd /opt/abcd-control
             echo "📁 Directorio: $(pwd)"
-            
-            # Asegurar permisos del script
-            chmod +x scripts/deploy.sh
-            
-            # Ejecutar script de deploy
-            ./scripts/deploy.sh
+
+            if [ -f scripts/deploy.sh ]; then
+              echo "✅ Encontrado scripts/deploy.sh"
+              chmod +x scripts/deploy.sh
+              ./scripts/deploy.sh
+            else
+              echo "⚠️ scripts/deploy.sh no existe, ejecutando fallback"
+              if [ ! -f docker-compose.yml ]; then
+                echo "❌ No existe docker-compose.yml en /opt/abcd-control"
+                exit 1
+              fi
+
+              docker compose build --no-cache
+              docker compose up -d
+            fi
             
             echo "✅ Deploy completado exitosamente"
 
