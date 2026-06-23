@@ -58,6 +58,26 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Validate Secrets
+        run: |
+          if [ -z "${{ secrets.SERVER_HOST }}" ]; then
+            echo "❌ ERROR: SERVER_HOST secret no configurado"
+            exit 1
+          fi
+          if [ -z "${{ secrets.SERVER_USER }}" ]; then
+            echo "❌ ERROR: SERVER_USER secret no configurado"
+            exit 1
+          fi
+          if [ -z "${{ secrets.SERVER_PORT }}" ]; then
+            echo "❌ ERROR: SERVER_PORT secret no configurado"
+            exit 1
+          fi
+          if [ -z "${{ secrets.SERVER_SSH_KEY }}" ]; then
+            echo "❌ ERROR: SERVER_SSH_KEY secret no configurado"
+            exit 1
+          fi
+          echo "✅ Todos los secrets están configurados"
+
       - name: Deploy to Server
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: appleboy/ssh-action@master
