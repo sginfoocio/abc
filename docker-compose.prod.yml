@@ -1,0 +1,68 @@
+# Versión para Producción
+# Uso: docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+
+version: '3.8'
+
+services:
+  abcd-app:
+    # En producción, usar imagen específica por versión
+    image: registry.diagonaleyewear.net/abcd-control:latest
+    
+    # Restart automático
+    restart: always
+    
+    # Límites más estrictos en producción
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 4G
+        reservations:
+          cpus: '2'
+          memory: 2G
+    
+    # Logs centralizados
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "10"
+        labels: "service=abcd-control"
+    
+    # Security
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    read_only: true
+    
+    # Tmpfs para Streamlit
+    tmpfs:
+      - /tmp
+      - /root/.streamlit
+
+  # Opcional: Reverse proxy Nginx integrado
+  # nginx:
+  #   image: nginx:alpine
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #   volumes:
+  #     - ./nginx.conf:/etc/nginx/nginx.conf:ro
+  #     - /etc/letsencrypt:/etc/letsencrypt:ro
+  #   depends_on:
+  #     - abcd-app
+  #   restart: always
+
+  # Opcional: Prometheus para monitoreo
+  # prometheus:
+  #   image: prom/prometheus:latest
+  #   ports:
+  #     - "9090:9090"
+  #   volumes:
+  #     - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+  #     - prometheus_data:/prometheus
+  #   restart: always
+
+volumes:
+  # prometheus_data: {}

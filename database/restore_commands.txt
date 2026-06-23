@@ -1,0 +1,9 @@
+-- Restaurar los datos exportados usando psql o cualquier herramienta compatible.
+-- Ajusta la ruta si es necesario.
+
+\copy product_product FROM 'product_product.csv' CSV HEADER;
+\copy product_template FROM 'product_template.csv' CSV HEADER;
+\copy stock_move FROM 'stock_move.csv' CSV HEADER;
+\copy stock_quant FROM 'stock_quant.csv' CSV HEADER;
+\copy stock_location FROM 'stock_location.csv' CSV HEADER;
+\copy sale_order_line FROM 'sale_order_line.csv' CSV HEADER;
