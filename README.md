@@ -348,3 +348,4 @@ AWS/Cloud → DEPLOYMENT_GUIDE.md (Opción 4)
 **Para producción rápida:** ISPConfig (35 min)
 **Para colaboración:** GitHub Actions (20 min) + ISPConfig/Linux
 **Para máximo control:** Linux sin ISPConfig (40 min)
+# Deploy test
