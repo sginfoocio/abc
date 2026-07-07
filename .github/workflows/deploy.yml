@@ -78,19 +78,6 @@ jobs:
           fi
           echo "✅ Todos los secrets están configurados"
 
-      - name: Copy code to server
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: appleboy/scp-action@master
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          port: ${{ secrets.SERVER_PORT }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
-          source: "*.py,requirements.txt,Dockerfile,docker-compose.yml,docker-compose.prod.yml,.github"
-          target: /opt/abcd-control
-          strip_components: 0
-          overwrite: true
-
       - name: Deploy to Server
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: appleboy/ssh-action@master
@@ -101,48 +88,25 @@ jobs:
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
             set -e
-            DEPLOY_DIR="/opt/abcd-control"
-            LOG_DIR="$DEPLOY_DIR/logs"
-            LOG_FILE="$LOG_DIR/abcd-deploy.log"
-            mkdir -p "$LOG_DIR"
+            echo "🚀 Iniciando deploy desde GitHub Actions..."
+            cd /opt/abcd-control
+            echo "📁 Directorio: $(pwd)"
 
-            log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"; }
+            echo "📥 Actualizando código..."
+            git remote set-url origin git@github.com:diagonaleyewear/abc.git
+            git pull origin main
 
-            log "🚀 Iniciando deploy desde GitHub Actions..."
-            cd "$DEPLOY_DIR"
-            log "📁 Directorio: $(pwd)"
+            echo "🔨 Construyendo imagen Docker..."
+            docker compose build --no-cache
 
-            if [ ! -f .env ]; then
-              log "❌ Archivo .env no encontrado"
-              exit 1
-            fi
-
-            log "🔨 Construyendo imagen Docker..."
-            docker compose build --no-cache >> "$LOG_FILE" 2>&1
-            log "✅ Build completado"
-
-            log "⏹️  Deteniendo contenedor actual..."
-            docker compose down >> "$LOG_FILE" 2>&1
+            echo "⏹️  Deteniendo contenedor actual..."
+            docker compose down
             sleep 2
 
-            log "▶️  Iniciando nuevo contenedor..."
-            docker compose up -d >> "$LOG_FILE" 2>&1
-            log "✅ Contenedor iniciado"
+            echo "▶️  Iniciando nuevo contenedor..."
+            docker compose up -d
 
-            log "⏳ Esperando health check..."
-            sleep 8
-            attempt=0
-            while [ $attempt -lt 10 ]; do
-              if docker compose exec -T abcd-app curl -s http://localhost:8501/_stcore/health > /dev/null 2>&1; then
-                log "✅ Health check OK"
-                break
-              fi
-              attempt=$((attempt + 1))
-              sleep 3
-            done
-
-            docker image prune -f >> "$LOG_FILE" 2>&1
-            log "✨ Deploy completado exitosamente"
+            echo "✅ Deploy completado exitosamente"
 
   tests:
     runs-on: ubuntu-latest
