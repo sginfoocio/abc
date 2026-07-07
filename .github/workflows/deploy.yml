@@ -88,43 +88,52 @@ jobs:
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
             set -e
-            echo "🚀 Iniciando deploy desde GitHub Actions..."
-            cd /opt/abcd-control
-            echo "📁 Directorio: $(pwd)"
+            DEPLOY_DIR="/opt/abcd-control"
+            LOG_DIR="$DEPLOY_DIR/logs"
+            LOG_FILE="$LOG_DIR/abcd-deploy.log"
+            mkdir -p "$LOG_DIR"
 
-            if [ -f scripts/deploy.sh ]; then
-              echo "✅ Encontrado scripts/deploy.sh"
-              chmod +x scripts/deploy.sh
-              ./scripts/deploy.sh
-            else
-              echo "⚠️ scripts/deploy.sh no existe, ejecutando fallback"
-              if [ ! -f docker-compose.yml ]; then
-                echo "❌ No existe docker-compose.yml en /opt/abcd-control"
-                exit 1
-              fi
+            log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"; }
 
-              docker compose build --no-cache
-              docker compose up -d
+            log "🚀 Iniciando deploy desde GitHub Actions..."
+            cd "$DEPLOY_DIR"
+            log "📁 Directorio: $(pwd)"
+
+            log "📥 Actualizando código..."
+            git pull origin main >> "$LOG_FILE" 2>&1
+            log "✅ Git pull exitoso"
+
+            if [ ! -f .env ]; then
+              log "❌ Archivo .env no encontrado"
+              exit 1
             fi
 
-            echo "✅ Deploy completado exitosamente"
+            log "🔨 Construyendo imagen Docker..."
+            docker compose build --no-cache >> "$LOG_FILE" 2>&1
+            log "✅ Build completado"
 
-            if [ -f scripts/deploy.sh ]; then
-              echo "✅ Encontrado scripts/deploy.sh"
-              chmod +x scripts/deploy.sh
-              ./scripts/deploy.sh
-            else
-              echo "⚠️ scripts/deploy.sh no existe, ejecutando fallback"
-              if [ ! -f docker-compose.yml ]; then
-                echo "❌ No existe docker-compose.yml en /opt/abcd-control"
-                exit 1
+            log "⏹️  Deteniendo contenedor actual..."
+            docker compose down >> "$LOG_FILE" 2>&1
+            sleep 2
+
+            log "▶️  Iniciando nuevo contenedor..."
+            docker compose up -d >> "$LOG_FILE" 2>&1
+            log "✅ Contenedor iniciado"
+
+            log "⏳ Esperando health check..."
+            sleep 8
+            attempt=0
+            while [ $attempt -lt 10 ]; do
+              if docker compose exec -T abcd-app curl -s http://localhost:8501/_stcore/health > /dev/null 2>&1; then
+                log "✅ Health check OK"
+                break
               fi
+              attempt=$((attempt + 1))
+              sleep 3
+            done
 
-              docker compose build --no-cache
-              docker compose up -d
-            fi
-            
-            echo "✅ Deploy completado exitosamente"
+            docker image prune -f >> "$LOG_FILE" 2>&1
+            log "✨ Deploy completado exitosamente"
 
   tests:
     runs-on: ubuntu-latest
