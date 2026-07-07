@@ -81,12 +81,14 @@ jobs:
       - name: Deploy to Server
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: appleboy/ssh-action@master
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           port: ${{ secrets.SERVER_PORT }}
           key: ${{ secrets.SERVER_SSH_KEY }}
-          envs: GITHUB_TOKEN
+          envs: GH_TOKEN
           script: |
             set -e
             echo "🚀 Iniciando deploy desde GitHub Actions..."
@@ -94,7 +96,7 @@ jobs:
             echo "📁 Directorio: $(pwd)"
 
             echo "📥 Actualizando código..."
-            git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/diagonaleyewear/abc.git"
+            git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/diagonaleyewear/abc.git"
             git fetch origin main
             git reset --hard origin/main
             echo "✅ Código actualizado"
