@@ -86,10 +86,9 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           port: ${{ secrets.SERVER_PORT }}
           key: ${{ secrets.SERVER_SSH_KEY }}
-          env:
-            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           script: |
             set -e
+            export GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
             echo "🚀 Iniciando deploy desde GitHub Actions..."
             cd /opt/abcd-control
             echo "📁 Directorio: $(pwd)"
