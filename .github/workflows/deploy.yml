@@ -81,34 +81,33 @@ jobs:
       - name: Deploy to Server
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: appleboy/ssh-action@master
-        env:
-          DEPLOY_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           port: ${{ secrets.SERVER_PORT }}
           key: ${{ secrets.SERVER_SSH_KEY }}
-          envs: DEPLOY_TOKEN
           script: |
             set -e
             echo "🚀 Iniciando deploy desde GitHub Actions..."
             cd /opt/abcd-control
             echo "📁 Directorio: $(pwd)"
 
-            if [ -d .git ]; then
-              echo "📥 Actualizando código desde origin/main"
-              echo "🔑 Configurando autenticación de Git..."
-              git config --global url."https://x-access-token:${DEPLOY_TOKEN}@github.com/".insteadOf "https://github.com/"
-              echo "📥 Ejecutando git pull..."
-              if git pull --ff-only origin main; then
-                echo "✅ Git pull exitoso"
-              else
-                echo "⚠️ Git pull fall-back sin ff-only"
-                git pull origin main
-              fi
+            if [ -f scripts/deploy.sh ]; then
+              echo "✅ Encontrado scripts/deploy.sh"
+              chmod +x scripts/deploy.sh
+              ./scripts/deploy.sh
             else
-              echo "⚠️ No se encontró repositorio git en /opt/abcd-control"
+              echo "⚠️ scripts/deploy.sh no existe, ejecutando fallback"
+              if [ ! -f docker-compose.yml ]; then
+                echo "❌ No existe docker-compose.yml en /opt/abcd-control"
+                exit 1
+              fi
+
+              docker compose build --no-cache
+              docker compose up -d
             fi
+
+            echo "✅ Deploy completado exitosamente"
 
             if [ -f scripts/deploy.sh ]; then
               echo "✅ Encontrado scripts/deploy.sh"
