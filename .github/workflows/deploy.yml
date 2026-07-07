@@ -86,6 +86,7 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           port: ${{ secrets.SERVER_PORT }}
           key: ${{ secrets.SERVER_SSH_KEY }}
+          envs: GITHUB_TOKEN
           script: |
             set -e
             echo "🚀 Iniciando deploy desde GitHub Actions..."
@@ -93,8 +94,10 @@ jobs:
             echo "📁 Directorio: $(pwd)"
 
             echo "📥 Actualizando código..."
-            git remote set-url origin git@github.com:diagonaleyewear/abc.git
-            git pull origin main
+            git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/diagonaleyewear/abc.git"
+            git fetch origin main
+            git reset --hard origin/main
+            echo "✅ Código actualizado"
 
             echo "🔨 Construyendo imagen Docker..."
             docker compose build --no-cache
