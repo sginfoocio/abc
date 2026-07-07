@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # Script para ejecutar deploy desde GitHub Actions
 # Este script se ejecuta en el servidor cuando GitHub Actions hace SSH
 
