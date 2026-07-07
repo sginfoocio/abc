@@ -15,7 +15,7 @@ from sqlalchemy import create_engine, text
 
 from db_loader import load_odoo_dataframe
 from engine import run_abcd_engine
-from db_config import load_db_config
+from db_config import load_db_config, load_env_file
 
 # ==============================================================================
 # CONFIG
@@ -52,6 +52,7 @@ def load_data_cached():
 
 def _get_auth_credentials() -> tuple[str, str]:
     """Obtiene credenciales desde variables de entorno."""
+    load_env_file()
     username = os.getenv(AUTH_USERNAME_ENV, "")
     password = os.getenv(AUTH_PASSWORD_ENV, "")
     return username, password
@@ -436,6 +437,9 @@ elif page == "📈 Reportes ABCD":
         (df_classified['ABCD'].isin(selected_abcd)) &
         (df_classified['Capital_Bloqueado (€)'] >= min_capital)
     ]
+    filtered_report = filtered.copy()
+    if ('EAN' not in filtered_report.columns or filtered_report['EAN'].isna().all()) and 'Cód Barras' in filtered_report.columns:
+        filtered_report['EAN'] = filtered_report['Cód Barras']
     
     st.subheader(f"Resultados: {len(filtered)} productos")
     
@@ -444,11 +448,11 @@ elif page == "📈 Reportes ABCD":
     
     with tab1:
         # Ordenar por capital
-        display_filtered = filtered.sort_values('Capital_Bloqueado (€)', ascending=False).head(max_products)
+        display_filtered = filtered_report.sort_values('Capital_Bloqueado (€)', ascending=False).head(max_products)
         
         st.dataframe(
             display_filtered[[
-                'Marca', 'ABCD', 'Stock', 'PVO', 'Capital_Bloqueado (€)',
+                'Marca', 'Modelo', 'EAN', 'ABCD', 'Stock', 'PVO', 'Capital_Bloqueado (€)',
                 'Num_Ventas_180D', 'Última Venta', 'Accion_Recomendada'
             ]],
             use_container_width=True,
@@ -484,7 +488,7 @@ elif page == "📈 Reportes ABCD":
     
     with tab3:
         # Exportar a CSV
-        csv = filtered.to_csv(index=False)
+        csv = filtered_report.to_csv(index=False)
         st.download_button(
             label="📥 Descargar CSV",
             data=csv,

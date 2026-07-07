@@ -95,6 +95,7 @@ SELECT
     pp.id AS product_id,
     pt.name AS "Marca",
     pt.default_code AS "Cód Barras",
+    pp.barcode AS "EAN",
     pt.categ_id AS categoria,
     COALESCE(sa."Stock", 0) AS "Stock",
     COALESCE(ps.price_discount, ps.price, pt.list_price) AS "PVO",
@@ -129,6 +130,12 @@ def load_odoo_dataframe(query: str = DEFAULT_QUERY, config: DBConfig | None = No
     engine = create_engine(url)
     with engine.connect() as connection:
         df = pd.read_sql_query(query, connection)
+
+    if "Marca" in df.columns:
+        full_name = df["Marca"].fillna("").astype(str).str.strip()
+        split_name = full_name.str.split(n=1, expand=True)
+        df["Marca"] = split_name[0].fillna("")
+        df["Modelo"] = split_name[1].fillna("") if 1 in split_name.columns else ""
 
     if "Stock" in df.columns:
         df = df[df["Stock"] > 0].reset_index(drop=True)
