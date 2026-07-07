@@ -82,13 +82,13 @@ jobs:
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: appleboy/ssh-action@master
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEPLOY_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           port: ${{ secrets.SERVER_PORT }}
           key: ${{ secrets.SERVER_SSH_KEY }}
-          envs: GITHUB_TOKEN
+          envs: DEPLOY_TOKEN
           script: |
             set -e
             echo "🚀 Iniciando deploy desde GitHub Actions..."
@@ -97,8 +97,15 @@ jobs:
 
             if [ -d .git ]; then
               echo "📥 Actualizando código desde origin/main"
-              git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"
-              git pull --ff-only origin main || git pull origin main
+              echo "🔑 Configurando autenticación de Git..."
+              git config --global url."https://x-access-token:${DEPLOY_TOKEN}@github.com/".insteadOf "https://github.com/"
+              echo "📥 Ejecutando git pull..."
+              if git pull --ff-only origin main; then
+                echo "✅ Git pull exitoso"
+              else
+                echo "⚠️ Git pull fall-back sin ff-only"
+                git pull origin main
+              fi
             else
               echo "⚠️ No se encontró repositorio git en /opt/abcd-control"
             fi
