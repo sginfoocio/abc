@@ -86,6 +86,8 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           port: ${{ secrets.SERVER_PORT }}
           key: ${{ secrets.SERVER_SSH_KEY }}
+          env:
+            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           script: |
             set -e
             echo "🚀 Iniciando deploy desde GitHub Actions..."
@@ -94,6 +96,7 @@ jobs:
 
             if [ -d .git ]; then
               echo "📥 Actualizando código desde origin/main"
+              git config --global url."https://${GITHUB_TOKEN}:@github.com/".insteadOf "https://github.com/"
               git pull --ff-only origin main || git pull origin main
             else
               echo "⚠️ No se encontró repositorio git en /opt/abcd-control"
