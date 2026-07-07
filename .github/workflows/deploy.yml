@@ -81,21 +81,23 @@ jobs:
       - name: Deploy to Server
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: appleboy/ssh-action@master
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           port: ${{ secrets.SERVER_PORT }}
           key: ${{ secrets.SERVER_SSH_KEY }}
+          envs: GITHUB_TOKEN
           script: |
             set -e
-            export GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
             echo "🚀 Iniciando deploy desde GitHub Actions..."
             cd /opt/abcd-control
             echo "📁 Directorio: $(pwd)"
 
             if [ -d .git ]; then
               echo "📥 Actualizando código desde origin/main"
-              git config --global url."https://${GITHUB_TOKEN}:@github.com/".insteadOf "https://github.com/"
+              git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"
               git pull --ff-only origin main || git pull origin main
             else
               echo "⚠️ No se encontró repositorio git en /opt/abcd-control"
