@@ -86,6 +86,7 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           port: ${{ secrets.SERVER_PORT }}
           key: ${{ secrets.SERVER_SSH_KEY }}
+          envs: GH_TOKEN
           script: |
             set -e
             DEPLOY_DIR="/opt/abcd-control"
@@ -100,6 +101,7 @@ jobs:
             log "📁 Directorio: $(pwd)"
 
             log "📥 Actualizando código..."
+            git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/diagonaleyewear/abc.git"
             git pull origin main >> "$LOG_FILE" 2>&1
             log "✅ Git pull exitoso"
 
@@ -134,6 +136,8 @@ jobs:
 
             docker image prune -f >> "$LOG_FILE" 2>&1
             log "✨ Deploy completado exitosamente"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   tests:
     runs-on: ubuntu-latest
