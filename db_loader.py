@@ -93,7 +93,7 @@ WITH supplier_locations AS (
 )
 SELECT
     pp.id AS product_id,
-    pt.name AS "Marca",
+    COALESCE(dpb.name, pt.name) AS "Marca",
     pt.default_code AS "Cód Barras",
     pp.barcode AS "EAN",
     pt.categ_id AS categoria,
@@ -106,6 +106,7 @@ SELECT
     COALESCE(ws."Ventas_7_Dias", 0) AS "Ventas_7_Dias"
 FROM product_product pp
 JOIN product_template pt ON pt.id = pp.product_tmpl_id
+LEFT JOIN diagonal_product_brand dpb ON dpb.id = pt.brand_id
 LEFT JOIN stock_actual sa ON sa.product_id = pp.id
 LEFT JOIN first_purchase fp ON fp.product_id = pp.id
 LEFT JOIN last_purchase lp ON lp.product_id = pp.id
