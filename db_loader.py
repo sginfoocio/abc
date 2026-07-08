@@ -94,6 +94,7 @@ WITH supplier_locations AS (
 SELECT
     pp.id AS product_id,
     COALESCE(dpb.name, pt.name) AS "Marca",
+    pt.name AS "Modelo",
     pt.default_code AS "Cód Barras",
     pp.barcode AS "EAN",
     pt.categ_id AS categoria,
@@ -131,12 +132,6 @@ def load_odoo_dataframe(query: str = DEFAULT_QUERY, config: DBConfig | None = No
     engine = create_engine(url)
     with engine.connect() as connection:
         df = pd.read_sql_query(query, connection)
-
-    if "Marca" in df.columns:
-        full_name = df["Marca"].fillna("").astype(str).str.strip()
-        split_name = full_name.str.split(n=1, expand=True)
-        df["Marca"] = split_name[0].fillna("")
-        df["Modelo"] = split_name[1].fillna("") if 1 in split_name.columns else ""
 
     if "Stock" in df.columns:
         df = df[df["Stock"] > 0].reset_index(drop=True)
