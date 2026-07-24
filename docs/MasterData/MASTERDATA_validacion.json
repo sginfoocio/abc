@@ -1,0 +1,12 @@
+{
+  "total_input": 812,
+  "total_output": 812,
+  "discarded": 0,
+  "discarded_accessories": 0,
+  "discarded_ralph_lauren": 0,
+  "discarded_invalid_upc": 0,
+  "upc_missing_after_transform": 0,
+  "leading_zero_issues": 0,
+  "invalid_yes_no_rows": 0,
+  "anomalous_values": {}
+}

@@ -1,0 +1,36 @@
+{
+  "total_input": 14176,
+  "total_output": 12782,
+  "discarded": 1394,
+  "discarded_accessories": 1394,
+  "discarded_ralph_lauren": 0,
+  "discarded_invalid_product": 0,
+  "accessory_whitelist_kept": 2,
+  "discarded_invalid_upc": 0,
+  "upc_missing_after_transform": 1394,
+  "leading_zero_issues": 2,
+  "leading_zero_real_loss_columns": 0,
+  "leading_zero_summary": [
+    {
+      "columna": "Color",
+      "con_cero_input_total": 2222,
+      "con_cero_input_post_filtros": 887,
+      "con_cero_output": 887,
+      "incidencia_reportada_por_script": "SI",
+      "perdida_real_post_filtros": "NO"
+    },
+    {
+      "columna": "Código del modelo",
+      "con_cero_input_total": 12839,
+      "con_cero_input_post_filtros": 12780,
+      "con_cero_output": 12780,
+      "incidencia_reportada_por_script": "SI",
+      "perdida_real_post_filtros": "NO"
+    }
+  ],
+  "unmatched_brand_names": [
+    "GENERICS"
+  ],
+  "invalid_yes_no_rows": 0,
+  "anomalous_values": {}
+}

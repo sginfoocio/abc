@@ -1,0 +1,4 @@
+# Codigos de modelo que deben conservarse aunque parezcan accesorio
+# Un codigo por linea, sin comas.
+# Ejemplo activo para validar excepcion:
+AOO0005LS
