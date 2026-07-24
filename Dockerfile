@@ -31,6 +31,8 @@ COPY app_enhanced.py .
 COPY db_loader.py .
 COPY engine.py .
 COPY db_config.py .
+COPY transform_luxottica_masterdata.py .
+COPY validate_masterdata_odoo_dryrun.py .
 
 # Crear directorio para configuración de Streamlit
 RUN mkdir -p ~/.streamlit
