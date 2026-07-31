@@ -33,6 +33,7 @@ COPY engine.py .
 COPY db_config.py .
 COPY transform_luxottica_masterdata.py .
 COPY validate_masterdata_odoo_dryrun.py .
+COPY graph_mail_downloader.py .
 
 # Crear directorio para configuración de Streamlit
 RUN mkdir -p ~/.streamlit
