@@ -8,6 +8,8 @@ Transformar el Excel original de Luxottica a un Excel MASTERDATA limpio, normali
 
 No limitarse a renombrar columnas: interpretar, limpiar, enriquecer y normalizar.
 
+Este documento refleja el comportamiento actualmente implementado en la app y en el script de transformación.
+
 ## Entradas
 - Archivo Excel de Luxottica.
 - Diccionarios desde BD:
@@ -45,7 +47,7 @@ No limitarse a renombrar columnas: interpretar, limpiar, enriquecer y normalizar
 - Eliminar "/" y "-".
 - Concatenar resultado.
 - Mantener formato texto.
-- No perder ceros iniciales.
+- Extraer un "0" inicial cuando venga como prefijo del modelo.
 - Mantener letras finales.
 - Conservar espacios (incluido Prada y Miu Miu).
 
@@ -105,36 +107,55 @@ Mapear a:
 - Biopoliamida
 
 ## Columna de colección
-- Se toma de la columna H del archivo origen.
+- Se toma de la columna L (`Nombre del modelo`) del archivo origen.
+
+## Regla de PVP
+- Priorizar `PVP sugerido`.
+- Si el origen trae `PVP` (columna W) en lugar de `PVP sugerido`, usar `PVP` como fuente.
 
 ## Duplicados
 - Dedupe por UPC.
 
-## Salida esperada (24 columnas)
-- Punto de venta
-- Código del modelo
-- Calibre
-- Color
-- UPC
-- Nombre de la marca
-- Código de marca
+## Salida técnica transformada (18 columnas)
+Orden exacto:
+- Marca
 - Colección
+- Modelo
+- Color
+- Calibre
+- Ancho Puente
+- Longitud Varilla
 - Género
+- Color Frontal
+- Color Lente
 - Forma
-- Tipo
-- Nombre del modelo
-- Descripción del color
-- Material del frente
-- Color del frontal
-- Material de las lentes
-- Color de las lentes
+- Material Principal
 - Fotocromático
 - Polarizado
-- Largo de varilla
-- Dimensión del puente
-- PVP sugerido
 - PVO
+- PVP
+- Barcode
 - Categoría
+
+## Descarga XLS en la web
+- En el botón de descarga del transformado se excluyen `Barcode` y `Categoría`.
+- Orden exacto del XLS descargado:
+  - Marca
+  - Colección
+  - Modelo
+  - Color
+  - Calibre
+  - Ancho Puente
+  - Longitud Varilla
+  - Género
+  - Color Frontal
+  - Color Lente
+  - Forma
+  - Material Principal
+  - Fotocromático
+  - Polarizado
+  - PVO
+  - PVP
 
 ## Validaciones obligatorias
 - Verificar que no se pierdan registros válidos.

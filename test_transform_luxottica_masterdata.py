@@ -42,7 +42,7 @@ class TransformMasterdataTests(unittest.TestCase):
         output, report, _, _, _ = transform_masterdata(pd.DataFrame([row]), color_map={})
 
         self.assertEqual(report.total_output, 1)
-        self.assertEqual(output.iloc[0]["Nombre de la marca"], "Ray Ban Meta")
+        self.assertEqual(output.iloc[0]["Marca"], "Ray Ban Meta")
 
     def test_brand_name_is_canonicalized_from_brand_map(self) -> None:
         row = self._base_row()
@@ -56,7 +56,7 @@ class TransformMasterdataTests(unittest.TestCase):
         )
 
         self.assertEqual(report.total_output, 1)
-        self.assertEqual(output.iloc[0]["Nombre de la marca"], "Emporio Armani")
+        self.assertEqual(output.iloc[0]["Marca"], "Emporio Armani")
 
     def test_brand_alias_tiffany_is_resolved(self) -> None:
         row = self._base_row()
@@ -70,7 +70,7 @@ class TransformMasterdataTests(unittest.TestCase):
         )
 
         self.assertEqual(report.total_output, 1)
-        self.assertEqual(output.iloc[0]["Nombre de la marca"], "Tiffany & Co.")
+        self.assertEqual(output.iloc[0]["Marca"], "Tiffany & Co.")
         self.assertEqual(report.unmatched_brand_names, [])
 
     def test_brand_code_is_derived_from_model_code_when_missing(self) -> None:
@@ -86,7 +86,7 @@ class TransformMasterdataTests(unittest.TestCase):
         )
 
         self.assertEqual(report.total_output, 1)
-        self.assertEqual(output.iloc[0]["Código de marca"], "DG")
+        self.assertEqual(output.iloc[0]["Modelo"], "DG1322")
 
     def test_generics_remains_as_incidence(self) -> None:
         row = self._base_row()
@@ -100,7 +100,7 @@ class TransformMasterdataTests(unittest.TestCase):
         )
 
         self.assertEqual(report.total_output, 1)
-        self.assertEqual(output.iloc[0]["Nombre de la marca"], "GENERICS")
+        self.assertEqual(output.iloc[0]["Marca"], "GENERICS")
         self.assertEqual(report.unmatched_brand_names, ["GENERICS"])
         self.assertEqual(brand_audit.iloc[0]["marca_origen"], "GENERICS")
         self.assertEqual(brand_audit.iloc[0]["existe_en_bd"], "NO")
@@ -155,6 +155,36 @@ class TransformMasterdataTests(unittest.TestCase):
         self.assertEqual(report.accessory_whitelist_kept, 1)
         self.assertEqual(len(output), 2)
         self.assertEqual(len(discarded_audit), 0)
+
+    def test_pvp_from_alias_column_is_preserved(self) -> None:
+        row = self._base_row()
+        row.pop("PVP sugerido", None)
+        row["PVP"] = "173"
+
+        output, report, _, _, _ = transform_masterdata(pd.DataFrame([row]), color_map={})
+
+        self.assertEqual(report.total_output, 1)
+        self.assertEqual(output.iloc[0]["PVP"], "173")
+
+    def test_collection_comes_from_model_name_column(self) -> None:
+        row = self._base_row()
+        row["Colección"] = "VALOR_ORIGINAL_COLECCION"
+        row["Nombre del modelo"] = "WAYFARER PUFFER"
+
+        output, report, _, _, _ = transform_masterdata(pd.DataFrame([row]), color_map={})
+
+        self.assertEqual(report.total_output, 1)
+        self.assertEqual(output.iloc[0]["Colección"], "WAYFARER PUFFER")
+
+    def test_collection_comes_from_column_l_even_if_header_changes(self) -> None:
+        row = self._base_row()
+        row["Nombre del modelo"] = "VALOR_COLUMNA_L"
+        df = pd.DataFrame([row]).rename(columns={"Nombre del modelo": "L_ORIGEN"})
+
+        output, report, _, _, _ = transform_masterdata(df, color_map={})
+
+        self.assertEqual(report.total_output, 1)
+        self.assertEqual(output.iloc[0]["Colección"], "VALOR_COLUMNA_L")
 
 
 if __name__ == "__main__":

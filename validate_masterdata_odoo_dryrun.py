@@ -53,6 +53,25 @@ def load_excel_as_text(path: Path) -> pd.DataFrame:
     return df
 
 
+def _canonicalize_masterdata_columns(masterdata_df: pd.DataFrame) -> pd.DataFrame:
+    """Adapta nombres de columnas del MASTERDATA al formato canónico interno."""
+    df = masterdata_df.copy()
+    alias_map = {
+        "UPC": ["UPC", "Barcode"],
+        "Nombre de la marca": ["Nombre de la marca", "Marca"],
+        "Código del modelo": ["Código del modelo", "Modelo"],
+    }
+
+    for canonical, aliases in alias_map.items():
+        if canonical in df.columns:
+            continue
+        found = next((name for name in aliases if name in df.columns), None)
+        if found:
+            df[canonical] = df[found]
+
+    return df
+
+
 def load_odoo_snapshot() -> tuple[pd.DataFrame, dict[str, int]]:
     cfg = load_db_config()
     url = URL.create(
@@ -107,7 +126,7 @@ def load_odoo_snapshot() -> tuple[pd.DataFrame, dict[str, int]]:
 
 
 def analyze_masterdata_against_odoo(masterdata_df: pd.DataFrame, odoo_barcodes_df: pd.DataFrame, brand_map: dict[str, int]) -> tuple[pd.DataFrame, DryRunReport]:
-    df = masterdata_df.copy()
+    df = _canonicalize_masterdata_columns(masterdata_df)
     df["UPC"] = df["UPC"].map(safe_text)
     df["Nombre de la marca"] = df["Nombre de la marca"].map(safe_text)
     df["Código del modelo"] = df["Código del modelo"].map(safe_text)

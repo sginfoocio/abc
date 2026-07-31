@@ -41,6 +41,27 @@ EXPECTED_OUTPUT_COLUMNS = [
     "Categoría",
 ]
 
+RESULT_EXPORT_COLUMNS = [
+    "Marca",
+    "Colección",
+    "Modelo",
+    "Color",
+    "Calibre",
+    "Ancho Puente",
+    "Longitud Varilla",
+    "Género",
+    "Color Frontal",
+    "Color Lente",
+    "Forma",
+    "Material Principal",
+    "Fotocromático",
+    "Polarizado",
+    "PVO",
+    "PVP",
+    "Barcode",
+    "Categoría",
+]
+
 VALID_GENDER = {"Hombre", "Mujer", "Unisex", "Niño"}
 VALID_SHAPE = {
     "Rectangular",
@@ -248,6 +269,23 @@ def load_excel_as_text(path: Path) -> pd.DataFrame:
     return df
 
 
+def _normalize_input_column_aliases(df: pd.DataFrame) -> pd.DataFrame:
+    """Normaliza alias frecuentes del Excel origen a nombres canónicos internos."""
+    alias_map = {
+        "PVP sugerido": ["PVP sugerido", "PVP Sugerido", "PVP"],
+    }
+
+    normalized = df.copy()
+    for canonical, aliases in alias_map.items():
+        if canonical in normalized.columns:
+            continue
+        found = next((name for name in aliases if name in normalized.columns), None)
+        if found:
+            normalized[canonical] = normalized[found]
+
+    return normalized
+
+
 def build_color_dictionary_from_db() -> dict[str, str]:
     cfg = load_db_config()
     url = URL.create(
@@ -432,7 +470,10 @@ def normalize_brand(
 
 def normalize_model(value: str) -> str:
     text_value = _safe_text(value)
-    return text_value.replace("/", "").replace("-", "")
+    cleaned = text_value.replace("/", "").replace("-", "")
+    if cleaned.startswith("0") and len(cleaned) > 1:
+        cleaned = cleaned[1:]
+    return cleaned
 
 
 def derive_brand_code_from_model(model_code: str) -> str:
@@ -445,7 +486,9 @@ def derive_brand_code_from_model(model_code: str) -> str:
 
 def normalize_gender(value: str, brand_name: str, category_hint: str) -> str:
     v = _normalize_text(value)
-    if "ni" in v or "kid" in v or "junior" in _normalize_text(brand_name) or "junior" in _normalize_text(category_hint):
+    if v in {"niño", "nino", "niña", "nina", "kid", "kids", "junior"}:
+        return "Niño"
+    if "junior" in _normalize_text(brand_name) or "junior" in _normalize_text(category_hint):
         return "Niño"
     if v in {"hombre", "man", "male", "caballero"}:
         return "Hombre"
@@ -602,7 +645,14 @@ def transform_masterdata(
     brand_map: dict[str, str] | None = None,
 ) -> tuple[pd.DataFrame, ValidationReport, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     input_count = len(df)
-    df = df.copy()
+    df = _normalize_input_column_aliases(df)
+
+    # Regla de negocio: la colección debe salir de la columna L del origen.
+    if df.shape[1] > 11:
+        collection_from_col_l = df.iloc[:, 11].map(_safe_text)
+    else:
+        collection_from_col_l = df.get("Nombre del modelo", pd.Series("", index=df.index)).map(_safe_text)
+
     whitelist = accessory_whitelist or set()
     brand_map = brand_map or {}
 
@@ -642,6 +692,9 @@ def transform_masterdata(
     )
     working["Nombre de la marca"] = brand_data.map(lambda x: x[0])
     working["Código de marca"] = brand_data.map(lambda x: x[1])
+
+    # Regla de negocio: la Colección se toma de la columna L del Excel origen.
+    working["Colección"] = collection_from_col_l.reindex(working.index).fillna("").map(_safe_text)
 
     working["Código del modelo"] = working["Código del modelo"].map(normalize_model)
     working["Género"] = working.apply(
@@ -705,12 +758,32 @@ def transform_masterdata(
     for col in EXPECTED_OUTPUT_COLUMNS:
         working[col] = working[col].map(_safe_text)
 
-    output = working[EXPECTED_OUTPUT_COLUMNS].copy()
+    output_canonical = working[EXPECTED_OUTPUT_COLUMNS].copy()
+
+    # Export final con estructura acordada para result.xlsx.
+    output = output_canonical.rename(
+        columns={
+            "UPC": "Barcode",
+            "Nombre de la marca": "Marca",
+            "Código del modelo": "Modelo",
+            "Dimensión del puente": "Ancho Puente",
+            "Largo de varilla": "Longitud Varilla",
+            "Color del frontal": "Color Frontal",
+            "Color de las lentes": "Color Lente",
+            "Material del frente": "Material Principal",
+            "PVP sugerido": "PVP",
+        }
+    )
+
+    for col in RESULT_EXPORT_COLUMNS:
+        if col not in output.columns:
+            output[col] = ""
+    output = output[RESULT_EXPORT_COLUMNS].copy()
 
     source_upc = {u for u in df["UPC"].map(_safe_text).tolist() if u}
-    output_upc = {u for u in output["UPC"].map(_safe_text).tolist() if u}
+    output_upc = {u for u in output["Barcode"].map(_safe_text).tolist() if u}
 
-    leading_zero_summary = _build_leading_zero_summary(df, kept_for_zero, output)
+    leading_zero_summary = _build_leading_zero_summary(df, kept_for_zero, output_canonical)
     leading_zero_issues = sum(
         1 for row in leading_zero_summary if row["incidencia_reportada_por_script"] == "SI"
     )
@@ -723,12 +796,18 @@ def transform_masterdata(
     )
 
     anomalous: dict[str, list[str]] = {}
-    unknown_shapes = sorted(set(output[~output["Forma"].isin(VALID_SHAPE)]["Forma"].tolist()))
-    unknown_gender = sorted(set(output[~output["Género"].isin(VALID_GENDER)]["Género"].tolist()))
+    unknown_shapes = sorted(set(output_canonical[~output_canonical["Forma"].isin(VALID_SHAPE)]["Forma"].tolist()))
+    unknown_gender = sorted(set(output_canonical[~output_canonical["Género"].isin(VALID_GENDER)]["Género"].tolist()))
     unknown_materials = sorted(
-        set(output[~output["Material del frente"].isin(VALID_MATERIALS)]["Material del frente"].tolist())
+        set(
+            output_canonical[
+                ~output_canonical["Material del frente"].isin(VALID_MATERIALS)
+            ]["Material del frente"].tolist()
+        )
     )
-    unknown_cats = sorted(set(output[~output["Categoría"].isin(VALID_CATEGORIES)]["Categoría"].tolist()))
+    unknown_cats = sorted(
+        set(output_canonical[~output_canonical["Categoría"].isin(VALID_CATEGORIES)]["Categoría"].tolist())
+    )
 
     if unknown_shapes:
         anomalous["forma"] = unknown_shapes

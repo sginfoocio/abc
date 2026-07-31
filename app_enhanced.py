@@ -28,6 +28,11 @@ from validate_masterdata_odoo_dryrun import (
     build_summary_markdown,
     load_odoo_snapshot,
 )
+from graph_mail_downloader import (
+    download_luxoptica_mail_attachments,
+    load_m365_config,
+    validate_m365_config,
+)
 
 # ==============================================================================
 # CONFIG
@@ -37,6 +42,14 @@ APP_TITLE = "Diagonal Eyewear"
 APP_ICON = "📊"
 AUTH_USERNAME_ENV = "APP_USERNAME"
 AUTH_PASSWORD_ENV = "APP_PASSWORD"
+ESSILOR_URL_ENV = "ESSILOR_URL"
+ESSILOR_USER_ENV = "ESSILOR_USERNAME"
+ESSILOR_PASSWORD_ENV = "ESSILOR_PASSWORD"
+M365_TENANT_ID_ENV = "M365_TENANT_ID"
+M365_CLIENT_ID_ENV = "M365_CLIENT_ID"
+M365_CLIENT_SECRET_ENV = "M365_CLIENT_SECRET"
+M365_MAILBOX_ENV = "M365_MAILBOX"
+M365_DOWNLOAD_ROOT_ENV = "M365_DOWNLOAD_ROOT"
 
 st.set_page_config(
     page_title=APP_TITLE,
@@ -92,6 +105,111 @@ def dataframe_to_excel_bytes(df: pd.DataFrame) -> bytes:
     return buffer.getvalue()
 
 
+def normalize_result_export_schema(df: pd.DataFrame) -> pd.DataFrame:
+    """Garantiza el esquema final del fichero transformado para preview y descarga."""
+    target_columns = [
+        "Marca",
+        "Colección",
+        "Modelo",
+        "Color",
+        "Calibre",
+        "Ancho Puente",
+        "Longitud Varilla",
+        "Género",
+        "Color Frontal",
+        "Color Lente",
+        "Forma",
+        "Material Principal",
+        "Fotocromático",
+        "Polarizado",
+        "PVO",
+        "PVP",
+        "Barcode",
+        "Categoría",
+    ]
+    # Compatibilidad con salidas antiguas/canónicas para no romper sesiones en curso.
+    alias_map = {
+        "Barcode": ["Barcode", "UPC"],
+        "Marca": ["Marca", "Nombre de la marca"],
+        "Modelo": ["Modelo", "Código del modelo"],
+        "Ancho Puente": ["Ancho Puente", "Dimensión del puente"],
+        "Longitud Varilla": ["Longitud Varilla", "Largo de varilla"],
+        "Color Frontal": ["Color Frontal", "Color del frontal"],
+        "Color Lente": ["Color Lente", "Color de las lentes"],
+        "Material Principal": ["Material Principal", "Material del frente"],
+        "PVP": ["PVP", "PVP sugerido"],
+    }
+
+    normalized = df.copy()
+    for target, aliases in alias_map.items():
+        if target in normalized.columns:
+            continue
+        source = next((name for name in aliases if name in normalized.columns), None)
+        if source:
+            normalized[target] = normalized[source]
+
+    for col in target_columns:
+        if col not in normalized.columns:
+            normalized[col] = ""
+
+    # Defensa adicional para sesiones antiguas: quitar un 0 inicial en Modelo.
+    normalized["Modelo"] = normalized["Modelo"].map(lambda v: str(v).strip())
+    normalized["Modelo"] = normalized["Modelo"].map(
+        lambda v: v[1:] if v.startswith("0") and len(v) > 1 else v
+    )
+
+    return normalized[target_columns].copy()
+
+
+def _extract_clean_eans(df: pd.DataFrame) -> list[str]:
+    """Extrae EAN limpios desde Barcode sin prefijo y sin duplicados."""
+    if "Barcode" not in df.columns:
+        return []
+
+    seen: set[str] = set()
+    eans: list[str] = []
+
+    for raw_value in df["Barcode"].tolist():
+        value = str(raw_value).strip()
+        if not value or value.lower() == "nan":
+            continue
+        if value.lower().startswith("es."):
+            value = value[3:]
+        if value.endswith(".0"):
+            value = value[:-2]
+        value = value.replace(" ", "")
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        eans.append(value)
+
+    return eans
+
+
+def _chunk_list(items: list[str], chunk_size: int) -> list[list[str]]:
+    return [items[i : i + chunk_size] for i in range(0, len(items), chunk_size)]
+
+
+def generate_luxoptica_request_files(df: pd.DataFrame, output_dir: Path, batch_size: int = 250) -> list[Path]:
+    """Genera archivos txt para solicitud de imágenes con lotes de EAN."""
+    eans = _extract_clean_eans(df)
+    if not eans:
+        return []
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    batches = _chunk_list(eans, batch_size)
+    generated_files: list[Path] = []
+
+    for idx, batch in enumerate(batches, start=1):
+        file_name = f"upc-products-images-request-{timestamp}-lote-{idx:03d}.txt"
+        file_path = output_dir / file_name
+        file_path.write_text("\n".join(batch) + "\n", encoding="utf-8")
+        generated_files.append(file_path)
+
+    return generated_files
+
+
 def split_report_warnings(report) -> tuple[list[str], list[str], list[str]]:
     """Separa incidencias bloqueantes, de riesgo medio e informativas para la UI."""
     blocking: list[str] = []
@@ -114,6 +232,157 @@ def split_report_warnings(report) -> tuple[list[str], list[str], list[str]]:
         blocking.append(f"Valores anómalos en {key}: {', '.join(values)}")
 
     return blocking, medium, info
+
+
+def _read_env_setting(key: str, default: str = "") -> str:
+    load_env_file()
+    return os.getenv(key, default)
+
+
+def _upsert_env_settings(updates: dict[str, str], env_path: str | Path = ".env") -> None:
+    path = Path(env_path)
+    if not path.is_absolute():
+        path = Path(__file__).resolve().parent / path
+
+    lines: list[str] = []
+    if path.exists():
+        lines = path.read_text(encoding="utf-8").splitlines()
+
+    applied: set[str] = set()
+    out_lines: list[str] = []
+
+    for line in lines:
+        item = line.strip()
+        if not item or item.startswith("#") or "=" not in line:
+            out_lines.append(line)
+            continue
+
+        key, _ = line.split("=", 1)
+        key = key.strip()
+        if key in updates:
+            out_lines.append(f"{key}={updates[key]}")
+            applied.add(key)
+        else:
+            out_lines.append(line)
+
+    for key, value in updates.items():
+        if key not in applied:
+            out_lines.append(f"{key}={value}")
+
+    path.write_text("\n".join(out_lines).rstrip() + "\n", encoding="utf-8")
+
+
+def _first_available_selector(page, selectors: list[str]) -> str:
+    for selector in selectors:
+        locator = page.locator(selector)
+        if locator.count() > 0 and locator.first.is_visible():
+            return selector
+    return ""
+
+
+def _attempt_essilor_auto_login(url: str, username: str, password: str) -> tuple[bool, str]:
+    if not url.strip() or not username.strip() or not password.strip():
+        return False, "Faltan URL, usuario o contraseña en la configuración."
+
+    try:
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+        from playwright.sync_api import sync_playwright
+    except Exception:
+        return False, (
+            "Playwright no está disponible. Instala dependencias y ejecuta: "
+            "python -m playwright install chromium"
+        )
+
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(url, wait_until="domcontentloaded", timeout=60000)
+
+            user_selector = _first_available_selector(
+                page,
+                [
+                    "input#signInName",
+                    "input[name='signInName']",
+                    "input[aria-label='Sign in name']",
+                    "input[type='email']",
+                    "input[type='text']",
+                ],
+            )
+            if not user_selector:
+                browser.close()
+                return False, "No se encontró el campo de usuario en la página de login."
+
+            page.fill(user_selector, username)
+
+            continue_selector = _first_available_selector(
+                page,
+                [
+                    "button:has-text('Continue')",
+                    "button:has-text('Continuar')",
+                    "button#continue",
+                    "#continue",
+                ],
+            )
+            if continue_selector:
+                page.click(continue_selector)
+
+            password_selector = ""
+            for _ in range(20):
+                if page.locator("text=LOGIN_USER_NOT_FOUND").count() > 0:
+                    browser.close()
+                    return False, "Usuario no encontrado en Essilor (LOGIN_USER_NOT_FOUND)."
+
+                password_selector = _first_available_selector(
+                    page,
+                    [
+                        "input#password",
+                        "input[name='password']",
+                        "input[type='password']",
+                    ],
+                )
+                if password_selector:
+                    break
+                page.wait_for_timeout(500)
+
+            if not password_selector:
+                browser.close()
+                return False, "No se encontró el campo de contraseña tras enviar el usuario."
+
+            page.fill(password_selector, password)
+
+            sign_in_selector = _first_available_selector(
+                page,
+                [
+                    "button:has-text('Sign in')",
+                    "button:has-text('Iniciar sesión')",
+                    "button:has-text('Acceder')",
+                    "button:has-text('Continue')",
+                    "button:has-text('Continuar')",
+                    "button#next",
+                    "#next",
+                    "button#continue",
+                    "#continue",
+                ],
+            )
+            if sign_in_selector:
+                page.click(sign_in_selector)
+
+            page.wait_for_timeout(3500)
+            current_url = page.url
+            browser.close()
+
+            if "b2clogin.com" in current_url.lower():
+                return False, (
+                    "El login no se completó automáticamente (posible validación adicional/MFA o credenciales inválidas)."
+                )
+
+            return True, f"Login automático completado. URL actual: {current_url}"
+
+    except PlaywrightTimeoutError:
+        return False, "Timeout durante el login automático."
+    except Exception as exc:
+        return False, f"Error en login automático: {exc}"
 
 def _get_auth_credentials() -> tuple[str, str]:
     """Obtiene credenciales desde variables de entorno."""
@@ -255,7 +524,7 @@ def render_home_page() -> None:
     st.subheader("Portal interno")
     st.write("Selecciona una de las dos áreas principales.")
 
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
         st.markdown("### Área ABC")
         st.write("Análisis ABCD, búsqueda, reportes y detalle de producto.")
@@ -264,6 +533,100 @@ def render_home_page() -> None:
         st.markdown("### Área Masterdata")
         st.write("Transformación de Luxottica, advertencias, descargas y dry-run Odoo.")
         st.page_link(MASTER_PAGE, label="Entrar en Masterdata", use_container_width=True)
+    with col3:
+        st.markdown("### Configuración")
+        st.write("Guardar claves y credenciales de integración en el entorno local.")
+        st.page_link(SETTINGS_PAGE, label="Entrar en Configuración", use_container_width=True)
+
+    render_footer()
+
+
+def render_settings_page() -> None:
+    render_sidebar_shell("Configuración")
+    st.title("Configuración")
+    st.caption("Guarda credenciales de integración en el archivo .env local del proyecto.")
+
+    current_url = _read_env_setting(ESSILOR_URL_ENV)
+    current_user = _read_env_setting(ESSILOR_USER_ENV)
+    current_password = _read_env_setting(ESSILOR_PASSWORD_ENV)
+    current_tenant_id = _read_env_setting(M365_TENANT_ID_ENV)
+    current_client_id = _read_env_setting(M365_CLIENT_ID_ENV)
+    current_client_secret = _read_env_setting(M365_CLIENT_SECRET_ENV)
+    current_mailbox = _read_env_setting(M365_MAILBOX_ENV, "ruben.cebreiros@diagonaleyewear.com")
+    current_download_root = _read_env_setting(M365_DOWNLOAD_ROOT_ENV, "docs/Luxoptica/descargas")
+
+    with st.form("settings_form", clear_on_submit=False):
+        st.subheader("Essilor Luxottica")
+        url_value = st.text_input("URL", value=current_url, placeholder="https://...")
+        user_value = st.text_input("Usuario", value=current_user)
+        password_value = st.text_input(
+            "Contraseña",
+            type="password",
+            placeholder="Deja vacío para conservar la actual",
+        )
+
+        st.subheader("Microsoft 365 (Graph)")
+        tenant_id_value = st.text_input("Tenant ID", value=current_tenant_id)
+        client_id_value = st.text_input("Client ID", value=current_client_id)
+        client_secret_value = st.text_input(
+            "Client Secret",
+            type="password",
+            placeholder="Deja vacío para conservar el actual",
+        )
+        mailbox_value = st.text_input("Mailbox objetivo", value=current_mailbox)
+        download_root_value = st.text_input("Carpeta destino descargas", value=current_download_root)
+
+        submitted = st.form_submit_button("Guardar configuración", type="primary")
+
+    if submitted:
+        updates = {
+            ESSILOR_URL_ENV: url_value.strip(),
+            ESSILOR_USER_ENV: user_value.strip(),
+            M365_TENANT_ID_ENV: tenant_id_value.strip(),
+            M365_CLIENT_ID_ENV: client_id_value.strip(),
+            M365_MAILBOX_ENV: mailbox_value.strip(),
+            M365_DOWNLOAD_ROOT_ENV: download_root_value.strip(),
+        }
+        keep_existing_password = not password_value.strip() and bool(current_password)
+        keep_existing_client_secret = not client_secret_value.strip() and bool(current_client_secret)
+        if password_value.strip():
+            updates[ESSILOR_PASSWORD_ENV] = password_value.strip()
+        if client_secret_value.strip():
+            updates[M365_CLIENT_SECRET_ENV] = client_secret_value.strip()
+
+        _upsert_env_settings(updates)
+        for key, value in updates.items():
+            os.environ[key] = value
+
+        st.success("Configuración guardada en .env")
+        if keep_existing_password:
+            st.info("Se conservó la contraseña existente.")
+        if keep_existing_client_secret:
+            st.info("Se conservó el client secret existente.")
+
+    st.markdown("### Variables gestionadas")
+    st.write(f"- {ESSILOR_URL_ENV}")
+    st.write(f"- {ESSILOR_USER_ENV}")
+    st.write(f"- {ESSILOR_PASSWORD_ENV}")
+    st.write(f"- {M365_TENANT_ID_ENV}")
+    st.write(f"- {M365_CLIENT_ID_ENV}")
+    st.write(f"- {M365_CLIENT_SECRET_ENV}")
+    st.write(f"- {M365_MAILBOX_ENV}")
+    st.write(f"- {M365_DOWNLOAD_ROOT_ENV}")
+
+    st.divider()
+    st.subheader("Login automático")
+    st.caption("Usa las credenciales guardadas en .env para probar el acceso automático a la web.")
+    if st.button("Probar login automático", type="secondary"):
+        auto_url = _read_env_setting(ESSILOR_URL_ENV)
+        auto_user = _read_env_setting(ESSILOR_USER_ENV)
+        auto_password = _read_env_setting(ESSILOR_PASSWORD_ENV)
+        with st.spinner("Ejecutando login automático..."):
+            ok, message = _attempt_essilor_auto_login(auto_url, auto_user, auto_password)
+        if ok:
+            st.success(message)
+        else:
+            st.error(message)
 
     render_footer()
 
@@ -601,24 +964,11 @@ def render_master_page() -> None:
             elif not blocking_warnings:
                 st.success("Transformación completada sin incidencias bloqueantes.")
 
-            st.subheader("Campos de lentes")
-            nonempty_lens_material = int((output_df["Material de las lentes"].astype(str).str.strip() != "").sum())
-            nonempty_lens_color = int((output_df["Color de las lentes"].astype(str).str.strip() != "").sum())
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("Material de las lentes informado", nonempty_lens_material)
-            with col2:
-                st.metric("Color de las lentes informado", nonempty_lens_color)
-            if nonempty_lens_material == 0:
-                st.info("El Excel origen no trae una columna de material de lente. Por eso `Material de las lentes` queda vacío salvo que se defina una regla de negocio adicional.")
-            st.dataframe(
-                output_df[["Código del modelo", "Categoría", "Material de las lentes", "Color de las lentes"]].head(50),
-                use_container_width=True,
-                hide_index=True,
-            )
+            export_df = normalize_result_export_schema(output_df)
 
             st.subheader("Vista previa del MASTERDATA")
-            st.dataframe(output_df.head(50), use_container_width=True, hide_index=True)
+            st.caption(f"Filas en vista previa: {len(export_df):,}")
+            st.dataframe(export_df, use_container_width=True, hide_index=True)
 
             executive_summary = build_executive_summary_markdown(
                 type("ReportProxy", (), {**report_dict, "to_dict": lambda self=None: report_dict})(),
@@ -626,7 +976,8 @@ def render_master_page() -> None:
                 Path(source_name).with_name(f"{Path(source_name).stem}_transformado.xlsx"),
                 None,
             )
-            transformed_excel = dataframe_to_excel_bytes(output_df)
+            download_export_df = export_df.drop(columns=["Barcode", "Categoría"], errors="ignore")
+            transformed_excel = dataframe_to_excel_bytes(download_export_df)
             discarded_csv = discarded_audit.to_csv(index=False) if discarded_audit is not None else ""
             zero_csv = zero_audit_df.to_csv(index=False) if zero_audit_df is not None else ""
             brand_csv = brand_audit_df.to_csv(index=False) if brand_audit_df is not None else ""
@@ -642,6 +993,146 @@ def render_master_page() -> None:
                 st.download_button("📥 Descargar auditoría descartes (.csv)", data=discarded_csv, file_name=f"{Path(source_name).stem}_descartes_auditoria.csv", mime="text/csv")
                 st.download_button("📥 Descargar auditoría ceros (.csv)", data=zero_csv, file_name=f"{Path(source_name).stem}_ceros_iniciales_resumen.csv", mime="text/csv")
                 st.download_button("📥 Descargar auditoría marcas (.csv)", data=brand_csv, file_name=f"{Path(source_name).stem}_marcas_auditoria.csv", mime="text/csv")
+
+            st.subheader("4. Solicitud de imágenes (Luxoptica)")
+            default_email = st.session_state.get("luxoptica_request_email", "ruben.cebreiros@diagonaleyewear.com")
+            request_email = st.text_input("Email para la solicitud", value=default_email, key="luxoptica_request_email_input")
+            st.caption("Se generan lotes de 250 EAN máximos por archivo, sin prefijo.")
+
+            if st.button("Generar archivos para pedir imágenes", key="generate_luxoptica_request_files"):
+                luxoptica_dir = Path(__file__).resolve().parent / "docs" / "Luxoptica"
+                generated_files = generate_luxoptica_request_files(export_df, luxoptica_dir, batch_size=250)
+                st.session_state["luxoptica_request_email"] = request_email.strip() or default_email
+                st.session_state["luxoptica_generated_files"] = [str(p) for p in generated_files]
+                st.session_state["luxoptica_generated_total_eans"] = len(_extract_clean_eans(export_df))
+                st.session_state["luxoptica_processed_files"] = []
+
+                if generated_files:
+                    st.success(f"Generados {len(generated_files)} archivo(s) en docs/Luxoptica.")
+                else:
+                    st.warning("No se encontraron EAN válidos para generar archivos.")
+
+            generated_files_raw = st.session_state.get("luxoptica_generated_files", [])
+            if generated_files_raw:
+                generated_paths = [Path(p) for p in generated_files_raw if Path(p).exists()]
+                total_eans = st.session_state.get("luxoptica_generated_total_eans", 0)
+                processed_files = set(st.session_state.get("luxoptica_processed_files", []))
+                st.info(
+                    f"Email de solicitud: {st.session_state.get('luxoptica_request_email', request_email)} | "
+                    f"EAN totales: {total_eans} | Archivos: {len(generated_paths)}"
+                )
+                st.caption("Sube los archivos uno por uno en Luxoptica. Cada archivo corresponde a una solicitud.")
+
+                for idx, file_path in enumerate(generated_paths, start=1):
+                    content = file_path.read_text(encoding="utf-8")
+                    num_lines = len([line for line in content.splitlines() if line.strip()])
+                    col_a, col_b = st.columns([3, 2])
+                    with col_a:
+                        st.download_button(
+                            label=f"📄 Descargar lote {idx} ({num_lines} EAN)",
+                            data=content,
+                            file_name=file_path.name,
+                            mime="text/plain",
+                            key=f"luxoptica_download_{idx}_{file_path.name}",
+                        )
+                    with col_b:
+                        file_key = file_path.name
+                        if file_key in processed_files:
+                            st.success("✅ Procesado")
+                        else:
+                            if st.button("Marcar como procesado", key=f"luxoptica_mark_{idx}_{file_key}"):
+                                updated = list(processed_files)
+                                updated.append(file_key)
+                                st.session_state["luxoptica_processed_files"] = updated
+                                st.rerun()
+
+                processed_count = len([p for p in generated_paths if p.name in processed_files])
+                total_batches = len(generated_paths)
+                if total_batches > 0:
+                    st.progress(processed_count / total_batches)
+                    st.caption(f"Lotes procesados: {processed_count}/{total_batches}")
+
+                if total_batches > 0 and processed_count == total_batches:
+                    st.success(
+                        "Todos los lotes están procesados. Solicitudes de imágenes completadas para este lote de MASTERDATA."
+                    )
+
+            st.subheader("5. Descarga automática de imágenes (Microsoft 365)")
+            m365_cfg = load_m365_config()
+            missing_m365 = validate_m365_config(m365_cfg)
+            sender_hint = st.text_input(
+                "Filtro remitente (contains)",
+                value="luxottica",
+                key="m365_sender_hint",
+            )
+            subject_hint = st.text_input(
+                "Filtro asunto (contains)",
+                value="image",
+                key="m365_subject_hint",
+            )
+            lookback_days = st.number_input(
+                "Ventana de búsqueda (días)",
+                min_value=1,
+                max_value=60,
+                value=7,
+                step=1,
+                key="m365_lookback_days",
+            )
+            top_messages = st.number_input(
+                "Máximo correos a revisar",
+                min_value=10,
+                max_value=500,
+                value=100,
+                step=10,
+                key="m365_top_messages",
+            )
+
+            if missing_m365:
+                st.warning(
+                    "Faltan variables M365 en .env: " + ", ".join(missing_m365)
+                )
+            else:
+                st.caption(
+                    f"Mailbox: {m365_cfg.mailbox} | Destino: {m365_cfg.download_root}"
+                )
+
+            if st.button("Procesar buzón y descargar adjuntos", key="m365_download_attachments"):
+                if missing_m365:
+                    st.error("Configura primero las variables de Microsoft 365 en Configuración.")
+                else:
+                    with st.spinner("Leyendo buzón y descargando adjuntos..."):
+                        try:
+                            summary = download_luxoptica_mail_attachments(
+                                sender_hint=sender_hint,
+                                subject_hint=subject_hint,
+                                lookback_days=int(lookback_days),
+                                top_messages=int(top_messages),
+                            )
+                            st.session_state["m365_last_download_summary"] = {
+                                "messages_scanned": summary.messages_scanned,
+                                "messages_with_attachments": summary.messages_with_attachments,
+                                "attachments_downloaded": summary.attachments_downloaded,
+                                "saved_paths": summary.saved_paths,
+                                "processed_message_ids": summary.processed_message_ids,
+                            }
+                        except Exception as exc:
+                            st.error(f"Error en descarga automática: {exc}")
+
+            m365_summary = st.session_state.get("m365_last_download_summary")
+            if m365_summary:
+                st.success(
+                    "Descarga automática finalizada: "
+                    f"{m365_summary['attachments_downloaded']} adjunto(s) en "
+                    f"{m365_summary['messages_with_attachments']} correo(s)."
+                )
+                st.caption(
+                    f"Correos revisados: {m365_summary['messages_scanned']} | "
+                    f"Correos marcados como procesados: {len(m365_summary['processed_message_ids'])}"
+                )
+                if m365_summary["saved_paths"]:
+                    with st.expander("Ver archivos descargados"):
+                        for file_path in m365_summary["saved_paths"]:
+                            st.write(f"- {file_path}")
 
     else:
         st.title("Dry-run Odoo")
@@ -679,8 +1170,16 @@ def render_master_page() -> None:
                     masterdata_df = load_masterdata_file(uploaded_file)
 
         if masterdata_df is not None:
-            required_cols = {"UPC", "Nombre de la marca", "Código del modelo"}
-            missing_cols = sorted(required_cols - set(masterdata_df.columns))
+            required_cols_alternatives = {
+                "UPC": ["UPC", "Barcode"],
+                "Nombre de la marca": ["Nombre de la marca", "Marca"],
+                "Código del modelo": ["Código del modelo", "Modelo"],
+            }
+            missing_cols = sorted(
+                required
+                for required, alternatives in required_cols_alternatives.items()
+                if not any(col in masterdata_df.columns for col in alternatives)
+            )
             if missing_cols:
                 st.error(f"El fichero no parece un MASTERDATA válido. Faltan columnas: {', '.join(missing_cols)}")
             else:
@@ -729,7 +1228,8 @@ require_authentication()
 HOME_PAGE = st.Page(render_home_page, title="Inicio", icon="🏠", url_path="", default=True)
 ABC_PAGE = st.Page(render_abc_page, title="ABC", icon="📊", url_path="abc")
 MASTER_PAGE = st.Page(render_master_page, title="Masterdata", icon="📥", url_path="master")
+SETTINGS_PAGE = st.Page(render_settings_page, title="Configuración", icon="⚙️", url_path="config")
 
-navigation = st.navigation([HOME_PAGE, ABC_PAGE, MASTER_PAGE], position="sidebar")
+navigation = st.navigation([HOME_PAGE, ABC_PAGE, MASTER_PAGE, SETTINGS_PAGE], position="sidebar")
 
 navigation.run()

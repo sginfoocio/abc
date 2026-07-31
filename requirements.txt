@@ -5,3 +5,5 @@ psycopg2-binary>=2.9
 sqlalchemy>=2.0
 plotly>=5.0
 numpy>=1.21
+playwright>=1.46
+requests>=2.31
