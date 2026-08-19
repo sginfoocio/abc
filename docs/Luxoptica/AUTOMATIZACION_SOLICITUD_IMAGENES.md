@@ -47,10 +47,19 @@ Automatizar el flujo completo desde MASTERDATA hasta la recepcion y descarga de 
 - Ejemplo de plantilla:
   - docs/Luxoptica/upc-products-images-template.txt
 
-## Siguiente fase (pendiente): lectura automatica de buzon y descarga con Microsoft 365
+## Siguiente fase (pendiente): lectura automática de buzón y descarga con Microsoft 365
 
 ### Objetivo de la fase
-Leer correos de respuesta de Luxoptica y descargar automaticamente enlaces/adjuntos de imagenes.
+Leer correos de respuesta de Luxoptica y descargar automáticamente enlaces/adjuntos de imágenes.
+
+### 📋 Documentación de Configuración
+- **[CONFIGURACION_GRAPH_API.md](CONFIGURACION_GRAPH_API.md)** - Guía detallada de registro en Azure AD
+- **[CHECKLIST_GRAPH_CONFIG.md](CHECKLIST_GRAPH_CONFIG.md)** - Pasos rápidos (paso a paso)
+
+### Estado Técnico
+- ✅ Script `graph_mail_downloader.py` implementado
+- ✅ Integración en `app_enhanced.py` lista
+- ⏳ Pendiente: Registrar app en Azure AD y obtener credenciales
 
 ## Decisiones cerradas (2026-07-31)
 - Se registrara una app exclusiva en un tenant dedicado para este flujo.
@@ -106,10 +115,11 @@ Leer correos de respuesta de Luxoptica y descargar automaticamente enlaces/adjun
 - [ ] Email especificado: images@diagonaleyewear.com
 - [ ] Lotes marcados como procesados en app
 
-## Checklist proximo sprint (M365 token)
-- [ ] Alta app en Entra ID
-- [ ] Permisos Graph concedidos
-- [ ] Token flow implementado
-- [ ] Lectura de buzon implementada
-- [ ] Descarga de adjuntos implementada
-- [ ] Trazabilidad por lote implementada
+## Checklist próximo sprint (M365 token)
+- [ ] Alta app en Entra ID → Ver [CONFIGURACION_GRAPH_API.md](CONFIGURACION_GRAPH_API.md) Pasos 1-2
+- [ ] Permisos Graph concedidos → Ver [CONFIGURACION_GRAPH_API.md](CONFIGURACION_GRAPH_API.md) Paso 3
+- [ ] Permisos en mailbox compartido → Ver [CONFIGURACION_GRAPH_API.md](CONFIGURACION_GRAPH_API.md) Paso 4
+- [ ] Token flow implementado ✅ (ya en código)
+- [ ] Lectura de buzón implementada ✅ (ya en código)
+- [ ] Descarga de adjuntos implementada ✅ (ya en código)
+- [ ] Trazabilidad por lote implementada ✅ (ya en código)
