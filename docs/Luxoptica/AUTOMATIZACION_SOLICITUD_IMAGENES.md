@@ -116,10 +116,12 @@ Leer correos de respuesta de Luxoptica y descargar automáticamente enlaces/adju
 - [ ] Lotes marcados como procesados en app
 
 ## Checklist próximo sprint (M365 token)
-- [ ] Alta app en Entra ID → Ver [CONFIGURACION_GRAPH_API.md](CONFIGURACION_GRAPH_API.md) Pasos 1-2
-- [ ] Permisos Graph concedidos → Ver [CONFIGURACION_GRAPH_API.md](CONFIGURACION_GRAPH_API.md) Paso 3
-- [ ] Permisos en mailbox compartido → Ver [CONFIGURACION_GRAPH_API.md](CONFIGURACION_GRAPH_API.md) Paso 4
-- [ ] Token flow implementado ✅ (ya en código)
-- [ ] Lectura de buzón implementada ✅ (ya en código)
-- [ ] Descarga de adjuntos implementada ✅ (ya en código)
-- [ ] Trazabilidad por lote implementada ✅ (ya en código)
+- [x] Alta app en Entra ID ✅ (Completado)
+- [x] Permisos Graph concedidos ✅ (Completado)
+- [x] Permisos en mailbox compartido ✅ (Completado)
+- [x] Token flow implementado ✅ (Ya en código)
+- [x] Lectura de buzón implementada ✅ (Ya en código)
+- [x] Descarga de adjuntos implementada ✅ (Ya en código)
+- [x] Trazabilidad por lote implementada ✅ (Ya en código)
+
+**Estado:** ✅ **CONFIGURACIÓN LISTA PARA PRODUCCIÓN**

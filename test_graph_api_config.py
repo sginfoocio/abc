@@ -75,7 +75,7 @@ def test_inbox(token, config):
     print("=" * 80)
     
     try:
-        messages = _list_inbox_messages(token, config.mailbox, top_messages=10)
+        messages = _list_inbox_messages(token, config.mailbox, top=10)
         print(f"✅ Inbox accesible")
         print(f"   Mensajes recuperados: {len(messages)}")
         
