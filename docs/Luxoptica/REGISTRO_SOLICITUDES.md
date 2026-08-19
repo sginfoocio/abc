@@ -8,8 +8,10 @@
 | **Archivo** | `upc-products-images-request-20260819_102506-50-eans.txt` |
 | **EAN** | 50 |
 | **Email Destino** | images@diagonaleyewear.com |
-| **Estado** | ⏳ Pendiente envío |
+| **Estado** | ✅ ENVIADO A LUXOPTICA |
+| **Fecha Envío** | 2026-08-19 ~10:30 UTC |
 | **Ubicación Descarga** | docs/Luxoptica/descargas/2026-08-19/lote-001/ |
+| **ETA Respuesta** | 2026-08-20 a 2026-08-21 (24-48h) |
 
 ### EAN Solicitados
 
