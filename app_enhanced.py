@@ -190,9 +190,16 @@ def _chunk_list(items: list[str], chunk_size: int) -> list[list[str]]:
     return [items[i : i + chunk_size] for i in range(0, len(items), chunk_size)]
 
 
-def generate_luxoptica_request_files(df: pd.DataFrame, output_dir: Path, batch_size: int = 250) -> list[Path]:
+def generate_luxoptica_request_files(
+    df: pd.DataFrame,
+    output_dir: Path,
+    batch_size: int = 250,
+    max_total_eans: int | None = None,
+) -> list[Path]:
     """Genera archivos txt para solicitud de imágenes con lotes de EAN."""
     eans = _extract_clean_eans(df)
+    if max_total_eans is not None and max_total_eans > 0:
+        eans = eans[:max_total_eans]
     if not eans:
         return []
 
@@ -999,16 +1006,43 @@ def render_master_page() -> None:
             request_email = st.text_input("Email para la solicitud", value=default_email, key="luxoptica_request_email_input")
             st.caption("Se generan lotes de 250 EAN máximos por archivo, sin prefijo.")
 
-            if st.button("Generar archivos para pedir imágenes", key="generate_luxoptica_request_files"):
+            eans_available = len(_extract_clean_eans(export_df))
+            col_gen_a, col_gen_b = st.columns(2)
+
+            with col_gen_a:
+                generate_test_50 = st.button(
+                    "Generar lote de prueba (50 EAN)",
+                    key="generate_luxoptica_request_files_50",
+                    use_container_width=True,
+                )
+            with col_gen_b:
+                generate_full = st.button(
+                    "Generar lotes completos",
+                    key="generate_luxoptica_request_files_full",
+                    use_container_width=True,
+                )
+
+            if generate_test_50 or generate_full:
                 luxoptica_dir = Path(__file__).resolve().parent / "docs" / "Luxoptica"
-                generated_files = generate_luxoptica_request_files(export_df, luxoptica_dir, batch_size=250)
+                limit = 50 if generate_test_50 else None
+                generated_files = generate_luxoptica_request_files(
+                    export_df,
+                    luxoptica_dir,
+                    batch_size=250,
+                    max_total_eans=limit,
+                )
                 st.session_state["luxoptica_request_email"] = request_email.strip() or default_email
                 st.session_state["luxoptica_generated_files"] = [str(p) for p in generated_files]
-                st.session_state["luxoptica_generated_total_eans"] = len(_extract_clean_eans(export_df))
+                st.session_state["luxoptica_generated_total_eans"] = min(eans_available, limit) if limit else eans_available
                 st.session_state["luxoptica_processed_files"] = []
 
                 if generated_files:
-                    st.success(f"Generados {len(generated_files)} archivo(s) en docs/Luxoptica.")
+                    if limit:
+                        st.success(
+                            f"Generado lote de prueba con {st.session_state['luxoptica_generated_total_eans']} EAN en docs/Luxoptica."
+                        )
+                    else:
+                        st.success(f"Generados {len(generated_files)} archivo(s) en docs/Luxoptica.")
                 else:
                     st.warning("No se encontraron EAN válidos para generar archivos.")
 
