@@ -1055,6 +1055,34 @@ def render_master_page() -> None:
                     f"Email de solicitud: {st.session_state.get('luxoptica_request_email', request_email)} | "
                     f"EAN totales: {total_eans} | Archivos: {len(generated_paths)}"
                 )
+                
+                # Botón de subida automática a Luxoptica
+                st.subheader("Subida Automática a Luxoptica")
+                col_auto_a, col_auto_b = st.columns([2, 1])
+                with col_auto_a:
+                    st.caption("Requiere credenciales en .env: LUXOPTICA_USERNAME, LUXOPTICA_PASSWORD")
+                with col_auto_b:
+                    if st.button("🚀 Subir a Luxoptica Automáticamente", use_container_width=True, key="auto_upload_luxoptica"):
+                        import subprocess
+                        try:
+                            result = subprocess.run(
+                                ["python", "luxoptica_auto_upload.py"],
+                                cwd=Path(__file__).parent,
+                                capture_output=True,
+                                text=True,
+                                timeout=300,
+                            )
+                            if result.returncode == 0:
+                                st.success("✅ Solicitud enviada a Luxoptica automáticamente!")
+                                st.session_state["luxoptica_processed_files"] = [p.name for p in generated_paths]
+                                st.rerun()
+                            else:
+                                st.error(f"❌ Error en la subida:\n{result.stdout}\n{result.stderr}")
+                        except subprocess.TimeoutExpired:
+                            st.error("❌ Timeout (5 minutos) en la subida")
+                        except Exception as e:
+                            st.error(f"❌ Error: {e}")
+                
                 st.caption("Sube los archivos uno por uno en Luxoptica. Cada archivo corresponde a una solicitud.")
 
                 for idx, file_path in enumerate(generated_paths, start=1):
