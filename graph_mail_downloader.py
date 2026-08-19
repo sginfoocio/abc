@@ -44,7 +44,7 @@ def load_m365_config() -> M365Config:
         tenant_id=os.getenv(M365_TENANT_ID_ENV, "").strip(),
         client_id=os.getenv(M365_CLIENT_ID_ENV, "").strip(),
         client_secret=os.getenv(M365_CLIENT_SECRET_ENV, "").strip(),
-        mailbox=os.getenv(M365_MAILBOX_ENV, "").strip(),
+        mailbox=os.getenv(M365_MAILBOX_ENV, "images@diagonaleyewear.com").strip(),
         download_root=Path(os.getenv(M365_DOWNLOAD_ROOT_ENV, "docs/Luxoptica/descargas").strip() or "docs/Luxoptica/descargas"),
     )
 

@@ -26,7 +26,7 @@ Automatizar el flujo completo desde MASTERDATA hasta la recepcion y descarga de 
   - Cargar archivo
   - Seleccionar Todas las vistas
   - Enviar solicitud
-  - Añadir email de recepcion (si aplica)
+  - Especificar email de recepcion: **images@diagonaleyewear.com**
 
 ### 4) Control de progreso en app
 - Por cada lote generado:
@@ -78,7 +78,7 @@ Leer correos de respuesta de Luxoptica y descargar automaticamente enlaces/adjun
   - Mail.ReadWrite (si se van a etiquetar/mover correos)
   - User.Read (opcional para validacion de identidad del token)
 - Buzon objetivo:
-  - ruben.cebreiros@diagonaleyewear.com
+  - images@diagonaleyewear.com (SharedMailbox dedicado para recepción de imágenes)
 
 ### Modo de autenticacion propuesto
 - `client_credentials` para proceso backend no interactivo.
@@ -102,7 +102,8 @@ Leer correos de respuesta de Luxoptica y descargar automaticamente enlaces/adjun
 - [ ] Lotes generados
 - [ ] Lotes subidos (uno por uno)
 - [ ] Todas las vistas seleccionadas
-- [ ] Solicitud enviada
+- [ ] Solicitud enviada a Luxoptica
+- [ ] Email especificado: images@diagonaleyewear.com
 - [ ] Lotes marcados como procesados en app
 
 ## Checklist proximo sprint (M365 token)
