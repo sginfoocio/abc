@@ -304,27 +304,38 @@ def upload_to_luxoptica(
             # 7. Enviar solicitud
             print(f"🚀 Enviando solicitud...")
 
-            submit_button = page.get_by_role(
-                "button", name=re.compile(r"enviar solicitud|send request|submit", re.I)
-            ).first
             submit_candidates = [
-                submit_button,
-                page.get_by_text(
-                    re.compile(r"^enviar solicitud$|^send request$|^submit$", re.I)
-                ).last,
                 page.locator("button:has-text('ENVIAR SOLICITUD')").last,
-                page.locator("[role='button']:has-text('ENVIAR SOLICITUD')").last,
+                page.locator("button:has-text('Enviar solicitud')").last,
+                page.locator("button:has-text('Send request')").last,
+                page.locator("button, [role='button'], input[type='submit']").filter(
+                    has_text=re.compile(r"enviar solicitud|send request|submit", re.I)
+                ).last,
+                page.get_by_role("button", name=re.compile(r"enviar solicitud|send request|submit", re.I)).last,
+                page.get_by_text(re.compile(r"^enviar solicitud$|^send request$|^submit$", re.I)).last,
             ]
-            try:
-                submit_button = next(
-                    candidate for candidate in submit_candidates
-                    if candidate.count() > 0 and candidate.is_visible()
-                )
-            except StopIteration:
+
+            submit_button = None
+            for candidate in submit_candidates:
+                try:
+                    if candidate.count() > 0:
+                        for i in range(candidate.count()):
+                            loc = candidate.nth(i)
+                            if loc.is_visible() and loc.is_enabled():
+                                submit_button = loc
+                                break
+                    if submit_button is not None:
+                        break
+                except Exception:
+                    continue
+
+            if submit_button is None:
                 browser.close()
                 return False, "No se encontró el botón Enviar solicitud"
+
             print("   Pulsando ENVIAR SOLICITUD...")
-            submit_button.click(timeout=15000)
+            submit_button.scroll_into_view_if_needed()
+            submit_button.click(timeout=25000, force=True)
             time.sleep(3)
             
             # Verificar éxito
