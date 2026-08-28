@@ -6,7 +6,9 @@ from pathlib import Path
 import base64
 import json
 import os
+import zipfile
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 import requests
 
@@ -112,11 +114,39 @@ def _attachment_value_url(mailbox: str, message_id: str, attachment_id: str) -> 
     return f"https://graph.microsoft.com/v1.0/users/{mailbox}/messages/{message_id}/attachments/{attachment_id}/$value"
 
 
+def _message_body_url(mailbox: str, message_id: str) -> str:
+    return f"https://graph.microsoft.com/v1.0/users/{mailbox}/messages/{message_id}?$select=body"
+
+
 def _list_attachments(token: str, mailbox: str, message_id: str) -> list[dict[str, Any]]:
     response = requests.get(_attachments_url(mailbox, message_id), headers=_graph_headers(token), timeout=30)
     response.raise_for_status()
     payload = response.json()
     return payload.get("value", [])
+
+
+def _get_message_body(token: str, mailbox: str, message_id: str) -> str:
+    response = requests.get(_message_body_url(mailbox, message_id), headers=_graph_headers(token), timeout=30)
+    response.raise_for_status()
+    return response.json().get("body", {}).get("content", "")
+
+
+def _mark_message_read(token: str, mailbox: str, message_id: str) -> None:
+    response = requests.patch(
+        f"https://graph.microsoft.com/v1.0/users/{mailbox}/messages/{message_id}",
+        headers={**_graph_headers(token), "Content-Type": "application/json"},
+        json={"isRead": True},
+        timeout=30,
+    )
+    response.raise_for_status()
+
+
+def _find_download_links(body: str) -> list[str]:
+    import re
+    from html import unescape
+
+    html = unescape(body or "")
+    return re.findall(r"href=[\"']([^\"']+)[\"']", html, flags=re.IGNORECASE)
 
 
 def _sanitize_filename(name: str) -> str:
@@ -170,6 +200,67 @@ def _save_attachment_bytes(content: bytes, root: Path, received_at: datetime, lo
     return out_path
 
 
+def _model_from_image_name(file_name: str) -> str:
+    model = Path(file_name).name.split("__", 1)[0].strip()
+    if model.startswith("0"):
+        model = model[1:]
+    return _sanitize_filename(model or "modelo-unknown")
+
+
+def _extract_zip(archive_path: Path, images_root: Path) -> list[Path]:
+    extracted_paths: list[Path] = []
+    target_dir = images_root.resolve()
+
+    with zipfile.ZipFile(archive_path) as archive:
+        for member in archive.infolist():
+            if member.is_dir():
+                continue
+
+            file_name = _sanitize_filename(Path(member.filename).name)
+            model_dir = target_dir / _model_from_image_name(file_name)
+            destination = (model_dir / file_name).resolve()
+            if destination != target_dir and target_dir not in destination.parents:
+                raise ValueError(f"Ruta insegura en ZIP: {member.filename}")
+
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with archive.open(member) as source, destination.open("wb") as target:
+                target.write(source.read())
+            extracted_paths.append(destination)
+
+    return extracted_paths
+
+
+def _download_zip_link(url: str, target_dir: Path) -> Path | None:
+    with requests.get(url, allow_redirects=True, stream=True, timeout=120) as response:
+        response.raise_for_status()
+        first_chunk = next(response.iter_content(64), b"")
+        final_path = unquote(urlparse(response.url).path)
+        if not final_path.lower().endswith(".zip"):
+            return None
+
+        file_name = Path(final_path).name or "luxoptica-images.zip"
+        archive_path = target_dir / _sanitize_filename(file_name)
+        total_bytes = int(response.headers.get("content-length", "0") or 0)
+        print(f"   Descargando {file_name} ({total_bytes / 1024 / 1024:.1f} MB)...", flush=True)
+        downloaded_bytes = len(first_chunk)
+        next_report = 50 * 1024 * 1024
+        with archive_path.open("wb") as archive_file:
+            archive_file.write(first_chunk)
+            for chunk in response.iter_content(1024 * 1024):
+                if chunk:
+                    archive_file.write(chunk)
+                    downloaded_bytes += len(chunk)
+                    if downloaded_bytes >= next_report:
+                        if total_bytes:
+                            progress = downloaded_bytes / total_bytes * 100
+                            print(f"      {downloaded_bytes / 1024 / 1024:.0f}/{total_bytes / 1024 / 1024:.0f} MB ({progress:.0f}%)", flush=True)
+                        else:
+                            print(f"      {downloaded_bytes / 1024 / 1024:.0f} MB", flush=True)
+                        next_report += 50 * 1024 * 1024
+        print(f"   Descarga completada: {archive_path}", flush=True)
+    return archive_path
+
+
 def download_luxoptica_mail_attachments(
     sender_hint: str = "luxottica",
     subject_hint: str = "image",
@@ -205,7 +296,7 @@ def download_luxoptica_mail_attachments(
 
     for msg in messages:
         message_id = msg.get("id", "")
-        if not message_id or message_id in processed_ids:
+        if not message_id or msg.get("isRead", False):
             continue
 
         received_at = _parse_graph_dt(msg.get("receivedDateTime", ""))
@@ -226,7 +317,22 @@ def download_luxoptica_mail_attachments(
                 continue
 
         if not msg.get("hasAttachments", False):
-            newly_processed.append(message_id)
+            body = _get_message_body(token, config.mailbox, message_id)
+            target_dir = root / received_at.astimezone(timezone.utc).strftime("%Y-%m-%d") / _detect_lote_from_subject(subject)
+            target_dir.mkdir(parents=True, exist_ok=True)
+            downloaded_from_link = False
+            for link in _find_download_links(body):
+                archive_path = _download_zip_link(link, target_dir)
+                if archive_path is None:
+                    continue
+                saved_paths.append(str(archive_path))
+                saved_paths.extend(str(path) for path in _extract_zip(archive_path, root))
+                attachments_downloaded += 1
+                downloaded_from_link = True
+                break
+            if downloaded_from_link:
+                _mark_message_read(token, config.mailbox, message_id)
+                newly_processed.append(message_id)
             continue
 
         attachments = _list_attachments(token, config.mailbox, message_id)
@@ -265,6 +371,11 @@ def download_luxoptica_mail_attachments(
             saved_paths.append(str(saved))
             attachments_downloaded += 1
 
+            if saved.suffix.lower() == ".zip":
+                extracted_paths = _extract_zip(saved, root)
+                saved_paths.extend(str(path) for path in extracted_paths)
+
+        _mark_message_read(token, config.mailbox, message_id)
         newly_processed.append(message_id)
 
     if newly_processed:
