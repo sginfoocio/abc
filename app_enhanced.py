@@ -39,7 +39,7 @@ from graph_mail_downloader import (
 # ==============================================================================
 
 APP_TITLE = "Diagonal Eyewear"
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 APP_ICON = Path(__file__).resolve().parent / "assets" / "favicon.svg"
 AUTH_USERNAME_ENV = "APP_USERNAME"
 AUTH_PASSWORD_ENV = "APP_PASSWORD"
@@ -141,6 +141,16 @@ def build_abcd_report_export_df(df: pd.DataFrame) -> pd.DataFrame:
     ordered_columns = [column for column in preferred_columns if column in df.columns]
     remaining_columns = [column for column in df.columns if column not in ordered_columns]
     return df[ordered_columns + remaining_columns]
+
+
+def build_abcd_report_excel_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Aplica cabeceras solicitadas para la exportación Excel ABCD."""
+    return build_abcd_report_export_df(df).rename(
+        columns={
+            "Modelo": "NOMBRE",
+            "Cód Barras": "SKU",
+        }
+    )
 
 
 def normalize_result_export_schema(df: pd.DataFrame) -> pd.DataFrame:
@@ -877,7 +887,7 @@ def render_abc_page(abc_page: str | None = None) -> None:
                 st.plotly_chart(fig, use_container_width=True)
         with tab3:
             csv = filtered_report.to_csv(index=False)
-            excel = dataframe_to_excel_bytes(filtered_report)
+            excel = dataframe_to_excel_bytes(build_abcd_report_excel_df(filtered_report))
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             col_csv, col_excel = st.columns(2)
             with col_csv:

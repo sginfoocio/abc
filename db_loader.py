@@ -126,7 +126,7 @@ SELECT
     pt.name AS "Modelo",
     pt.default_code AS "Cód Barras",
     pp.barcode AS "EAN",
-    pt.categ_id AS categoria,
+    COALESCE(pc.name, pt.categ_id::text) AS categoria,
     COALESCE(sa."Stock", 0) AS "Stock",
     COALESCE(ps.price_discount, ps.price, pt.list_price) AS "PVO",
     COALESCE(ps.price, pt.list_price) AS "PVO sin descuento",
@@ -139,6 +139,7 @@ SELECT
         COALESCE(ws."Ventas_7_Dias", 0) AS "Ventas_7_Dias"
 FROM product_product pp
 JOIN product_template pt ON pt.id = pp.product_tmpl_id
+LEFT JOIN product_category pc ON pc.id = pt.categ_id
 LEFT JOIN diagonal_product_brand dpb ON dpb.id = pt.brand_id
 LEFT JOIN stock_actual sa ON sa.product_id = pp.id
 LEFT JOIN first_purchase fp ON fp.product_id = pp.id
