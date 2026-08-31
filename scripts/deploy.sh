@@ -71,10 +71,22 @@ log "📦 Nueva imagen: $NEW_IMAGE"
 
 # Detener contenedor actual
 log "⏹️  Deteniendo contenedor actual..."
-docker compose down >> "$LOG_FILE" 2>&1
+docker compose down --timeout 30 >> "$LOG_FILE" 2>&1
 
-# Pequeña espera
-sleep 2
+log "⏳ Esperando eliminación completa del contenedor..."
+for attempt in $(seq 1 30); do
+    if ! docker ps -a --format '{{.Names}}' | grep -qx 'abcd-control'; then
+        log "✅ Contenedor eliminado"
+        break
+    fi
+    if [ "$attempt" -eq 30 ]; then
+        log "❌ El contenedor abcd-control sigue en eliminación tras 30 intentos"
+        docker ps -a --filter name=abcd-control >> "$LOG_FILE" 2>&1
+        notify_slack "❌ Deploy fallido: contenedor abcd-control bloqueado en eliminación"
+        exit 1
+    fi
+    sleep 1
+done
 
 # Iniciar nuevo contenedor
 log "▶️  Iniciando nuevo contenedor..."

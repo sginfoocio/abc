@@ -10,6 +10,10 @@ on:
       - main
       - master
 
+concurrency:
+  group: abcd-control-deploy-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
@@ -105,8 +109,21 @@ jobs:
             docker compose build --no-cache
 
             echo "⏹️  Deteniendo contenedor actual..."
-            docker compose down
-            sleep 2
+            docker compose down --timeout 30
+
+            echo "⏳ Esperando eliminación completa del contenedor..."
+            for attempt in $(seq 1 30); do
+              if ! docker ps -a --format '{{.Names}}' | grep -qx 'abcd-control'; then
+                echo "✅ Contenedor eliminado"
+                break
+              fi
+              if [ "$attempt" -eq 30 ]; then
+                echo "❌ El contenedor abcd-control sigue en eliminación tras 30 intentos"
+                docker ps -a --filter name=abcd-control
+                exit 1
+              fi
+              sleep 1
+            done
 
             echo "▶️  Iniciando nuevo contenedor..."
             docker compose up -d

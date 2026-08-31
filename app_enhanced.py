@@ -39,7 +39,7 @@ from graph_mail_downloader import (
 # ==============================================================================
 
 APP_TITLE = "Diagonal Eyewear"
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.0.3"
 APP_ICON = Path(__file__).resolve().parent / "assets" / "favicon.svg"
 AUTH_USERNAME_ENV = "APP_USERNAME"
 AUTH_PASSWORD_ENV = "APP_PASSWORD"
