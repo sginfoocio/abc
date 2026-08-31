@@ -39,7 +39,8 @@ from graph_mail_downloader import (
 # ==============================================================================
 
 APP_TITLE = "Diagonal Eyewear"
-APP_ICON = "📊"
+APP_VERSION = "1.0.1"
+APP_ICON = Path(__file__).resolve().parent / "assets" / "favicon.svg"
 AUTH_USERNAME_ENV = "APP_USERNAME"
 AUTH_PASSWORD_ENV = "APP_PASSWORD"
 LUXOPTICA_URL_ENV = "LUXOPTICA_URL"
@@ -557,14 +558,15 @@ def render_sidebar_shell(section_name: str) -> None:
             - Área Masterdata para transformación y validación previa a Odoo.
             """
         )
+        st.caption(f"Versión {APP_VERSION}")
 
 
 def render_footer() -> None:
     st.divider()
     st.markdown(
-        """
+        f"""
         <div style='text-align: center; color: #888; margin-top: 2rem;'>
-        <small>Diagonal Eyewear | Plataforma ABC y Masterdata</small>
+        <small>Diagonal Eyewear | Plataforma ABC y Masterdata | v{APP_VERSION}</small>
         </div>
         """,
         unsafe_allow_html=True,
