@@ -39,7 +39,7 @@ from graph_mail_downloader import (
 # ==============================================================================
 
 APP_TITLE = "Diagonal Eyewear"
-APP_VERSION = "1.0.4"
+APP_VERSION = "1.0.5"
 APP_ICON = Path(__file__).resolve().parent / "assets" / "favicon.svg"
 AUTH_USERNAME_ENV = "APP_USERNAME"
 AUTH_PASSWORD_ENV = "APP_PASSWORD"
@@ -117,26 +117,26 @@ def build_abcd_report_export_df(df: pd.DataFrame) -> pd.DataFrame:
         "Modelo",
         "Cód Barras",
         "EAN",
+        "categoria",
+        "Stock",
         "ABCD",
         "Motivo",
         "Alerta",
         "Accion_Recomendada",
-        "Stock",
         "PVO",
         "PVO sin descuento",
-        "Capital_Bloqueado (€)",
-        "Ventas_7_Dias",
-        "Num_Ventas_180D",
-        "Ventas_180_Dias",
         "Primera Compra",
         "Última Compra",
         "Última Venta",
         "Última Reposicion",
+        "Num_Ventas_180D",
+        "Ventas_180_Dias",
+        "Ventas_7_Dias",
+        "Dias_desde_Primera_Compra",
+        "Capital_Bloqueado (€)",
         "Fecha_Revision",
         "Dias_para_D",
-        "Dias_desde_Primera_Compra",
         "product_id",
-        "categoria",
     ]
     ordered_columns = [column for column in preferred_columns if column in df.columns]
     remaining_columns = [column for column in df.columns if column not in ordered_columns]
