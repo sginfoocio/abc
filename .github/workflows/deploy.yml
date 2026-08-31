@@ -128,6 +128,16 @@ jobs:
             echo "▶️  Iniciando nuevo contenedor..."
             docker compose up -d
 
+            echo "🗓️  Programando foto semanal ABCD..."
+            mkdir -p /opt/abcd-control/logs
+            SNAPSHOT_CRON="0 6 * * 1 cd /opt/abcd-control && docker compose exec -T abcd-app python save_abcd_weekly_snapshot.py >> /opt/abcd-control/logs/abcd-weekly-snapshot.log 2>&1 # ABCD weekly snapshot"
+            if command -v crontab >/dev/null 2>&1; then
+              (crontab -l 2>/dev/null | grep -v 'ABCD weekly snapshot'; echo "$SNAPSHOT_CRON") | crontab -
+              echo "✅ Cron semanal configurado: lunes 06:00"
+            else
+              echo "⚠️  crontab no está disponible en el servidor; configura manualmente: $SNAPSHOT_CRON"
+            fi
+
             echo "✅ Deploy completado exitosamente"
 
   tests:

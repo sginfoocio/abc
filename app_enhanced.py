@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from io import BytesIO
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 import hmac
 import json
 import os
@@ -39,8 +39,9 @@ from graph_mail_downloader import (
 # ==============================================================================
 
 APP_TITLE = "Diagonal Eyewear"
-APP_VERSION = "1.0.5"
+APP_VERSION = "1.0.6"
 APP_ICON = Path(__file__).resolve().parent / "assets" / "favicon.svg"
+ABCD_SNAPSHOT_TABLE = "abcd_weekly_snapshots"
 AUTH_USERNAME_ENV = "APP_USERNAME"
 AUTH_PASSWORD_ENV = "APP_PASSWORD"
 LUXOPTICA_URL_ENV = "LUXOPTICA_URL"
@@ -151,6 +152,89 @@ def build_abcd_report_excel_df(df: pd.DataFrame) -> pd.DataFrame:
             "Cód Barras": "SKU",
         }
     )
+
+
+def _current_week_start() -> date:
+    today = pd.Timestamp.today().normalize()
+    return (today - pd.Timedelta(days=today.weekday())).date()
+
+
+def _ensure_abcd_snapshot_table(engine) -> None:
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                f"""
+                CREATE TABLE IF NOT EXISTS {ABCD_SNAPSHOT_TABLE} (
+                    snapshot_date date PRIMARY KEY,
+                    iso_year integer NOT NULL,
+                    iso_week integer NOT NULL,
+                    product_count integer NOT NULL,
+                    data jsonb NOT NULL,
+                    created_at timestamp with time zone NOT NULL DEFAULT now(),
+                    updated_at timestamp with time zone NOT NULL DEFAULT now()
+                )
+                """
+            )
+        )
+
+
+def save_abcd_weekly_snapshot(engine, df: pd.DataFrame, snapshot_date: date | None = None) -> date:
+    snapshot_date = snapshot_date or _current_week_start()
+    iso_year, iso_week, _ = snapshot_date.isocalendar()
+    snapshot_df = build_abcd_report_export_df(df.copy())
+    snapshot_json = snapshot_df.to_json(orient="records", date_format="iso", force_ascii=False)
+
+    _ensure_abcd_snapshot_table(engine)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                f"""
+                INSERT INTO {ABCD_SNAPSHOT_TABLE} (
+                    snapshot_date, iso_year, iso_week, product_count, data, created_at, updated_at
+                ) VALUES (
+                    :snapshot_date, :iso_year, :iso_week, :product_count, CAST(:data AS jsonb), now(), now()
+                )
+                ON CONFLICT (snapshot_date) DO UPDATE SET
+                    iso_year = EXCLUDED.iso_year,
+                    iso_week = EXCLUDED.iso_week,
+                    product_count = EXCLUDED.product_count,
+                    data = EXCLUDED.data,
+                    updated_at = now()
+                """
+            ),
+            {
+                "snapshot_date": snapshot_date,
+                "iso_year": iso_year,
+                "iso_week": iso_week,
+                "product_count": len(snapshot_df),
+                "data": snapshot_json,
+            },
+        )
+    return snapshot_date
+
+
+def list_abcd_snapshot_dates(engine) -> list[date]:
+    _ensure_abcd_snapshot_table(engine)
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(f"SELECT snapshot_date FROM {ABCD_SNAPSHOT_TABLE} ORDER BY snapshot_date DESC")
+        ).fetchall()
+    return [row[0] for row in rows]
+
+
+def load_abcd_weekly_snapshot(engine, snapshot_date: date) -> pd.DataFrame:
+    _ensure_abcd_snapshot_table(engine)
+    with engine.connect() as conn:
+        row = conn.execute(
+            text(f"SELECT data FROM {ABCD_SNAPSHOT_TABLE} WHERE snapshot_date = :snapshot_date"),
+            {"snapshot_date": snapshot_date},
+        ).fetchone()
+    if row is None:
+        return pd.DataFrame()
+    payload = row[0]
+    if isinstance(payload, str):
+        payload = json.loads(payload)
+    return build_abcd_report_export_df(pd.DataFrame(payload))
 
 
 def normalize_result_export_schema(df: pd.DataFrame) -> pd.DataFrame:
@@ -900,6 +984,86 @@ def render_abc_page(abc_page: str | None = None) -> None:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
 
+    elif abc_page == "📅 Histórico Semanal":
+        st.title("Histórico semanal ABCD")
+        st.caption("Guarda una foto semanal del análisis ABCD y consulta snapshots anteriores.")
+        engine = get_db_engine()
+
+        current_snapshot_date = _current_week_start()
+        st.info(f"Semana actual: {current_snapshot_date.strftime('%d/%m/%Y')}")
+
+        if st.button("Guardar / actualizar foto de esta semana", type="primary"):
+            with st.spinner("Calculando ABCD y guardando foto semanal..."):
+                df = load_data_cached()
+                df_classified = run_abcd_engine(df.copy())
+                if ('EAN' not in df_classified.columns or df_classified['EAN'].isna().all()) and 'Cód Barras' in df_classified.columns:
+                    df_classified['EAN'] = df_classified['Cód Barras']
+                saved_date = save_abcd_weekly_snapshot(engine, df_classified)
+            st.success(f"Foto semanal guardada: {saved_date.strftime('%d/%m/%Y')}")
+
+        try:
+            snapshot_dates = list_abcd_snapshot_dates(engine)
+        except Exception as exc:
+            st.error(f"No se pudo cargar el histórico ABCD: {exc}")
+            render_footer()
+            return
+
+        if not snapshot_dates:
+            st.warning("Todavía no hay fotos semanales guardadas.")
+            render_footer()
+            return
+
+        selected_date = st.selectbox(
+            "Fecha de foto:",
+            snapshot_dates,
+            format_func=lambda value: value.strftime("%d/%m/%Y"),
+        )
+        snapshot_df = load_abcd_weekly_snapshot(engine, selected_date)
+        if snapshot_df.empty:
+            st.warning("La foto seleccionada no contiene datos.")
+            render_footer()
+            return
+
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Productos", f"{len(snapshot_df):,}")
+        with col2:
+            st.metric("Stock", f"{snapshot_df['Stock'].sum():,.0f}")
+        with col3:
+            st.metric("Capital", f"€{snapshot_df['Capital_Bloqueado (€)'].sum():,.0f}")
+        with col4:
+            st.metric("Productos D", f"{len(snapshot_df[snapshot_df['ABCD'] == 'D']):,}")
+
+        st.subheader("Resumen por categoría")
+        summary = snapshot_df.groupby('ABCD').agg({
+            'product_id': 'count',
+            'Stock': 'sum',
+            'Capital_Bloqueado (€)': 'sum',
+            'PVO': 'mean',
+        }).round(2)
+        summary.columns = ['Productos', 'Stock Total', 'Capital (€)', 'PVO Promedio']
+        st.dataframe(summary, use_container_width=True)
+
+        st.subheader("Detalle de la foto")
+        st.dataframe(snapshot_df, use_container_width=True, hide_index=True)
+
+        timestamp = selected_date.strftime('%Y%m%d')
+        col_csv, col_excel = st.columns(2)
+        with col_csv:
+            st.download_button(
+                "📥 Descargar histórico CSV",
+                data=snapshot_df.to_csv(index=False),
+                file_name=f"abcd_historico_{timestamp}.csv",
+                mime="text/csv",
+            )
+        with col_excel:
+            st.download_button(
+                "📥 Descargar histórico Excel",
+                data=dataframe_to_excel_bytes(build_abcd_report_excel_df(snapshot_df)),
+                file_name=f"abcd_historico_{timestamp}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+
     else:
         st.title("Análisis Detallado de Productos")
         with st.spinner("Cargando datos..."):
@@ -1368,6 +1532,10 @@ def render_abc_reports_page() -> None:
     render_abc_page("📈 Reportes ABCD")
 
 
+def render_abc_history_page() -> None:
+    render_abc_page("📅 Histórico Semanal")
+
+
 def render_abc_detail_page() -> None:
     render_abc_page("📉 Análisis Detallado")
 
@@ -1384,6 +1552,7 @@ HOME_PAGE = st.Page(render_home_page, title="Inicio", icon="🏠", url_path="", 
 ABC_HOME_PAGE = st.Page(render_abc_home_page, title="Inicio", icon="📊", url_path="abc")
 ABC_SEARCH_PAGE = st.Page(render_abc_search_page, title="Buscar Producto", icon="🔍", url_path="abc-buscar")
 ABC_REPORTS_PAGE = st.Page(render_abc_reports_page, title="Reportes ABCD", icon="📈", url_path="abc-reportes")
+ABC_HISTORY_PAGE = st.Page(render_abc_history_page, title="Histórico Semanal", icon="📅", url_path="abc-historico")
 ABC_DETAIL_PAGE = st.Page(render_abc_detail_page, title="Análisis Detallado", icon="📉", url_path="abc-analisis")
 MASTER_IMPORT_PAGE = st.Page(render_master_import_page, title="Importador Masterdata", icon="📥", url_path="master")
 MASTER_DRYRUN_PAGE = st.Page(render_master_dryrun_page, title="Dry-run Odoo", icon="🧪", url_path="master-dry-run")
@@ -1396,6 +1565,7 @@ navigation = st.navigation(
             ABC_HOME_PAGE,
             ABC_SEARCH_PAGE,
             ABC_REPORTS_PAGE,
+            ABC_HISTORY_PAGE,
             ABC_DETAIL_PAGE,
         ],
         "Master Data": [MASTER_IMPORT_PAGE, MASTER_DRYRUN_PAGE],

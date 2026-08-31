@@ -98,6 +98,15 @@ else
     exit 1
 fi
 
+log "🗓️  Programando foto semanal ABCD..."
+SNAPSHOT_CRON="0 6 * * 1 cd $DEPLOY_DIR && docker compose exec -T abcd-app python save_abcd_weekly_snapshot.py >> $LOG_DIR/abcd-weekly-snapshot.log 2>&1 # ABCD weekly snapshot"
+if command -v crontab >/dev/null 2>&1; then
+    (crontab -l 2>/dev/null | grep -v 'ABCD weekly snapshot'; echo "$SNAPSHOT_CRON") | crontab -
+    log "✅ Cron semanal configurado: lunes 06:00"
+else
+    log "⚠️  crontab no está disponible; configura manualmente: $SNAPSHOT_CRON"
+fi
+
 # Esperar a que esté listo
 log "⏳ Esperando a que la aplicación esté lista..."
 sleep 5
