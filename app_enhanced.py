@@ -42,9 +42,13 @@ APP_TITLE = "Diagonal Eyewear"
 APP_ICON = "📊"
 AUTH_USERNAME_ENV = "APP_USERNAME"
 AUTH_PASSWORD_ENV = "APP_PASSWORD"
-ESSILOR_URL_ENV = "ESSILOR_URL"
-ESSILOR_USER_ENV = "ESSILOR_USERNAME"
-ESSILOR_PASSWORD_ENV = "ESSILOR_PASSWORD"
+LUXOPTICA_URL_ENV = "LUXOPTICA_URL"
+LUXOPTICA_USER_ENV = "LUXOPTICA_USERNAME"
+LUXOPTICA_PASSWORD_ENV = "LUXOPTICA_PASSWORD"
+LUXOPTICA_REQUEST_EMAIL_ENV = "LUXOPTICA_REQUEST_EMAIL"
+LEGACY_ESSILOR_URL_ENV = "ESSILOR_URL"
+LEGACY_ESSILOR_USER_ENV = "ESSILOR_USERNAME"
+LEGACY_ESSILOR_PASSWORD_ENV = "ESSILOR_PASSWORD"
 M365_TENANT_ID_ENV = "M365_TENANT_ID"
 M365_CLIENT_ID_ENV = "M365_CLIENT_ID"
 M365_CLIENT_SECRET_ENV = "M365_CLIENT_SECRET"
@@ -103,6 +107,39 @@ def dataframe_to_excel_bytes(df: pd.DataFrame) -> bytes:
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         df.to_excel(writer, index=False)
     return buffer.getvalue()
+
+
+def build_abcd_report_export_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Ordena las columnas del informe ABCD manteniendo todas las disponibles."""
+    preferred_columns = [
+        "Marca",
+        "Modelo",
+        "Cód Barras",
+        "EAN",
+        "ABCD",
+        "Motivo",
+        "Alerta",
+        "Accion_Recomendada",
+        "Stock",
+        "PVO",
+        "PVO sin descuento",
+        "Capital_Bloqueado (€)",
+        "Ventas_7_Dias",
+        "Num_Ventas_180D",
+        "Ventas_180_Dias",
+        "Primera Compra",
+        "Última Compra",
+        "Última Venta",
+        "Última Reposicion",
+        "Fecha_Revision",
+        "Dias_para_D",
+        "Dias_desde_Primera_Compra",
+        "product_id",
+        "categoria",
+    ]
+    ordered_columns = [column for column in preferred_columns if column in df.columns]
+    remaining_columns = [column for column in df.columns if column not in ordered_columns]
+    return df[ordered_columns + remaining_columns]
 
 
 def normalize_result_export_schema(df: pd.DataFrame) -> pd.DataFrame:
@@ -244,6 +281,15 @@ def split_report_warnings(report) -> tuple[list[str], list[str], list[str]]:
 def _read_env_setting(key: str, default: str = "") -> str:
     load_env_file()
     return os.getenv(key, default)
+
+
+def _read_env_setting_any(keys: list[str], default: str = "") -> str:
+    load_env_file()
+    for key in keys:
+        value = os.getenv(key, "").strip()
+        if value:
+            return value
+    return default
 
 
 def _upsert_env_settings(updates: dict[str, str], env_path: str | Path = ".env") -> None:
@@ -535,11 +581,11 @@ def render_home_page() -> None:
     with col1:
         st.markdown("### Área ABC")
         st.write("Análisis ABCD, búsqueda, reportes y detalle de producto.")
-        st.page_link(ABC_PAGE, label="Entrar en ABC", use_container_width=True)
+        st.page_link(ABC_HOME_PAGE, label="Entrar en Análisis ABC", use_container_width=True)
     with col2:
         st.markdown("### Área Masterdata")
         st.write("Transformación de Luxottica, advertencias, descargas y dry-run Odoo.")
-        st.page_link(MASTER_PAGE, label="Entrar en Masterdata", use_container_width=True)
+        st.page_link(MASTER_IMPORT_PAGE, label="Entrar en Master Data", use_container_width=True)
     with col3:
         st.markdown("### Configuración")
         st.write("Guardar claves y credenciales de integración en el entorno local.")
@@ -553,9 +599,10 @@ def render_settings_page() -> None:
     st.title("Configuración")
     st.caption("Guarda credenciales de integración en el archivo .env local del proyecto.")
 
-    current_url = _read_env_setting(ESSILOR_URL_ENV)
-    current_user = _read_env_setting(ESSILOR_USER_ENV)
-    current_password = _read_env_setting(ESSILOR_PASSWORD_ENV)
+    current_url = _read_env_setting_any([LUXOPTICA_URL_ENV, LEGACY_ESSILOR_URL_ENV])
+    current_user = _read_env_setting_any([LUXOPTICA_USER_ENV, LEGACY_ESSILOR_USER_ENV])
+    current_password = _read_env_setting_any([LUXOPTICA_PASSWORD_ENV, LEGACY_ESSILOR_PASSWORD_ENV])
+    current_request_email = _read_env_setting(LUXOPTICA_REQUEST_EMAIL_ENV, "images@diagonaleyewear.com")
     current_tenant_id = _read_env_setting(M365_TENANT_ID_ENV)
     current_client_id = _read_env_setting(M365_CLIENT_ID_ENV)
     current_client_secret = _read_env_setting(M365_CLIENT_SECRET_ENV)
@@ -569,8 +616,10 @@ def render_settings_page() -> None:
         password_value = st.text_input(
             "Contraseña",
             type="password",
+            value=current_password,
             placeholder="Deja vacío para conservar la actual",
         )
+        request_email_value = st.text_input("Email solicitud imágenes", value=current_request_email)
 
         st.subheader("Microsoft 365 (Graph)")
         tenant_id_value = st.text_input("Tenant ID", value=current_tenant_id)
@@ -587,8 +636,9 @@ def render_settings_page() -> None:
 
     if submitted:
         updates = {
-            ESSILOR_URL_ENV: url_value.strip(),
-            ESSILOR_USER_ENV: user_value.strip(),
+            LUXOPTICA_URL_ENV: url_value.strip(),
+            LUXOPTICA_USER_ENV: user_value.strip(),
+            LUXOPTICA_REQUEST_EMAIL_ENV: request_email_value.strip(),
             M365_TENANT_ID_ENV: tenant_id_value.strip(),
             M365_CLIENT_ID_ENV: client_id_value.strip(),
             M365_MAILBOX_ENV: mailbox_value.strip(),
@@ -597,7 +647,7 @@ def render_settings_page() -> None:
         keep_existing_password = not password_value.strip() and bool(current_password)
         keep_existing_client_secret = not client_secret_value.strip() and bool(current_client_secret)
         if password_value.strip():
-            updates[ESSILOR_PASSWORD_ENV] = password_value.strip()
+            updates[LUXOPTICA_PASSWORD_ENV] = password_value.strip()
         if client_secret_value.strip():
             updates[M365_CLIENT_SECRET_ENV] = client_secret_value.strip()
 
@@ -612,9 +662,10 @@ def render_settings_page() -> None:
             st.info("Se conservó el client secret existente.")
 
     st.markdown("### Variables gestionadas")
-    st.write(f"- {ESSILOR_URL_ENV}")
-    st.write(f"- {ESSILOR_USER_ENV}")
-    st.write(f"- {ESSILOR_PASSWORD_ENV}")
+    st.write(f"- {LUXOPTICA_URL_ENV}")
+    st.write(f"- {LUXOPTICA_USER_ENV}")
+    st.write(f"- {LUXOPTICA_PASSWORD_ENV}")
+    st.write(f"- {LUXOPTICA_REQUEST_EMAIL_ENV}")
     st.write(f"- {M365_TENANT_ID_ENV}")
     st.write(f"- {M365_CLIENT_ID_ENV}")
     st.write(f"- {M365_CLIENT_SECRET_ENV}")
@@ -625,9 +676,9 @@ def render_settings_page() -> None:
     st.subheader("Login automático")
     st.caption("Usa las credenciales guardadas en .env para probar el acceso automático a la web.")
     if st.button("Probar login automático", type="secondary"):
-        auto_url = _read_env_setting(ESSILOR_URL_ENV)
-        auto_user = _read_env_setting(ESSILOR_USER_ENV)
-        auto_password = _read_env_setting(ESSILOR_PASSWORD_ENV)
+        auto_url = _read_env_setting_any([LUXOPTICA_URL_ENV, LEGACY_ESSILOR_URL_ENV])
+        auto_user = _read_env_setting_any([LUXOPTICA_USER_ENV, LEGACY_ESSILOR_USER_ENV])
+        auto_password = _read_env_setting_any([LUXOPTICA_PASSWORD_ENV, LEGACY_ESSILOR_PASSWORD_ENV])
         with st.spinner("Ejecutando login automático..."):
             ok, message = _attempt_essilor_auto_login(auto_url, auto_user, auto_password)
         if ok:
@@ -638,14 +689,10 @@ def render_settings_page() -> None:
     render_footer()
 
 
-def render_abc_page() -> None:
-    render_sidebar_shell("ABC")
-    with st.sidebar:
-        abc_page = st.radio(
-            "Sección ABC:",
-            ["📊 Inicio", "🔍 Buscar Producto", "📈 Reportes ABCD", "📉 Análisis Detallado"],
-            key="abc_page_selector",
-        )
+def render_abc_page(abc_page: str | None = None) -> None:
+    render_sidebar_shell("Análisis ABC")
+    if abc_page is None:
+        abc_page = "📊 Inicio"
 
     if abc_page == "📊 Inicio":
         st.title("ABC")
@@ -803,6 +850,7 @@ def render_abc_page() -> None:
         filtered_report = filtered.copy()
         if ('EAN' not in filtered_report.columns or filtered_report['EAN'].isna().all()) and 'Cód Barras' in filtered_report.columns:
             filtered_report['EAN'] = filtered_report['Cód Barras']
+        filtered_report = build_abcd_report_export_df(filtered_report)
         st.subheader(f"Resultados: {len(filtered)} productos")
         tab1, tab2, tab3 = st.tabs(["📊 Tabla", "📈 Gráficos", "💾 Descargar"])
         with tab1:
@@ -827,7 +875,18 @@ def render_abc_page() -> None:
                 st.plotly_chart(fig, use_container_width=True)
         with tab3:
             csv = filtered_report.to_csv(index=False)
-            st.download_button("📥 Descargar CSV", data=csv, file_name=f"abcd_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", mime="text/csv")
+            excel = dataframe_to_excel_bytes(filtered_report)
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            col_csv, col_excel = st.columns(2)
+            with col_csv:
+                st.download_button("📥 Descargar CSV", data=csv, file_name=f"abcd_report_{timestamp}.csv", mime="text/csv")
+            with col_excel:
+                st.download_button(
+                    "📥 Descargar Excel",
+                    data=excel,
+                    file_name=f"abcd_report_{timestamp}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
 
     else:
         st.title("Análisis Detallado de Productos")
@@ -885,14 +944,10 @@ def render_abc_page() -> None:
     render_footer()
 
 
-def render_master_page() -> None:
-    render_sidebar_shell("Masterdata")
-    with st.sidebar:
-        master_page = st.radio(
-            "Sección Masterdata:",
-            ["📥 Importador Masterdata", "🧪 Dry-run Odoo"],
-            key="master_page_selector",
-        )
+def render_master_page(master_page: str | None = None) -> None:
+    render_sidebar_shell("Master Data")
+    if master_page is None:
+        master_page = "📥 Importador Masterdata"
 
     masterdata_dir = Path(__file__).resolve().parent / "docs" / "MasterData"
     available_files = sorted(masterdata_dir.glob("*transformado.xlsx"), key=lambda p: p.stat().st_mtime, reverse=True)
@@ -1002,7 +1057,8 @@ def render_master_page() -> None:
                 st.download_button("📥 Descargar auditoría marcas (.csv)", data=brand_csv, file_name=f"{Path(source_name).stem}_marcas_auditoria.csv", mime="text/csv")
 
             st.subheader("4. Solicitud de imágenes (Luxoptica)")
-            default_email = st.session_state.get("luxoptica_request_email", "ruben.cebreiros@diagonaleyewear.com")
+            configured_request_email = _read_env_setting(LUXOPTICA_REQUEST_EMAIL_ENV, "images@diagonaleyewear.com")
+            default_email = st.session_state.get("luxoptica_request_email", configured_request_email)
             request_email = st.text_input("Email para la solicitud", value=default_email, key="luxoptica_request_email_input")
             st.caption("Se generan lotes de 250 EAN máximos por archivo, sin prefijo.")
 
@@ -1287,11 +1343,53 @@ def render_master_page() -> None:
 
 require_authentication()
 
+
+def render_abc_home_page() -> None:
+    render_abc_page("📊 Inicio")
+
+
+def render_abc_search_page() -> None:
+    render_abc_page("🔍 Buscar Producto")
+
+
+def render_abc_reports_page() -> None:
+    render_abc_page("📈 Reportes ABCD")
+
+
+def render_abc_detail_page() -> None:
+    render_abc_page("📉 Análisis Detallado")
+
+
+def render_master_import_page() -> None:
+    render_master_page("📥 Importador Masterdata")
+
+
+def render_master_dryrun_page() -> None:
+    render_master_page("🧪 Dry-run Odoo")
+
+
 HOME_PAGE = st.Page(render_home_page, title="Inicio", icon="🏠", url_path="", default=True)
-ABC_PAGE = st.Page(render_abc_page, title="ABC", icon="📊", url_path="abc")
-MASTER_PAGE = st.Page(render_master_page, title="Masterdata", icon="📥", url_path="master")
+ABC_HOME_PAGE = st.Page(render_abc_home_page, title="Inicio", icon="📊", url_path="abc")
+ABC_SEARCH_PAGE = st.Page(render_abc_search_page, title="Buscar Producto", icon="🔍", url_path="abc-buscar")
+ABC_REPORTS_PAGE = st.Page(render_abc_reports_page, title="Reportes ABCD", icon="📈", url_path="abc-reportes")
+ABC_DETAIL_PAGE = st.Page(render_abc_detail_page, title="Análisis Detallado", icon="📉", url_path="abc-analisis")
+MASTER_IMPORT_PAGE = st.Page(render_master_import_page, title="Importador Masterdata", icon="📥", url_path="master")
+MASTER_DRYRUN_PAGE = st.Page(render_master_dryrun_page, title="Dry-run Odoo", icon="🧪", url_path="master-dry-run")
 SETTINGS_PAGE = st.Page(render_settings_page, title="Configuración", icon="⚙️", url_path="config")
 
-navigation = st.navigation([HOME_PAGE, ABC_PAGE, MASTER_PAGE, SETTINGS_PAGE], position="sidebar")
+navigation = st.navigation(
+    {
+        "Inicio": [HOME_PAGE],
+        "Análisis ABC": [
+            ABC_HOME_PAGE,
+            ABC_SEARCH_PAGE,
+            ABC_REPORTS_PAGE,
+            ABC_DETAIL_PAGE,
+        ],
+        "Master Data": [MASTER_IMPORT_PAGE, MASTER_DRYRUN_PAGE],
+        "Configuración": [SETTINGS_PAGE],
+    },
+    position="sidebar",
+)
 
 navigation.run()
