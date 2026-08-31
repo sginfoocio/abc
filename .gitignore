@@ -60,6 +60,9 @@ Thumbs.db
 # Snapshots (large data files)
 snapshots/
 
+# Generated image downloads
+repo/
+
 # Temp files
 tmp_*.py
 inicio
