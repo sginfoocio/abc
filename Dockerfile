@@ -21,7 +21,10 @@ WORKDIR /app
 # Instalar solo lo necesario en runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
     postgresql-client \
+    tzdata \
     && rm -rf /var/lib/apt/lists/*
+
+ENV TZ=Europe/Madrid
 
 # Copiar dependencias instaladas desde el builder
 COPY --from=builder /root/.local /root/.local
