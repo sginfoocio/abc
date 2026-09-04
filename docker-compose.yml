@@ -15,7 +15,25 @@ services:
       - DB_PASSWORD=${DB_PASSWORD}
       - APP_USERNAME=${APP_USERNAME}
       - APP_PASSWORD=${APP_PASSWORD}
-      
+
+      # Microsoft 365 / Graph API (envío de alertas y descarga Luxoptica)
+      - M365_TENANT_ID=${M365_TENANT_ID}
+      - M365_CLIENT_ID=${M365_CLIENT_ID}
+      - M365_CLIENT_SECRET=${M365_CLIENT_SECRET}
+      - M365_MAILBOX=${M365_MAILBOX}
+      - M365_DOWNLOAD_ROOT=${M365_DOWNLOAD_ROOT}
+
+      # Alerta de pedidos vigilados
+      - ALERT_RECIPIENT_EMAIL=${ALERT_RECIPIENT_EMAIL}
+      - AUTH_REMEMBER_DAYS=${AUTH_REMEMBER_DAYS}
+      - AUTH_COOKIE_SECRET=${AUTH_COOKIE_SECRET}
+
+      # Luxoptica (subida/descarga automática)
+      - LUXOPTICA_URL=${LUXOPTICA_URL}
+      - LUXOPTICA_USERNAME=${LUXOPTICA_USERNAME}
+      - LUXOPTICA_PASSWORD=${LUXOPTICA_PASSWORD}
+      - LUXOPTICA_REQUEST_EMAIL=${LUXOPTICA_REQUEST_EMAIL}
+
       # Configuración de Streamlit
       - STREAMLIT_SERVER_HEADLESS=true
       - STREAMLIT_SERVER_PORT=8501
