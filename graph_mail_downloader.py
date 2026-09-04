@@ -131,6 +131,37 @@ def _get_message_body(token: str, mailbox: str, message_id: str) -> str:
     return response.json().get("body", {}).get("content", "")
 
 
+def send_alert_email(
+    subject: str,
+    html_body: str,
+    to_address: str | list[str],
+    config: M365Config | None = None,
+) -> None:
+    """Envia un email desde el buzon configurado (requiere permiso Mail.Send)."""
+    config = config or load_m365_config()
+    missing = validate_m365_config(config)
+    if missing:
+        raise RuntimeError(f"Faltan variables de configuracion M365: {', '.join(missing)}")
+
+    direcciones = [to_address] if isinstance(to_address, str) else to_address
+    token = _get_access_token(config)
+    payload = {
+        "message": {
+            "subject": subject,
+            "body": {"contentType": "HTML", "content": html_body},
+            "toRecipients": [{"emailAddress": {"address": direccion}} for direccion in direcciones],
+        },
+        "saveToSentItems": True,
+    }
+    response = requests.post(
+        f"https://graph.microsoft.com/v1.0/users/{config.mailbox}/sendMail",
+        headers={**_graph_headers(token), "Content-Type": "application/json"},
+        json=payload,
+        timeout=30,
+    )
+    response.raise_for_status()
+
+
 def _mark_message_read(token: str, mailbox: str, message_id: str) -> None:
     response = requests.patch(
         f"https://graph.microsoft.com/v1.0/users/{mailbox}/messages/{message_id}",

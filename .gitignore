@@ -62,6 +62,7 @@ snapshots/
 
 # Generated image downloads
 repo/
+docs/Luxoptica/upc-products-images-request-*.txt
 
 # Temp files
 tmp_*.py

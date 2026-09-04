@@ -3,9 +3,11 @@ from __future__ import annotations
 from io import BytesIO
 from pathlib import Path
 from datetime import date, datetime, timedelta
+import hashlib
 import hmac
 import json
 import os
+import time
 
 import numpy as np
 import pandas as pd
@@ -13,6 +15,7 @@ import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 from sqlalchemy import create_engine, text
+from streamlit_cookies_controller import CookieController
 
 from db_loader import load_odoo_dataframe
 from engine import run_abcd_engine
@@ -31,8 +34,11 @@ from validate_masterdata_odoo_dryrun import (
 from graph_mail_downloader import (
     download_luxoptica_mail_attachments,
     load_m365_config,
+    send_alert_email,
     validate_m365_config,
 )
+from watchlist_config import add_customer, load_watchlist, remove_customer, save_watchlist
+from check_pedidos_vigilados import find_matching_orders
 
 # ==============================================================================
 # CONFIG
@@ -43,6 +49,10 @@ APP_VERSION = "1.0.6"
 APP_ICON = Path(__file__).resolve().parent / "assets" / "favicon.svg"
 ABCD_SNAPSHOT_TABLE = "abcd_weekly_snapshots"
 AUTH_USERNAME_ENV = "APP_USERNAME"
+AUTH_COOKIE_SECRET_ENV = "AUTH_COOKIE_SECRET"
+AUTH_REMEMBER_DAYS_ENV = "AUTH_REMEMBER_DAYS"
+AUTH_REMEMBER_DAYS_DEFAULT = 30
+AUTH_COOKIE_NAME = "abc_auth_session"
 AUTH_PASSWORD_ENV = "APP_PASSWORD"
 LUXOPTICA_URL_ENV = "LUXOPTICA_URL"
 LUXOPTICA_USER_ENV = "LUXOPTICA_USERNAME"
@@ -56,6 +66,9 @@ M365_CLIENT_ID_ENV = "M365_CLIENT_ID"
 M365_CLIENT_SECRET_ENV = "M365_CLIENT_SECRET"
 M365_MAILBOX_ENV = "M365_MAILBOX"
 M365_DOWNLOAD_ROOT_ENV = "M365_DOWNLOAD_ROOT"
+ALERT_RECIPIENT_EMAIL_ENV = "ALERT_RECIPIENT_EMAIL"
+ALERT_RECIPIENT_EMAIL_DEFAULT = "roberto@diagonaleyewear.com"
+ALERT_RECIPIENT_EMAILS_EXTRA = ["virginia.nunez@diagonaleyewear.com"]
 
 st.set_page_config(
     page_title=APP_TITLE,
@@ -387,6 +400,23 @@ def _read_env_setting_any(keys: list[str], default: str = "") -> str:
     return default
 
 
+def _build_alert_email_html(resultados: pd.DataFrame) -> str:
+    filas = "".join(
+        f"<tr><td>{row.pedido}</td><td>{row.cliente}</td><td>{row.direccion_entrega}</td>"
+        f"<td>{row.date_order}</td><td>{row.state}</td><td>{row.invoice_status}</td>"
+        f"<td>{row.amount_total}</td></tr>"
+        for row in resultados.itertuples(index=False)
+    )
+    return (
+        "<p>Se han detectado los siguientes pedidos de clientes vigilados en Odoo:</p>"
+        "<table border='1' cellpadding='4' cellspacing='0'>"
+        "<tr><th>Pedido</th><th>Cliente</th><th>Dirección entrega</th><th>Fecha</th><th>Estado</th>"
+        "<th>Estado factura</th><th>Total</th></tr>"
+        f"{filas}"
+        "</table>"
+    )
+
+
 def _upsert_env_settings(updates: dict[str, str], env_path: str | Path = ".env") -> None:
     path = Path(env_path)
     if not path.is_absolute():
@@ -539,6 +569,49 @@ def _get_auth_credentials() -> tuple[str, str]:
     password = os.getenv(AUTH_PASSWORD_ENV, "")
     return username, password
 
+
+def _get_auth_cookie_secret(expected_password: str) -> str:
+    return os.getenv(AUTH_COOKIE_SECRET_ENV) or expected_password
+
+
+def _get_remember_days() -> int:
+    try:
+        return int(os.getenv(AUTH_REMEMBER_DAYS_ENV, AUTH_REMEMBER_DAYS_DEFAULT))
+    except ValueError:
+        return AUTH_REMEMBER_DAYS_DEFAULT
+
+
+def _make_auth_token(username: str, secret: str, days: int) -> str:
+    """Genera un token firmado con expiración para recordar la sesión."""
+    expiry = int(time.time()) + days * 86400
+    payload = f"{username}:{expiry}"
+    signature = hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    return f"{payload}:{signature}"
+
+
+def _verify_auth_token(token: str, expected_user: str, secret: str) -> bool:
+    """Valida firma, usuario y expiración de un token de sesión recordada."""
+    try:
+        username, expiry_str, signature = token.split(":")
+    except (ValueError, AttributeError):
+        return False
+    expected_signature = hmac.new(secret.encode(), f"{username}:{expiry_str}".encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(signature, expected_signature):
+        return False
+    if not hmac.compare_digest(username, expected_user):
+        return False
+    try:
+        return int(expiry_str) >= int(time.time())
+    except ValueError:
+        return False
+
+
+def _get_cookie_controller() -> CookieController:
+    if "_cookie_controller" not in st.session_state:
+        st.session_state["_cookie_controller"] = CookieController()
+    return st.session_state["_cookie_controller"]
+
+
 def _render_login() -> None:
     st.title(APP_TITLE)
     st.subheader("Acceso restringido")
@@ -550,9 +623,11 @@ def _render_login() -> None:
         )
         st.stop()
 
+    remember_days = _get_remember_days()
     with st.form("login_form", clear_on_submit=False):
         username = st.text_input("Usuario")
         password = st.text_input("Contraseña", type="password")
+        recordarme = st.checkbox(f"Recordarme durante {remember_days} días", value=True)
         submitted = st.form_submit_button("Entrar")
 
     if submitted:
@@ -561,15 +636,32 @@ def _render_login() -> None:
         if valid_user and valid_password:
             st.session_state["authenticated"] = True
             st.session_state["auth_user"] = username
+            if recordarme:
+                secret = _get_auth_cookie_secret(expected_password)
+                token = _make_auth_token(username, secret, remember_days)
+                _get_cookie_controller().set(
+                    AUTH_COOKIE_NAME, token, max_age=remember_days * 86400
+                )
             st.rerun()
         st.error("Usuario o contraseña incorrectos")
 
     st.stop()
 
 def require_authentication() -> None:
-    """Bloquea la app hasta que el usuario se autentique."""
-    if not st.session_state.get("authenticated", False):
-        _render_login()
+    """Bloquea la app hasta que el usuario se autentique (incluye sesión recordada por cookie)."""
+    if st.session_state.get("authenticated", False):
+        return
+
+    expected_user, expected_password = _get_auth_credentials()
+    if expected_user and expected_password:
+        token = _get_cookie_controller().get(AUTH_COOKIE_NAME)
+        secret = _get_auth_cookie_secret(expected_password)
+        if token and _verify_auth_token(token, expected_user, secret):
+            st.session_state["authenticated"] = True
+            st.session_state["auth_user"] = expected_user
+            return
+
+    _render_login()
 
 def get_product_stockout_periods(product_id: int, engine) -> list:
     """Obtiene períodos de agotamiento de un producto"""
@@ -641,6 +733,7 @@ def render_sidebar_shell(section_name: str) -> None:
         if st.button("Cerrar sesión"):
             st.session_state["authenticated"] = False
             st.session_state.pop("auth_user", None)
+            _get_cookie_controller().remove(AUTH_COOKIE_NAME)
             st.rerun()
         st.divider()
         st.markdown("### Información")
@@ -1548,6 +1641,111 @@ def render_master_dryrun_page() -> None:
     render_master_page("🧪 Dry-run Odoo")
 
 
+def render_alerta_pedidos_page() -> None:
+    render_sidebar_shell("Alerta Pedidos")
+    st.title("Alerta de Pedidos de Clientes Vigilados")
+    st.caption(
+        "Mantén aquí la lista de clientes a vigilar. Se busca coincidencia en el nombre del cliente "
+        "o en la dirección de entrega. Cuando se detecte un pedido, se enviará un email de alerta."
+    )
+
+    watchlist = load_watchlist()
+
+    with st.form("watchlist_add_form", clear_on_submit=True):
+        st.subheader("Añadir cliente a vigilar")
+        new_name = st.text_input(
+            "Nombre exacto del cliente (tal cual figura en Odoo)",
+            placeholder="Ej: Óptica Ejemplo S.L.",
+        )
+        added = st.form_submit_button("Añadir", type="primary")
+
+    if added:
+        if new_name.strip():
+            watchlist = add_customer(new_name)
+            st.success(f"Cliente '{new_name.strip()}' añadido a la lista de vigilancia.")
+        else:
+            st.warning("Introduce un nombre antes de añadir.")
+
+    st.divider()
+    st.subheader("Clientes vigilados")
+    if not watchlist:
+        st.info("No hay clientes en la lista de vigilancia todavía.")
+    else:
+        clientes_editados = st.data_editor(
+            pd.DataFrame({"Cliente": watchlist}),
+            column_config={"Cliente": st.column_config.TextColumn("Cliente vigilado", required=True)},
+            hide_index=True,
+            num_rows="dynamic",
+            key="watchlist_editor",
+        )
+        if st.button("Guardar lista de clientes", type="secondary"):
+            clientes = [
+                str(nombre).strip()
+                for nombre in clientes_editados["Cliente"].dropna().tolist()
+                if str(nombre).strip()
+            ]
+            clientes = list(dict.fromkeys(clientes))
+            save_watchlist(clientes)
+            st.success(f"Lista guardada: {len(clientes)} cliente(s) vigilado(s).")
+            st.rerun()
+
+            cliente_a_quitar = st.selectbox("Cliente a quitar", options=watchlist)
+            if st.button("Quitar cliente", type="secondary"):
+                remove_customer(cliente_a_quitar)
+                st.success(f"Cliente '{cliente_a_quitar}' eliminado de la lista.")
+                st.rerun()
+
+    st.divider()
+    st.subheader("Comprobar pedidos")
+
+    col_desde, col_hasta, col_estado = st.columns([1, 1, 1])
+    hoy = date.today()
+    fecha_desde = col_desde.date_input("Desde", value=hoy - timedelta(days=30))
+    fecha_hasta = col_hasta.date_input("Hasta", value=hoy)
+    filtro_estado = col_estado.radio("Estado", options=["Pendientes", "Todos"], horizontal=True)
+
+    if st.button("Comprobar ahora", type="primary"):
+        if not watchlist:
+            st.warning("Añade al menos un cliente a la lista de vigilancia antes de comprobar.")
+        elif fecha_desde > fecha_hasta:
+            st.warning("La fecha 'Desde' no puede ser posterior a la fecha 'Hasta'.")
+        else:
+            with st.spinner("Consultando pedidos en Odoo..."):
+                try:
+                    resultados = find_matching_orders(
+                        clientes=watchlist,
+                        fecha_desde=fecha_desde,
+                        fecha_hasta=fecha_hasta + timedelta(days=1),
+                        solo_pendientes=(filtro_estado == "Pendientes"),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f"Error al consultar Odoo: {exc}")
+                    resultados = None
+
+            if resultados is not None:
+                if resultados.empty:
+                    st.info("No se han encontrado pedidos para los clientes vigilados en el rango indicado.")
+                else:
+                    st.success(f"Se han encontrado {len(resultados)} pedido(s).")
+                    st.dataframe(resultados, use_container_width=True, hide_index=True)
+
+                    destinatario = _read_env_setting(ALERT_RECIPIENT_EMAIL_ENV, ALERT_RECIPIENT_EMAIL_DEFAULT)
+                    destinatarios = list(dict.fromkeys([destinatario, *ALERT_RECIPIENT_EMAILS_EXTRA]))
+                    with st.spinner(f"Enviando alerta por email a {', '.join(destinatarios)}..."):
+                        try:
+                            send_alert_email(
+                                subject=f"Alerta de pedidos vigilados ({len(resultados)})",
+                                html_body=_build_alert_email_html(resultados),
+                                to_address=destinatarios,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            st.error(f"No se pudo enviar el email de alerta: {exc}")
+                        else:
+                            st.success(f"Email de alerta enviado a {', '.join(destinatarios)}.")
+
+    render_footer()
+
+
 HOME_PAGE = st.Page(render_home_page, title="Inicio", icon="🏠", url_path="", default=True)
 ABC_HOME_PAGE = st.Page(render_abc_home_page, title="Inicio", icon="📊", url_path="abc")
 ABC_SEARCH_PAGE = st.Page(render_abc_search_page, title="Buscar Producto", icon="🔍", url_path="abc-buscar")
@@ -1556,6 +1754,7 @@ ABC_HISTORY_PAGE = st.Page(render_abc_history_page, title="Histórico Semanal", 
 ABC_DETAIL_PAGE = st.Page(render_abc_detail_page, title="Análisis Detallado", icon="📉", url_path="abc-analisis")
 MASTER_IMPORT_PAGE = st.Page(render_master_import_page, title="Importador Masterdata", icon="📥", url_path="master")
 MASTER_DRYRUN_PAGE = st.Page(render_master_dryrun_page, title="Dry-run Odoo", icon="🧪", url_path="master-dry-run")
+ALERTA_PEDIDOS_PAGE = st.Page(render_alerta_pedidos_page, title="Alerta Pedidos", icon="🔔", url_path="alerta-pedidos")
 SETTINGS_PAGE = st.Page(render_settings_page, title="Configuración", icon="⚙️", url_path="config")
 
 navigation = st.navigation(
@@ -1569,6 +1768,7 @@ navigation = st.navigation(
             ABC_DETAIL_PAGE,
         ],
         "Master Data": [MASTER_IMPORT_PAGE, MASTER_DRYRUN_PAGE],
+        "Alertas": [ALERTA_PEDIDOS_PAGE],
         "Configuración": [SETTINGS_PAGE],
     },
     position="sidebar",

@@ -27,6 +27,8 @@ services:
     # Volúmenes para desarrollo (comentar en producción)
     # volumes:
     #   - .:/app
+    volumes:
+      - ./watchlist_clientes.json:/app/watchlist_clientes.json
     
     # Restart policy
     restart: unless-stopped
