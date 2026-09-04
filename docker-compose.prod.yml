@@ -39,9 +39,11 @@ services:
       - /tmp
       - /root/.streamlit
 
-    # Persistencia de la lista de vigilancia (el resto del filesystem es read_only)
+    # Persistencia de la lista de vigilancia y del registro de alertas ya enviadas
+    # (el resto del filesystem es read_only)
     volumes:
       - ./watchlist_clientes.json:/app/watchlist_clientes.json
+      - ./alerta_pedidos_notificados.json:/app/alerta_pedidos_notificados.json
 
   # Opcional: Reverse proxy Nginx integrado
   # nginx:

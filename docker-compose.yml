@@ -29,6 +29,7 @@ services:
     #   - .:/app
     volumes:
       - ./watchlist_clientes.json:/app/watchlist_clientes.json
+      - ./alerta_pedidos_notificados.json:/app/alerta_pedidos_notificados.json
     
     # Restart policy
     restart: unless-stopped

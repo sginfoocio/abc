@@ -128,20 +128,25 @@ Criterio DoD:
 - Email recibido correctamente en un envio de prueba con datos reales.
 
 ## Sprint 4 - Programacion via cron (0.5-1 dia)
+✅ IMPLEMENTADO
+
 Objetivo: automatizar la comprobacion periodica sin intervencion manual.
 
 Tareas:
 - Script standalone `run_alerta_pedidos.py` (equivalente a
   `poll_luxoptica_mail.py` / `scheduler_luxoptica.py`) que ejecuta la misma
-  logica de los Sprints 2-3.
-- Registro de pedidos ya notificados (fichero o tabla) para evitar alertas
-  duplicadas en ejecuciones sucesivas del cron.
-- Documentar programacion via cron (Linux) o Task Scheduler (Windows),
-  frecuencia recomendada a definir con el usuario.
+  logica de los Sprints 2-3 (solo pedidos "Pendientes").
+- Registro de pedidos ya notificados en `alerta_pedidos_notificados.json`
+  para evitar alertas duplicadas en ejecuciones sucesivas del cron.
+- Programacion: 2 ejecuciones diarias (07:45 y 12:00) via crontab del host,
+  invocando el script dentro del contenedor Docker (`docker compose exec`).
 
 Entregable:
-- Script ejecutable de forma independiente + guia de programacion cron.
+- Script ejecutable de forma independiente (`run_alerta_pedidos.py`).
+- Volumen Docker para persistir `alerta_pedidos_notificados.json`.
+- Entradas de crontab documentadas en el README de despliegue.
 
 Criterio DoD:
 - Ejecucion programada detecta y notifica solo pedidos nuevos desde la
   ultima ejecucion.
+

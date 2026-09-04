@@ -37,6 +37,7 @@ COPY graph_mail_downloader.py .
 COPY save_abcd_weekly_snapshot.py .
 COPY watchlist_config.py .
 COPY check_pedidos_vigilados.py .
+COPY run_alerta_pedidos.py .
 
 # Crear directorio para configuración de Streamlit
 RUN mkdir -p ~/.streamlit
