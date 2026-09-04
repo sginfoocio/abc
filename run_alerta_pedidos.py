@@ -100,7 +100,7 @@ def main() -> int:
         )
         return 0
 
-    destinatario = os.getenv(ALERT_RECIPIENT_EMAIL_ENV, ALERT_RECIPIENT_EMAIL_DEFAULT)
+    destinatario = os.getenv(ALERT_RECIPIENT_EMAIL_ENV, "").strip() or ALERT_RECIPIENT_EMAIL_DEFAULT
     destinatarios = list(dict.fromkeys([destinatario, *ALERT_RECIPIENT_EMAILS_EXTRA]))
 
     _log(f"Se encontraron {len(nuevos)} pedido(s) nuevo(s). Enviando alerta a {', '.join(destinatarios)}...")

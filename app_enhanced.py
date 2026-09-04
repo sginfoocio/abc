@@ -388,7 +388,7 @@ def split_report_warnings(report) -> tuple[list[str], list[str], list[str]]:
 
 def _read_env_setting(key: str, default: str = "") -> str:
     load_env_file()
-    return os.getenv(key, default)
+    return os.getenv(key, "").strip() or default
 
 
 def _read_env_setting_any(keys: list[str], default: str = "") -> str:
