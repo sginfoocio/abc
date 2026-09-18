@@ -172,7 +172,7 @@ def render_master_dictionary_page() -> None:
                 required=True,
             ),
             "Valor": st.column_config.TextColumn("Valor", required=True),
-            "Transformado": st.column_config.TextColumn("Transformado", required=True),
+            "Transformado": st.column_config.TextColumn("Transformado", required=False),
         },
         num_rows="dynamic",
         hide_index=True,
@@ -183,8 +183,8 @@ def render_master_dictionary_page() -> None:
         for row in edited_df.fillna("").to_dict("records"):
             rule = {key: str(row.get(key, "")).strip() for key in ["Columna", "Valor", "Transformado"]}
             if any(rule.values()):
-                if not all(rule.values()):
-                    st.error("Cada regla debe tener Columna, Valor y Transformado.")
+                if not rule["Columna"] or not rule["Valor"]:
+                    st.error("Cada regla debe tener Columna y Valor. Transformado puede quedar vacío.")
                     return
                 clean_rules.append(rule)
         save_masterdata_dictionary(clean_rules)

@@ -69,6 +69,16 @@ Las reglas personalizadas se aplican antes de los diccionarios de Odoo, por lo
 que tienen prioridad para resolver excepciones del negocio. Después se aplican
 las normalizaciones estándar de color, forma, género y demás campos.
 
+Se han incorporado inicialmente las relaciones detectadas en la revisión:
+
+- `Categoría`: `Gafas de vista` -> `MONTURAS`.
+- `Color de las lentes`: `multiples` -> vacío.
+- `Forma`: Aviador -> `AVIATOR`; Cuadrada, Irregular, Pillow, Rectangular y
+  Square -> `RECTANGULAR/CUADRADA`; Mariposa y Ojo de gato -> `CAT EYE`;
+  Ovalada, Pantos y Redonda -> `REDONDA/OVALADA`.
+- `Material del frente`: `Acero` -> `METAL`.
+- `PVP sugerido`: `Todo vacio` -> vacío.
+
 Si una regla guardada no aparece en el XLS cargado, la aplicación muestra una
 alerta con las reglas no encontradas. Esto permite detectar valores obsoletos,
 errores de escritura o cambios en el fichero de Luxottica.

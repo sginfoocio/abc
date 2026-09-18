@@ -266,6 +266,7 @@ def _normalize_text(value: str) -> str:
 def apply_custom_dictionary(
     df: pd.DataFrame,
     dictionary_rules: list[dict[str, str]] | None = None,
+    source_df: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, list[dict[str, str]]]:
     """Aplica reglas exactas por columna y devuelve las reglas no encontradas."""
     working = df.copy()
@@ -275,14 +276,15 @@ def apply_custom_dictionary(
         column = _safe_text(rule.get("Columna", rule.get("column", "")))
         source = _safe_text(rule.get("Valor", rule.get("value", "")))
         target = _safe_text(rule.get("Transformado", rule.get("transformed", "")))
-        if column and source and target and column in working.columns:
+        if column and source and column in working.columns:
             normalized_rules.append({"Columna": column, "Valor": source, "Transformado": target})
 
     not_found: list[dict[str, str]] = []
     for rule in normalized_rules:
         column = rule["Columna"]
         source = rule["Valor"]
-        mask = working[column].map(lambda value: _normalize_text(value) == _normalize_text(source))
+        comparison = source_df[column] if source_df is not None and column in source_df.columns else working[column]
+        mask = comparison.map(lambda value: _normalize_text(value) == _normalize_text(source))
         if not bool(mask.any()):
             not_found.append(rule)
             continue
@@ -744,6 +746,7 @@ def transform_masterdata(
 ) -> tuple[pd.DataFrame, ValidationReport, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     input_count = len(df)
     df = _normalize_input_column_aliases(df)
+    original_df = df.copy()
     df, dictionary_rules_not_found = apply_custom_dictionary(df, dictionary_rules)
     dictionary_values_not_resolved = find_dictionary_values_not_resolved(
         df,
@@ -845,6 +848,10 @@ def transform_masterdata(
     working["Polarizado"] = working["Polarizado"].map(normalize_yes_no)
 
     working["PVP sugerido"] = working["PVP sugerido"].map(_safe_text)
+
+    # Las reglas personalizadas se reaplican sobre el valor original para que
+    # también puedan corregir el valor canónico final o vaciarlo.
+    working, _ = apply_custom_dictionary(working, dictionary_rules, source_df=original_df)
     working["PVO"] = working["PVO"].map(_safe_text)
 
     # Validaciones post-transformacion.
