@@ -23,7 +23,7 @@ services:
       - M365_CLIENT_ID=${M365_CLIENT_ID}
       - M365_CLIENT_SECRET=${M365_CLIENT_SECRET}
       - M365_MAILBOX=${M365_MAILBOX}
-      - M365_DOWNLOAD_ROOT=${M365_DOWNLOAD_ROOT}
+      - M365_DOWNLOAD_ROOT=${M365_DOWNLOAD_ROOT:-/app/repo/images}
       - MASTERDATA_DICTIONARY_PATH=${MASTERDATA_DICTIONARY_PATH:-/app/data/masterdata_dictionary.json}
 
       # Alerta de pedidos vigilados
@@ -53,6 +53,8 @@ services:
       - ./watchlist_clientes.json:/app/watchlist_clientes.json
       - ./alerta_pedidos_notificados.json:/app/alerta_pedidos_notificados.json
       - ./masterdata_data:/app/data
+      - ./repo/images:/app/repo/images
+      - ./luxoptica_data:/app/docs/Luxoptica
     
     # Restart policy
     restart: unless-stopped
@@ -83,6 +85,34 @@ services:
       start_period: 40s
     
     # Red
+    networks:
+      - abcd-network
+
+  abcd-luxoptica-monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: abcd-luxoptica-monitor
+    command: ["python", "poll_luxoptica_mail.py", "--interval-minutes", "10", "--sender-hint", "luxottica", "--subject-hint", "image", "--lookback-days", "30", "--top-messages", "100"]
+    environment:
+      - DB_HOST=${DB_HOST}
+      - DB_PORT=${DB_PORT}
+      - DB_NAME=${DB_NAME}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - M365_TENANT_ID=${M365_TENANT_ID}
+      - M365_CLIENT_ID=${M365_CLIENT_ID}
+      - M365_CLIENT_SECRET=${M365_CLIENT_SECRET}
+      - M365_MAILBOX=${M365_MAILBOX}
+      - M365_DOWNLOAD_ROOT=${M365_DOWNLOAD_ROOT:-/app/repo/images}
+      - MASTERDATA_DICTIONARY_PATH=${MASTERDATA_DICTIONARY_PATH:-/app/data/masterdata_dictionary.json}
+      - TZ=Europe/Madrid
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./masterdata_data:/app/data
+      - ./repo/images:/app/repo/images
+      - ./luxoptica_data:/app/docs/Luxoptica
+    restart: unless-stopped
     networks:
       - abcd-network
 

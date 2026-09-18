@@ -46,6 +46,10 @@ services:
       - ./alerta_pedidos_notificados.json:/app/alerta_pedidos_notificados.json
       - ./masterdata_data:/app/data
 
+  abcd-luxoptica-monitor:
+    image: registry.diagonaleyewear.net/abcd-control:latest
+    restart: always
+
   # Opcional: Reverse proxy Nginx integrado
   # nginx:
   #   image: nginx:alpine

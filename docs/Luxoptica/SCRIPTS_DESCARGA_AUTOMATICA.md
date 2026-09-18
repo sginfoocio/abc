@@ -81,6 +81,23 @@ python scheduler_luxoptica.py status
 - Permite ejecutar pruebas
 - Muestra estado actual
 
+### Monitor automático en Docker
+
+En producción, `docker-compose.yml` incluye el servicio
+`abcd-luxoptica-monitor`. Revisa el buzón cada 10 minutos, descarga los ZIP y
+organiza las imágenes sin intervención manual.
+
+```bash
+docker compose up -d --build --force-recreate
+docker compose logs -f abcd-luxoptica-monitor
+```
+
+Las carpetas persistentes son:
+
+- `repo/images/`: imágenes originales y copias por mercado.
+- `luxoptica_data/`: solicitudes TXT, manifiestos y descargas auxiliares.
+- `masterdata_data/`: diccionario personalizado de producción.
+
 **Instalación de Scheduler (Windows):**
 ```powershell
 # Copiar el comando que genera:

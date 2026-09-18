@@ -42,6 +42,7 @@ COPY watchlist_config.py .
 COPY check_pedidos_vigilados.py .
 COPY run_alerta_pedidos.py .
 COPY luxoptica_auto_upload.py .
+COPY poll_luxoptica_mail.py .
 
 # Crear directorio para configuración de Streamlit
 RUN mkdir -p ~/.streamlit
