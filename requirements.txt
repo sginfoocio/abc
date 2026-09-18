@@ -7,4 +7,5 @@ plotly>=5.0
 numpy>=1.21
 playwright>=1.46
 requests>=2.31
+Pillow>=10.0
 streamlit-cookies-controller>=0.0.4

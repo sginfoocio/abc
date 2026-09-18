@@ -306,29 +306,44 @@ def normalize_result_export_schema(df: pd.DataFrame) -> pd.DataFrame:
     return normalized[target_columns].copy()
 
 
-def _extract_clean_eans(df: pd.DataFrame) -> list[str]:
-    """Extrae EAN limpios desde Barcode sin prefijo y sin duplicados."""
+def _clean_ean(raw_value: object) -> str:
+    value = str(raw_value).strip()
+    if not value or value.lower() == "nan":
+        return ""
+    if value.lower().startswith("es."):
+        value = value[3:]
+    if value.endswith(".0"):
+        value = value[:-2]
+    return value.replace(" ", "")
+
+
+def _extract_luxoptica_products(df: pd.DataFrame) -> list[dict[str, str]]:
+    """Extrae un producto unico por EAN, conservando modelo y color."""
     if "Barcode" not in df.columns:
         return []
 
     seen: set[str] = set()
-    eans: list[str] = []
+    products: list[dict[str, str]] = []
 
-    for raw_value in df["Barcode"].tolist():
-        value = str(raw_value).strip()
-        if not value or value.lower() == "nan":
-            continue
-        if value.lower().startswith("es."):
-            value = value[3:]
-        if value.endswith(".0"):
-            value = value[:-2]
-        value = value.replace(" ", "")
+    for _, row in df.iterrows():
+        value = _clean_ean(row["Barcode"])
         if not value or value in seen:
             continue
         seen.add(value)
-        eans.append(value)
+        products.append(
+            {
+                "ean": value,
+                "modelo": str(row.get("Modelo", "")).strip(),
+                "color": str(row.get("Color", "")).strip(),
+            }
+        )
 
-    return eans
+    return products
+
+
+def _extract_clean_eans(df: pd.DataFrame) -> list[str]:
+    """Extrae EAN limpios desde Barcode sin prefijo y sin duplicados."""
+    return [product["ean"] for product in _extract_luxoptica_products(df)]
 
 
 def _chunk_list(items: list[str], chunk_size: int) -> list[list[str]]:
@@ -342,21 +357,26 @@ def generate_luxoptica_request_files(
     max_total_eans: int | None = None,
 ) -> list[Path]:
     """Genera archivos txt para solicitud de imágenes con lotes de EAN."""
-    eans = _extract_clean_eans(df)
+    products = _extract_luxoptica_products(df)
     if max_total_eans is not None and max_total_eans > 0:
-        eans = eans[:max_total_eans]
-    if not eans:
+        products = products[:max_total_eans]
+    if not products:
         return []
 
     output_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    batches = _chunk_list(eans, batch_size)
+    batches = _chunk_list(products, batch_size)
     generated_files: list[Path] = []
 
     for idx, batch in enumerate(batches, start=1):
         file_name = f"upc-products-images-request-{timestamp}-lote-{idx:03d}.txt"
         file_path = output_dir / file_name
-        file_path.write_text("\n".join(batch) + "\n", encoding="utf-8")
+        file_path.write_text("\n".join(product["ean"] for product in batch) + "\n", encoding="utf-8")
+        manifest_path = file_path.with_suffix(".manifest.json")
+        manifest_path.write_text(
+            json.dumps({"products": batch}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
         generated_files.append(file_path)
 
     return generated_files

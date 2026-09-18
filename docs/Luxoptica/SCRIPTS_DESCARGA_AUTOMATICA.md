@@ -42,8 +42,10 @@ python run_luxoptica_download.py
 2. Se conecta a Microsoft Graph API
 3. Lee inbox del mailbox compartido
 4. Descarga adjuntos (imágenes)
-5. Organiza por lote y fecha
-6. Registra en `.mail_download_state.json`
+5. Organiza por modelo y EAN
+6. Crea copias para Farfetch y Miinto cuando existen sus IDs en Odoo
+7. Registra pendientes en `repo/images/.market_pending.json`
+8. Registra correos procesados en `.mail_download_state.json`
 
 **Output:**
 ```
@@ -153,15 +155,26 @@ python scheduler_luxoptica.py status
 ## 📊 Estructura de Archivos Descargados
 
 ```
-docs/Luxoptica/descargas/
-├─ .mail_download_state.json          (log de correos procesados)
-└─ 2026-08-20/                         (fecha de recepción del correo)
-   └─ lote-001/                        (número de lote)
-      ├─ image-001.jpg
-      ├─ image-002.jpg
-      ├─ image-003.png
-      └─ ...
+repo/images/
+├─ .market_pending.json                (imágenes sin ID de mercado)
+└─ RB2140/
+   └─ 8056262672563/
+      ├─ originales.png
+      ├─ Farfetch/
+      │  ├─ <id>_V1.png
+      │  ├─ <id>_V2.png
+      │  └─ <id>_V3.png
+      └─ Miinto/
+         ├─ <id>_V1.jpeg
+         ├─ <id>_V2.jpeg
+         └─ <id>_V3.jpeg
 ```
+
+Si una imagen ya se ha descargado pero Odoo todavía no tiene el ID de
+Farfetch o Miinto, el original se conserva en su carpeta EAN y se registra en
+`.market_pending.json`. El monitor vuelve a consultar Odoo en cada intervalo
+(`--interval-minutes`, 10 minutos por defecto) y crea las copias pendientes
+cuando los IDs aparecen.
 
 ---
 
@@ -205,7 +218,8 @@ Remove-Item docs/Luxoptica/descargas/.mail_download_state.json -Force
 | `test_graph_api_config.py` | Validar credenciales | 1x (setup) | Manual |
 | `monitor_luxoptica_downloads.py` | Ver estado | Bajo demanda | Manual |
 | `run_luxoptica_download.py` | Descargar imágenes | Test y manual | Manual |
-| `scheduler_luxoptica.py` | Automatizar | Setup 1x | Automático (cada hora) |
+| `poll_luxoptica_mail.py` | Descargar y revisar pendientes | `--interval-minutes 10` | Automático |
+| `scheduler_luxoptica.py` | Automatizar descarga | Setup 1x | Automático (cada hora) |
 
 ---
 

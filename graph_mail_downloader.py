@@ -6,13 +6,17 @@ from pathlib import Path
 import base64
 import json
 import os
+import re
+import shutil
 import zipfile
 from typing import Any
 from urllib.parse import unquote, urlparse
 
 import requests
+from sqlalchemy import bindparam, create_engine, text
+from sqlalchemy.engine import URL
 
-from db_config import load_env_file
+from db_config import load_db_config, load_env_file
 
 
 M365_TENANT_ID_ENV = "M365_TENANT_ID"
@@ -177,7 +181,27 @@ def _find_download_links(body: str) -> list[str]:
     from html import unescape
 
     html = unescape(body or "")
-    return re.findall(r"href=[\"']([^\"']+)[\"']", html, flags=re.IGNORECASE)
+    links: list[tuple[str, str, str]] = []
+    for match in re.finditer(
+        r"<a\b[^>]*href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>",
+        html,
+        flags=re.IGNORECASE | re.DOTALL,
+    ):
+        href, label = match.groups()
+        context = re.sub(r"<[^>]+>", " ", html[max(0, match.start() - 180) : match.end() + 180])
+        following_text = re.sub(r"<[^>]+>", " ", html[match.end() : match.end() + 160])
+        links.append((href, f"{label} {context}".lower(), following_text.lower()))
+
+    image_links = [
+        href
+        for href, context, following_text in links
+        if ("imagen" in context or "image" in context)
+        and "informe" not in following_text
+        and "report" not in following_text
+    ]
+    if image_links:
+        return image_links
+    return [href for href, _, _ in links]
 
 
 def _sanitize_filename(name: str) -> str:
@@ -238,9 +262,167 @@ def _model_from_image_name(file_name: str) -> str:
     return _sanitize_filename(model or "modelo-unknown")
 
 
+def _normalize_image_key(value: str, remove_initial_zero: bool = False) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9]", "", str(value or "")).upper()
+    if remove_initial_zero and normalized.startswith("0"):
+        normalized = normalized[1:]
+    return normalized
+
+
+def _image_model_color_key(file_name: str) -> tuple[str, str] | None:
+    parts = Path(file_name).stem.split("__")
+    if len(parts) < 2:
+        return None
+    model = _normalize_image_key(parts[0], remove_initial_zero=True)
+    color_part = re.sub(r"_\d{3}A$", "", parts[1], flags=re.IGNORECASE)
+    color = _normalize_image_key(color_part)
+    if not model or not color:
+        return None
+    return model, color
+
+
+def _load_eans_by_image_key() -> dict[tuple[str, str], str]:
+    """Carga la relacion modelo/color/EAN de los manifiestos de solicitudes."""
+    manifest_root = Path(__file__).resolve().parent / "docs" / "Luxoptica"
+    matches: dict[tuple[str, str], set[str]] = {}
+    for manifest_path in manifest_root.glob("upc-products-images-request-*.manifest.json"):
+        try:
+            products = json.loads(manifest_path.read_text(encoding="utf-8")).get("products", [])
+        except (OSError, json.JSONDecodeError):
+            continue
+        for product in products:
+            key = (
+                _normalize_image_key(product.get("modelo", ""), remove_initial_zero=True),
+                _normalize_image_key(product.get("color", "")),
+            )
+            ean = str(product.get("ean", "")).strip()
+            if key[0] and key[1] and ean:
+                matches.setdefault(key, set()).add(ean)
+    return {key: next(iter(eans)) for key, eans in matches.items() if len(eans) == 1}
+
+
+def _get_market_ids_by_ean(eans: set[str]) -> dict[str, dict[str, str]]:
+    """Obtiene los IDs externos de Farfetch y Miinto para los EAN indicados."""
+    if not eans:
+        return {}
+
+    config = load_db_config()
+    if not all([config.host, config.database, config.user]):
+        print("   No se pudo consultar Odoo: falta configuracion de base de datos.", flush=True)
+        return {}
+
+    engine = create_engine(
+        URL.create(
+            "postgresql+psycopg2",
+            username=config.user,
+            password=config.password,
+            host=config.host,
+            port=config.port,
+            database=config.database,
+        )
+    )
+    query = text(
+        """
+        SELECT pp.barcode AS ean, dpw.siteweb_id, dpw.product_website_id
+        FROM product_product pp
+        JOIN diagonal_product_website dpw ON dpw.product_id = pp.id
+        WHERE pp.barcode IN :eans
+          AND dpw.siteweb_id IN (2, 3)
+          AND COALESCE(dpw.product_website_id, '') <> ''
+        """
+    ).bindparams(bindparam("eans", expanding=True))
+    market_names = {2: "Miinto", 3: "Farfetch"}
+    result: dict[str, dict[str, str]] = {}
+    with engine.connect() as conn:
+        for row in conn.execute(query, {"eans": sorted(eans)}).mappings():
+            result.setdefault(row["ean"], {})[market_names[row["siteweb_id"]]] = row["product_website_id"]
+    return result
+
+
+def _market_view_from_image_name(file_name: str) -> str | None:
+    parts = [part.lower() for part in Path(file_name).stem.split("__")]
+    if len(parts) < 4:
+        return None
+    views = {
+        ("noshad", "fr"): "V1",
+        ("noshad", "qt"): "V2",
+        ("shad", "lt"): "V3",
+    }
+    return views.get((parts[-2], parts[-1]))
+
+
+def _create_market_images(source: Path, ean_dir: Path, market_ids: dict[str, str]) -> list[Path]:
+    view = _market_view_from_image_name(source.name)
+    if view is None or source.suffix.lower() != ".png":
+        return []
+
+    created: list[Path] = []
+    farfetch_id = market_ids.get("Farfetch")
+    if farfetch_id:
+        destination = ean_dir / "Farfetch" / f"{farfetch_id}_{view}.png"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+        created.append(destination)
+
+    miinto_id = market_ids.get("Miinto")
+    if miinto_id:
+        destination = ean_dir / "Miinto" / f"{miinto_id}_{view}.jpeg"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+        created.append(destination)
+
+    return created
+
+
+def _market_pending_file(images_root: Path) -> Path:
+    return images_root / ".market_pending.json"
+
+
+def _refresh_pending_market_images(images_root: Path) -> tuple[int, int]:
+    """Reintenta crear copias de mercado para originales que aun no tenian ID."""
+    pending_file = _market_pending_file(images_root)
+    if not images_root.exists():
+        return 0, 0
+
+    pending_entries: dict[str, dict[str, Any]] = {}
+    for source in images_root.glob("*/*/*.png"):
+        if source.parent.name in {"Farfetch", "Miinto", "Pendientes"}:
+            continue
+        if source.parent.name == "ean-no-identificado" or source.parent.parent.name == "ean-no-identificado":
+            continue
+        ean = source.parent.name
+        pending_entries[str(source)] = {"ean": ean, "missing_markets": ["Farfetch", "Miinto"]}
+
+    market_ids_by_ean = _get_market_ids_by_ean({entry["ean"] for entry in pending_entries.values()})
+    completed = 0
+    created = 0
+    for source_name, entry in list(pending_entries.items()):
+        source = Path(source_name)
+        market_ids = market_ids_by_ean.get(entry["ean"], {})
+        created_paths = _create_market_images(source, source.parent, market_ids)
+        created += len(created_paths)
+        missing = [market for market in ("Farfetch", "Miinto") if not market_ids.get(market)]
+        if missing:
+            entry["missing_markets"] = missing
+            pending_entries[source_name] = entry
+        else:
+            completed += 1
+            pending_entries.pop(source_name, None)
+
+    if pending_entries:
+        _save_state(pending_file, pending_entries)
+    elif pending_file.exists():
+        pending_file.unlink()
+
+    return completed, created
+
+
 def _extract_zip(archive_path: Path, images_root: Path) -> list[Path]:
     extracted_paths: list[Path] = []
     target_dir = images_root.resolve()
+    eans_by_image_key = _load_eans_by_image_key()
+    matched_eans = set(eans_by_image_key.values())
+    market_ids_by_ean = _get_market_ids_by_ean(matched_eans)
 
     with zipfile.ZipFile(archive_path) as archive:
         for member in archive.infolist():
@@ -249,7 +431,9 @@ def _extract_zip(archive_path: Path, images_root: Path) -> list[Path]:
 
             file_name = _sanitize_filename(Path(member.filename).name)
             model_dir = target_dir / _model_from_image_name(file_name)
-            destination = (model_dir / file_name).resolve()
+            image_key = _image_model_color_key(file_name)
+            ean = eans_by_image_key.get(image_key, "ean-no-identificado") if image_key else "ean-no-identificado"
+            destination = (model_dir / ean / file_name).resolve()
             if destination != target_dir and target_dir not in destination.parents:
                 raise ValueError(f"Ruta insegura en ZIP: {member.filename}")
 
@@ -257,6 +441,20 @@ def _extract_zip(archive_path: Path, images_root: Path) -> list[Path]:
             with archive.open(member) as source, destination.open("wb") as target:
                 target.write(source.read())
             extracted_paths.append(destination)
+            market_ids = market_ids_by_ean.get(ean, {})
+            extracted_paths.extend(_create_market_images(destination, destination.parent, market_ids))
+            if ean != "ean-no-identificado" and (
+                not market_ids.get("Farfetch") or not market_ids.get("Miinto")
+            ):
+                pending_file = _market_pending_file(target_dir)
+                pending = _load_state(pending_file)
+                pending[str(destination)] = {
+                    "ean": ean,
+                    "missing_markets": [
+                        market for market in ("Farfetch", "Miinto") if not market_ids.get(market)
+                    ],
+                }
+                _save_state(pending_file, pending)
 
     return extracted_paths
 
@@ -310,6 +508,13 @@ def download_luxoptica_mail_attachments(
     if not root.is_absolute():
         root = Path(__file__).resolve().parent / root
     root.mkdir(parents=True, exist_ok=True)
+    pending_completed, pending_created = _refresh_pending_market_images(root)
+    if pending_completed or pending_created:
+        print(
+            f"   Pendientes revisados: {pending_completed} completados, "
+            f"{pending_created} copias de mercado creadas.",
+            flush=True,
+        )
 
     state_file = root / ".mail_download_state.json"
     state = _load_state(state_file)

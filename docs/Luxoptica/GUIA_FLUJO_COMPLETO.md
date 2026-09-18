@@ -44,6 +44,43 @@
   - Ceros iniciales
   - Marcas no resueltas
 
+### Paso 5: Obtener los IDs de canales de venta desde el EAN
+
+Cada gafa se identifica por su EAN, guardado en `product_product.barcode`.
+Para obtener el ID de producto que usa cada canal de venta, se busca primero la
+variante de Odoo y después sus registros en `diagonal_product_website`.
+
+```sql
+SELECT
+      pp.barcode AS ean,
+      pp.id AS product_id_odoo,
+      dpw.name AS canal_venta,
+      dpw.product_website_id AS id_producto_canal,
+      dpw.published AS publicado,
+      dpw.published_website_date AS fecha_subida,
+      dpw.updated_website_date AS fecha_actualizacion,
+      dpw.archived_website_date AS fecha_baja
+FROM product_product pp
+JOIN diagonal_product_website dpw ON dpw.product_id = pp.id
+WHERE pp.barcode = '8056262672563'
+ORDER BY dpw.siteweb_id;
+```
+
+Resultado comprobado para el EAN `8056262672563` (`RAY BAN WAYFARER RB2140 129431`):
+
+| Canal de venta | ID de producto en el canal |
+| --- | --- |
+| Cettire | `8056262672563` |
+| Poizon | `8056262672563` |
+| Deipe | `S0017840` |
+| Farfetch | `31715787` |
+| Miinto | `70eb4458-0cdb-48be-99fc-afc72667624a` |
+| Prestashop | `8056262672563` |
+
+`diagonal_product_website.id` es el identificador interno del registro de
+relación en Odoo. Para operaciones en el canal debe usarse
+`diagonal_product_website.product_website_id`.
+
 ---
 
 ## 🎁 Fase 2: Solicitud de Imágenes Luxoptica
@@ -63,6 +100,8 @@
 3. **Resultado**:
    - Se crean archivos `.txt` en `docs/Luxoptica/`
    - Formato: `upc-products-images-request-YYYYMMDD_HHMMSS-lote-XXX.txt`
+   - Junto a cada lote se crea un manifiesto `.manifest.json` con EAN, modelo y color.
+     Se usa internamente para identificar las imágenes recibidas.
 
 ### Paso 2: Descargar Lotes
 1. Se muestra tabla con lotes generados
@@ -109,13 +148,25 @@
 4. **Descarga automática** de adjuntos (imágenes)
 5. **Organización**:
    ```
-   docs/Luxoptica/descargas/
-   └── 2026-08-19/           (fecha de recepción)
-       └── lote-001/         (número de lote)
-           ├── image-001.jpg
-           ├── image-002.jpg
-           └── ...
+   repo/images/
+   └── VE4526U/                                      (modelo)
+      └── 8056262672563/                            (EAN)
+         ├── 0VE4526U__108_71__P21__noshad__fr.png (original)
+         ├── 0VE4526U__108_71__P21__noshad__qt.png (original)
+         ├── 0VE4526U__108_71__P21__shad__lt.png   (original)
+         ├── Farfetch/
+         │   ├── 31715787_V1.png                   (noshad__fr)
+         │   ├── 31715787_V2.png                   (noshad__qt)
+         │   └── 31715787_V3.png                   (shad__lt)
+         └── Miinto/
+            ├── <id-miinto>_V1.jpeg               (noshad__fr)
+            ├── <id-miinto>_V2.jpeg               (noshad__qt)
+            └── <id-miinto>_V3.jpeg               (shad__lt)
    ```
+
+   Los originales se conservan en la carpeta del EAN. Los IDs de Farfetch y
+   Miinto se consultan en Odoo desde ese EAN; solo se generan las tres vistas
+   indicadas para cada mercado. Las imágenes de Miinto se convierten a JPEG.
 
 ### Monitoreo:
 - Ver archivo: `docs/Luxoptica/descargas/.mail_download_state.json`
