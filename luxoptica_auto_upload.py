@@ -396,6 +396,8 @@ def main():
     password = os.getenv("LUXOPTICA_PASSWORD", "").strip()
     url = os.getenv("LUXOPTICA_URL", "https://portal.luxottica.com/").strip()
     email = os.getenv("LUXOPTICA_REQUEST_EMAIL", "images@diagonaleyewear.com").strip()
+    headless = os.getenv("LUXOPTICA_HEADLESS", "true").strip().lower() not in {"0", "false", "no"}
+    keep_browser_open = os.getenv("LUXOPTICA_KEEP_BROWSER_OPEN", "false").strip().lower() in {"1", "true", "yes"}
     
     if not username or not password:
         print(f"\n❌ Faltan credenciales en .env")
@@ -424,8 +426,8 @@ def main():
         password=password,
         ean_file=ean_file,
         email_destino=email,
-        headless=False,  # Mostrar navegador para que veas
-        keep_browser_open=True,
+        headless=headless,
+        keep_browser_open=keep_browser_open,
     )
     
     print(f"\n{message}")
