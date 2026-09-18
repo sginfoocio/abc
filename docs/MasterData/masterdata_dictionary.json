@@ -6,6 +6,11 @@
       "Transformado": "MONTURAS"
     },
     {
+      "Columna": "Categoría",
+      "Valor": "Productos finales: Gafas",
+      "Transformado": "MONTURAS"
+    },
+    {
       "Columna": "Color de las lentes",
       "Valor": "multiples",
       "Transformado": ""
@@ -43,6 +48,11 @@
     {
       "Columna": "Forma",
       "Valor": "Pantos",
+      "Transformado": "REDONDA/OVALADA"
+    },
+    {
+      "Columna": "Forma",
+      "Valor": "Phantos",
       "Transformado": "REDONDA/OVALADA"
     },
     {
