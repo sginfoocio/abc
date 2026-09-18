@@ -1359,6 +1359,11 @@ def render_master_page(master_page: str | None = None) -> None:
     if master_page == "📥 Importador Masterdata":
         st.title("Importador Masterdata")
         st.caption("Flujo web: cargar Excel origen, transformar, revisar advertencias y descargar el MASTERDATA.")
+        dictionary_rules = load_masterdata_dictionary()
+        if dictionary_rules:
+            st.caption(f"Diccionario personalizado cargado: {len(dictionary_rules)} reglas")
+        else:
+            st.warning("No hay reglas de diccionario cargadas. Revisa la imagen Docker y masterdata_dictionary.json.")
         st.subheader("1. Cargar Excel origen Luxottica")
         uploaded_source = st.file_uploader("Sube el Excel origen", type=["xlsx"], key="masterdata_source_upload")
         use_whitelist = st.checkbox("Aplicar whitelist de accesorios local", value=True)
@@ -1382,7 +1387,7 @@ def render_master_page(master_page: str | None = None) -> None:
                     accessory_whitelist=whitelist_codes,
                     brand_map=brand_map,
                     shape_map=shape_map,
-                    dictionary_rules=load_masterdata_dictionary(),
+                    dictionary_rules=dictionary_rules,
                 )
                 st.session_state["masterdata_transform_output_df"] = output_df
                 st.session_state["masterdata_transform_report"] = transform_report.to_dict()
