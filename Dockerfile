@@ -41,7 +41,6 @@ COPY save_abcd_weekly_snapshot.py .
 COPY watchlist_config.py .
 COPY check_pedidos_vigilados.py .
 COPY run_alerta_pedidos.py .
-COPY docs/MasterData/masterdata_dictionary.json /app/docs/MasterData/masterdata_dictionary.json
 
 # Crear directorio para configuración de Streamlit
 RUN mkdir -p ~/.streamlit

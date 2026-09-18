@@ -67,11 +67,6 @@ Thumbs.db
 snapshots/
 database/
 docs/
-!docs/
-docs/*
-!docs/MasterData/
-docs/MasterData/*
-!docs/MasterData/masterdata_dictionary.json
 backup_*.py
 tmp_*.py
 *.csv

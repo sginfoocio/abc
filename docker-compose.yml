@@ -24,6 +24,7 @@ services:
       - M365_CLIENT_SECRET=${M365_CLIENT_SECRET}
       - M365_MAILBOX=${M365_MAILBOX}
       - M365_DOWNLOAD_ROOT=${M365_DOWNLOAD_ROOT}
+      - MASTERDATA_DICTIONARY_PATH=${MASTERDATA_DICTIONARY_PATH:-/app/data/masterdata_dictionary.json}
 
       # Alerta de pedidos vigilados
       - ALERT_RECIPIENT_EMAIL=${ALERT_RECIPIENT_EMAIL}

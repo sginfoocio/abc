@@ -70,7 +70,12 @@ M365_CLIENT_ID_ENV = "M365_CLIENT_ID"
 M365_CLIENT_SECRET_ENV = "M365_CLIENT_SECRET"
 M365_MAILBOX_ENV = "M365_MAILBOX"
 M365_DOWNLOAD_ROOT_ENV = "M365_DOWNLOAD_ROOT"
-MASTERDATA_DICTIONARY_FILE = Path(__file__).resolve().parent / "docs" / "MasterData" / "masterdata_dictionary.json"
+MASTERDATA_DICTIONARY_FILE = Path(
+    os.getenv(
+        "MASTERDATA_DICTIONARY_PATH",
+        str(Path(__file__).resolve().parent / "docs" / "MasterData" / "masterdata_dictionary.json"),
+    )
+)
 MASTERDATA_DOWNLOAD_COLUMNS = [
     "Barcode",
     "Categoría",

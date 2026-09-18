@@ -62,6 +62,7 @@ snapshots/
 
 # Generated image downloads
 repo/
+masterdata_data/
 docs/Luxoptica/upc-products-images-request-*.txt
 
 # Temp files

@@ -64,6 +64,28 @@ Las reglas se guardan en:
 
 `docs/MasterData/masterdata_dictionary.json`
 
+En producción Docker, el diccionario se guarda fuera de la imagen en:
+
+`masterdata_data/masterdata_dictionary.json`
+
+Esta carpeta está excluida de Git y se monta como volumen en `/app/data`, por
+lo que los rebuilds y despliegues no sobrescriben las reglas existentes. Para
+migrar una instalación que todavía tiene el JSON dentro del contenedor,
+ejecutar una sola vez, antes de recrearlo:
+
+```bash
+mkdir -p masterdata_data
+docker cp abcd-control:/app/docs/MasterData/masterdata_dictionary.json \
+  ./masterdata_data/masterdata_dictionary.json
+```
+
+Después ya se puede actualizar y reconstruir:
+
+```bash
+git pull origin main
+docker compose up -d --build --force-recreate
+```
+
 El valor se compara de forma exacta ignorando mayúsculas y espacios exteriores.
 Las reglas personalizadas se aplican antes de los diccionarios de Odoo, por lo
 que tienen prioridad para resolver excepciones del negocio. Después se aplican
