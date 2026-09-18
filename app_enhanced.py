@@ -1438,13 +1438,6 @@ def render_master_page(master_page: str | None = None) -> None:
                 st.info("Avisos informativos")
                 for line in info_warnings:
                     st.info(line)
-            if report_dict.get("dictionary_rules_not_found"):
-                st.warning("Hay reglas del diccionario que no aparecen en este XLS:")
-                st.dataframe(
-                    pd.DataFrame(report_dict["dictionary_rules_not_found"]),
-                    hide_index=True,
-                    use_container_width=True,
-                )
             if report_dict.get("dictionary_values_not_resolved"):
                 st.warning("Hay valores del XLS sin relación en Odoo ni en el diccionario:")
                 st.dataframe(
