@@ -181,27 +181,26 @@ def _find_download_links(body: str) -> list[str]:
     from html import unescape
 
     html = unescape(body or "")
-    links: list[tuple[str, str, str]] = []
-    for match in re.finditer(
-        r"<a\b[^>]*href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>",
-        html,
-        flags=re.IGNORECASE | re.DOTALL,
-    ):
-        href, label = match.groups()
-        context = re.sub(r"<[^>]+>", " ", html[max(0, match.start() - 180) : match.end() + 180])
-        following_text = re.sub(r"<[^>]+>", " ", html[match.end() : match.end() + 160])
-        links.append((href, f"{label} {context}".lower(), following_text.lower()))
+    links: list[tuple[str, str]] = []
+    for paragraph in re.findall(r"<p\b[^>]*>(.*?)</p>", html, flags=re.IGNORECASE | re.DOTALL):
+        paragraph_text = re.sub(r"<[^>]+>", " ", paragraph).lower()
+        for match in re.finditer(
+            r"<a\b[^>]*href=[\"']([^\"']+)[\"'][^>]*>.*?</a>",
+            paragraph,
+            flags=re.IGNORECASE | re.DOTALL,
+        ):
+            links.append((match.group(1), paragraph_text))
 
     image_links = [
         href
-        for href, context, following_text in links
-        if ("imagen" in context or "image" in context)
-        and "informe" not in following_text
-        and "report" not in following_text
+        for href, paragraph_text in links
+        if ("descargar las imágenes" in paragraph_text or "download the images" in paragraph_text)
+        and "informe" not in paragraph_text
+        and "report" not in paragraph_text
     ]
     if image_links:
         return image_links
-    return [href for href, _, _ in links]
+    return [href for href, _ in links]
 
 
 def _sanitize_filename(name: str) -> str:
