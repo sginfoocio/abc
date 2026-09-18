@@ -178,6 +178,66 @@ cuando los IDs aparecen.
 
 ---
 
+## NAS Synology: sincronización de imágenes
+
+Las imágenes organizadas en `repo/images/` se sincronizan con el Synology
+mediante el servicio rsync. El módulo remoto validado es `Fotos` y el destino
+corresponde a la carpeta compartida `/volume1/Fotos`.
+
+### Comprobar conectividad y módulo
+
+Desde el equipo que realiza la sincronización:
+
+```powershell
+Test-NetConnection 188.227.143.110 -Port 873
+rsync rsync://188.227.143.110/
+```
+
+Debe aparecer el módulo `Fotos`. La conexión rsync usa el usuario configurado
+en Synology, por ejemplo `sync_images`.
+
+### Prueba sin modificar el NAS
+
+Antes de copiar datos, ejecutar un `dry-run`:
+
+```powershell
+rsync -avn --itemize-changes --stats `
+   --exclude='20??-??-??/***' `
+   --exclude='*.zip' `
+   repo/images/ `
+   sync_images@188.227.143.110::Fotos/
+```
+
+Las exclusiones evitan copiar las carpetas temporales por fecha y los ZIP
+descargados. En la prueba validada se detectaron 1.202 archivos y unos 3,77 GB
+para sincronizar, sin borrar archivos remotos.
+
+### Sincronización real
+
+Cuando el `dry-run` sea correcto:
+
+```powershell
+rsync -av --partial `
+   --exclude='20??-??-??/***' `
+   --exclude='*.zip' `
+   repo/images/ `
+   sync_images@188.227.143.110::Fotos/
+```
+
+`--partial` permite reanudar transferencias interrumpidas. No se usa `--delete`,
+por lo que la sincronización no elimina contenido existente en el NAS.
+
+### Requisitos del Synology
+
+- Servicio rsync habilitado.
+- Módulo compartido `Fotos` publicado.
+- Usuario rsync con permiso de lectura/escritura en `Fotos`.
+- Puerto TCP `873` accesible desde el servidor Docker.
+- Si el acceso se realiza por Internet, limitar la regla WAN a la IP pública
+   del servidor y preferir una VPN frente a exponer rsync directamente.
+
+---
+
 ## 🔍 Logs y Diagnostico
 
 ### Ver qué correos se procesaron

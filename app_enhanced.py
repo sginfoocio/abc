@@ -23,6 +23,8 @@ from db_config import load_db_config, load_env_file
 from transform_luxottica_masterdata import (
     build_brand_dictionary_from_db,
     build_color_dictionary_from_db,
+    build_shape_dictionary_from_db,
+    EXPECTED_OUTPUT_COLUMNS,
     build_executive_summary_markdown,
     transform_masterdata,
 )
@@ -54,6 +56,8 @@ AUTH_REMEMBER_DAYS_ENV = "AUTH_REMEMBER_DAYS"
 AUTH_REMEMBER_DAYS_DEFAULT = 30
 AUTH_COOKIE_NAME = "abc_auth_session"
 AUTH_PASSWORD_ENV = "APP_PASSWORD"
+MASTERDATA_USERNAME_ENV = "MASTERDATA_USERNAME"
+MASTERDATA_PASSWORD_ENV = "MASTERDATA_PASSWORD"
 LUXOPTICA_URL_ENV = "LUXOPTICA_URL"
 LUXOPTICA_USER_ENV = "LUXOPTICA_USERNAME"
 LUXOPTICA_PASSWORD_ENV = "LUXOPTICA_PASSWORD"
@@ -66,6 +70,27 @@ M365_CLIENT_ID_ENV = "M365_CLIENT_ID"
 M365_CLIENT_SECRET_ENV = "M365_CLIENT_SECRET"
 M365_MAILBOX_ENV = "M365_MAILBOX"
 M365_DOWNLOAD_ROOT_ENV = "M365_DOWNLOAD_ROOT"
+MASTERDATA_DICTIONARY_FILE = Path(__file__).resolve().parent / "docs" / "MasterData" / "masterdata_dictionary.json"
+MASTERDATA_DOWNLOAD_COLUMNS = [
+    "Barcode",
+    "Categoría",
+    "Marca",
+    "Colección",
+    "Modelo",
+    "Color",
+    "Calibre",
+    "Ancho Puente",
+    "Longitud Varilla",
+    "Género",
+    "Color Frontal",
+    "Color Lente",
+    "Forma",
+    "Material Principal",
+    "Fotocromático",
+    "Polarizado",
+    "PVO",
+    "PVP",
+]
 ALERT_RECIPIENT_EMAIL_ENV = "ALERT_RECIPIENT_EMAIL"
 ALERT_RECIPIENT_EMAIL_DEFAULT = "roberto@diagonaleyewear.com"
 ALERT_RECIPIENT_EMAILS_EXTRA = ["virginia.nunez@diagonaleyewear.com"]
@@ -104,7 +129,72 @@ def load_odoo_snapshot_cached():
 @st.cache_data(ttl=300)
 def load_masterdata_reference_maps():
     """Carga diccionarios de apoyo para transformacion MASTERDATA."""
-    return build_color_dictionary_from_db(), build_brand_dictionary_from_db()
+    return (
+        build_color_dictionary_from_db(),
+        build_brand_dictionary_from_db(),
+        build_shape_dictionary_from_db(),
+    )
+
+
+def load_masterdata_dictionary() -> list[dict[str, str]]:
+    if not MASTERDATA_DICTIONARY_FILE.exists():
+        return []
+    try:
+        payload = json.loads(MASTERDATA_DICTIONARY_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    return payload if isinstance(payload, list) else payload.get("rules", [])
+
+
+def save_masterdata_dictionary(rules: list[dict[str, str]]) -> None:
+    MASTERDATA_DICTIONARY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    MASTERDATA_DICTIONARY_FILE.write_text(
+        json.dumps({"rules": rules}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def render_master_dictionary_page() -> None:
+    render_sidebar_shell("Master Data")
+    st.title("Diccionario Masterdata")
+    st.caption("Define transformaciones personalizadas por columna y valor exacto.")
+    st.info("Las columnas del Excel origen son fijas y se cargan automáticamente.")
+    source_columns = sorted(EXPECTED_OUTPUT_COLUMNS, key=str.casefold)
+
+    rules = load_masterdata_dictionary()
+    editor_df = pd.DataFrame(rules, columns=["Columna", "Valor", "Transformado"])
+    edited_df = st.data_editor(
+        editor_df,
+        column_config={
+            "Columna": st.column_config.SelectboxColumn(
+                "Columna",
+                options=source_columns,
+                required=True,
+            ),
+            "Valor": st.column_config.TextColumn("Valor", required=True),
+            "Transformado": st.column_config.TextColumn("Transformado", required=True),
+        },
+        num_rows="dynamic",
+        hide_index=True,
+        key="masterdata_dictionary_editor",
+    )
+    if st.button("Guardar diccionario", type="primary"):
+        clean_rules = []
+        for row in edited_df.fillna("").to_dict("records"):
+            rule = {key: str(row.get(key, "")).strip() for key in ["Columna", "Valor", "Transformado"]}
+            if any(rule.values()):
+                if not all(rule.values()):
+                    st.error("Cada regla debe tener Columna, Valor y Transformado.")
+                    return
+                clean_rules.append(rule)
+        save_masterdata_dictionary(clean_rules)
+        st.success(f"Diccionario guardado: {len(clean_rules)} regla(s).")
+        st.rerun()
+
+    if rules:
+        st.info(f"Reglas activas: {len(rules)}. Se aplican antes de los diccionarios de Odoo.")
+    else:
+        st.info("No hay reglas personalizadas todavía.")
 
 
 def load_masterdata_file(file_source) -> pd.DataFrame:
@@ -590,6 +680,21 @@ def _get_auth_credentials() -> tuple[str, str]:
     return username, password
 
 
+def _get_auth_users() -> dict[str, dict[str, str]]:
+    load_env_file()
+    users: dict[str, dict[str, str]] = {}
+    admin_user = os.getenv(AUTH_USERNAME_ENV, "").strip()
+    admin_password = os.getenv(AUTH_PASSWORD_ENV, "")
+    if admin_user and admin_password:
+        users[admin_user] = {"password": admin_password, "role": "admin"}
+
+    masterdata_user = os.getenv(MASTERDATA_USERNAME_ENV, "").strip()
+    masterdata_password = os.getenv(MASTERDATA_PASSWORD_ENV, "")
+    if masterdata_user and masterdata_password and masterdata_user not in users:
+        users[masterdata_user] = {"password": masterdata_password, "role": "masterdata"}
+    return users
+
+
 def _get_auth_cookie_secret(expected_password: str) -> str:
     return os.getenv(AUTH_COOKIE_SECRET_ENV) or expected_password
 
@@ -636,10 +741,10 @@ def _render_login() -> None:
     st.title(APP_TITLE)
     st.subheader("Acceso restringido")
 
-    expected_user, expected_password = _get_auth_credentials()
-    if not expected_user or not expected_password:
+    users = _get_auth_users()
+    if not users:
         st.error(
-            f"Autenticación no configurada. Define {AUTH_USERNAME_ENV} y {AUTH_PASSWORD_ENV}."
+            f"Autenticación no configurada. Define {AUTH_USERNAME_ENV}/{AUTH_PASSWORD_ENV}."
         )
         st.stop()
 
@@ -651,13 +756,13 @@ def _render_login() -> None:
         submitted = st.form_submit_button("Entrar")
 
     if submitted:
-        valid_user = hmac.compare_digest(username, expected_user)
-        valid_password = hmac.compare_digest(password, expected_password)
-        if valid_user and valid_password:
+        user_config = users.get(username)
+        if user_config and hmac.compare_digest(password, user_config["password"]):
             st.session_state["authenticated"] = True
             st.session_state["auth_user"] = username
+            st.session_state["auth_role"] = user_config["role"]
             if recordarme:
-                secret = _get_auth_cookie_secret(expected_password)
+                secret = _get_auth_cookie_secret(os.getenv(AUTH_PASSWORD_ENV, ""))
                 token = _make_auth_token(username, secret, remember_days)
                 _get_cookie_controller().set(
                     AUTH_COOKIE_NAME, token, max_age=remember_days * 86400
@@ -672,16 +777,24 @@ def require_authentication() -> None:
     if st.session_state.get("authenticated", False):
         return
 
-    expected_user, expected_password = _get_auth_credentials()
-    if expected_user and expected_password:
+    users = _get_auth_users()
+    if users:
         token = _get_cookie_controller().get(AUTH_COOKIE_NAME)
-        secret = _get_auth_cookie_secret(expected_password)
-        if token and _verify_auth_token(token, expected_user, secret):
-            st.session_state["authenticated"] = True
-            st.session_state["auth_user"] = expected_user
-            return
+        secret = _get_auth_cookie_secret(os.getenv(AUTH_PASSWORD_ENV, ""))
+        for expected_user, user_config in users.items():
+            if token and _verify_auth_token(token, expected_user, secret):
+                st.session_state["authenticated"] = True
+                st.session_state["auth_user"] = expected_user
+                st.session_state["auth_role"] = user_config["role"]
+                return
 
     _render_login()
+
+
+def require_admin_access() -> None:
+    if st.session_state.get("auth_role") != "admin":
+        st.error("Este apartado requiere un usuario administrador.")
+        st.stop()
 
 def get_product_stockout_periods(product_id: int, engine) -> list:
     """Obtiene períodos de agotamiento de un producto"""
@@ -805,6 +918,7 @@ def render_home_page() -> None:
 
 def render_settings_page() -> None:
     render_sidebar_shell("Configuración")
+    require_admin_access()
     st.title("Configuración")
     st.caption("Guarda credenciales de integración en el archivo .env local del proyecto.")
 
@@ -900,6 +1014,7 @@ def render_settings_page() -> None:
 
 def render_abc_page(abc_page: str | None = None) -> None:
     render_sidebar_shell("Análisis ABC")
+    require_admin_access()
     if abc_page is None:
         abc_page = "📊 Inicio"
 
@@ -1251,7 +1366,8 @@ def render_master_page(master_page: str | None = None) -> None:
         if uploaded_source is not None and st.button("Transformar fichero", type="primary"):
             with st.spinner("Transformando MASTERDATA..."):
                 source_df = load_masterdata_file(uploaded_source)
-                color_map, brand_map = load_masterdata_reference_maps()
+                st.session_state["masterdata_source_columns"] = list(source_df.columns)
+                color_map, brand_map, shape_map = load_masterdata_reference_maps()
                 whitelist_codes: set[str] = set()
                 whitelist_path = masterdata_dir / "accessory_whitelist_codes.txt"
                 if use_whitelist and whitelist_path.exists():
@@ -1265,6 +1381,8 @@ def render_master_page(master_page: str | None = None) -> None:
                     color_map,
                     accessory_whitelist=whitelist_codes,
                     brand_map=brand_map,
+                    shape_map=shape_map,
+                    dictionary_rules=load_masterdata_dictionary(),
                 )
                 st.session_state["masterdata_transform_output_df"] = output_df
                 st.session_state["masterdata_transform_report"] = transform_report.to_dict()
@@ -1310,16 +1428,35 @@ def render_master_page(master_page: str | None = None) -> None:
                 st.info("Avisos informativos")
                 for line in info_warnings:
                     st.info(line)
+            if report_dict.get("dictionary_rules_not_found"):
+                st.warning("Hay reglas del diccionario que no aparecen en este XLS:")
+                st.dataframe(
+                    pd.DataFrame(report_dict["dictionary_rules_not_found"]),
+                    hide_index=True,
+                    use_container_width=True,
+                )
+            if report_dict.get("dictionary_values_not_resolved"):
+                st.warning("Hay valores del XLS sin relación en Odoo ni en el diccionario:")
+                st.dataframe(
+                    pd.DataFrame(report_dict["dictionary_values_not_resolved"]),
+                    hide_index=True,
+                    use_container_width=True,
+                )
             if not blocking_warnings and not medium_warnings and not info_warnings:
                 st.success("Transformación completada sin incidencias críticas ni advertencias abiertas.")
             elif not blocking_warnings:
                 st.success("Transformación completada sin incidencias bloqueantes.")
 
-            export_df = normalize_result_export_schema(output_df)
+            export_df = normalize_result_export_schema(output_df).reindex(columns=MASTERDATA_DOWNLOAD_COLUMNS)
 
             st.subheader("Vista previa del MASTERDATA")
             st.caption(f"Filas en vista previa: {len(export_df):,}")
-            st.dataframe(export_df, use_container_width=True, hide_index=True)
+            preview_df = export_df.copy()
+            for column in preview_df.columns:
+                preview_df[column] = preview_df[column].map(
+                    lambda value: str(value).upper() if pd.notna(value) else ""
+                )
+            st.dataframe(preview_df, use_container_width=True, hide_index=True)
 
             executive_summary = build_executive_summary_markdown(
                 type("ReportProxy", (), {**report_dict, "to_dict": lambda self=None: report_dict})(),
@@ -1327,8 +1464,9 @@ def render_master_page(master_page: str | None = None) -> None:
                 Path(source_name).with_name(f"{Path(source_name).stem}_transformado.xlsx"),
                 None,
             )
-            download_export_df = export_df.drop(columns=["Barcode", "Categoría"], errors="ignore")
+            download_export_df = export_df.reindex(columns=MASTERDATA_DOWNLOAD_COLUMNS)
             transformed_excel = dataframe_to_excel_bytes(download_export_df)
+            transformed_csv = download_export_df.to_csv(index=False, sep=";").encode("utf-8-sig")
             discarded_csv = discarded_audit.to_csv(index=False) if discarded_audit is not None else ""
             zero_csv = zero_audit_df.to_csv(index=False) if zero_audit_df is not None else ""
             brand_csv = brand_audit_df.to_csv(index=False) if brand_audit_df is not None else ""
@@ -1338,6 +1476,7 @@ def render_master_page(master_page: str | None = None) -> None:
             col1, col2 = st.columns(2)
             with col1:
                 st.download_button("📥 Descargar fichero transformado (.xlsx)", data=transformed_excel, file_name=f"{Path(source_name).stem}_transformado.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                st.download_button("📥 Descargar fichero transformado (.csv)", data=transformed_csv, file_name=f"{Path(source_name).stem}_transformado.csv", mime="text/csv")
                 st.download_button("📥 Descargar reporte JSON", data=report_json, file_name=f"{Path(source_name).stem}_validacion.json", mime="application/json")
                 st.download_button("📥 Descargar resumen ejecutivo (.md)", data=executive_summary, file_name=f"{Path(source_name).stem}_resumen_ejecutivo.md", mime="text/markdown")
             with col2:
@@ -1661,8 +1800,13 @@ def render_master_dryrun_page() -> None:
     render_master_page("🧪 Dry-run Odoo")
 
 
+def render_master_dictionary_page_route() -> None:
+    render_master_dictionary_page()
+
+
 def render_alerta_pedidos_page() -> None:
     render_sidebar_shell("Alerta Pedidos")
+    require_admin_access()
     st.title("Alerta de Pedidos de Clientes Vigilados")
     st.caption(
         "Mantén aquí la lista de clientes a vigilar. Se busca coincidencia en el nombre del cliente "
@@ -1774,23 +1918,31 @@ ABC_HISTORY_PAGE = st.Page(render_abc_history_page, title="Histórico Semanal", 
 ABC_DETAIL_PAGE = st.Page(render_abc_detail_page, title="Análisis Detallado", icon="📉", url_path="abc-analisis")
 MASTER_IMPORT_PAGE = st.Page(render_master_import_page, title="Importador Masterdata", icon="📥", url_path="master")
 MASTER_DRYRUN_PAGE = st.Page(render_master_dryrun_page, title="Dry-run Odoo", icon="🧪", url_path="master-dry-run")
+MASTER_DICTIONARY_PAGE = st.Page(render_master_dictionary_page_route, title="Diccionario", icon="📖", url_path="master-diccionario")
 ALERTA_PEDIDOS_PAGE = st.Page(render_alerta_pedidos_page, title="Alerta Pedidos", icon="🔔", url_path="alerta-pedidos")
 SETTINGS_PAGE = st.Page(render_settings_page, title="Configuración", icon="⚙️", url_path="config")
 
 navigation = st.navigation(
-    {
-        "Inicio": [HOME_PAGE],
-        "Análisis ABC": [
-            ABC_HOME_PAGE,
-            ABC_SEARCH_PAGE,
-            ABC_REPORTS_PAGE,
-            ABC_HISTORY_PAGE,
-            ABC_DETAIL_PAGE,
-        ],
-        "Master Data": [MASTER_IMPORT_PAGE, MASTER_DRYRUN_PAGE],
-        "Alertas": [ALERTA_PEDIDOS_PAGE],
-        "Configuración": [SETTINGS_PAGE],
-    },
+    (
+        {
+            "Inicio": [HOME_PAGE],
+            "Master Data": [MASTER_IMPORT_PAGE, MASTER_DICTIONARY_PAGE, MASTER_DRYRUN_PAGE],
+        }
+        if st.session_state.get("auth_role") == "masterdata"
+        else {
+            "Inicio": [HOME_PAGE],
+            "Análisis ABC": [
+                ABC_HOME_PAGE,
+                ABC_SEARCH_PAGE,
+                ABC_REPORTS_PAGE,
+                ABC_HISTORY_PAGE,
+                ABC_DETAIL_PAGE,
+            ],
+            "Master Data": [MASTER_IMPORT_PAGE, MASTER_DICTIONARY_PAGE, MASTER_DRYRUN_PAGE],
+            "Alertas": [ALERTA_PEDIDOS_PAGE],
+            "Configuración": [SETTINGS_PAGE],
+        }
+    ),
     position="sidebar",
 )
 

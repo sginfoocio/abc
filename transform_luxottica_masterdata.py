@@ -126,6 +126,8 @@ class ValidationReport:
     unmatched_brand_names: list[str] = field(default_factory=list)
     invalid_yes_no_rows: int = 0
     anomalous_values: dict[str, list[str]] = field(default_factory=dict)
+    dictionary_rules_not_found: list[dict[str, str]] = field(default_factory=list)
+    dictionary_values_not_resolved: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -144,6 +146,8 @@ class ValidationReport:
             "unmatched_brand_names": self.unmatched_brand_names,
             "invalid_yes_no_rows": self.invalid_yes_no_rows,
             "anomalous_values": self.anomalous_values,
+            "dictionary_rules_not_found": self.dictionary_rules_not_found,
+            "dictionary_values_not_resolved": self.dictionary_values_not_resolved,
         }
 
 
@@ -259,6 +263,65 @@ def _normalize_text(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
+def apply_custom_dictionary(
+    df: pd.DataFrame,
+    dictionary_rules: list[dict[str, str]] | None = None,
+) -> tuple[pd.DataFrame, list[dict[str, str]]]:
+    """Aplica reglas exactas por columna y devuelve las reglas no encontradas."""
+    working = df.copy()
+    rules = dictionary_rules or []
+    normalized_rules: list[dict[str, str]] = []
+    for rule in rules:
+        column = _safe_text(rule.get("Columna", rule.get("column", "")))
+        source = _safe_text(rule.get("Valor", rule.get("value", "")))
+        target = _safe_text(rule.get("Transformado", rule.get("transformed", "")))
+        if column and source and target and column in working.columns:
+            normalized_rules.append({"Columna": column, "Valor": source, "Transformado": target})
+
+    not_found: list[dict[str, str]] = []
+    for rule in normalized_rules:
+        column = rule["Columna"]
+        source = rule["Valor"]
+        mask = working[column].map(lambda value: _normalize_text(value) == _normalize_text(source))
+        if not bool(mask.any()):
+            not_found.append(rule)
+            continue
+        working.loc[mask, column] = rule["Transformado"]
+    return working, not_found
+
+
+def find_dictionary_values_not_resolved(
+    df: pd.DataFrame,
+    color_map: dict[str, str],
+    shape_map: dict[str, str] | None = None,
+    dictionary_rules: list[dict[str, str]] | None = None,
+) -> list[dict[str, Any]]:
+    """Detecta valores no relacionados con Odoo ni con reglas personalizadas."""
+    custom_keys = {
+        (
+            _safe_text(rule.get("Columna", rule.get("column", ""))),
+            _normalize_text(rule.get("Valor", rule.get("value", ""))),
+        )
+        for rule in dictionary_rules or []
+    }
+    color_columns = {"Color", "Descripción del color", "Color del frontal", "Color de las lentes"}
+    shape_columns = {"Forma"}
+    unresolved: list[dict[str, Any]] = []
+    for column in [*color_columns, *shape_columns]:
+        if column not in df.columns:
+            continue
+        for value, count in df[column].map(_safe_text).value_counts().items():
+            normalized = _normalize_text(value)
+            if not normalized or (column, normalized) in custom_keys:
+                continue
+            if column in color_columns and value.upper() in color_map:
+                continue
+            if column in shape_columns and shape_map and normalized in shape_map:
+                continue
+            unresolved.append({"Columna": column, "Valor": value, "Filas": int(count)})
+    return sorted(unresolved, key=lambda item: (item["Columna"], item["Valor"]))
+
+
 def load_excel_as_text(path: Path) -> pd.DataFrame:
     df = pd.read_excel(path, dtype=str)
     df.columns = [str(c).strip() for c in df.columns]
@@ -303,6 +366,10 @@ def build_color_dictionary_from_db() -> dict[str, str]:
         FROM diagonal_product_color_dictionary d
         LEFT JOIN diagonal_product_color c ON c.id = d.color_id
         WHERE d.name IS NOT NULL
+        UNION
+        SELECT UPPER(TRIM(c.name)) AS alias, c.name AS canonical
+        FROM diagonal_product_color c
+        WHERE c.name IS NOT NULL
         """
     )
     mapping: dict[str, str] = {}
@@ -311,6 +378,33 @@ def build_color_dictionary_from_db() -> dict[str, str]:
         for alias, canonical in rows:
             if alias and canonical:
                 mapping[str(alias).strip()] = str(canonical).strip()
+    return mapping
+
+
+def build_shape_dictionary_from_db() -> dict[str, str]:
+    """Carga alias y nombres canónicos de formas desde Odoo."""
+    cfg = load_db_config()
+    url = URL.create(
+        "postgresql+psycopg2",
+        username=cfg.user,
+        password=cfg.password,
+        host=cfg.host,
+        port=cfg.port,
+        database=cfg.database,
+    )
+    engine = create_engine(url)
+    query = text(
+        """
+        SELECT LOWER(TRIM(name)) AS alias, name AS canonical
+        FROM diagonal_product_forma
+        WHERE name IS NOT NULL
+        """
+    )
+    mapping: dict[str, str] = {}
+    with engine.connect() as conn:
+        for alias, canonical in conn.execute(query).fetchall():
+            if alias and canonical:
+                mapping[str(alias)] = str(canonical).strip()
     return mapping
 
 
@@ -499,8 +593,10 @@ def normalize_gender(value: str, brand_name: str, category_hint: str) -> str:
     return "Unisex"
 
 
-def normalize_shape(value: str) -> str:
+def normalize_shape(value: str, shape_map: dict[str, str] | None = None) -> str:
     v = _normalize_text(value)
+    if shape_map and v in shape_map:
+        return shape_map[v]
     mapping = {
         "rectangular": "Rectangular",
         "cuadrada": "Cuadrada",
@@ -559,11 +655,11 @@ def normalize_color(value: str, color_map: dict[str, str]) -> str:
     if upper_raw == "NEGRO/TALCO":
         return "BLANCO"
 
-    if re.fullmatch(r"[0-9A-Z]+", upper_raw):
-        return raw
-
     if upper_raw in color_map:
         return color_map[upper_raw]
+
+    if re.fullmatch(r"[0-9A-Z]+", upper_raw):
+        return raw
 
     fallback = {
         "BLACK": "Negro",
@@ -643,9 +739,18 @@ def transform_masterdata(
     color_map: dict[str, str],
     accessory_whitelist: set[str] | None = None,
     brand_map: dict[str, str] | None = None,
+    shape_map: dict[str, str] | None = None,
+    dictionary_rules: list[dict[str, str]] | None = None,
 ) -> tuple[pd.DataFrame, ValidationReport, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     input_count = len(df)
     df = _normalize_input_column_aliases(df)
+    df, dictionary_rules_not_found = apply_custom_dictionary(df, dictionary_rules)
+    dictionary_values_not_resolved = find_dictionary_values_not_resolved(
+        df,
+        color_map,
+        shape_map=shape_map,
+        dictionary_rules=dictionary_rules,
+    )
 
     # Regla de negocio: la colección debe salir de la columna L del origen.
     if df.shape[1] > 11:
@@ -724,7 +829,7 @@ def transform_masterdata(
         derive_brand_code_from_model
     )
 
-    working["Forma"] = working["Forma"].map(normalize_shape)
+    working["Forma"] = working["Forma"].map(lambda value: normalize_shape(value, shape_map))
     working["Material del frente"] = working["Material del frente"].map(normalize_material)
 
     working["Color"] = working["Color"].map(lambda x: normalize_color(x, color_map))
@@ -837,6 +942,8 @@ def transform_masterdata(
         unmatched_brand_names=unmatched_brand_names,
         invalid_yes_no_rows=invalid_yes_no_rows,
         anomalous_values=anomalous,
+        dictionary_rules_not_found=dictionary_rules_not_found,
+        dictionary_values_not_resolved=dictionary_values_not_resolved,
     )
 
     discarded_audit = _build_audit_discarded(df)
@@ -902,6 +1009,7 @@ def main() -> None:
 
     color_map: dict[str, str] = {}
     brand_map: dict[str, str] = {}
+    shape_map: dict[str, str] = {}
     if not args.no_db_colors:
         try:
             color_map = build_color_dictionary_from_db()
@@ -915,11 +1023,18 @@ def main() -> None:
         print(f"[WARN] No se pudo cargar diccionario de marca desde BD: {exc}")
         brand_map = {}
 
+    try:
+        shape_map = build_shape_dictionary_from_db()
+    except Exception as exc:
+        print(f"[WARN] No se pudo cargar diccionario de formas desde BD: {exc}")
+        shape_map = {}
+
     result, report, discarded_audit, leading_zero_summary_df, brand_audit = transform_masterdata(
         df,
         color_map,
         accessory_whitelist=whitelist_codes,
         brand_map=brand_map,
+        shape_map=shape_map,
     )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

@@ -166,7 +166,9 @@ relación en Odoo. Para operaciones en el canal debe usarse
 
    Los originales se conservan en la carpeta del EAN. Los IDs de Farfetch y
    Miinto se consultan en Odoo desde ese EAN; solo se generan las tres vistas
-   indicadas para cada mercado. Las imágenes de Miinto se convierten a JPEG.
+   indicadas para cada mercado. Para Miinto se conserva el contenido PNG
+   original y solo se cambia la extensión del nombre a `.jpeg`, sin conversión
+   ni pérdida de calidad.
 
 ### Monitoreo:
 - Ver archivo: `docs/Luxoptica/descargas/.mail_download_state.json`

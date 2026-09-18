@@ -2,10 +2,55 @@ import unittest
 
 import pandas as pd
 
-from transform_luxottica_masterdata import transform_masterdata
+from transform_luxottica_masterdata import (
+    find_dictionary_values_not_resolved,
+    normalize_color,
+    normalize_shape,
+    transform_masterdata,
+)
 
 
 class TransformMasterdataTests(unittest.TestCase):
+    def test_color_dictionary_is_checked_before_alphanumeric_fallback(self) -> None:
+        color_map = {"BLACK": "Negro", "GREEN": "Verde", "901": "Negro"}
+
+        self.assertEqual(normalize_color("BLACK", color_map), "Negro")
+        self.assertEqual(normalize_color("GREEN", color_map), "Verde")
+        self.assertEqual(normalize_color("901", color_map), "Negro")
+
+    def test_shape_dictionary_resolves_odoo_names(self) -> None:
+        shape_map = {
+            "aviator": "Aviator",
+            "cat eye": "Cat Eye",
+            "rectangular/cuadrada": "Rectangular/Cuadrada",
+        }
+
+        self.assertEqual(normalize_shape("Aviator", shape_map), "Aviator")
+        self.assertEqual(normalize_shape("Cat Eye", shape_map), "Cat Eye")
+        self.assertEqual(normalize_shape("Rectangular/Cuadrada", shape_map), "Rectangular/Cuadrada")
+
+    def test_unresolved_dictionary_values_are_reported(self) -> None:
+        source = pd.DataFrame(
+            {
+                "Color": ["BLACK", "CUSTOM_GREEN", "UNKNOWN_COLOR"],
+                "Forma": ["Aviator", "CUSTOM_SHAPE", "UNKNOWN_SHAPE"],
+            }
+        )
+        unresolved = find_dictionary_values_not_resolved(
+            source,
+            color_map={"BLACK": "Negro"},
+            shape_map={"aviator": "Aviator"},
+            dictionary_rules=[
+                {"Columna": "Color", "Valor": "CUSTOM_GREEN", "Transformado": "Verde"},
+                {"Columna": "Forma", "Valor": "CUSTOM_SHAPE", "Transformado": "Geométrica"},
+            ],
+        )
+
+        self.assertEqual(
+            {(item["Columna"], item["Valor"]) for item in unresolved},
+            {("Color", "UNKNOWN_COLOR"), ("Forma", "UNKNOWN_SHAPE")},
+        )
+
     def _base_row(self) -> dict[str, str]:
         return {
             "Punto de venta": "0001",
