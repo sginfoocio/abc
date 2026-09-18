@@ -181,26 +181,26 @@ def _find_download_links(body: str) -> list[str]:
     from html import unescape
 
     html = unescape(body or "")
-    links: list[tuple[str, str]] = []
-    for paragraph in re.findall(r"<p\b[^>]*>(.*?)</p>", html, flags=re.IGNORECASE | re.DOTALL):
-        paragraph_text = re.sub(r"<[^>]+>", " ", paragraph).lower()
-        for match in re.finditer(
-            r"<a\b[^>]*href=[\"']([^\"']+)[\"'][^>]*>.*?</a>",
-            paragraph,
-            flags=re.IGNORECASE | re.DOTALL,
-        ):
-            links.append((match.group(1), paragraph_text))
+    links: list[tuple[str, str, str]] = []
+    anchor_pattern = re.compile(
+        r"<a\b[^>]*href=[\"']([^\"']+)[\"'][^>]*>.*?</a>",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    for match in anchor_pattern.finditer(html):
+        before = re.sub(r"<[^>]+>", " ", html[max(0, match.start() - 350) : match.start()]).lower()
+        after = re.sub(r"<[^>]+>", " ", html[match.end() : match.end() + 140]).lower()
+        links.append((match.group(1), before, after))
 
     image_links = [
         href
-        for href, paragraph_text in links
-        if ("descargar las imágenes" in paragraph_text or "download the images" in paragraph_text)
-        and "informe" not in paragraph_text
-        and "report" not in paragraph_text
+        for href, before, after in links
+        if ("descargar las imágenes" in before or "download the images" in before)
+        and "informe" not in after
+        and "report" not in after
     ]
     if image_links:
         return image_links
-    return [href for href, _ in links]
+    return [href for href, _, _ in links]
 
 
 def _sanitize_filename(name: str) -> str:
@@ -556,7 +556,8 @@ def download_luxoptica_mail_attachments(
             target_dir = root / received_at.astimezone(timezone.utc).strftime("%Y-%m-%d") / _detect_lote_from_subject(subject)
             target_dir.mkdir(parents=True, exist_ok=True)
             downloaded_from_link = False
-            for link in _find_download_links(body):
+            links = _find_download_links(body)
+            for link in links:
                 archive_path = _download_zip_link(link, target_dir)
                 if archive_path is None:
                     continue
@@ -568,6 +569,12 @@ def download_luxoptica_mail_attachments(
             if downloaded_from_link:
                 _mark_message_read(token, config.mailbox, message_id)
                 newly_processed.append(message_id)
+            else:
+                print(
+                    f"   ⚠️ Correo no leído sin ZIP de imágenes detectable: {subject or '[sin asunto]'} "
+                    f"({len(links)} enlace(s))",
+                    flush=True,
+                )
             continue
 
         attachments = _list_attachments(token, config.mailbox, message_id)
