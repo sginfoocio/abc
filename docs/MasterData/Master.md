@@ -150,9 +150,14 @@ al resultado de la ejecución actual y a las descargas generadas.
 - Conservar espacios (incluido Prada y Miu Miu).
 
 ## Reglas de color
-- Mantener formato texto.
-- No convertir color a numérico.
-- Conservar ceros iniciales.
+- La columna D `Color` contiene el código de color de Luxottica: copiarla
+  literalmente, manteniendo formato texto, ceros iniciales y códigos
+  alfanuméricos.
+- No consultar `Color` contra Odoo ni incluirlo en la alerta de valores no
+  relacionados.
+- Las columnas O y Q del origen, `Color del frontal` y `Color de las lentes`,
+  sí se normalizan mediante los diccionarios de Odoo y el diccionario
+  personalizado.
 - Consultar primero el diccionario `diagonal_product_color_dictionary` unido a
   `diagonal_product_color`.
 - Incluir también los nombres base de `diagonal_product_color` como alias.

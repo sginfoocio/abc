@@ -306,7 +306,7 @@ def find_dictionary_values_not_resolved(
         )
         for rule in dictionary_rules or []
     }
-    color_columns = {"Color", "Descripción del color", "Color del frontal", "Color de las lentes"}
+    color_columns = {"Descripción del color", "Color del frontal", "Color de las lentes"}
     shape_columns = {"Forma"}
     unresolved: list[dict[str, Any]] = []
     for column in [*color_columns, *shape_columns]:
@@ -835,7 +835,6 @@ def transform_masterdata(
     working["Forma"] = working["Forma"].map(lambda value: normalize_shape(value, shape_map))
     working["Material del frente"] = working["Material del frente"].map(normalize_material)
 
-    working["Color"] = working["Color"].map(lambda x: normalize_color(x, color_map))
     working["Descripción del color"] = working["Descripción del color"].map(lambda x: normalize_color(x, color_map))
     working["Color del frontal"] = working["Color del frontal"].map(lambda x: normalize_color(x, color_map))
     working["Color de las lentes"] = working["Color de las lentes"].map(lambda x: normalize_color(x, color_map))

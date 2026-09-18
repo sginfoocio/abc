@@ -18,6 +18,17 @@ class TransformMasterdataTests(unittest.TestCase):
         self.assertEqual(normalize_color("GREEN", color_map), "Verde")
         self.assertEqual(normalize_color("901", color_map), "Negro")
 
+    def test_color_code_is_preserved_in_masterdata(self) -> None:
+        row = self._base_row()
+        row["Color"] = "900642"
+        output, report, *_ = transform_masterdata(
+            pd.DataFrame([row]),
+            color_map={"900642": "No debe aplicarse"},
+        )
+
+        self.assertEqual(report.total_output, 1)
+        self.assertEqual(output.iloc[0]["Color"], "900642")
+
     def test_shape_dictionary_resolves_odoo_names(self) -> None:
         shape_map = {
             "aviator": "Aviator",
@@ -48,7 +59,7 @@ class TransformMasterdataTests(unittest.TestCase):
 
         self.assertEqual(
             {(item["Columna"], item["Valor"]) for item in unresolved},
-            {("Color", "UNKNOWN_COLOR"), ("Forma", "UNKNOWN_SHAPE")},
+            {("Forma", "UNKNOWN_SHAPE")},
         )
 
     def _base_row(self) -> dict[str, str]:
