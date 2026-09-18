@@ -63,6 +63,9 @@ enableXsrfProtection = true\n\
 level = info\n\
 " > ~/.streamlit/config.toml
 
+# Navegador requerido por la subida automatica a Luxottica.
+RUN python -m playwright install --with-deps chromium
+
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health', timeout=5)" || exit 1
