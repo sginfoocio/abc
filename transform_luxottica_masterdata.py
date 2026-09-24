@@ -600,45 +600,46 @@ def normalize_shape(value: str, shape_map: dict[str, str] | None = None) -> str:
     if shape_map and v in shape_map:
         return shape_map[v]
     mapping = {
-        "rectangular": "Rectangular",
-        "cuadrada": "Cuadrada",
-        "ovalada": "Ovalada",
-        "redonda": "Ovalada",
-        "pantos": "Pantos",
-        "phantos": "Pantos",
-        "aviador": "Aviador",
-        "aviator": "Aviador",
-        "ojo de gato": "Ojo de Gato",
-        "cat eye": "Ojo de Gato",
-        "mariposa": "Mariposa",
-        "irregular": "Irregular",
-        "pantalla": "Irregular",
-        "pillow": "Irregular",
-        "geometrica": "Irregular",
-        "geométrica": "Irregular",
+        "rectangular": "RECTANGULAR/CUADRADA",
+        "cuadrada": "RECTANGULAR/CUADRADA",
+        "ovalada": "REDONDA/OVALADA",
+        "redonda": "REDONDA/OVALADA",
+        "pantos": "REDONDA/OVALADA",
+        "phantos": "REDONDA/OVALADA",
+        "aviador": "AVIATOR",
+        "aviator": "AVIATOR",
+        "ojo de gato": "CAT EYE",
+        "cat eye": "CAT EYE",
+        "mariposa": "CAT EYE",
+        "imperfecta": "RECTANGULAR/CUADRADA",
+        "irregular": "RECTANGULAR/CUADRADA",
+        "pantalla": "RECTANGULAR/CUADRADA",
+        "pillow": "RECTANGULAR/CUADRADA",
+        "geometrica": "RECTANGULAR/CUADRADA",
+        "geométrica": "RECTANGULAR/CUADRADA",
     }
-    return mapping.get(v, "Irregular")
+    return mapping.get(v, "RECTANGULAR/CUADRADA")
 
 
 def normalize_material(value: str) -> str:
     v = _normalize_text(value)
     if not v:
-        return "Acetato"
+        return "ACETATO"
     if "acet" in v and "metal" in v:
-        return "Acetato y Metal"
+        return "ACETATO/METAL"
     if "acet" in v:
-        return "Acetato"
+        return "ACETATO"
     if "acero" in v:
-        return "Acero"
+        return "METAL"
     if "metal" in v:
-        return "Metal"
+        return "METAL"
     if "titan" in v:
-        return "Titanio"
+        return "TITANIO"
     if "nylon" in v:
-        return "Nylon"
+        return "ACETATO"
     if "bio" in v and ("poly" in v or "poli" in v):
-        return "Biopoliamida"
-    return "Acetato"
+        return "BIOPOLIAMIDA"
+    return "ACETATO"
 
 
 def normalize_yes_no(value: str) -> str:
@@ -660,8 +661,13 @@ def normalize_color(value: str, color_map: dict[str, str]) -> str:
     if upper_raw in color_map:
         return color_map[upper_raw]
 
-    if re.fullmatch(r"[0-9A-Z]+", upper_raw):
-        return raw
+    compact_raw = raw.replace("/", "")
+    compact_upper = upper_raw.replace("/", "")
+    if compact_upper in color_map:
+        return color_map[compact_upper]
+
+    if re.fullmatch(r"[0-9A-Z]+", compact_upper):
+        return compact_raw
 
     fallback = {
         "BLACK": "Negro",
@@ -679,7 +685,7 @@ def normalize_color(value: str, color_map: dict[str, str]) -> str:
         if src in upper_raw:
             return dst
 
-    return raw
+    return compact_raw
 
 
 def normalize_category(value: str) -> str:
@@ -845,6 +851,7 @@ def transform_masterdata(
 
     working["Forma"] = working["Forma"].map(lambda value: normalize_shape(value, shape_map))
     working["Material del frente"] = working["Material del frente"].map(normalize_material)
+    working["Color"] = working["Color"].map(lambda value: _safe_text(value).replace("/", ""))
 
     working["Descripción del color"] = working["Descripción del color"].map(lambda x: normalize_color(x, color_map))
     working["Color del frontal"] = working["Color del frontal"].map(lambda x: normalize_color(x, color_map))

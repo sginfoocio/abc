@@ -5,6 +5,7 @@ import pandas as pd
 from transform_luxottica_masterdata import (
     find_dictionary_values_not_resolved,
     normalize_color,
+    normalize_material,
     normalize_shape,
     transform_masterdata,
 )
@@ -17,6 +18,9 @@ class TransformMasterdataTests(unittest.TestCase):
         self.assertEqual(normalize_color("BLACK", color_map), "Negro")
         self.assertEqual(normalize_color("GREEN", color_map), "Verde")
         self.assertEqual(normalize_color("901", color_map), "Negro")
+
+    def test_supplier_color_removes_slashes(self) -> None:
+        self.assertEqual(normalize_color("C395/3", {}), "C3953")
 
     def test_inferred_category_is_normalized_to_monturas(self) -> None:
         row = self._base_row()
@@ -39,6 +43,15 @@ class TransformMasterdataTests(unittest.TestCase):
         self.assertEqual(report.total_output, 1)
         self.assertEqual(output.iloc[0]["Color"], "900642")
 
+    def test_supplier_color_slash_is_removed_from_transformed_output(self) -> None:
+        row = self._base_row()
+        row["Color"] = "C395/3"
+
+        output, report, *_ = transform_masterdata(pd.DataFrame([row]), color_map={})
+
+        self.assertEqual(report.total_output, 1)
+        self.assertEqual(output.iloc[0]["Color"], "C3953")
+
     def test_shape_dictionary_resolves_odoo_names(self) -> None:
         shape_map = {
             "aviator": "Aviator",
@@ -49,6 +62,11 @@ class TransformMasterdataTests(unittest.TestCase):
         self.assertEqual(normalize_shape("Aviator", shape_map), "Aviator")
         self.assertEqual(normalize_shape("Cat Eye", shape_map), "Cat Eye")
         self.assertEqual(normalize_shape("Rectangular/Cuadrada", shape_map), "Rectangular/Cuadrada")
+
+    def test_irregular_shape_and_material_rules_are_canonicalized(self) -> None:
+        self.assertEqual(normalize_shape("Irregular"), "RECTANGULAR/CUADRADA")
+        self.assertEqual(normalize_material("Nylon"), "ACETATO")
+        self.assertEqual(normalize_material("Acetato y Metal"), "ACETATO/METAL")
 
     def test_unresolved_dictionary_values_are_reported(self) -> None:
         source = pd.DataFrame(

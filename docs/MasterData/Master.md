@@ -98,7 +98,7 @@ Se han incorporado inicialmente las relaciones detectadas en la revisión:
 - `Forma`: Aviador -> `AVIATOR`; Cuadrada, Irregular, Pillow, Rectangular y
   Square -> `RECTANGULAR/CUADRADA`; Mariposa y Ojo de gato -> `CAT EYE`;
   Ovalada, Pantos y Redonda -> `REDONDA/OVALADA`.
-- `Material del frente`: `Acero` -> `METAL`.
+- `Material del frente`: `Acero` -> `METAL`; `Nylon` -> `ACETATO`; `Acetato y Metal` -> `ACETATO/METAL`.
 - `PVP sugerido`: `Todo vacio` -> vacío.
 
 Si una regla guardada no aparece en el XLS cargado, la aplicación muestra una
@@ -150,9 +150,9 @@ al resultado de la ejecución actual y a las descargas generadas.
 - Conservar espacios (incluido Prada y Miu Miu).
 
 ## Reglas de color
-- La columna D `Color` contiene el código de color de Luxottica: copiarla
-  literalmente, manteniendo formato texto, ceros iniciales y códigos
-  alfanuméricos.
+- La columna D `Color` contiene el código de color de Luxottica: conservarlo
+  como texto, manteniendo ceros iniciales y códigos alfanuméricos, pero
+  eliminar `/` de los códigos compuestos (por ejemplo, `C395/3` -> `C3953`).
 - No consultar `Color` contra Odoo ni incluirlo en la alerta de valores no
   relacionados.
 - Las columnas O y Q del origen, `Color del frontal` y `Color de las lentes`,
@@ -190,44 +190,39 @@ Todo producto infantil debe quedar en Niño.
 
 ## Reglas de categoría
 Mapear solo a:
-- Gafas de vista
+- MONTURAS
 - Gafas de sol
+
+En la práctica, la categoría de monturas se normaliza a `MONTURAS` para
+alinearlo con el valor canónico esperado por Odoo.
 
 ## Reglas de forma
 - Consultar el catálogo `diagonal_product_forma` de Odoo.
 - Normalizar el valor de entrada y buscarlo en el diccionario de formas.
 - Conservar el nombre canónico definido en Odoo.
-- Ejemplos: `Aviator` -> `Aviator`, `Cat Eye` -> `Cat Eye`.
-- Si no existe correspondencia, aplicar el mapa de respaldo y usar `Irregular`
-  cuando no sea posible determinar la forma.
+- Ejemplos: `Aviator` -> `AVIATOR`, `Cat Eye` -> `CAT EYE`.
+- Si no existe correspondencia, aplicar el mapa de respaldo y usar
+  `RECTANGULAR/CUADRADA` cuando no sea posible determinar la forma con
+  precisión.
 
-Formas canónicas actualmente disponibles en Odoo:
-- Aviator
-- Cat Eye
-- Oversize
-- Rectangular/Cuadrada
-- Redonda/Ovalada
-- Butterfly
-- Geométrica
-- Piloto
-- Pantos
-- Rectangular
-- Cuadrada
-- Ovalada
-- Redonda
-- Visor
-- Shield
-- Máscara
+Formas canónicas actualmente disponibles en la transformación:
+- AVIATOR
+- CAT EYE
+- RECTANGULAR/CUADRADA
+- REDONDA/OVALADA
 
 ## Reglas de materiales
 Mapear a:
-- Acetato
-- Metal
-- Acero
-- Acetato y Metal
-- Titanio
-- Nylon
-- Biopoliamida
+- ACETATO
+- METAL
+- ACETATO/METAL
+- TITANIO
+- BIOPOLIAMIDA
+
+Normas vigentes en la transformación:
+- `Nylon` -> `ACETATO`
+- `Acetato y Metal` -> `ACETATO/METAL`
+- `Acero` -> `METAL`
 
 ## Columna de colección
 - Se toma de la columna L (`Nombre del modelo`) del archivo origen.
