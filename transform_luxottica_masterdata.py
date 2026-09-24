@@ -82,7 +82,7 @@ VALID_MATERIALS = {
     "Nylon",
     "Biopoliamida",
 }
-VALID_CATEGORIES = {"Gafas de vista", "Gafas de sol"}
+VALID_CATEGORIES = {"MONTURAS", "Gafas de sol"}
 BRAND_NAME_ALIASES = {
     "dolce & gabbana": "Dolce Gabbana",
     "dolce e gabbana": "Dolce Gabbana",
@@ -682,6 +682,17 @@ def normalize_color(value: str, color_map: dict[str, str]) -> str:
     return raw
 
 
+def normalize_category(value: str) -> str:
+    v = _normalize_text(value)
+    if not v:
+        return "MONTURAS"
+    if v in {"gafas de vista", "monturas", "monto"}:
+        return "MONTURAS"
+    if v == "gafas de sol":
+        return "Gafas de sol"
+    return v
+
+
 def infer_category(row: pd.Series) -> str:
     lens_color = _normalize_text(row.get("Color de las lentes", ""))
     model_type = _normalize_text(row.get("Tipo", ""))
@@ -690,7 +701,7 @@ def infer_category(row: pd.Series) -> str:
         return "Gafas de sol"
     if "sol" in model_type:
         return "Gafas de sol"
-    return "Gafas de vista"
+    return "MONTURAS"
 
 
 def mark_accessory(row: pd.Series, accessory_whitelist: set[str] | None = None) -> bool:
@@ -815,10 +826,10 @@ def transform_masterdata(
     working.loc[is_rb_junior, "Género"] = "Niño"
 
     inferred_category = working.apply(infer_category, axis=1)
-    working["Categoría"] = inferred_category
+    working["Categoría"] = inferred_category.map(normalize_category)
 
     rb_junior_sol = is_rb_junior & working["Categoría"].eq("Gafas de sol")
-    rb_junior_vista = is_rb_junior & working["Categoría"].eq("Gafas de vista")
+    rb_junior_vista = is_rb_junior & working["Categoría"].eq("MONTURAS")
     working.loc[rb_junior_sol, "Código de marca"] = "RJ"
     working.loc[rb_junior_vista, "Código de marca"] = "RB"
 
@@ -839,7 +850,7 @@ def transform_masterdata(
     working["Color del frontal"] = working["Color del frontal"].map(lambda x: normalize_color(x, color_map))
     working["Color de las lentes"] = working["Color de las lentes"].map(lambda x: normalize_color(x, color_map))
 
-    is_vista = working["Categoría"].eq("Gafas de vista")
+    is_vista = working["Categoría"].eq("MONTURAS")
     working.loc[is_vista, "Color de las lentes"] = ""
     working.loc[is_vista, "Material de las lentes"] = ""
 

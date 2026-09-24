@@ -18,6 +18,16 @@ class TransformMasterdataTests(unittest.TestCase):
         self.assertEqual(normalize_color("GREEN", color_map), "Verde")
         self.assertEqual(normalize_color("901", color_map), "Negro")
 
+    def test_inferred_category_is_normalized_to_monturas(self) -> None:
+        row = self._base_row()
+        row["Color de las lentes"] = ""
+        row["Tipo"] = "Aro completo"
+
+        output, report, _, _, _ = transform_masterdata(pd.DataFrame([row]), color_map={})
+
+        self.assertEqual(report.total_output, 1)
+        self.assertEqual(output.iloc[0]["Categoría"], "MONTURAS")
+
     def test_color_code_is_preserved_in_masterdata(self) -> None:
         row = self._base_row()
         row["Color"] = "900642"
