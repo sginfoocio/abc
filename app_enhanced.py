@@ -36,6 +36,7 @@ from validate_masterdata_odoo_dryrun import (
 from graph_mail_downloader import (
     download_luxoptica_mail_attachments,
     load_m365_config,
+    _refresh_pending_market_images,
     send_alert_email,
     validate_m365_config,
 )
@@ -439,6 +440,74 @@ def _extract_luxoptica_products(df: pd.DataFrame) -> list[dict[str, str]]:
 def _extract_clean_eans(df: pd.DataFrame) -> list[str]:
     """Extrae EAN limpios desde Barcode sin prefijo y sin duplicados."""
     return [product["ean"] for product in _extract_luxoptica_products(df)]
+
+
+def _load_market_pending_rows(images_root: Path) -> list[dict[str, object]]:
+    pending_path = images_root / ".market_pending.json"
+    if not pending_path.exists():
+        return []
+
+    try:
+        payload = json.loads(pending_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+
+    if not isinstance(payload, dict):
+        return []
+
+    rows: list[dict[str, object]] = []
+    for source_name, entry in payload.items():
+        if not isinstance(entry, dict):
+            continue
+        source = Path(source_name)
+        try:
+            relative_parts = source.relative_to(images_root).parts
+        except ValueError:
+            relative_parts = source.parts
+        rows.append(
+            {
+                "Modelo": relative_parts[0] if relative_parts else "",
+                "EAN": str(entry.get("ean", "")),
+                "Archivo": source.name,
+                "Mercados pendientes": ", ".join(entry.get("missing_markets", [])),
+                "Ruta": source_name,
+            }
+        )
+    return rows
+
+
+@st.cache_data(ttl=30)
+def _load_image_catalog(images_root: Path) -> pd.DataFrame:
+    image_extensions = {".jpg", ".jpeg", ".png"}
+    rows: list[dict[str, object]] = []
+    if not images_root.exists():
+        return pd.DataFrame(columns=["Modelo", "EAN", "Mercado", "Archivo", "Ruta", "Descargada", "Fecha"])
+
+    for image_path in images_root.rglob("*"):
+        if not image_path.is_file() or image_path.suffix.lower() not in image_extensions:
+            continue
+        relative = image_path.relative_to(images_root)
+        if len(relative.parts) < 3:
+            continue
+        model, ean = relative.parts[:2]
+        market = relative.parts[2] if relative.parts[2] in {"Farfetch", "Miinto"} else "Original"
+        rows.append(
+            {
+                "Modelo": model,
+                "EAN": ean,
+                "Mercado": market,
+                "Archivo": image_path.name,
+                "Ruta": str(image_path),
+                "Descargada": image_path.stat().st_mtime,
+                "Fecha": datetime.fromtimestamp(image_path.stat().st_mtime).strftime("%d/%m/%Y %H:%M"),
+            }
+        )
+
+    catalog = pd.DataFrame(
+        rows,
+        columns=["Modelo", "EAN", "Mercado", "Archivo", "Ruta", "Descargada", "Fecha"],
+    )
+    return catalog.sort_values("Descargada", ascending=False).reset_index(drop=True)
 
 
 def _chunk_list(items: list[str], chunk_size: int) -> list[list[str]]:
@@ -1353,6 +1422,178 @@ def render_abc_page(abc_page: str | None = None) -> None:
     render_footer()
 
 
+def render_luxoptica_pending_panel() -> None:
+    st.subheader("Imágenes pendientes de procesar")
+    images_root = Path(__file__).resolve().parent / "repo" / "images"
+    pending_rows = _load_market_pending_rows(images_root)
+    if not pending_rows:
+        st.success("No hay imágenes pendientes de procesar.")
+        return
+
+    pending_df = pd.DataFrame(pending_rows)
+    metric_col, action_col = st.columns([3, 2])
+    with metric_col:
+        st.metric("Imágenes pendientes", len(pending_df))
+        st.caption(f"{pending_df['EAN'].nunique()} EAN con copias de mercado pendientes.")
+    with action_col:
+        st.write("")
+        if st.button(
+            "Procesar pendientes ahora",
+            type="primary",
+            icon=":material/refresh:",
+            key="process_market_pending",
+        ):
+            with st.spinner("Consultando Odoo y creando copias de mercado..."):
+                try:
+                    completed, created = _refresh_pending_market_images(images_root)
+                except Exception as exc:
+                    st.error(f"No se pudieron procesar las imágenes pendientes: {exc}")
+                else:
+                    st.success(
+                        f"Proceso completado: {created} copias creadas y "
+                        f"{completed} imágenes resueltas."
+                    )
+                    st.rerun()
+
+    st.dataframe(
+        pending_df,
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "Ruta": st.column_config.TextColumn("Ruta", width="large"),
+        },
+    )
+
+    st.markdown("#### Visor de imágenes pendientes")
+    selected_image_name = st.selectbox(
+        "Selecciona una imagen",
+        options=pending_df["Archivo"].tolist(),
+        key="market_pending_image_selector",
+    )
+    selected_row = pending_df.loc[pending_df["Archivo"] == selected_image_name].iloc[0]
+    selected_path = Path(str(selected_row["Ruta"]))
+    if not selected_path.is_file() and len(selected_path.parts) >= 3:
+        selected_path = images_root.joinpath(*selected_path.parts[-3:])
+
+    if selected_path.is_file():
+        st.image(
+            str(selected_path),
+            caption=(
+                f"{selected_row['Modelo']} | EAN {selected_row['EAN']} | "
+                f"Pendiente: {selected_row['Mercados pendientes']}"
+            ),
+            width="stretch",
+        )
+    else:
+        st.warning(f"No se encuentra el archivo en el servidor: {selected_path}")
+
+
+def render_luxoptica_images_page() -> None:
+    render_sidebar_shell("Repositorio de imágenes")
+    st.title("Imágenes")
+    st.caption("Explora las imágenes descargadas por modelo, EAN y mercado.")
+
+    images_root = Path(__file__).resolve().parent / "repo" / "images"
+    image_catalog = _load_image_catalog(images_root)
+
+    st.subheader("Visor de imágenes")
+    search_ean = st.text_input(
+        "Buscar por EAN",
+        placeholder="Introduce el EAN completo o una parte",
+        key="luxoptica_search_ean",
+    ).strip()
+    market_filter = st.selectbox(
+        "Mercado",
+        options=["Todos", "Original", "Farfetch", "Miinto"],
+        key="luxoptica_market_filter",
+    )
+
+    filtered_catalog = image_catalog
+    if search_ean:
+        filtered_catalog = filtered_catalog[
+            filtered_catalog["EAN"].str.contains(search_ean, case=False, na=False)
+        ]
+    if market_filter != "Todos":
+        filtered_catalog = filtered_catalog[filtered_catalog["Mercado"] == market_filter]
+
+    if filtered_catalog.empty:
+        st.info("No hay imágenes que coincidan con la búsqueda.")
+    else:
+        st.caption(
+            f"{len(filtered_catalog):,} imágenes | "
+            f"{filtered_catalog['EAN'].nunique():,} EAN | "
+            f"{filtered_catalog['Modelo'].nunique():,} modelos"
+        )
+        page_size = 24
+        total_pages = max(1, (len(filtered_catalog) + page_size - 1) // page_size)
+        current_page = min(
+            st.session_state.get("luxoptica_gallery_page", 1),
+            total_pages,
+        )
+        page_col, size_col = st.columns([3, 1])
+        with page_col:
+            current_page = st.number_input(
+                "Página",
+                min_value=1,
+                max_value=total_pages,
+                value=current_page,
+                step=1,
+                key="luxoptica_gallery_page_input",
+            )
+        with size_col:
+            st.caption(f"{total_pages} página(s) de {page_size} miniaturas")
+        st.session_state["luxoptica_gallery_page"] = int(current_page)
+
+        start = (int(current_page) - 1) * page_size
+        page_catalog = filtered_catalog.iloc[start : start + page_size]
+        thumbnail_columns = st.columns(4)
+        for position, (row_index, image_row) in enumerate(page_catalog.iterrows()):
+            with thumbnail_columns[position % 4]:
+                st.image(image_row["Ruta"], width="stretch")
+                st.caption(
+                    f"{image_row['EAN']} · {image_row['Mercado']}\n"
+                    f"{image_row['Archivo']} · {image_row['Fecha']}"
+                )
+                if st.button(
+                    "Ver imagen",
+                    key=f"luxoptica_view_{row_index}",
+                    width="stretch",
+                ):
+                    st.session_state["luxoptica_selected_image"] = str(image_row["Ruta"])
+                    st.rerun()
+
+        selected_path = st.session_state.get("luxoptica_selected_image")
+        if selected_path and selected_path in set(filtered_catalog["Ruta"]):
+            selected_row = filtered_catalog[filtered_catalog["Ruta"] == selected_path].iloc[0]
+            st.markdown("#### Imagen ampliada")
+            viewer_col, details_col = st.columns([2, 1])
+            with viewer_col:
+                st.image(selected_path, caption=selected_row["Archivo"], width="stretch")
+            with details_col:
+                st.write(f"**Modelo:** {selected_row['Modelo']}")
+                st.write(f"**EAN:** {selected_row['EAN']}")
+                st.write(f"**Mercado:** {selected_row['Mercado']}")
+                st.write(f"**Fecha:** {selected_row['Fecha']}")
+                st.write(f"**Archivo:** {selected_row['Archivo']}")
+
+        st.markdown("#### Estructura encontrada")
+        st.dataframe(
+            filtered_catalog[["Modelo", "EAN", "Mercado", "Archivo", "Fecha"]],
+            hide_index=True,
+            width="stretch",
+        )
+
+    render_footer()
+
+
+def render_luxoptica_pending_page() -> None:
+    render_sidebar_shell("Repositorio de imágenes")
+    st.title("Pendiente Luxoptica")
+    st.caption("Revisa y procesa manualmente las copias pendientes para Farfetch y Miinto.")
+    render_luxoptica_pending_panel()
+    render_footer()
+
+
 def render_master_page(master_page: str | None = None) -> None:
     render_sidebar_shell("Master Data")
     if master_page is None:
@@ -1683,6 +1924,8 @@ def render_master_page(master_page: str | None = None) -> None:
                         for file_path in m365_summary["saved_paths"]:
                             st.write(f"- {file_path}")
 
+            render_luxoptica_pending_panel()
+
     else:
         st.title("Dry-run Odoo")
         st.caption("Usa un MASTERDATA ya transformado para clasificar altas y actualizaciones sin grabar nada.")
@@ -1922,6 +2165,8 @@ ABC_DETAIL_PAGE = st.Page(render_abc_detail_page, title="Análisis Detallado", i
 MASTER_IMPORT_PAGE = st.Page(render_master_import_page, title="Importador Masterdata", icon="📥", url_path="master")
 MASTER_DRYRUN_PAGE = st.Page(render_master_dryrun_page, title="Dry-run Odoo", icon="🧪", url_path="master-dry-run")
 MASTER_DICTIONARY_PAGE = st.Page(render_master_dictionary_page_route, title="Diccionario", icon="📖", url_path="master-diccionario")
+LUXOPTICA_IMAGES_PAGE = st.Page(render_luxoptica_images_page, title="Imágenes", icon="🖼️", url_path="repositorio-imagenes")
+LUXOPTICA_PENDING_PAGE = st.Page(render_luxoptica_pending_page, title="Pendiente Luxoptica", icon="⏳", url_path="pendiente-luxoptica")
 ALERTA_PEDIDOS_PAGE = st.Page(render_alerta_pedidos_page, title="Alerta Pedidos", icon="🔔", url_path="alerta-pedidos")
 SETTINGS_PAGE = st.Page(render_settings_page, title="Configuración", icon="⚙️", url_path="config")
 
@@ -1930,6 +2175,7 @@ navigation = st.navigation(
         {
             "Inicio": [HOME_PAGE],
             "Master Data": [MASTER_IMPORT_PAGE, MASTER_DICTIONARY_PAGE, MASTER_DRYRUN_PAGE],
+            "Repositorio de imágenes": [LUXOPTICA_IMAGES_PAGE, LUXOPTICA_PENDING_PAGE],
         }
         if st.session_state.get("auth_role") == "masterdata"
         else {
@@ -1942,6 +2188,7 @@ navigation = st.navigation(
                 ABC_DETAIL_PAGE,
             ],
             "Master Data": [MASTER_IMPORT_PAGE, MASTER_DICTIONARY_PAGE, MASTER_DRYRUN_PAGE],
+            "Repositorio de imágenes": [LUXOPTICA_IMAGES_PAGE, LUXOPTICA_PENDING_PAGE],
             "Alertas": [ALERTA_PEDIDOS_PAGE],
             "Configuración": [SETTINGS_PAGE],
         }
