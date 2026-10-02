@@ -142,17 +142,6 @@ jobs:
             mv .last-deployed-image.tmp .last-deployed-image
             echo "✅ Imagen desplegada y healthy: ${IMAGE_REF}"
 
-            echo "🗓️  Programando foto semanal ABCD..."
-            mkdir -p /opt/abcd-control/logs
-            SNAPSHOT_CRON="0 6 * * 1 cd /opt/abcd-control && docker compose exec -T abcd-app python save_abcd_weekly_snapshot.py >> /opt/abcd-control/logs/abcd-weekly-snapshot.log 2>&1 # ABCD weekly snapshot"
-            if command -v crontab >/dev/null 2>&1; then
-              # Las alertas de pedidos las ejecuta el servicio abcd-order-alerts: se retira cualquier cron legacy.
-              (crontab -l 2>/dev/null | grep -v -e 'ABCD weekly snapshot' -e 'run_alerta_pedidos.py'; echo "$SNAPSHOT_CRON") | crontab -
-              echo "✅ Cron semanal configurado: lunes 06:00 (cron legacy de alertas retirado)"
-            else
-              echo "⚠️  crontab no está disponible en el servidor; configura manualmente: $SNAPSHOT_CRON"
-            fi
-
             echo "✅ Deploy completado exitosamente"
 
   tests:
