@@ -159,8 +159,15 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pytest flake8
+          pip install uv==0.12.22
+          pip install -r requirements-dev.txt
+
+      - name: Verify dependency locks
+        run: |
+          uv pip compile requirements.in --python-version 3.11 --python-platform x86_64-unknown-linux-gnu --custom-compile-command "uv pip compile requirements.in --python-version 3.11 --python-platform x86_64-unknown-linux-gnu" -o /tmp/requirements.txt
+          uv pip compile requirements-dev.in --python-version 3.11 --python-platform x86_64-unknown-linux-gnu --custom-compile-command "uv pip compile requirements-dev.in --python-version 3.11 --python-platform x86_64-unknown-linux-gnu" -o /tmp/requirements-dev.txt
+          diff -u requirements.txt /tmp/requirements.txt
+          diff -u requirements-dev.txt /tmp/requirements-dev.txt
 
       - name: Run offline tests
         run: python -m pytest -q tests test_transform_luxottica_masterdata.py test_validate_masterdata_odoo_dryrun.py
