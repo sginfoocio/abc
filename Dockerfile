@@ -33,6 +33,7 @@ COPY --from=builder /root/.local /root/.local
 COPY app_enhanced.py .
 COPY db_loader.py .
 COPY engine.py .
+COPY abcd_snapshots.py .
 COPY auth_session.py .
 COPY db_config.py .
 COPY transform_luxottica_masterdata.py .
