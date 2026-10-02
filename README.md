@@ -8,7 +8,7 @@ Sistema inteligente que clasifica productos en 4 categorías:
 - **A**: Alta demanda → REPONER
 - **B**: Demanda media → MANTENER  
 - **C**: 60+ días sin ventas → REVISAR
-- **D**: 120+ días sin ventas → LIQUIDAR
+- **D**: 180+ días sin ventas → LIQUIDAR
 
 Con análisis único de **ventanas de agotamiento** que entiende la diferencia entre "sin demanda" vs "sin stock".
 
