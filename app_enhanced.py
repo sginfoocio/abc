@@ -41,6 +41,11 @@ from graph_mail_downloader import (
 )
 from watchlist_config import add_customer, load_watchlist, remove_customer, save_watchlist
 from check_pedidos_vigilados import find_matching_orders
+from order_alerts import (
+    OrderAlertStore,
+    build_alert_email_html,
+    import_legacy_notification_file,
+)
 from auth_session import (
     AuthStateStore,
     create_auth_token,
@@ -594,23 +599,6 @@ def _read_env_setting_any(keys: list[str], default: str = "") -> str:
         if value:
             return value
     return default
-
-
-def _build_alert_email_html(resultados: pd.DataFrame) -> str:
-    filas = "".join(
-        f"<tr><td>{row.pedido}</td><td>{row.cliente}</td><td>{row.direccion_entrega}</td>"
-        f"<td>{row.date_order}</td><td>{row.state}</td><td>{row.invoice_status}</td>"
-        f"<td>{row.amount_total}</td></tr>"
-        for row in resultados.itertuples(index=False)
-    )
-    return (
-        "<p>Se han detectado los siguientes pedidos de clientes vigilados en Odoo:</p>"
-        "<table border='1' cellpadding='4' cellspacing='0'>"
-        "<tr><th>Pedido</th><th>Cliente</th><th>Dirección entrega</th><th>Fecha</th><th>Estado</th>"
-        "<th>Estado factura</th><th>Total</th></tr>"
-        f"{filas}"
-        "</table>"
-    )
 
 
 def _upsert_env_settings(updates: dict[str, str], env_path: str | Path = ".env") -> None:
@@ -2270,19 +2258,34 @@ def render_alerta_pedidos_page() -> None:
                     st.success(f"Se han encontrado {len(resultados)} pedido(s).")
                     st.dataframe(resultados, use_container_width=True, hide_index=True)
 
-                    destinatario = _read_env_setting(ALERT_RECIPIENT_EMAIL_ENV, ALERT_RECIPIENT_EMAIL_DEFAULT)
-                    destinatarios = list(dict.fromkeys([destinatario, *ALERT_RECIPIENT_EMAILS_EXTRA]))
-                    with st.spinner(f"Enviando alerta por email a {', '.join(destinatarios)}..."):
-                        try:
-                            send_alert_email(
-                                subject=f"Alerta de pedidos vigilados ({len(resultados)})",
-                                html_body=_build_alert_email_html(resultados),
-                                to_address=destinatarios,
-                            )
-                        except Exception as exc:  # noqa: BLE001
-                            st.error(f"No se pudo enviar el email de alerta: {exc}")
-                        else:
-                            st.success(f"Email de alerta enviado a {', '.join(destinatarios)}.")
+                    alert_store = OrderAlertStore()
+                    legacy_notifications = (
+                        Path(__file__).resolve().parent / "alerta_pedidos_notificados.json"
+                    )
+                    import_legacy_notification_file(alert_store, legacy_notifications)
+                    batch = alert_store.claim_orders(resultados["pedido_id"].tolist())
+                    nuevos = resultados[resultados["pedido_id"].isin(batch.order_ids)]
+                    if nuevos.empty:
+                        st.info("Los pedidos ya están notificados o hay otra ejecución procesándolos.")
+                    else:
+                        destinatario = _read_env_setting(
+                            ALERT_RECIPIENT_EMAIL_ENV,
+                            ALERT_RECIPIENT_EMAIL_DEFAULT,
+                        )
+                        destinatarios = list(dict.fromkeys([destinatario, *ALERT_RECIPIENT_EMAILS_EXTRA]))
+                        with st.spinner(f"Enviando alerta por email a {', '.join(destinatarios)}..."):
+                            try:
+                                send_alert_email(
+                                    subject=f"Alerta de pedidos vigilados ({len(nuevos)})",
+                                    html_body=build_alert_email_html(nuevos.to_dict(orient="records")),
+                                    to_address=destinatarios,
+                                )
+                            except Exception as exc:  # noqa: BLE001
+                                alert_store.mark_failed(batch.batch_id, str(exc))
+                                st.error(f"No se pudo enviar el email de alerta: {exc}")
+                            else:
+                                alert_store.mark_sent(batch.batch_id, ", ".join(destinatarios))
+                                st.success(f"Email de alerta enviado a {', '.join(destinatarios)}.")
 
     render_footer()
 
