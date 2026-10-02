@@ -2,14 +2,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from contextlib import contextmanager
+from email.utils import parsedate_to_datetime
+from html.parser import HTMLParser
 from pathlib import Path
 import base64
+import hashlib
 import json
 import os
 import re
 import shutil
+import tempfile
+import time
+import uuid
 import zipfile
-from typing import Any
+from typing import Any, Callable, Iterator
 from urllib.parse import unquote, urlparse
 
 import requests
@@ -24,6 +31,13 @@ M365_CLIENT_ID_ENV = "M365_CLIENT_ID"
 M365_CLIENT_SECRET_ENV = "M365_CLIENT_SECRET"
 M365_MAILBOX_ENV = "M365_MAILBOX"
 M365_DOWNLOAD_ROOT_ENV = "M365_DOWNLOAD_ROOT"
+GRAPH_MAX_ATTEMPTS = 4
+GRAPH_MAX_PAGES = 1000
+MAX_DOWNLOAD_BYTES = 200 * 1024 * 1024
+MAX_ZIP_MEMBER_BYTES = 250 * 1024 * 1024
+MAX_ZIP_TOTAL_BYTES = 1024 * 1024 * 1024
+MAX_ZIP_MEMBERS = 20000
+MAX_ZIP_COMPRESSION_RATIO = 1000
 
 
 @dataclass
@@ -76,8 +90,89 @@ def _graph_headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}", "Accept": "application/json"}
 
 
+def _retry_delay(response: requests.Response, attempt: int) -> float:
+    retry_after = response.headers.get("Retry-After", "")
+    try:
+        return min(max(float(retry_after), 0), 60)
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(retry_after)
+            return min(max((retry_at - datetime.now(timezone.utc)).total_seconds(), 0), 60)
+        except (TypeError, ValueError, OverflowError):
+            return float(min(2**attempt, 30))
+
+
+def _request_with_retries(
+    request_method: Callable[..., requests.Response],
+    url: str,
+    **kwargs: Any,
+) -> requests.Response:
+    for attempt in range(GRAPH_MAX_ATTEMPTS):
+        try:
+            response = request_method(url, **kwargs)
+        except requests.RequestException:
+            if attempt + 1 >= GRAPH_MAX_ATTEMPTS:
+                raise
+            time.sleep(min(2**attempt, 30))
+            continue
+
+        if response.status_code in {408, 429, 500, 502, 503, 504}:
+            if attempt + 1 >= GRAPH_MAX_ATTEMPTS:
+                response.raise_for_status()
+            delay = _retry_delay(response, attempt)
+            response.close()
+            time.sleep(delay)
+            continue
+
+        response.raise_for_status()
+        return response
+
+    raise RuntimeError("Se agotaron los reintentos de la solicitud HTTP")
+
+
+def _validate_graph_next_link(url: str) -> None:
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or parsed.hostname != "graph.microsoft.com":
+        raise ValueError("Microsoft Graph devolvió un @odata.nextLink fuera del host permitido")
+
+
+def _list_graph_collection(
+    token: str,
+    first_url: str,
+    timeout: int = 30,
+) -> list[dict[str, Any]]:
+    headers = _graph_headers(token)
+    values: list[dict[str, Any]] = []
+    visited_urls: set[str] = set()
+    next_url: str | None = first_url
+
+    while next_url:
+        _validate_graph_next_link(next_url)
+        if next_url in visited_urls:
+            raise RuntimeError("Microsoft Graph devolvió un ciclo de paginación")
+        if len(visited_urls) >= GRAPH_MAX_PAGES:
+            raise RuntimeError("Microsoft Graph excedió el máximo de páginas permitido")
+        visited_urls.add(next_url)
+
+        response = _request_with_retries(
+            requests.get,
+            next_url,
+            headers=headers,
+            timeout=timeout,
+        )
+        payload = response.json()
+        page_values = payload.get("value", [])
+        if not isinstance(page_values, list):
+            raise RuntimeError("La colección de Microsoft Graph tiene un formato inválido")
+        values.extend(page_values)
+        next_url = payload.get("@odata.nextLink")
+
+    return values
+
+
 def _get_access_token(config: M365Config) -> str:
-    response = requests.post(
+    response = _request_with_retries(
+        requests.post,
         _token_url(config.tenant_id),
         data={
             "client_id": config.client_id,
@@ -104,14 +199,15 @@ def _inbox_messages_url(mailbox: str, top: int) -> str:
 
 
 def _list_inbox_messages(token: str, mailbox: str, top: int) -> list[dict[str, Any]]:
-    response = requests.get(_inbox_messages_url(mailbox, top), headers=_graph_headers(token), timeout=30)
-    response.raise_for_status()
-    payload = response.json()
-    return payload.get("value", [])
+    return _list_graph_collection(token, _inbox_messages_url(mailbox, top))
 
 
 def _attachments_url(mailbox: str, message_id: str) -> str:
-    return f"https://graph.microsoft.com/v1.0/users/{mailbox}/messages/{message_id}/attachments?$top=200"
+    fields = "id,name,isInline,size"
+    return (
+        f"https://graph.microsoft.com/v1.0/users/{mailbox}/messages/{message_id}/attachments"
+        f"?$select={fields}&$top=200"
+    )
 
 
 def _attachment_value_url(mailbox: str, message_id: str, attachment_id: str) -> str:
@@ -123,15 +219,16 @@ def _message_body_url(mailbox: str, message_id: str) -> str:
 
 
 def _list_attachments(token: str, mailbox: str, message_id: str) -> list[dict[str, Any]]:
-    response = requests.get(_attachments_url(mailbox, message_id), headers=_graph_headers(token), timeout=30)
-    response.raise_for_status()
-    payload = response.json()
-    return payload.get("value", [])
+    return _list_graph_collection(token, _attachments_url(mailbox, message_id))
 
 
 def _get_message_body(token: str, mailbox: str, message_id: str) -> str:
-    response = requests.get(_message_body_url(mailbox, message_id), headers=_graph_headers(token), timeout=30)
-    response.raise_for_status()
+    response = _request_with_retries(
+        requests.get,
+        _message_body_url(mailbox, message_id),
+        headers=_graph_headers(token),
+        timeout=30,
+    )
     return response.json().get("body", {}).get("content", "")
 
 
@@ -167,7 +264,8 @@ def send_alert_email(
 
 
 def _mark_message_read(token: str, mailbox: str, message_id: str) -> None:
-    response = requests.patch(
+    response = _request_with_retries(
+        requests.patch,
         f"https://graph.microsoft.com/v1.0/users/{mailbox}/messages/{message_id}",
         headers={**_graph_headers(token), "Content-Type": "application/json"},
         json={"isRead": True},
@@ -177,30 +275,53 @@ def _mark_message_read(token: str, mailbox: str, message_id: str) -> None:
 
 
 def _find_download_links(body: str) -> list[str]:
-    import re
-    from html import unescape
+    class AnchorParser(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__(convert_charrefs=True)
+            self.text_parts: list[str] = []
+            self.text_length = 0
+            self.open_anchors: list[tuple[str, int]] = []
+            self.links: list[tuple[str, int, int]] = []
 
-    html = unescape(body or "")
-    links: list[tuple[str, str, str]] = []
-    anchor_pattern = re.compile(
-        r"<a\b[^>]*href=[\"']([^\"']+)[\"'][^>]*>.*?</a>",
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    for match in anchor_pattern.finditer(html):
-        before = re.sub(r"<[^>]+>", " ", html[max(0, match.start() - 350) : match.start()]).lower()
-        after = re.sub(r"<[^>]+>", " ", html[match.end() : match.end() + 140]).lower()
-        links.append((match.group(1), before, after))
+        def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+            if tag.lower() != "a":
+                return
+            href = next((value for key, value in attrs if key.lower() == "href"), None)
+            if href:
+                self.open_anchors.append((href, self.text_length))
+
+        def handle_data(self, data: str) -> None:
+            self.text_parts.append(data)
+            self.text_length += len(data)
+
+        def handle_endtag(self, tag: str) -> None:
+            if tag.lower() == "a" and self.open_anchors:
+                href, start = self.open_anchors.pop()
+                self.links.append((href, start, self.text_length))
+
+    parser = AnchorParser()
+    parser.feed(body or "")
+    plain_text = "".join(parser.text_parts).lower()
+    links = [
+        (
+            href,
+            plain_text[max(0, start - 350) : start],
+            plain_text[start:end],
+            plain_text[end : end + 140],
+        )
+        for href, start, end in parser.links
+    ]
 
     image_links = [
         href
-        for href, before, after in links
+        for href, before, anchor_text, _after in links
         if ("descargar las imágenes" in before or "download the images" in before)
-        and "informe" not in after
-        and "report" not in after
+        and "informe" not in f"{anchor_text} {href}".lower()
+        and "report" not in f"{anchor_text} {href}".lower()
     ]
     if image_links:
         return image_links
-    return [href for href, _, _ in links]
+    return [href for href, _, _, _ in links]
 
 
 def _sanitize_filename(name: str) -> str:
@@ -214,14 +335,82 @@ def _load_state(state_file: Path) -> dict[str, Any]:
     if not state_file.exists():
         return {"processed_message_ids": []}
     try:
-        return json.loads(state_file.read_text(encoding="utf-8"))
-    except Exception:
-        return {"processed_message_ids": []}
+        payload = json.loads(state_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"No se pudo leer el estado de descarga: {state_file}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"El estado de descarga tiene un formato inválido: {state_file}")
+    return payload
 
 
 def _save_state(state_file: Path, state: dict[str, Any]) -> None:
     state_file.parent.mkdir(parents=True, exist_ok=True)
-    state_file.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=state_file.parent,
+            prefix=f".{state_file.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+            json.dump(state, temporary_file, ensure_ascii=False, indent=2)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+        os.replace(temporary_path, state_file)
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
+
+
+@contextmanager
+def _state_file_lock(state_file: Path) -> Iterator[None]:
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = state_file.with_name(f"{state_file.name}.lock")
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        lock_name = hashlib.sha256(str(state_file.resolve()).casefold().encode()).hexdigest()
+        mutex_name = f"Local\\DiagonalAbcState-{lock_name}"
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_mutex = kernel32.CreateMutexW
+        create_mutex.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+        create_mutex.restype = wintypes.HANDLE
+        wait_for_single_object = kernel32.WaitForSingleObject
+        wait_for_single_object.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        wait_for_single_object.restype = wintypes.DWORD
+        release_mutex = kernel32.ReleaseMutex
+        release_mutex.argtypes = [wintypes.HANDLE]
+        release_mutex.restype = wintypes.BOOL
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [wintypes.HANDLE]
+        close_handle.restype = wintypes.BOOL
+
+        mutex_handle = create_mutex(None, False, mutex_name)
+        if not mutex_handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            wait_result = wait_for_single_object(mutex_handle, 0xFFFFFFFF)
+            if wait_result not in (0, 0x80):
+                raise ctypes.WinError(ctypes.get_last_error())
+            try:
+                yield
+            finally:
+                release_mutex(mutex_handle)
+        finally:
+            close_handle(mutex_handle)
+    else:
+        import fcntl
+
+        with lock_path.open("a+b") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def _parse_graph_dt(value: str) -> datetime:
@@ -246,11 +435,81 @@ def _detect_lote_from_subject(subject: str) -> str:
 
 
 def _save_attachment_bytes(content: bytes, root: Path, received_at: datetime, lote: str, file_name: str) -> Path:
+    if len(content) > MAX_DOWNLOAD_BYTES:
+        raise ValueError(f"El adjunto supera el máximo permitido de {MAX_DOWNLOAD_BYTES} bytes")
     date_folder = received_at.astimezone(timezone.utc).strftime("%Y-%m-%d")
     target_dir = root / date_folder / lote
     target_dir.mkdir(parents=True, exist_ok=True)
     out_path = target_dir / _sanitize_filename(file_name)
-    out_path.write_bytes(content)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=target_dir,
+            prefix=f".{out_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+            temporary_file.write(content)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+        os.replace(temporary_path, out_path)
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
+    return out_path
+
+
+def _download_attachment_file(
+    token: str,
+    mailbox: str,
+    message_id: str,
+    attachment_id: str,
+    root: Path,
+    received_at: datetime,
+    lote: str,
+    file_name: str,
+) -> Path:
+    date_folder = received_at.astimezone(timezone.utc).strftime("%Y-%m-%d")
+    target_dir = root / date_folder / lote
+    target_dir.mkdir(parents=True, exist_ok=True)
+    out_path = target_dir / _sanitize_filename(file_name)
+    response = _request_with_retries(
+        requests.get,
+        _attachment_value_url(mailbox, message_id, attachment_id),
+        headers=_graph_headers(token),
+        timeout=60,
+        stream=True,
+    )
+    temporary_path: Path | None = None
+    try:
+        content_length = int(response.headers.get("content-length", "0") or 0)
+        if content_length > MAX_DOWNLOAD_BYTES:
+            raise ValueError(f"El adjunto supera el máximo permitido de {MAX_DOWNLOAD_BYTES} bytes")
+        downloaded_bytes = 0
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=target_dir,
+            prefix=f".{out_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                if not chunk:
+                    continue
+                downloaded_bytes += len(chunk)
+                if downloaded_bytes > MAX_DOWNLOAD_BYTES:
+                    raise ValueError(f"El adjunto supera el máximo permitido de {MAX_DOWNLOAD_BYTES} bytes")
+                temporary_file.write(chunk)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+        os.replace(temporary_path, out_path)
+    finally:
+        response.close()
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
     return out_path
 
 
@@ -377,7 +636,7 @@ def _market_pending_file(images_root: Path) -> Path:
     return images_root / ".market_pending.json"
 
 
-def _refresh_pending_market_images(images_root: Path) -> tuple[int, int]:
+def _refresh_pending_market_images_unlocked(images_root: Path) -> tuple[int, int]:
     """Reintenta crear copias de mercado para originales que aun no tenian ID."""
     pending_file = _market_pending_file(images_root)
     if not images_root.exists():
@@ -416,6 +675,14 @@ def _refresh_pending_market_images(images_root: Path) -> tuple[int, int]:
     return completed, created
 
 
+def _refresh_pending_market_images(images_root: Path) -> tuple[int, int]:
+    if not images_root.exists():
+        return 0, 0
+    state_file = images_root / ".mail_download_state.json"
+    with _state_file_lock(state_file):
+        return _refresh_pending_market_images_unlocked(images_root)
+
+
 def _extract_zip(archive_path: Path, images_root: Path) -> list[Path]:
     extracted_paths: list[Path] = []
     target_dir = images_root.resolve()
@@ -424,9 +691,22 @@ def _extract_zip(archive_path: Path, images_root: Path) -> list[Path]:
     market_ids_by_ean = _get_market_ids_by_ean(matched_eans)
 
     with zipfile.ZipFile(archive_path) as archive:
-        for member in archive.infolist():
+        members = archive.infolist()
+        if len(members) > MAX_ZIP_MEMBERS:
+            raise ValueError(f"El ZIP supera el máximo de {MAX_ZIP_MEMBERS} entradas")
+        declared_total = 0
+        extracted_total = 0
+        for member in members:
             if member.is_dir():
                 continue
+            if member.file_size > MAX_ZIP_MEMBER_BYTES:
+                raise ValueError(f"Entrada ZIP demasiado grande: {member.filename}")
+            declared_total += member.file_size
+            if declared_total > MAX_ZIP_TOTAL_BYTES:
+                raise ValueError("El ZIP supera el máximo total de extracción permitido")
+            compression_ratio = member.file_size / max(member.compress_size, 1)
+            if compression_ratio > MAX_ZIP_COMPRESSION_RATIO:
+                raise ValueError(f"Ratio de compresión ZIP excesivo: {member.filename}")
 
             file_name = _sanitize_filename(Path(member.filename).name)
             model_dir = target_dir / _model_from_image_name(file_name)
@@ -437,8 +717,31 @@ def _extract_zip(archive_path: Path, images_root: Path) -> list[Path]:
                 raise ValueError(f"Ruta insegura en ZIP: {member.filename}")
 
             destination.parent.mkdir(parents=True, exist_ok=True)
-            with archive.open(member) as source, destination.open("wb") as target:
-                target.write(source.read())
+            temporary_path: Path | None = None
+            written = 0
+            try:
+                with archive.open(member) as source, tempfile.NamedTemporaryFile(
+                    mode="wb",
+                    dir=destination.parent,
+                    prefix=f".{destination.name}.",
+                    suffix=".tmp",
+                    delete=False,
+                ) as target:
+                    temporary_path = Path(target.name)
+                    while chunk := source.read(1024 * 1024):
+                        written += len(chunk)
+                        extracted_total += len(chunk)
+                        if written > MAX_ZIP_MEMBER_BYTES or extracted_total > MAX_ZIP_TOTAL_BYTES:
+                            raise ValueError("El ZIP excedió los límites durante extracción")
+                        target.write(chunk)
+                    target.flush()
+                    os.fsync(target.fileno())
+                if written != member.file_size:
+                    raise ValueError(f"Tamaño extraído no coincide con metadatos: {member.filename}")
+                os.replace(temporary_path, destination)
+            finally:
+                if temporary_path is not None and temporary_path.exists():
+                    temporary_path.unlink()
             extracted_paths.append(destination)
             market_ids = market_ids_by_ean.get(ean, {})
             extracted_paths.extend(_create_market_images(destination, destination.parent, market_ids))
@@ -459,9 +762,14 @@ def _extract_zip(archive_path: Path, images_root: Path) -> list[Path]:
 
 
 def _download_zip_link(url: str, target_dir: Path) -> Path | None:
-    with requests.get(url, allow_redirects=True, stream=True, timeout=120) as response:
-        response.raise_for_status()
-        first_chunk = next(response.iter_content(64), b"")
+    target_dir.mkdir(parents=True, exist_ok=True)
+    with _request_with_retries(
+        requests.get,
+        url,
+        allow_redirects=True,
+        stream=True,
+        timeout=120,
+    ) as response:
         final_path = unquote(urlparse(response.url).path)
         if not final_path.lower().endswith(".zip"):
             return None
@@ -469,15 +777,30 @@ def _download_zip_link(url: str, target_dir: Path) -> Path | None:
         file_name = Path(final_path).name or "luxoptica-images.zip"
         archive_path = target_dir / _sanitize_filename(file_name)
         total_bytes = int(response.headers.get("content-length", "0") or 0)
+        if total_bytes > MAX_DOWNLOAD_BYTES:
+            raise ValueError(f"El ZIP supera el máximo de descarga de {MAX_DOWNLOAD_BYTES} bytes")
         print(f"   Descargando {file_name} ({total_bytes / 1024 / 1024:.1f} MB)...", flush=True)
-        downloaded_bytes = len(first_chunk)
+        downloaded_bytes = 0
         next_report = 50 * 1024 * 1024
-        with archive_path.open("wb") as archive_file:
-            archive_file.write(first_chunk)
-            for chunk in response.iter_content(1024 * 1024):
-                if chunk:
-                    archive_file.write(chunk)
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                dir=target_dir,
+                prefix=f".{archive_path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as archive_file:
+                temporary_path = Path(archive_file.name)
+                for chunk in response.iter_content(1024 * 1024):
+                    if not chunk:
+                        continue
                     downloaded_bytes += len(chunk)
+                    if downloaded_bytes > MAX_DOWNLOAD_BYTES:
+                        raise ValueError(
+                            f"El ZIP supera el máximo de descarga de {MAX_DOWNLOAD_BYTES} bytes"
+                        )
+                    archive_file.write(chunk)
                     if downloaded_bytes >= next_report:
                         if total_bytes:
                             progress = downloaded_bytes / total_bytes * 100
@@ -485,6 +808,12 @@ def _download_zip_link(url: str, target_dir: Path) -> Path | None:
                         else:
                             print(f"      {downloaded_bytes / 1024 / 1024:.0f} MB", flush=True)
                         next_report += 50 * 1024 * 1024
+                archive_file.flush()
+                os.fsync(archive_file.fileno())
+            os.replace(temporary_path, archive_path)
+        finally:
+            if temporary_path is not None and temporary_path.exists():
+                temporary_path.unlink()
         print(f"   Descarga completada: {archive_path}", flush=True)
     return archive_path
 
@@ -500,14 +829,34 @@ def download_luxoptica_mail_attachments(
     if missing:
         raise RuntimeError(f"Faltan variables de entorno de Microsoft 365: {', '.join(missing)}")
 
-    token = _get_access_token(config)
-    messages = _list_inbox_messages(token, config.mailbox, top_messages)
-
     root = config.download_root
     if not root.is_absolute():
         root = Path(__file__).resolve().parent / root
     root.mkdir(parents=True, exist_ok=True)
-    pending_completed, pending_created = _refresh_pending_market_images(root)
+    state_file = root / ".mail_download_state.json"
+    with _state_file_lock(state_file):
+        return _download_luxoptica_mail_attachments_locked(
+            sender_hint,
+            subject_hint,
+            lookback_days,
+            top_messages,
+            config,
+            root,
+        )
+
+
+def _download_luxoptica_mail_attachments_locked(
+    sender_hint: str,
+    subject_hint: str,
+    lookback_days: int,
+    top_messages: int,
+    config: M365Config,
+    root: Path,
+) -> DownloadSummary:
+    token = _get_access_token(config)
+    messages = _list_inbox_messages(token, config.mailbox, top_messages)
+
+    pending_completed, pending_created = _refresh_pending_market_images_unlocked(root)
     if pending_completed or pending_created:
         print(
             f"   Pendientes revisados: {pending_completed} completados, "
@@ -597,19 +946,23 @@ def download_luxoptica_mail_attachments(
             if not att_id:
                 continue
 
-            content_bytes: bytes
+            attachment_size = int(att.get("size", 0) or 0)
+            if attachment_size > MAX_DOWNLOAD_BYTES:
+                raise ValueError(f"El adjunto supera el máximo permitido: {file_name}")
             if att.get("contentBytes"):
                 content_bytes = base64.b64decode(att["contentBytes"])
+                saved = _save_attachment_bytes(content_bytes, root, received_at, lote_folder, file_name)
             else:
-                value_resp = requests.get(
-                    _attachment_value_url(config.mailbox, message_id, att_id),
-                    headers=_graph_headers(token),
-                    timeout=60,
+                saved = _download_attachment_file(
+                    token,
+                    config.mailbox,
+                    message_id,
+                    att_id,
+                    root,
+                    received_at,
+                    lote_folder,
+                    file_name,
                 )
-                value_resp.raise_for_status()
-                content_bytes = value_resp.content
-
-            saved = _save_attachment_bytes(content_bytes, root, received_at, lote_folder, file_name)
             saved_paths.append(str(saved))
             attachments_downloaded += 1
 
