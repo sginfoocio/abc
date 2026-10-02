@@ -55,6 +55,7 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push Docker image
+        id: image
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -97,39 +98,49 @@ jobs:
           key: ${{ secrets.SERVER_SSH_KEY }}
           envs: GH_TOKEN
           script: |
-            set -e
+            set -euo pipefail
             echo "🚀 Iniciando deploy desde GitHub Actions..."
             cd /opt/abcd-control
             echo "📁 Directorio: $(pwd)"
 
             echo "📥 Actualizando código..."
-            git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/diagonaleyewear/abc.git"
-            git fetch origin main
-            git reset --hard origin/main
+            git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+            git fetch origin "${{ github.sha }}"
+            git reset --hard "${{ github.sha }}"
             echo "✅ Código actualizado"
 
-            echo "🔨 Construyendo imagen Docker..."
-            docker compose build --no-cache
+            IMAGE_REF="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.image.outputs.digest }}"
+            echo "📥 Descargando imagen verificada: ${IMAGE_REF}"
+            echo "${GH_TOKEN}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+            docker pull "${IMAGE_REF}"
 
-            echo "⏹️  Deteniendo contenedor actual..."
-            docker compose down --timeout 30
+            PREVIOUS_REF=""
+            PREVIOUS_IMAGE_ID="$(docker inspect --format='{{.Image}}' abcd-control 2>/dev/null || true)"
+            if [ -n "${PREVIOUS_IMAGE_ID}" ]; then
+              PREVIOUS_REF="abcd-control:rollback-${{ github.sha }}"
+              docker image tag "${PREVIOUS_IMAGE_ID}" "${PREVIOUS_REF}"
+              echo "💾 Imagen previa preservada como ${PREVIOUS_REF}"
+            fi
 
-            echo "⏳ Esperando eliminación completa del contenedor..."
-            for attempt in $(seq 1 30); do
-              if ! docker ps -a --format '{{.Names}}' | grep -qx 'abcd-control'; then
-                echo "✅ Contenedor eliminado"
-                break
+            echo "▶️  Actualizando servicios y esperando salud..."
+            if ! ABCD_IMAGE_REF="${IMAGE_REF}" docker compose up -d --no-build --wait --wait-timeout 180; then
+              echo "❌ La nueva revisión no llegó a estado healthy"
+              if [ -n "${PREVIOUS_REF}" ]; then
+                echo "↩️  Restaurando la imagen anterior"
+                ABCD_IMAGE_REF="${PREVIOUS_REF}" docker compose up -d --no-build --wait --wait-timeout 180 || {
+                  echo "❌ Falló también el rollback; requiere intervención manual"
+                  exit 1
+                }
+                echo "✅ Rollback completado"
+              else
+                echo "❌ No había contenedor anterior para restaurar"
               fi
-              if [ "$attempt" -eq 30 ]; then
-                echo "❌ El contenedor abcd-control sigue en eliminación tras 30 intentos"
-                docker ps -a --filter name=abcd-control
-                exit 1
-              fi
-              sleep 1
-            done
+              exit 1
+            fi
 
-            echo "▶️  Iniciando nuevo contenedor..."
-            docker compose up -d
+            printf '%s\n' "${IMAGE_REF}" > .last-deployed-image.tmp
+            mv .last-deployed-image.tmp .last-deployed-image
+            echo "✅ Imagen desplegada y healthy: ${IMAGE_REF}"
 
             echo "🗓️  Programando foto semanal ABCD..."
             mkdir -p /opt/abcd-control/logs

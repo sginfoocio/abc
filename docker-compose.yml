@@ -3,6 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    image: ${ABCD_IMAGE_REF:-abcd-control:local}
     container_name: abcd-control
     ports:
       - "8501:8501"
@@ -84,6 +85,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    image: ${ABCD_IMAGE_REF:-abcd-control:local}
     container_name: abcd-luxoptica-monitor
     command: ["python", "poll_luxoptica_mail.py", "--interval-minutes", "10", "--sender-hint", "luxottica", "--subject-hint", "image", "--lookback-days", "30", "--top-messages", "100"]
     environment:
@@ -105,6 +107,8 @@ services:
       - ./repo/images:/app/repo/images
       - ./luxoptica_data:/app/docs/Luxoptica
     restart: unless-stopped
+    healthcheck:
+      disable: true
     networks:
       - abcd-network
 
