@@ -18,6 +18,7 @@ from streamlit_cookies_controller import CookieController
 
 from db_loader import load_odoo_dataframe
 from adyen_reconciliation_ui import render_reconciliation_page
+from kering_images_ui import render_kering_page, render_kering_settings, gallery_rows
 from engine import run_abcd_engine
 from db_config import load_db_config, load_env_file
 from transform_luxottica_masterdata import (
@@ -1127,6 +1128,8 @@ def render_settings_page() -> None:
     render_sidebar_shell("Configuración")
     require_admin_access()
     st.title("Configuración")
+    render_kering_settings(get_db_engine)
+    st.divider()
     st.caption("Guarda credenciales de integración en el archivo .env local del proyecto.")
 
     current_url = _read_env_setting_any([LUXOPTICA_URL_ENV, LEGACY_ESSILOR_URL_ENV])
@@ -1629,6 +1632,7 @@ def render_luxoptica_images_page() -> None:
 
     images_root = Path(__file__).resolve().parent / "repo" / "images"
     image_catalog = _load_image_catalog(images_root)
+    image_catalog = pd.concat([image_catalog, pd.DataFrame(gallery_rows())], ignore_index=True)
 
     st.subheader("Visor de imágenes")
     search_ean = st.text_input(
@@ -1638,7 +1642,7 @@ def render_luxoptica_images_page() -> None:
     ).strip()
     market_filter = st.selectbox(
         "Mercado",
-        options=["Todos", "Original", "Farfetch", "Miinto"],
+        options=["Todos", "Original", "Farfetch", "Miinto", "Kering"],
         key="luxoptica_market_filter",
     )
 
@@ -2306,6 +2310,14 @@ def render_alerta_pedidos_page() -> None:
     render_footer()
 
 
+def render_kering_images_page() -> None:
+    render_sidebar_shell("Imagenes Kering")
+    require_admin_access()
+    render_kering_page(get_db_engine)
+    render_footer()
+
+
+KERING_IMAGES_PAGE = st.Page(render_kering_images_page, title="Imágenes Kering", url_path="imagenes-kering")
 HOME_PAGE = st.Page(render_home_page, title="Inicio", icon="🏠", url_path="", default=True)
 ABC_HOME_PAGE = st.Page(render_abc_home_page, title="Inicio", icon="📊", url_path="abc")
 ABC_SEARCH_PAGE = st.Page(render_abc_search_page, title="Buscar Producto", icon="🔍", url_path="abc-buscar")
@@ -2339,7 +2351,7 @@ navigation = st.navigation(
                 ABC_DETAIL_PAGE,
             ],
             "Master Data": [MASTER_IMPORT_PAGE, MASTER_DICTIONARY_PAGE, MASTER_DRYRUN_PAGE],
-            "Repositorio de imágenes": [LUXOPTICA_IMAGES_PAGE, LUXOPTICA_PENDING_PAGE],
+            "Repositorio de imágenes": [LUXOPTICA_IMAGES_PAGE, LUXOPTICA_PENDING_PAGE, KERING_IMAGES_PAGE],
             "Alertas": [ALERTA_PEDIDOS_PAGE],
             **reconciliation_navigation,
             "Configuración": [SETTINGS_PAGE],

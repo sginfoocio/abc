@@ -33,6 +33,8 @@ COPY --from=builder /root/.local /root/.local
 COPY app_enhanced.py .
 COPY adyen_reconciliation.py .
 COPY adyen_reconciliation_ui.py .
+COPY kering_images.py .
+COPY kering_images_ui.py .
 COPY db_loader.py .
 COPY engine.py .
 COPY auth_session.py .
