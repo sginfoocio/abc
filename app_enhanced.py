@@ -3,7 +3,6 @@ from __future__ import annotations
 from io import BytesIO
 from pathlib import Path
 from datetime import date, datetime, timedelta
-import hashlib
 import hmac
 import json
 import os
@@ -42,6 +41,13 @@ from graph_mail_downloader import (
 )
 from watchlist_config import add_customer, load_watchlist, remove_customer, save_watchlist
 from check_pedidos_vigilados import find_matching_orders
+from auth_session import (
+    AuthStateStore,
+    create_auth_token,
+    derive_session_signing_key,
+    login_bucket_keys,
+    verify_auth_token,
+)
 
 # ==============================================================================
 # CONFIG
@@ -57,6 +63,12 @@ AUTH_REMEMBER_DAYS_ENV = "AUTH_REMEMBER_DAYS"
 AUTH_REMEMBER_DAYS_DEFAULT = 30
 AUTH_COOKIE_NAME = "abc_auth_session"
 AUTH_PASSWORD_ENV = "APP_PASSWORD"
+AUTH_STATE_PATH_ENV = "AUTH_STATE_PATH"
+AUTH_LOGIN_MAX_ATTEMPTS_ENV = "AUTH_LOGIN_MAX_ATTEMPTS"
+AUTH_LOGIN_WINDOW_SECONDS_ENV = "AUTH_LOGIN_WINDOW_SECONDS"
+AUTH_COOKIE_SECRET_MIN_LENGTH = 32
+AUTH_LOGIN_MAX_ATTEMPTS_DEFAULT = 8
+AUTH_LOGIN_WINDOW_SECONDS_DEFAULT = 900
 MASTERDATA_USERNAME_ENV = "MASTERDATA_USERNAME"
 MASTERDATA_PASSWORD_ENV = "MASTERDATA_PASSWORD"
 LUXOPTICA_URL_ENV = "LUXOPTICA_URL"
@@ -769,8 +781,23 @@ def _get_auth_users() -> dict[str, dict[str, str]]:
     return users
 
 
-def _get_auth_cookie_secret(expected_password: str) -> str:
-    return os.getenv(AUTH_COOKIE_SECRET_ENV) or expected_password
+def _get_auth_cookie_secret() -> str:
+    return os.getenv(AUTH_COOKIE_SECRET_ENV, "").strip()
+
+
+def _get_auth_state_store() -> AuthStateStore:
+    if "_auth_state_store" not in st.session_state:
+        default_path = Path(__file__).resolve().parent / "masterdata_data" / "auth_state.sqlite3"
+        state_path = Path(os.getenv(AUTH_STATE_PATH_ENV, str(default_path)))
+        st.session_state["_auth_state_store"] = AuthStateStore(state_path)
+    return st.session_state["_auth_state_store"]
+
+
+def _get_auth_login_limit(env_name: str, default: int) -> int:
+    try:
+        return max(1, int(os.getenv(env_name, default)))
+    except ValueError:
+        return default
 
 
 def _get_remember_days() -> int:
@@ -780,29 +807,22 @@ def _get_remember_days() -> int:
         return AUTH_REMEMBER_DAYS_DEFAULT
 
 
-def _make_auth_token(username: str, secret: str, days: int) -> str:
+def _make_auth_token(username: str, secret: str, password: str, days: int) -> str:
     """Genera un token firmado con expiración para recordar la sesión."""
-    expiry = int(time.time()) + days * 86400
-    payload = f"{username}:{expiry}"
-    signature = hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
-    return f"{payload}:{signature}"
+    signing_key = derive_session_signing_key(secret, username, password)
+    return create_auth_token(username, signing_key, days)
 
 
-def _verify_auth_token(token: str, expected_user: str, secret: str) -> bool:
+def _verify_auth_token(
+    token: str,
+    expected_user: str,
+    password: str,
+    secret: str,
+) -> bool:
     """Valida firma, usuario y expiración de un token de sesión recordada."""
-    try:
-        username, expiry_str, signature = token.split(":")
-    except (ValueError, AttributeError):
-        return False
-    expected_signature = hmac.new(secret.encode(), f"{username}:{expiry_str}".encode(), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(signature, expected_signature):
-        return False
-    if not hmac.compare_digest(username, expected_user):
-        return False
-    try:
-        return int(expiry_str) >= int(time.time())
-    except ValueError:
-        return False
+    signing_key = derive_session_signing_key(secret, expected_user, password)
+    claims = verify_auth_token(token, expected_user, signing_key)
+    return bool(claims and not _get_auth_state_store().is_revoked(claims.session_id))
 
 
 def _get_cookie_controller() -> CookieController:
@@ -823,24 +843,83 @@ def _render_login() -> None:
         st.stop()
 
     remember_days = _get_remember_days()
+    cookie_secret = _get_auth_cookie_secret()
+    can_remember = len(cookie_secret) >= AUTH_COOKIE_SECRET_MIN_LENGTH
+    if not can_remember:
+        st.info(
+            f"Las sesiones recordadas requieren {AUTH_COOKIE_SECRET_ENV} "
+            f"con al menos {AUTH_COOKIE_SECRET_MIN_LENGTH} caracteres; no se usa la contraseña como alternativa."
+        )
     with st.form("login_form", clear_on_submit=False):
         username = st.text_input("Usuario")
         password = st.text_input("Contraseña", type="password")
-        recordarme = st.checkbox(f"Recordarme durante {remember_days} días", value=True)
+        recordarme = st.checkbox(
+            f"Recordarme durante {remember_days} días",
+            value=can_remember,
+            disabled=not can_remember,
+        )
         submitted = st.form_submit_button("Entrar")
 
     if submitted:
+        remote_ip = getattr(st.context, "ip_address", None)
+        attempt_keys = login_bucket_keys(username, remote_ip)
+        max_attempts = _get_auth_login_limit(
+            AUTH_LOGIN_MAX_ATTEMPTS_ENV,
+            AUTH_LOGIN_MAX_ATTEMPTS_DEFAULT,
+        )
+        window_seconds = _get_auth_login_limit(
+            AUTH_LOGIN_WINDOW_SECONDS_ENV,
+            AUTH_LOGIN_WINDOW_SECONDS_DEFAULT,
+        )
+        if not _get_auth_state_store().allow_login_attempt(
+            attempt_keys,
+            max_attempts,
+            window_seconds,
+        ):
+            st.error("Demasiados intentos. Espera antes de volver a intentarlo.")
+            st.stop()
+
         user_config = users.get(username)
         if user_config and hmac.compare_digest(password, user_config["password"]):
+            _get_auth_state_store().reset_login_attempts(attempt_keys)
             st.session_state["authenticated"] = True
             st.session_state["auth_user"] = username
             st.session_state["auth_role"] = user_config["role"]
+            st.session_state.pop("auth_session_id", None)
+            st.session_state.pop("auth_session_expires_at", None)
+            signing_key = derive_session_signing_key(
+                cookie_secret,
+                username,
+                user_config["password"],
+            )
+            st.session_state["auth_credential_fingerprint"] = signing_key
+            existing_token = _get_cookie_controller().get(AUTH_COOKIE_NAME)
+            existing_claims = (
+                verify_auth_token(existing_token, username, signing_key)
+                if existing_token
+                else None
+            )
+            if existing_claims:
+                _get_auth_state_store().revoke_session(
+                    existing_claims.session_id,
+                    existing_claims.expires_at,
+                )
             if recordarme:
-                secret = _get_auth_cookie_secret(os.getenv(AUTH_PASSWORD_ENV, ""))
-                token = _make_auth_token(username, secret, remember_days)
+                token = _make_auth_token(
+                    username,
+                    cookie_secret,
+                    user_config["password"],
+                    remember_days,
+                )
+                claims = verify_auth_token(token, username, signing_key)
+                assert claims is not None
+                st.session_state["auth_session_id"] = claims.session_id
+                st.session_state["auth_session_expires_at"] = claims.expires_at
                 _get_cookie_controller().set(
                     AUTH_COOKIE_NAME, token, max_age=remember_days * 86400
                 )
+            else:
+                _get_cookie_controller().remove(AUTH_COOKIE_NAME)
             st.rerun()
         st.error("Usuario o contraseña incorrectos")
 
@@ -848,18 +927,61 @@ def _render_login() -> None:
 
 def require_authentication() -> None:
     """Bloquea la app hasta que el usuario se autentique (incluye sesión recordada por cookie)."""
-    if st.session_state.get("authenticated", False):
-        return
-
     users = _get_auth_users()
+    if st.session_state.get("authenticated", False):
+        expected_user = st.session_state.get("auth_user", "")
+        user_config = users.get(expected_user)
+        secret = _get_auth_cookie_secret()
+        current_fingerprint = (
+            derive_session_signing_key(secret, expected_user, user_config["password"])
+            if user_config
+            else ""
+        )
+        session_id = st.session_state.get("auth_session_id")
+        expires_at = st.session_state.get("auth_session_expires_at")
+        session_expired = expires_at is not None and int(expires_at) < int(time.time())
+        credentials_changed = (
+            not user_config
+            or st.session_state.get("auth_role") != user_config["role"]
+            or not hmac.compare_digest(
+                st.session_state.get("auth_credential_fingerprint", ""),
+                current_fingerprint,
+            )
+        )
+        session_revoked = bool(session_id and _get_auth_state_store().is_revoked(session_id))
+        if not credentials_changed and not session_expired and not session_revoked:
+            return
+        st.session_state["authenticated"] = False
+        st.session_state.pop("auth_user", None)
+        st.session_state.pop("auth_role", None)
+        st.session_state.pop("auth_session_id", None)
+        st.session_state.pop("auth_session_expires_at", None)
+        st.session_state.pop("auth_credential_fingerprint", None)
+        _get_cookie_controller().remove(AUTH_COOKIE_NAME)
+
     if users:
         token = _get_cookie_controller().get(AUTH_COOKIE_NAME)
-        secret = _get_auth_cookie_secret(os.getenv(AUTH_PASSWORD_ENV, ""))
+        secret = _get_auth_cookie_secret()
         for expected_user, user_config in users.items():
-            if token and _verify_auth_token(token, expected_user, secret):
+            if token and len(secret) >= AUTH_COOKIE_SECRET_MIN_LENGTH and _verify_auth_token(
+                token,
+                expected_user,
+                user_config["password"],
+                secret,
+            ):
+                signing_key = derive_session_signing_key(
+                    secret,
+                    expected_user,
+                    user_config["password"],
+                )
+                claims = verify_auth_token(token, expected_user, signing_key)
+                assert claims is not None
                 st.session_state["authenticated"] = True
                 st.session_state["auth_user"] = expected_user
                 st.session_state["auth_role"] = user_config["role"]
+                st.session_state["auth_session_id"] = claims.session_id
+                st.session_state["auth_session_expires_at"] = claims.expires_at
+                st.session_state["auth_credential_fingerprint"] = signing_key
                 return
 
     _render_login()
@@ -938,8 +1060,15 @@ def render_sidebar_shell(section_name: str) -> None:
         st.caption(f"Sesión: {st.session_state.get('auth_user', 'usuario')}")
         st.caption(f"Área: {section_name}")
         if st.button("Cerrar sesión"):
+            session_id = st.session_state.get("auth_session_id")
+            expires_at = st.session_state.get("auth_session_expires_at")
+            if session_id and expires_at:
+                _get_auth_state_store().revoke_session(session_id, int(expires_at))
             st.session_state["authenticated"] = False
             st.session_state.pop("auth_user", None)
+            st.session_state.pop("auth_role", None)
+            st.session_state.pop("auth_session_id", None)
+            st.session_state.pop("auth_session_expires_at", None)
             _get_cookie_controller().remove(AUTH_COOKIE_NAME)
             st.rerun()
         st.divider()
@@ -1490,6 +1619,7 @@ def render_luxoptica_pending_panel() -> None:
 
 def render_luxoptica_images_page() -> None:
     render_sidebar_shell("Repositorio de imágenes")
+    require_admin_access()
     st.title("Imágenes")
     st.caption("Explora las imágenes descargadas por modelo, EAN y mercado.")
 
@@ -1588,6 +1718,7 @@ def render_luxoptica_images_page() -> None:
 
 def render_luxoptica_pending_page() -> None:
     render_sidebar_shell("Repositorio de imágenes")
+    require_admin_access()
     st.title("Pendiente Luxoptica")
     st.caption("Revisa y procesa manualmente las copias pendientes para Farfetch y Miinto.")
     render_luxoptica_pending_panel()
@@ -2175,7 +2306,6 @@ navigation = st.navigation(
         {
             "Inicio": [HOME_PAGE],
             "Master Data": [MASTER_IMPORT_PAGE, MASTER_DICTIONARY_PAGE, MASTER_DRYRUN_PAGE],
-            "Repositorio de imágenes": [LUXOPTICA_IMAGES_PAGE, LUXOPTICA_PENDING_PAGE],
         }
         if st.session_state.get("auth_role") == "masterdata"
         else {

@@ -185,8 +185,8 @@ jobs:
 
       - name: Lint with flake8
         run: |
-          flake8 app_enhanced.py db_loader.py engine.py --count --select=E9,F63,F7,F82 --show-source --statistics
-          flake8 app_enhanced.py db_loader.py engine.py --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+          flake8 app_enhanced.py db_loader.py engine.py auth_session.py tests/test_auth_session.py --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 app_enhanced.py db_loader.py engine.py auth_session.py tests/test_auth_session.py --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
 
       - name: Check syntax
         run: |
