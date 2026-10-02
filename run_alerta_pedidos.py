@@ -6,7 +6,6 @@ Uso: python run_alerta_pedidos.py
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 from datetime import date, datetime, timedelta
@@ -17,6 +16,11 @@ import pandas as pd
 from check_pedidos_vigilados import find_matching_orders
 from db_config import load_env_file
 from graph_mail_downloader import send_alert_email
+from order_alerts import (
+    OrderAlertStore,
+    build_alert_email_html,
+    import_legacy_notification_file,
+)
 from watchlist_config import load_watchlist
 
 NOTIFICADOS_FILE = Path(__file__).resolve().parent / "alerta_pedidos_notificados.json"
@@ -29,36 +33,6 @@ DIAS_ATRAS_DEFAULT = 180
 
 def _log(mensaje: str) -> None:
     print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {mensaje}", flush=True)
-
-
-def _load_notificados() -> set[int]:
-    if not NOTIFICADOS_FILE.exists():
-        return set()
-    data = json.loads(NOTIFICADOS_FILE.read_text(encoding="utf-8") or "[]")
-    return set(data)
-
-
-def _save_notificados(pedido_ids: set[int]) -> None:
-    NOTIFICADOS_FILE.write_text(
-        json.dumps(sorted(pedido_ids), ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-
-
-def _build_alert_email_html(resultados: pd.DataFrame) -> str:
-    filas = "".join(
-        f"<tr><td>{row.pedido}</td><td>{row.cliente}</td><td>{row.direccion_entrega}</td>"
-        f"<td>{row.date_order}</td><td>{row.state}</td><td>{row.invoice_status}</td>"
-        f"<td>{row.amount_total}</td></tr>"
-        for row in resultados.itertuples(index=False)
-    )
-    return (
-        "<p>Se han detectado los siguientes pedidos NUEVOS de clientes vigilados en Odoo:</p>"
-        "<table border='1' cellpadding='4' cellspacing='0'>"
-        "<tr><th>Pedido</th><th>Cliente</th><th>Dirección entrega</th><th>Fecha</th><th>Estado</th>"
-        "<th>Estado factura</th><th>Total</th></tr>"
-        f"{filas}"
-        "</table>"
-    )
 
 
 def main() -> int:
@@ -90,8 +64,10 @@ def main() -> int:
         _log("No hay pedidos pendientes de clientes vigilados.")
         return 0
 
-    notificados = _load_notificados()
-    nuevos = resultados[~resultados["pedido_id"].isin(notificados)]
+    alert_store = OrderAlertStore()
+    import_legacy_notification_file(alert_store, NOTIFICADOS_FILE)
+    batch = alert_store.claim_orders(resultados["pedido_id"].tolist())
+    nuevos = resultados[resultados["pedido_id"].isin(batch.order_ids)]
 
     if nuevos.empty:
         _log(
@@ -107,16 +83,16 @@ def main() -> int:
     try:
         send_alert_email(
             subject=f"Alerta de pedidos vigilados ({len(nuevos)})",
-            html_body=_build_alert_email_html(nuevos),
+            html_body=build_alert_email_html(nuevos.to_dict(orient="records")),
             to_address=destinatarios,
         )
     except Exception as exc:  # noqa: BLE001
+        alert_store.mark_failed(batch.batch_id, str(exc))
         _log(f"ERROR al enviar el email de alerta: {exc}")
         return 1
 
-    notificados.update(int(pid) for pid in nuevos["pedido_id"].tolist())
-    _save_notificados(notificados)
-    _log("Alerta enviada y registro de notificados actualizado.")
+    alert_store.mark_sent(batch.batch_id, ", ".join(destinatarios))
+    _log("Alerta enviada y registro compartido de notificaciones actualizado.")
     return 0
 
 

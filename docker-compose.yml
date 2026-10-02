@@ -29,6 +29,7 @@ services:
 
       # Alerta de pedidos vigilados
       - ALERT_RECIPIENT_EMAIL=${ALERT_RECIPIENT_EMAIL}
+      - ORDER_ALERT_STATE_PATH=${ORDER_ALERT_STATE_PATH:-/app/data/order_alerts.sqlite3}
       - AUTH_REMEMBER_DAYS=${AUTH_REMEMBER_DAYS}
       - AUTH_COOKIE_SECRET=${AUTH_COOKIE_SECRET}
       - AUTH_STATE_PATH=${AUTH_STATE_PATH:-/app/data/auth_state.sqlite3}
