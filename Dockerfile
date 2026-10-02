@@ -31,6 +31,9 @@ COPY --from=builder /root/.local /root/.local
 
 # Copiar archivos de la aplicación
 COPY app_enhanced.py .
+COPY app_exports.py .
+COPY app_navigation.py .
+COPY app_pages ./app_pages
 COPY db_loader.py .
 COPY engine.py .
 COPY abcd_snapshots.py .

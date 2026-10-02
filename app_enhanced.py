@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from io import BytesIO
+from functools import partial
 from pathlib import Path
 from datetime import date, datetime, timedelta
 import hmac
@@ -36,18 +36,11 @@ from graph_mail_downloader import (
     download_luxoptica_mail_attachments,
     load_m365_config,
     _refresh_pending_market_images,
-    send_alert_email,
     validate_m365_config,
-)
-from watchlist_config import add_customer, load_watchlist, remove_customer, save_watchlist
-from check_pedidos_vigilados import find_matching_orders
-from order_alerts import (
-    OrderAlertStore,
-    build_alert_email_html,
-    import_legacy_notification_file,
 )
 from abcd_snapshots import (
     build_abcd_report_export_df,
+    build_abcd_report_excel_df,
     build_snapshot_parameters,
     current_week_start as _current_week_start,
     engine_source_version,
@@ -62,6 +55,17 @@ from auth_session import (
     login_bucket_keys,
     verify_auth_token,
 )
+from app_exports import (
+    dataframe_to_excel_bytes,
+    extract_clean_eans as _extract_clean_eans,
+    generate_luxoptica_request_files,
+    load_masterdata_file,
+    normalize_result_export_schema,
+    split_report_warnings,
+)
+from app_navigation import build_navigation
+from app_pages.alerts import render_alerts_page
+from app_pages.luxoptica import render_images_page, render_pending_page
 
 # ==============================================================================
 # CONFIG
@@ -122,9 +126,6 @@ MASTERDATA_DOWNLOAD_COLUMNS = [
     "PVO",
     "PVP",
 ]
-ALERT_RECIPIENT_EMAIL_ENV = "ALERT_RECIPIENT_EMAIL"
-ALERT_RECIPIENT_EMAIL_DEFAULT = "roberto@diagonaleyewear.com"
-ALERT_RECIPIENT_EMAILS_EXTRA = ["virginia.nunez@diagonaleyewear.com"]
 
 st.set_page_config(
     page_title=APP_TITLE,
@@ -228,128 +229,6 @@ def render_master_dictionary_page() -> None:
         st.info("No hay reglas personalizadas todavía.")
 
 
-def load_masterdata_file(file_source) -> pd.DataFrame:
-    """Carga un Excel MASTERDATA preservando texto."""
-    df = pd.read_excel(file_source, dtype=str).fillna("")
-    df.columns = [str(c).strip() for c in df.columns]
-    for col in df.columns:
-        df[col] = df[col].astype(str).str.strip()
-    return df
-
-
-def dataframe_to_excel_bytes(df: pd.DataFrame) -> bytes:
-    """Serializa un DataFrame a Excel en memoria."""
-    buffer = BytesIO()
-    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False)
-    return buffer.getvalue()
-
-
-def build_abcd_report_excel_df(df: pd.DataFrame) -> pd.DataFrame:
-    """Aplica cabeceras solicitadas para la exportación Excel ABCD."""
-    return build_abcd_report_export_df(df).rename(
-        columns={
-            "Modelo": "NOMBRE",
-            "Cód Barras": "SKU",
-        }
-    )
-
-def normalize_result_export_schema(df: pd.DataFrame) -> pd.DataFrame:
-    """Garantiza el esquema final del fichero transformado para preview y descarga."""
-    target_columns = [
-        "Marca",
-        "Colección",
-        "Modelo",
-        "Color",
-        "Calibre",
-        "Ancho Puente",
-        "Longitud Varilla",
-        "Género",
-        "Color Frontal",
-        "Color Lente",
-        "Forma",
-        "Material Principal",
-        "Fotocromático",
-        "Polarizado",
-        "PVO",
-        "PVP",
-        "Barcode",
-        "Categoría",
-    ]
-    # Compatibilidad con salidas antiguas/canónicas para no romper sesiones en curso.
-    alias_map = {
-        "Barcode": ["Barcode", "UPC"],
-        "Marca": ["Marca", "Nombre de la marca"],
-        "Modelo": ["Modelo", "Código del modelo"],
-        "Ancho Puente": ["Ancho Puente", "Dimensión del puente"],
-        "Longitud Varilla": ["Longitud Varilla", "Largo de varilla"],
-        "Color Frontal": ["Color Frontal", "Color del frontal"],
-        "Color Lente": ["Color Lente", "Color de las lentes"],
-        "Material Principal": ["Material Principal", "Material del frente"],
-        "PVP": ["PVP", "PVP sugerido"],
-    }
-
-    normalized = df.copy()
-    for target, aliases in alias_map.items():
-        if target in normalized.columns:
-            continue
-        source = next((name for name in aliases if name in normalized.columns), None)
-        if source:
-            normalized[target] = normalized[source]
-
-    for col in target_columns:
-        if col not in normalized.columns:
-            normalized[col] = ""
-
-    # Defensa adicional para sesiones antiguas: quitar un 0 inicial en Modelo.
-    normalized["Modelo"] = normalized["Modelo"].map(lambda v: str(v).strip())
-    normalized["Modelo"] = normalized["Modelo"].map(
-        lambda v: v[1:] if v.startswith("0") and len(v) > 1 else v
-    )
-
-    return normalized[target_columns].copy()
-
-
-def _clean_ean(raw_value: object) -> str:
-    value = str(raw_value).strip()
-    if not value or value.lower() == "nan":
-        return ""
-    if value.lower().startswith("es."):
-        value = value[3:]
-    if value.endswith(".0"):
-        value = value[:-2]
-    return value.replace(" ", "")
-
-
-def _extract_luxoptica_products(df: pd.DataFrame) -> list[dict[str, str]]:
-    """Extrae un producto unico por EAN, conservando modelo y color."""
-    if "Barcode" not in df.columns:
-        return []
-
-    seen: set[str] = set()
-    products: list[dict[str, str]] = []
-
-    for _, row in df.iterrows():
-        value = _clean_ean(row["Barcode"])
-        if not value or value in seen:
-            continue
-        seen.add(value)
-        products.append(
-            {
-                "ean": value,
-                "modelo": str(row.get("Modelo", "")).strip(),
-                "color": str(row.get("Color", "")).strip(),
-            }
-        )
-
-    return products
-
-
-def _extract_clean_eans(df: pd.DataFrame) -> list[str]:
-    """Extrae EAN limpios desde Barcode sin prefijo y sin duplicados."""
-    return [product["ean"] for product in _extract_luxoptica_products(df)]
-
-
 def _load_market_pending_rows(images_root: Path) -> list[dict[str, object]]:
     pending_path = images_root / ".market_pending.json"
     if not pending_path.exists():
@@ -416,66 +295,6 @@ def _load_image_catalog(images_root: Path) -> pd.DataFrame:
         columns=["Modelo", "EAN", "Mercado", "Archivo", "Ruta", "Descargada", "Fecha"],
     )
     return catalog.sort_values("Descargada", ascending=False).reset_index(drop=True)
-
-
-def _chunk_list(items: list[str], chunk_size: int) -> list[list[str]]:
-    return [items[i : i + chunk_size] for i in range(0, len(items), chunk_size)]
-
-
-def generate_luxoptica_request_files(
-    df: pd.DataFrame,
-    output_dir: Path,
-    batch_size: int = 250,
-    max_total_eans: int | None = None,
-) -> list[Path]:
-    """Genera archivos txt para solicitud de imágenes con lotes de EAN."""
-    products = _extract_luxoptica_products(df)
-    if max_total_eans is not None and max_total_eans > 0:
-        products = products[:max_total_eans]
-    if not products:
-        return []
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    batches = _chunk_list(products, batch_size)
-    generated_files: list[Path] = []
-
-    for idx, batch in enumerate(batches, start=1):
-        file_name = f"upc-products-images-request-{timestamp}-lote-{idx:03d}.txt"
-        file_path = output_dir / file_name
-        file_path.write_text("\n".join(product["ean"] for product in batch) + "\n", encoding="utf-8")
-        manifest_path = file_path.with_suffix(".manifest.json")
-        manifest_path.write_text(
-            json.dumps({"products": batch}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        generated_files.append(file_path)
-
-    return generated_files
-
-
-def split_report_warnings(report) -> tuple[list[str], list[str], list[str]]:
-    """Separa incidencias bloqueantes, de riesgo medio e informativas para la UI."""
-    blocking: list[str] = []
-    medium: list[str] = []
-    info: list[str] = []
-
-    if report.discarded > 0:
-        medium.append(f"Se descartaron {report.discarded} filas durante la transformacion.")
-    if report.discarded_accessories > 0:
-        info.append(f"{report.discarded_accessories} filas fueron marcadas como accesorios.")
-    if report.discarded_invalid_product > 0:
-        medium.append(f"{report.discarded_invalid_product} filas no cumplian criterio de producto valido.")
-    if report.leading_zero_real_loss_columns > 0:
-        blocking.append("Hay perdida real de ceros iniciales en al menos una columna critica.")
-    if report.invalid_yes_no_rows > 0:
-        blocking.append(f"Hay {report.invalid_yes_no_rows} filas con valores invalidos SI/NO.")
-    if report.unmatched_brand_names:
-        medium.append(f"Marcas con incidencia abierta: {', '.join(report.unmatched_brand_names)}")
-    for key, values in report.anomalous_values.items():
-        blocking.append(f"Valores anómalos en {key}: {', '.join(values)}")
-
-    return blocking, medium, info
 
 
 def _read_env_setting(key: str, default: str = "") -> str:
@@ -1525,114 +1344,6 @@ def render_luxoptica_pending_panel() -> None:
         st.warning(f"No se encuentra el archivo en el servidor: {selected_path}")
 
 
-def render_luxoptica_images_page() -> None:
-    render_sidebar_shell("Repositorio de imágenes")
-    require_admin_access()
-    st.title("Imágenes")
-    st.caption("Explora las imágenes descargadas por modelo, EAN y mercado.")
-
-    images_root = Path(__file__).resolve().parent / "repo" / "images"
-    image_catalog = _load_image_catalog(images_root)
-
-    st.subheader("Visor de imágenes")
-    search_ean = st.text_input(
-        "Buscar por EAN",
-        placeholder="Introduce el EAN completo o una parte",
-        key="luxoptica_search_ean",
-    ).strip()
-    market_filter = st.selectbox(
-        "Mercado",
-        options=["Todos", "Original", "Farfetch", "Miinto"],
-        key="luxoptica_market_filter",
-    )
-
-    filtered_catalog = image_catalog
-    if search_ean:
-        filtered_catalog = filtered_catalog[
-            filtered_catalog["EAN"].str.contains(search_ean, case=False, na=False)
-        ]
-    if market_filter != "Todos":
-        filtered_catalog = filtered_catalog[filtered_catalog["Mercado"] == market_filter]
-
-    if filtered_catalog.empty:
-        st.info("No hay imágenes que coincidan con la búsqueda.")
-    else:
-        st.caption(
-            f"{len(filtered_catalog):,} imágenes | "
-            f"{filtered_catalog['EAN'].nunique():,} EAN | "
-            f"{filtered_catalog['Modelo'].nunique():,} modelos"
-        )
-        page_size = 24
-        total_pages = max(1, (len(filtered_catalog) + page_size - 1) // page_size)
-        current_page = min(
-            st.session_state.get("luxoptica_gallery_page", 1),
-            total_pages,
-        )
-        page_col, size_col = st.columns([3, 1])
-        with page_col:
-            current_page = st.number_input(
-                "Página",
-                min_value=1,
-                max_value=total_pages,
-                value=current_page,
-                step=1,
-                key="luxoptica_gallery_page_input",
-            )
-        with size_col:
-            st.caption(f"{total_pages} página(s) de {page_size} miniaturas")
-        st.session_state["luxoptica_gallery_page"] = int(current_page)
-
-        start = (int(current_page) - 1) * page_size
-        page_catalog = filtered_catalog.iloc[start : start + page_size]
-        thumbnail_columns = st.columns(4)
-        for position, (row_index, image_row) in enumerate(page_catalog.iterrows()):
-            with thumbnail_columns[position % 4]:
-                st.image(image_row["Ruta"], width="stretch")
-                st.caption(
-                    f"{image_row['EAN']} · {image_row['Mercado']}\n"
-                    f"{image_row['Archivo']} · {image_row['Fecha']}"
-                )
-                if st.button(
-                    "Ver imagen",
-                    key=f"luxoptica_view_{row_index}",
-                    width="stretch",
-                ):
-                    st.session_state["luxoptica_selected_image"] = str(image_row["Ruta"])
-                    st.rerun()
-
-        selected_path = st.session_state.get("luxoptica_selected_image")
-        if selected_path and selected_path in set(filtered_catalog["Ruta"]):
-            selected_row = filtered_catalog[filtered_catalog["Ruta"] == selected_path].iloc[0]
-            st.markdown("#### Imagen ampliada")
-            viewer_col, details_col = st.columns([2, 1])
-            with viewer_col:
-                st.image(selected_path, caption=selected_row["Archivo"], width="stretch")
-            with details_col:
-                st.write(f"**Modelo:** {selected_row['Modelo']}")
-                st.write(f"**EAN:** {selected_row['EAN']}")
-                st.write(f"**Mercado:** {selected_row['Mercado']}")
-                st.write(f"**Fecha:** {selected_row['Fecha']}")
-                st.write(f"**Archivo:** {selected_row['Archivo']}")
-
-        st.markdown("#### Estructura encontrada")
-        st.dataframe(
-            filtered_catalog[["Modelo", "EAN", "Mercado", "Archivo", "Fecha"]],
-            hide_index=True,
-            width="stretch",
-        )
-
-    render_footer()
-
-
-def render_luxoptica_pending_page() -> None:
-    render_sidebar_shell("Repositorio de imágenes")
-    require_admin_access()
-    st.title("Pendiente Luxoptica")
-    st.caption("Revisa y procesa manualmente las copias pendientes para Farfetch y Miinto.")
-    render_luxoptica_pending_panel()
-    render_footer()
-
-
 def render_master_page(master_page: str | None = None) -> None:
     render_sidebar_shell("Master Data")
     if master_page is None:
@@ -2089,127 +1800,6 @@ def render_master_dictionary_page_route() -> None:
     render_master_dictionary_page()
 
 
-def render_alerta_pedidos_page() -> None:
-    render_sidebar_shell("Alerta Pedidos")
-    require_admin_access()
-    st.title("Alerta de Pedidos de Clientes Vigilados")
-    st.caption(
-        "Mantén aquí la lista de clientes a vigilar. Se busca coincidencia en el nombre del cliente "
-        "o en la dirección de entrega. Cuando se detecte un pedido, se enviará un email de alerta."
-    )
-
-    watchlist = load_watchlist()
-
-    with st.form("watchlist_add_form", clear_on_submit=True):
-        st.subheader("Añadir cliente a vigilar")
-        new_name = st.text_input(
-            "Nombre exacto del cliente (tal cual figura en Odoo)",
-            placeholder="Ej: Óptica Ejemplo S.L.",
-        )
-        added = st.form_submit_button("Añadir", type="primary")
-
-    if added:
-        if new_name.strip():
-            watchlist = add_customer(new_name)
-            st.success(f"Cliente '{new_name.strip()}' añadido a la lista de vigilancia.")
-        else:
-            st.warning("Introduce un nombre antes de añadir.")
-
-    st.divider()
-    st.subheader("Clientes vigilados")
-    if not watchlist:
-        st.info("No hay clientes en la lista de vigilancia todavía.")
-    else:
-        clientes_editados = st.data_editor(
-            pd.DataFrame({"Cliente": watchlist}),
-            column_config={"Cliente": st.column_config.TextColumn("Cliente vigilado", required=True)},
-            hide_index=True,
-            num_rows="dynamic",
-            key="watchlist_editor",
-        )
-        if st.button("Guardar lista de clientes", type="secondary"):
-            clientes = [
-                str(nombre).strip()
-                for nombre in clientes_editados["Cliente"].dropna().tolist()
-                if str(nombre).strip()
-            ]
-            clientes = list(dict.fromkeys(clientes))
-            save_watchlist(clientes)
-            st.success(f"Lista guardada: {len(clientes)} cliente(s) vigilado(s).")
-            st.rerun()
-
-            cliente_a_quitar = st.selectbox("Cliente a quitar", options=watchlist)
-            if st.button("Quitar cliente", type="secondary"):
-                remove_customer(cliente_a_quitar)
-                st.success(f"Cliente '{cliente_a_quitar}' eliminado de la lista.")
-                st.rerun()
-
-    st.divider()
-    st.subheader("Comprobar pedidos")
-
-    col_desde, col_hasta, col_estado = st.columns([1, 1, 1])
-    hoy = date.today()
-    fecha_desde = col_desde.date_input("Desde", value=hoy - timedelta(days=30))
-    fecha_hasta = col_hasta.date_input("Hasta", value=hoy)
-    filtro_estado = col_estado.radio("Estado", options=["Pendientes", "Todos"], horizontal=True)
-
-    if st.button("Comprobar ahora", type="primary"):
-        if not watchlist:
-            st.warning("Añade al menos un cliente a la lista de vigilancia antes de comprobar.")
-        elif fecha_desde > fecha_hasta:
-            st.warning("La fecha 'Desde' no puede ser posterior a la fecha 'Hasta'.")
-        else:
-            with st.spinner("Consultando pedidos en Odoo..."):
-                try:
-                    resultados = find_matching_orders(
-                        clientes=watchlist,
-                        fecha_desde=fecha_desde,
-                        fecha_hasta=fecha_hasta + timedelta(days=1),
-                        solo_pendientes=(filtro_estado == "Pendientes"),
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    st.error(f"Error al consultar Odoo: {exc}")
-                    resultados = None
-
-            if resultados is not None:
-                if resultados.empty:
-                    st.info("No se han encontrado pedidos para los clientes vigilados en el rango indicado.")
-                else:
-                    st.success(f"Se han encontrado {len(resultados)} pedido(s).")
-                    st.dataframe(resultados, use_container_width=True, hide_index=True)
-
-                    alert_store = OrderAlertStore()
-                    legacy_notifications = (
-                        Path(__file__).resolve().parent / "alerta_pedidos_notificados.json"
-                    )
-                    import_legacy_notification_file(alert_store, legacy_notifications)
-                    batch = alert_store.claim_orders(resultados["pedido_id"].tolist())
-                    nuevos = resultados[resultados["pedido_id"].isin(batch.order_ids)]
-                    if nuevos.empty:
-                        st.info("Los pedidos ya están notificados o hay otra ejecución procesándolos.")
-                    else:
-                        destinatario = _read_env_setting(
-                            ALERT_RECIPIENT_EMAIL_ENV,
-                            ALERT_RECIPIENT_EMAIL_DEFAULT,
-                        )
-                        destinatarios = list(dict.fromkeys([destinatario, *ALERT_RECIPIENT_EMAILS_EXTRA]))
-                        with st.spinner(f"Enviando alerta por email a {', '.join(destinatarios)}..."):
-                            try:
-                                send_alert_email(
-                                    subject=f"Alerta de pedidos vigilados ({len(nuevos)})",
-                                    html_body=build_alert_email_html(nuevos.to_dict(orient="records")),
-                                    to_address=destinatarios,
-                                )
-                            except Exception as exc:  # noqa: BLE001
-                                alert_store.mark_failed(batch.batch_id, str(exc))
-                                st.error(f"No se pudo enviar el email de alerta: {exc}")
-                            else:
-                                alert_store.mark_sent(batch.batch_id, ", ".join(destinatarios))
-                                st.success(f"Email de alerta enviado a {', '.join(destinatarios)}.")
-
-    render_footer()
-
-
 HOME_PAGE = st.Page(render_home_page, title="Inicio", icon="🏠", url_path="", default=True)
 ABC_HOME_PAGE = st.Page(render_abc_home_page, title="Inicio", icon="📊", url_path="abc")
 ABC_SEARCH_PAGE = st.Page(render_abc_search_page, title="Buscar Producto", icon="🔍", url_path="abc-buscar")
@@ -2219,34 +1809,62 @@ ABC_DETAIL_PAGE = st.Page(render_abc_detail_page, title="Análisis Detallado", i
 MASTER_IMPORT_PAGE = st.Page(render_master_import_page, title="Importador Masterdata", icon="📥", url_path="master")
 MASTER_DRYRUN_PAGE = st.Page(render_master_dryrun_page, title="Dry-run Odoo", icon="🧪", url_path="master-dry-run")
 MASTER_DICTIONARY_PAGE = st.Page(render_master_dictionary_page_route, title="Diccionario", icon="📖", url_path="master-diccionario")
-LUXOPTICA_IMAGES_PAGE = st.Page(render_luxoptica_images_page, title="Imágenes", icon="🖼️", url_path="repositorio-imagenes")
-LUXOPTICA_PENDING_PAGE = st.Page(render_luxoptica_pending_page, title="Pendiente Luxoptica", icon="⏳", url_path="pendiente-luxoptica")
-ALERTA_PEDIDOS_PAGE = st.Page(render_alerta_pedidos_page, title="Alerta Pedidos", icon="🔔", url_path="alerta-pedidos")
+LUXOPTICA_IMAGES_PAGE = st.Page(
+    partial(
+        render_images_page,
+        render_sidebar_shell=render_sidebar_shell,
+        require_admin_access=require_admin_access,
+        render_footer=render_footer,
+        load_image_catalog=_load_image_catalog,
+        application_root=Path(__file__).resolve().parent,
+    ),
+    title="Imágenes",
+    icon="🖼️",
+    url_path="repositorio-imagenes",
+)
+LUXOPTICA_PENDING_PAGE = st.Page(
+    partial(
+        render_pending_page,
+        render_sidebar_shell=render_sidebar_shell,
+        require_admin_access=require_admin_access,
+        render_footer=render_footer,
+        render_pending_panel=render_luxoptica_pending_panel,
+    ),
+    title="Pendiente Luxoptica",
+    icon="⏳",
+    url_path="pendiente-luxoptica",
+)
+ALERTA_PEDIDOS_PAGE = st.Page(
+    partial(
+        render_alerts_page,
+        render_sidebar_shell=render_sidebar_shell,
+        require_admin_access=require_admin_access,
+        render_footer=render_footer,
+    ),
+    title="Alerta Pedidos",
+    icon="🔔",
+    url_path="alerta-pedidos",
+)
 SETTINGS_PAGE = st.Page(render_settings_page, title="Configuración", icon="⚙️", url_path="config")
 
-navigation = st.navigation(
-    (
-        {
-            "Inicio": [HOME_PAGE],
-            "Master Data": [MASTER_IMPORT_PAGE, MASTER_DICTIONARY_PAGE, MASTER_DRYRUN_PAGE],
-        }
-        if st.session_state.get("auth_role") == "masterdata"
-        else {
-            "Inicio": [HOME_PAGE],
-            "Análisis ABC": [
-                ABC_HOME_PAGE,
-                ABC_SEARCH_PAGE,
-                ABC_REPORTS_PAGE,
-                ABC_HISTORY_PAGE,
-                ABC_DETAIL_PAGE,
-            ],
-            "Master Data": [MASTER_IMPORT_PAGE, MASTER_DICTIONARY_PAGE, MASTER_DRYRUN_PAGE],
-            "Repositorio de imágenes": [LUXOPTICA_IMAGES_PAGE, LUXOPTICA_PENDING_PAGE],
-            "Alertas": [ALERTA_PEDIDOS_PAGE],
-            "Configuración": [SETTINGS_PAGE],
-        }
-    ),
-    position="sidebar",
+navigation = build_navigation(
+    st,
+    st.session_state.get("auth_role"),
+    {
+        "home": HOME_PAGE,
+        "abc_home": ABC_HOME_PAGE,
+        "abc_search": ABC_SEARCH_PAGE,
+        "abc_reports": ABC_REPORTS_PAGE,
+        "abc_history": ABC_HISTORY_PAGE,
+        "abc_detail": ABC_DETAIL_PAGE,
+        "master_import": MASTER_IMPORT_PAGE,
+        "master_dryrun": MASTER_DRYRUN_PAGE,
+        "master_dictionary": MASTER_DICTIONARY_PAGE,
+        "luxoptica_images": LUXOPTICA_IMAGES_PAGE,
+        "luxoptica_pending": LUXOPTICA_PENDING_PAGE,
+        "alerts": ALERTA_PEDIDOS_PAGE,
+        "settings": SETTINGS_PAGE,
+    },
 )
 
 navigation.run()
