@@ -42,9 +42,15 @@ from graph_mail_downloader import (
 from watchlist_config import add_customer, load_watchlist, remove_customer, save_watchlist
 from check_pedidos_vigilados import find_matching_orders
 from order_alerts import (
+    LEGACY_NOTIFICATIONS_FILE,
+    RESULT_LABELS,
+    SOURCE_AUTO,
+    SOURCE_MANUAL,
     OrderAlertStore,
-    build_alert_email_html,
+    alert_recipients,
+    dispatch_order_alerts,
     import_legacy_notification_file,
+    scheduler_state,
 )
 from auth_session import (
     AuthStateStore,
@@ -114,9 +120,6 @@ MASTERDATA_DOWNLOAD_COLUMNS = [
     "PVO",
     "PVP",
 ]
-ALERT_RECIPIENT_EMAIL_ENV = "ALERT_RECIPIENT_EMAIL"
-ALERT_RECIPIENT_EMAIL_DEFAULT = "roberto@diagonaleyewear.com"
-ALERT_RECIPIENT_EMAILS_EXTRA = ["virginia.nunez@diagonaleyewear.com"]
 
 st.set_page_config(
     page_title=APP_TITLE,
@@ -2169,6 +2172,65 @@ def render_master_dictionary_page_route() -> None:
     render_master_dictionary_page()
 
 
+def _format_alert_timestamp(value: int | None) -> str:
+    return datetime.fromtimestamp(int(value)).strftime("%d/%m/%Y %H:%M:%S") if value else "—"
+
+
+def _render_order_alert_service_status() -> None:
+    st.subheader("Envío automático")
+    try:
+        status = OrderAlertStore().get_status(SOURCE_AUTO)
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"No se puede leer el registro de alertas: {exc}")
+        return
+
+    state = scheduler_state(status)
+    if state == "never":
+        st.warning(
+            "El servicio automático (contenedor `abcd-order-alerts`) no ha registrado ninguna ejecución. "
+            "Hasta que arranque, las alertas solo se envían con «Comprobar ahora»."
+        )
+        return
+
+    interval_minutes = max(1, int(status.get("interval_seconds") or 300) // 60)
+    result_label = RESULT_LABELS.get(status.get("last_check_result") or "", "—")
+    last_error_at = status.get("last_error_at")
+    last_check_failed = bool(last_error_at) and int(last_error_at) >= int(status.get("last_check_at") or 0)
+    if state == "stopped":
+        st.error(
+            f"Servicio automático DETENIDO desde {_format_alert_timestamp(status.get('stopped_at'))}. "
+            "No se están comprobando pedidos."
+        )
+    elif state == "stale":
+        st.error(
+            f"Servicio automático sin actividad desde {_format_alert_timestamp(status.get('heartbeat_at'))}: "
+            "proceso detenido o bloqueado. No se están comprobando pedidos."
+        )
+    elif last_check_failed:
+        st.warning(f"Servicio activo (cada {interval_minutes} min), pero la última comprobación falló: {result_label}.")
+    else:
+        st.success(f"Servicio activo (cada {interval_minutes} min). Último resultado: {result_label}.")
+
+    col_check, col_sent, col_error = st.columns(3)
+    col_check.markdown(
+        f"**Última comprobación**  \n{_format_alert_timestamp(status.get('last_check_at'))}  \n"
+        f"{result_label}. {status.get('last_check_detail') or ''}"
+    )
+    col_sent.markdown(
+        f"**Último envío**  \n{_format_alert_timestamp(status.get('last_sent_at'))}  \n"
+        + (f"{status.get('last_sent_count')} pedido(s)" if status.get("last_sent_at") else "Sin envíos")
+    )
+    col_error.markdown(
+        f"**Último error**  \n{_format_alert_timestamp(last_error_at)}  \n"
+        f"{status.get('last_error') or 'Sin errores'}"
+    )
+    st.caption(
+        "El envío automático busca solo pedidos confirmados y pendientes (estado 'sale', sin facturar del todo "
+        "o con líneas sin entregar) de la ventana ALERTA_PEDIDOS_DIAS_ATRAS (180 días por defecto). "
+        "Comparte con «Comprobar ahora» la lista de clientes y el registro de pedidos ya notificados."
+    )
+
+
 def render_alerta_pedidos_page() -> None:
     render_sidebar_shell("Alerta Pedidos")
     require_admin_access()
@@ -2225,6 +2287,9 @@ def render_alerta_pedidos_page() -> None:
                 st.rerun()
 
     st.divider()
+    _render_order_alert_service_status()
+
+    st.divider()
     st.subheader("Comprobar pedidos")
 
     col_desde, col_hasta, col_estado = st.columns([1, 1, 1])
@@ -2259,33 +2324,30 @@ def render_alerta_pedidos_page() -> None:
                     st.dataframe(resultados, use_container_width=True, hide_index=True)
 
                     alert_store = OrderAlertStore()
-                    legacy_notifications = (
-                        Path(__file__).resolve().parent / "alerta_pedidos_notificados.json"
-                    )
-                    import_legacy_notification_file(alert_store, legacy_notifications)
-                    batch = alert_store.claim_orders(resultados["pedido_id"].tolist())
-                    nuevos = resultados[resultados["pedido_id"].isin(batch.order_ids)]
-                    if nuevos.empty:
-                        st.info("Los pedidos ya están notificados o hay otra ejecución procesándolos.")
-                    else:
-                        destinatario = _read_env_setting(
-                            ALERT_RECIPIENT_EMAIL_ENV,
-                            ALERT_RECIPIENT_EMAIL_DEFAULT,
+                    import_legacy_notification_file(alert_store, LEGACY_NOTIFICATIONS_FILE)
+                    load_env_file()
+                    destinatarios = alert_recipients()
+                    with st.spinner(f"Comprobando registro y enviando alerta a {', '.join(destinatarios)}..."):
+                        # Acción explícita: sin límite de intentos para poder reintentar envíos agotados.
+                        dispatch = dispatch_order_alerts(
+                            resultados.to_dict(orient="records"),
+                            alert_store,
+                            send_alert_email,
+                            destinatarios,
                         )
-                        destinatarios = list(dict.fromkeys([destinatario, *ALERT_RECIPIENT_EMAILS_EXTRA]))
-                        with st.spinner(f"Enviando alerta por email a {', '.join(destinatarios)}..."):
-                            try:
-                                send_alert_email(
-                                    subject=f"Alerta de pedidos vigilados ({len(nuevos)})",
-                                    html_body=build_alert_email_html(nuevos.to_dict(orient="records")),
-                                    to_address=destinatarios,
-                                )
-                            except Exception as exc:  # noqa: BLE001
-                                alert_store.mark_failed(batch.batch_id, str(exc))
-                                st.error(f"No se pudo enviar el email de alerta: {exc}")
-                            else:
-                                alert_store.mark_sent(batch.batch_id, ", ".join(destinatarios))
-                                st.success(f"Email de alerta enviado a {', '.join(destinatarios)}.")
+                    if dispatch.error:
+                        alert_store.record_check(
+                            SOURCE_MANUAL, "error_envio", error=dispatch.error
+                        )
+                        st.error(f"No se pudo enviar el email de alerta: {dispatch.error}")
+                    elif dispatch.sent:
+                        alert_store.record_check(
+                            SOURCE_MANUAL, "enviado", sent_count=len(dispatch.new_rows)
+                        )
+                        st.success(f"Email de alerta enviado a {', '.join(destinatarios)}.")
+                    else:
+                        alert_store.record_check(SOURCE_MANUAL, "ya_notificados")
+                        st.info("Los pedidos ya están notificados o hay otra ejecución procesándolos.")
 
     render_footer()
 

@@ -146,8 +146,9 @@ jobs:
             mkdir -p /opt/abcd-control/logs
             SNAPSHOT_CRON="0 6 * * 1 cd /opt/abcd-control && docker compose exec -T abcd-app python save_abcd_weekly_snapshot.py >> /opt/abcd-control/logs/abcd-weekly-snapshot.log 2>&1 # ABCD weekly snapshot"
             if command -v crontab >/dev/null 2>&1; then
-              (crontab -l 2>/dev/null | grep -v 'ABCD weekly snapshot'; echo "$SNAPSHOT_CRON") | crontab -
-              echo "✅ Cron semanal configurado: lunes 06:00"
+              # Las alertas de pedidos las ejecuta el servicio abcd-order-alerts: se retira cualquier cron legacy.
+              (crontab -l 2>/dev/null | grep -v -e 'ABCD weekly snapshot' -e 'run_alerta_pedidos.py'; echo "$SNAPSHOT_CRON") | crontab -
+              echo "✅ Cron semanal configurado: lunes 06:00 (cron legacy de alertas retirado)"
             else
               echo "⚠️  crontab no está disponible en el servidor; configura manualmente: $SNAPSHOT_CRON"
             fi
@@ -185,8 +186,8 @@ jobs:
 
       - name: Lint with flake8
         run: |
-          flake8 app_enhanced.py db_loader.py engine.py auth_session.py order_alerts.py tests/test_auth_session.py tests/test_order_alerts.py --count --select=E9,F63,F7,F82 --show-source --statistics
-          flake8 app_enhanced.py db_loader.py engine.py auth_session.py order_alerts.py tests/test_auth_session.py tests/test_order_alerts.py --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+          flake8 app_enhanced.py db_loader.py engine.py auth_session.py order_alerts.py run_alerta_pedidos.py watchlist_config.py tests/test_auth_session.py tests/test_order_alerts.py tests/test_order_alert_service.py --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 app_enhanced.py db_loader.py engine.py auth_session.py order_alerts.py run_alerta_pedidos.py watchlist_config.py tests/test_auth_session.py tests/test_order_alerts.py tests/test_order_alert_service.py --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
 
       - name: Check syntax
         run: |
