@@ -63,6 +63,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Validate Secrets
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
           if [ -z "${{ secrets.SERVER_HOST }}" ]; then
             echo "❌ ERROR: SERVER_HOST secret no configurado"
