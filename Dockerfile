@@ -31,6 +31,8 @@ COPY --from=builder /root/.local /root/.local
 
 # Copiar archivos de la aplicación
 COPY app_enhanced.py .
+COPY adyen_reconciliation.py .
+COPY adyen_reconciliation_ui.py .
 COPY db_loader.py .
 COPY engine.py .
 COPY auth_session.py .
