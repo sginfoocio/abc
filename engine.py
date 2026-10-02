@@ -113,7 +113,7 @@ def run_abcd_engine(
     # 3. No tiene ventas en últimos 120 días (sin contar agotamientos)
     # 4. No tiene ventas recientes en últimos 180 días
     has_recent_sales = df["Num_Ventas_180D"] > 0
-    no_sales_for_d = days_since_last_sale >= DEFAULT_DAYS_WITHOUT_SALES_FOR_D
+    no_sales_for_d = days_since_last_sale >= days_without_sales_for_d
     mask_d = has_stock & has_margin & no_sales_for_d & ~has_recent_sales
     
     df.loc[mask_d, ["ABCD", "Motivo", "Alerta", "Accion_Recomendada"]] = [

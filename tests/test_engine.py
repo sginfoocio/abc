@@ -3,7 +3,7 @@ import pandas as pd
 from engine import run_abcd_engine
 
 
-def test_eligible_product_without_recent_sales_is_classified_d() -> None:
+def test_days_without_sales_for_d_override_changes_classification() -> None:
     reference_date = pd.Timestamp("2025-01-01")
     products = pd.DataFrame(
         [
@@ -17,6 +17,12 @@ def test_eligible_product_without_recent_sales_is_classified_d() -> None:
         ]
     )
 
-    result = run_abcd_engine(products, reference_date=reference_date)
+    default_result = run_abcd_engine(products, reference_date=reference_date)
+    custom_result = run_abcd_engine(
+        products,
+        days_without_sales_for_d=250,
+        reference_date=reference_date,
+    )
 
-    assert result.loc[0, "ABCD"] == "D"
+    assert default_result.loc[0, "ABCD"] == "D"
+    assert custom_result.loc[0, "ABCD"] == "A"
