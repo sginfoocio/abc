@@ -823,6 +823,14 @@ def _get_cookie_controller() -> CookieController:
     return st.session_state["_cookie_controller"]
 
 
+def _remove_auth_cookie() -> None:
+    try:
+        _get_cookie_controller().remove(AUTH_COOKIE_NAME)
+    except KeyError as exc:
+        if exc.args != (AUTH_COOKIE_NAME,):
+            raise
+
+
 def _render_login() -> None:
     st.title(APP_TITLE)
     st.subheader("Acceso restringido")
@@ -911,7 +919,7 @@ def _render_login() -> None:
                     AUTH_COOKIE_NAME, token, max_age=remember_days * 86400
                 )
             else:
-                _get_cookie_controller().remove(AUTH_COOKIE_NAME)
+                _remove_auth_cookie()
             st.rerun()
         st.error("Usuario o contraseña incorrectos")
 
@@ -949,7 +957,7 @@ def require_authentication() -> None:
         st.session_state.pop("auth_session_id", None)
         st.session_state.pop("auth_session_expires_at", None)
         st.session_state.pop("auth_credential_fingerprint", None)
-        _get_cookie_controller().remove(AUTH_COOKIE_NAME)
+        _remove_auth_cookie()
 
     if users:
         token = _get_cookie_controller().get(AUTH_COOKIE_NAME)
@@ -1061,7 +1069,7 @@ def render_sidebar_shell(section_name: str) -> None:
             st.session_state.pop("auth_role", None)
             st.session_state.pop("auth_session_id", None)
             st.session_state.pop("auth_session_expires_at", None)
-            _get_cookie_controller().remove(AUTH_COOKIE_NAME)
+            _remove_auth_cookie()
             st.rerun()
         st.divider()
         st.markdown("### Información")
