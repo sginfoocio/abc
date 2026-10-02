@@ -48,9 +48,11 @@ from order_alerts import (
 )
 from abcd_snapshots import (
     build_abcd_report_export_df,
+    build_snapshot_parameters,
     current_week_start as _current_week_start,
-    list_abcd_snapshot_dates,
-    load_abcd_weekly_snapshot,
+    engine_source_version,
+    list_abcd_snapshot_refs,
+    load_abcd_snapshot_by_id,
     save_abcd_weekly_snapshot,
 )
 from auth_session import (
@@ -708,6 +710,55 @@ def _get_cookie_controller() -> CookieController:
     return st.session_state["_cookie_controller"]
 
 
+def _process_login(
+    username: str,
+    password: str,
+    remember: bool,
+    users: dict[str, dict[str, str]],
+    cookie_secret: str,
+    remember_days: int,
+) -> str:
+    attempt_keys = login_bucket_keys(username, getattr(st.context, "ip_address", None))
+    max_attempts = _get_auth_login_limit(
+        AUTH_LOGIN_MAX_ATTEMPTS_ENV,
+        AUTH_LOGIN_MAX_ATTEMPTS_DEFAULT,
+    )
+    window_seconds = _get_auth_login_limit(
+        AUTH_LOGIN_WINDOW_SECONDS_ENV,
+        AUTH_LOGIN_WINDOW_SECONDS_DEFAULT,
+    )
+    auth_store = _get_auth_state_store()
+    if not auth_store.allow_login_attempt(attempt_keys, max_attempts, window_seconds):
+        return "limited"
+
+    user_config = users.get(username)
+    if not user_config or not hmac.compare_digest(password, user_config["password"]):
+        return "invalid"
+
+    auth_store.reset_login_attempts(attempt_keys)
+    st.session_state["authenticated"] = True
+    st.session_state["auth_user"] = username
+    st.session_state["auth_role"] = user_config["role"]
+    st.session_state.pop("auth_session_id", None)
+    st.session_state.pop("auth_session_expires_at", None)
+    signing_key = derive_session_signing_key(cookie_secret, username, user_config["password"])
+    st.session_state["auth_credential_fingerprint"] = signing_key
+    existing_token = _get_cookie_controller().get(AUTH_COOKIE_NAME)
+    existing_claims = verify_auth_token(existing_token, username, signing_key) if existing_token else None
+    if existing_claims:
+        auth_store.revoke_session(existing_claims.session_id, existing_claims.expires_at)
+    if remember:
+        token = _make_auth_token(username, cookie_secret, user_config["password"], remember_days)
+        claims = verify_auth_token(token, username, signing_key)
+        assert claims is not None
+        st.session_state["auth_session_id"] = claims.session_id
+        st.session_state["auth_session_expires_at"] = claims.expires_at
+        _get_cookie_controller().set(AUTH_COOKIE_NAME, token, max_age=remember_days * 86400)
+    else:
+        _get_cookie_controller().remove(AUTH_COOKIE_NAME)
+    return "success"
+
+
 def _render_login() -> None:
     st.title(APP_TITLE)
     st.subheader("Acceso restringido")
@@ -730,7 +781,7 @@ def _render_login() -> None:
     with st.form("login_form", clear_on_submit=False):
         username = st.text_input("Usuario")
         password = st.text_input("Contraseña", type="password")
-        recordarme = st.checkbox(
+        remember = st.checkbox(
             f"Recordarme durante {remember_days} días",
             value=can_remember,
             disabled=not can_remember,
@@ -738,130 +789,84 @@ def _render_login() -> None:
         submitted = st.form_submit_button("Entrar")
 
     if submitted:
-        remote_ip = getattr(st.context, "ip_address", None)
-        attempt_keys = login_bucket_keys(username, remote_ip)
-        max_attempts = _get_auth_login_limit(
-            AUTH_LOGIN_MAX_ATTEMPTS_ENV,
-            AUTH_LOGIN_MAX_ATTEMPTS_DEFAULT,
-        )
-        window_seconds = _get_auth_login_limit(
-            AUTH_LOGIN_WINDOW_SECONDS_ENV,
-            AUTH_LOGIN_WINDOW_SECONDS_DEFAULT,
-        )
-        if not _get_auth_state_store().allow_login_attempt(
-            attempt_keys,
-            max_attempts,
-            window_seconds,
-        ):
-            st.error("Demasiados intentos. Espera antes de volver a intentarlo.")
-            st.stop()
-
-        user_config = users.get(username)
-        if user_config and hmac.compare_digest(password, user_config["password"]):
-            _get_auth_state_store().reset_login_attempts(attempt_keys)
-            st.session_state["authenticated"] = True
-            st.session_state["auth_user"] = username
-            st.session_state["auth_role"] = user_config["role"]
-            st.session_state.pop("auth_session_id", None)
-            st.session_state.pop("auth_session_expires_at", None)
-            signing_key = derive_session_signing_key(
-                cookie_secret,
-                username,
-                user_config["password"],
-            )
-            st.session_state["auth_credential_fingerprint"] = signing_key
-            existing_token = _get_cookie_controller().get(AUTH_COOKIE_NAME)
-            existing_claims = (
-                verify_auth_token(existing_token, username, signing_key)
-                if existing_token
-                else None
-            )
-            if existing_claims:
-                _get_auth_state_store().revoke_session(
-                    existing_claims.session_id,
-                    existing_claims.expires_at,
-                )
-            if recordarme:
-                token = _make_auth_token(
-                    username,
-                    cookie_secret,
-                    user_config["password"],
-                    remember_days,
-                )
-                claims = verify_auth_token(token, username, signing_key)
-                assert claims is not None
-                st.session_state["auth_session_id"] = claims.session_id
-                st.session_state["auth_session_expires_at"] = claims.expires_at
-                _get_cookie_controller().set(
-                    AUTH_COOKIE_NAME, token, max_age=remember_days * 86400
-                )
-            else:
-                _get_cookie_controller().remove(AUTH_COOKIE_NAME)
+        outcome = _process_login(username, password, remember, users, cookie_secret, remember_days)
+        if outcome == "success":
             st.rerun()
-        st.error("Usuario o contraseña incorrectos")
+        elif outcome == "limited":
+            st.error("Demasiados intentos. Espera antes de volver a intentarlo.")
+        else:
+            st.error("Usuario o contraseña incorrectos")
 
     st.stop()
+
+
+def _clear_auth_session() -> None:
+    st.session_state["authenticated"] = False
+    for key in (
+        "auth_user",
+        "auth_role",
+        "auth_session_id",
+        "auth_session_expires_at",
+        "auth_credential_fingerprint",
+    ):
+        st.session_state.pop(key, None)
+    _get_cookie_controller().remove(AUTH_COOKIE_NAME)
+
+
+def _authenticated_session_is_valid(users: dict[str, dict[str, str]]) -> bool:
+    username = st.session_state.get("auth_user", "")
+    user_config = users.get(username)
+    if not user_config:
+        return False
+
+    secret = _get_auth_cookie_secret()
+    fingerprint = derive_session_signing_key(secret, username, user_config["password"])
+    if st.session_state.get("auth_role") != user_config["role"]:
+        return False
+    if not hmac.compare_digest(st.session_state.get("auth_credential_fingerprint", ""), fingerprint):
+        return False
+
+    expires_at = st.session_state.get("auth_session_expires_at")
+    if expires_at is not None and int(expires_at) < int(time.time()):
+        return False
+    session_id = st.session_state.get("auth_session_id")
+    return not session_id or not _get_auth_state_store().is_revoked(session_id)
+
+
+def _restore_remembered_session(users: dict[str, dict[str, str]]) -> bool:
+    secret = _get_auth_cookie_secret()
+    if not users or len(secret) < AUTH_COOKIE_SECRET_MIN_LENGTH:
+        return False
+    token = _get_cookie_controller().get(AUTH_COOKIE_NAME)
+    if not token:
+        return False
+
+    for expected_user, user_config in users.items():
+        if not _verify_auth_token(token, expected_user, user_config["password"], secret):
+            continue
+        signing_key = derive_session_signing_key(secret, expected_user, user_config["password"])
+        claims = verify_auth_token(token, expected_user, signing_key)
+        if claims is None:
+            continue
+        st.session_state["authenticated"] = True
+        st.session_state["auth_user"] = expected_user
+        st.session_state["auth_role"] = user_config["role"]
+        st.session_state["auth_session_id"] = claims.session_id
+        st.session_state["auth_session_expires_at"] = claims.expires_at
+        st.session_state["auth_credential_fingerprint"] = signing_key
+        return True
+    return False
+
 
 def require_authentication() -> None:
     """Bloquea la app hasta que el usuario se autentique (incluye sesión recordada por cookie)."""
     users = _get_auth_users()
     if st.session_state.get("authenticated", False):
-        expected_user = st.session_state.get("auth_user", "")
-        user_config = users.get(expected_user)
-        secret = _get_auth_cookie_secret()
-        current_fingerprint = (
-            derive_session_signing_key(secret, expected_user, user_config["password"])
-            if user_config
-            else ""
-        )
-        session_id = st.session_state.get("auth_session_id")
-        expires_at = st.session_state.get("auth_session_expires_at")
-        session_expired = expires_at is not None and int(expires_at) < int(time.time())
-        credentials_changed = (
-            not user_config
-            or st.session_state.get("auth_role") != user_config["role"]
-            or not hmac.compare_digest(
-                st.session_state.get("auth_credential_fingerprint", ""),
-                current_fingerprint,
-            )
-        )
-        session_revoked = bool(session_id and _get_auth_state_store().is_revoked(session_id))
-        if not credentials_changed and not session_expired and not session_revoked:
+        if _authenticated_session_is_valid(users):
             return
-        st.session_state["authenticated"] = False
-        st.session_state.pop("auth_user", None)
-        st.session_state.pop("auth_role", None)
-        st.session_state.pop("auth_session_id", None)
-        st.session_state.pop("auth_session_expires_at", None)
-        st.session_state.pop("auth_credential_fingerprint", None)
-        _get_cookie_controller().remove(AUTH_COOKIE_NAME)
-
-    if users:
-        token = _get_cookie_controller().get(AUTH_COOKIE_NAME)
-        secret = _get_auth_cookie_secret()
-        for expected_user, user_config in users.items():
-            if token and len(secret) >= AUTH_COOKIE_SECRET_MIN_LENGTH and _verify_auth_token(
-                token,
-                expected_user,
-                user_config["password"],
-                secret,
-            ):
-                signing_key = derive_session_signing_key(
-                    secret,
-                    expected_user,
-                    user_config["password"],
-                )
-                claims = verify_auth_token(token, expected_user, signing_key)
-                assert claims is not None
-                st.session_state["authenticated"] = True
-                st.session_state["auth_user"] = expected_user
-                st.session_state["auth_role"] = user_config["role"]
-                st.session_state["auth_session_id"] = claims.session_id
-                st.session_state["auth_session_expires_at"] = claims.expires_at
-                st.session_state["auth_credential_fingerprint"] = signing_key
-                return
-
-    _render_login()
+        _clear_auth_session()
+    if not _restore_remembered_session(users):
+        _render_login()
 
 
 def require_admin_access() -> None:
@@ -1300,37 +1305,63 @@ def render_abc_page(abc_page: str | None = None) -> None:
         current_snapshot_date = _current_week_start()
         st.info(f"Semana actual: {current_snapshot_date.strftime('%d/%m/%Y')}")
 
-        if st.button("Guardar / actualizar foto de esta semana", type="primary"):
+        if st.button("Guardar nueva foto de esta semana", type="primary"):
             with st.spinner("Calculando ABCD y guardando foto semanal..."):
                 df = load_data_cached()
-                df_classified = run_abcd_engine(df.copy())
+                reference_date = pd.Timestamp.today().normalize()
+                snapshot_parameters = build_snapshot_parameters(reference_date)
+                df_classified = run_abcd_engine(df.copy(), reference_date=reference_date)
                 if ('EAN' not in df_classified.columns or df_classified['EAN'].isna().all()) and 'Cód Barras' in df_classified.columns:
                     df_classified['EAN'] = df_classified['Cód Barras']
-                saved_date = save_abcd_weekly_snapshot(engine, df_classified)
-            st.success(f"Foto semanal guardada: {saved_date.strftime('%d/%m/%Y')}")
+                saved_date = save_abcd_weekly_snapshot(
+                    engine,
+                    df_classified,
+                    run_at=datetime.now().astimezone(),
+                    engine_version=engine_source_version(),
+                    parameters=snapshot_parameters,
+                )
+            st.success(f"Nueva foto semanal guardada: {saved_date.strftime('%d/%m/%Y')}")
 
         try:
-            snapshot_dates = list_abcd_snapshot_dates(engine)
+            snapshot_refs = list_abcd_snapshot_refs(engine)
         except Exception as exc:
             st.error(f"No se pudo cargar el histórico ABCD: {exc}")
             render_footer()
             return
 
-        if not snapshot_dates:
+        if not snapshot_refs:
             st.warning("Todavía no hay fotos semanales guardadas.")
             render_footer()
             return
 
-        selected_date = st.selectbox(
-            "Fecha de foto:",
-            snapshot_dates,
-            format_func=lambda value: value.strftime("%d/%m/%Y"),
+        selected_snapshot = st.selectbox(
+            "Captura:",
+            snapshot_refs,
+            format_func=lambda item: (
+                f"{item.snapshot_date:%d/%m/%Y} · {item.run_at:%H:%M:%S %Z} · #{item.snapshot_id}"
+            ),
         )
-        snapshot_df = load_abcd_weekly_snapshot(engine, selected_date)
+        try:
+            snapshot_df, snapshot_metadata = load_abcd_snapshot_by_id(
+                engine,
+                selected_snapshot.snapshot_id,
+            )
+        except Exception as exc:
+            st.error(f"No se pudo verificar la integridad de la captura: {exc}")
+            render_footer()
+            return
         if snapshot_df.empty:
             st.warning("La foto seleccionada no contiene datos.")
             render_footer()
             return
+
+        if snapshot_metadata:
+            integrity_label = "verificada" if snapshot_metadata.data_sha256 else "legacy, no verificable"
+            st.caption(
+                f"Capturada: {snapshot_metadata.run_at:%d/%m/%Y %H:%M:%S %Z} · "
+                f"Motor: {snapshot_metadata.engine_version} · Integridad: {integrity_label}"
+            )
+            st.json(snapshot_metadata.parameters)
 
         col1, col2, col3, col4 = st.columns(4)
         with col1:
@@ -1355,7 +1386,7 @@ def render_abc_page(abc_page: str | None = None) -> None:
         st.subheader("Detalle de la foto")
         st.dataframe(snapshot_df, use_container_width=True, hide_index=True)
 
-        timestamp = selected_date.strftime('%Y%m%d')
+        timestamp = selected_snapshot.snapshot_date.strftime('%Y%m%d')
         col_csv, col_excel = st.columns(2)
         with col_csv:
             st.download_button(
