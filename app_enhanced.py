@@ -17,6 +17,7 @@ from sqlalchemy import create_engine, text
 from streamlit_cookies_controller import CookieController
 
 from db_loader import load_odoo_dataframe
+from adyen_reconciliation_ui import render_reconciliation_page
 from engine import run_abcd_engine
 from db_config import load_db_config, load_env_file
 from transform_luxottica_masterdata import (
@@ -1104,6 +1105,13 @@ def render_home_page() -> None:
         st.write("Guardar claves y credenciales de integración en el entorno local.")
         st.page_link(SETTINGS_PAGE, label="Entrar en Configuración", use_container_width=True)
 
+    render_footer()
+
+
+def render_odoo_reconciliation_page() -> None:
+    render_sidebar_shell("Conciliación Odoo")
+    require_admin_access()
+    render_reconciliation_page()
     render_footer()
 
 
@@ -2303,6 +2311,8 @@ LUXOPTICA_IMAGES_PAGE = st.Page(render_luxoptica_images_page, title="Imágenes",
 LUXOPTICA_PENDING_PAGE = st.Page(render_luxoptica_pending_page, title="Pendiente Luxoptica", icon="⏳", url_path="pendiente-luxoptica")
 ALERTA_PEDIDOS_PAGE = st.Page(render_alerta_pedidos_page, title="Alerta Pedidos", icon="🔔", url_path="alerta-pedidos")
 SETTINGS_PAGE = st.Page(render_settings_page, title="Configuración", icon="⚙️", url_path="config")
+ODOO_RECONCILIATION_PAGE = st.Page(render_odoo_reconciliation_page, title="Conciliación Odoo", url_path="conciliacion-odoo")
+reconciliation_navigation = {"Conciliación": [ODOO_RECONCILIATION_PAGE]} if st.session_state.get("auth_role") == "admin" else {}
 
 navigation = st.navigation(
     (
@@ -2323,6 +2333,7 @@ navigation = st.navigation(
             "Master Data": [MASTER_IMPORT_PAGE, MASTER_DICTIONARY_PAGE, MASTER_DRYRUN_PAGE],
             "Repositorio de imágenes": [LUXOPTICA_IMAGES_PAGE, LUXOPTICA_PENDING_PAGE],
             "Alertas": [ALERTA_PEDIDOS_PAGE],
+            **reconciliation_navigation,
             "Configuración": [SETTINGS_PAGE],
         }
     ),
