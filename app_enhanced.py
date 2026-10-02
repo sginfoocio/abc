@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from io import BytesIO
 from pathlib import Path
 from datetime import date, datetime, timedelta
 import hmac
@@ -48,6 +47,7 @@ from order_alerts import (
 )
 from abcd_snapshots import (
     build_abcd_report_export_df,
+    build_abcd_report_excel_df,
     build_snapshot_parameters,
     current_week_start as _current_week_start,
     engine_source_version,
@@ -62,6 +62,15 @@ from auth_session import (
     login_bucket_keys,
     verify_auth_token,
 )
+from app_exports import (
+    dataframe_to_excel_bytes,
+    extract_clean_eans as _extract_clean_eans,
+    generate_luxoptica_request_files,
+    load_masterdata_file,
+    normalize_result_export_schema,
+    split_report_warnings,
+)
+from app_navigation import build_navigation
 
 # ==============================================================================
 # CONFIG
@@ -228,128 +237,6 @@ def render_master_dictionary_page() -> None:
         st.info("No hay reglas personalizadas todavía.")
 
 
-def load_masterdata_file(file_source) -> pd.DataFrame:
-    """Carga un Excel MASTERDATA preservando texto."""
-    df = pd.read_excel(file_source, dtype=str).fillna("")
-    df.columns = [str(c).strip() for c in df.columns]
-    for col in df.columns:
-        df[col] = df[col].astype(str).str.strip()
-    return df
-
-
-def dataframe_to_excel_bytes(df: pd.DataFrame) -> bytes:
-    """Serializa un DataFrame a Excel en memoria."""
-    buffer = BytesIO()
-    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False)
-    return buffer.getvalue()
-
-
-def build_abcd_report_excel_df(df: pd.DataFrame) -> pd.DataFrame:
-    """Aplica cabeceras solicitadas para la exportación Excel ABCD."""
-    return build_abcd_report_export_df(df).rename(
-        columns={
-            "Modelo": "NOMBRE",
-            "Cód Barras": "SKU",
-        }
-    )
-
-def normalize_result_export_schema(df: pd.DataFrame) -> pd.DataFrame:
-    """Garantiza el esquema final del fichero transformado para preview y descarga."""
-    target_columns = [
-        "Marca",
-        "Colección",
-        "Modelo",
-        "Color",
-        "Calibre",
-        "Ancho Puente",
-        "Longitud Varilla",
-        "Género",
-        "Color Frontal",
-        "Color Lente",
-        "Forma",
-        "Material Principal",
-        "Fotocromático",
-        "Polarizado",
-        "PVO",
-        "PVP",
-        "Barcode",
-        "Categoría",
-    ]
-    # Compatibilidad con salidas antiguas/canónicas para no romper sesiones en curso.
-    alias_map = {
-        "Barcode": ["Barcode", "UPC"],
-        "Marca": ["Marca", "Nombre de la marca"],
-        "Modelo": ["Modelo", "Código del modelo"],
-        "Ancho Puente": ["Ancho Puente", "Dimensión del puente"],
-        "Longitud Varilla": ["Longitud Varilla", "Largo de varilla"],
-        "Color Frontal": ["Color Frontal", "Color del frontal"],
-        "Color Lente": ["Color Lente", "Color de las lentes"],
-        "Material Principal": ["Material Principal", "Material del frente"],
-        "PVP": ["PVP", "PVP sugerido"],
-    }
-
-    normalized = df.copy()
-    for target, aliases in alias_map.items():
-        if target in normalized.columns:
-            continue
-        source = next((name for name in aliases if name in normalized.columns), None)
-        if source:
-            normalized[target] = normalized[source]
-
-    for col in target_columns:
-        if col not in normalized.columns:
-            normalized[col] = ""
-
-    # Defensa adicional para sesiones antiguas: quitar un 0 inicial en Modelo.
-    normalized["Modelo"] = normalized["Modelo"].map(lambda v: str(v).strip())
-    normalized["Modelo"] = normalized["Modelo"].map(
-        lambda v: v[1:] if v.startswith("0") and len(v) > 1 else v
-    )
-
-    return normalized[target_columns].copy()
-
-
-def _clean_ean(raw_value: object) -> str:
-    value = str(raw_value).strip()
-    if not value or value.lower() == "nan":
-        return ""
-    if value.lower().startswith("es."):
-        value = value[3:]
-    if value.endswith(".0"):
-        value = value[:-2]
-    return value.replace(" ", "")
-
-
-def _extract_luxoptica_products(df: pd.DataFrame) -> list[dict[str, str]]:
-    """Extrae un producto unico por EAN, conservando modelo y color."""
-    if "Barcode" not in df.columns:
-        return []
-
-    seen: set[str] = set()
-    products: list[dict[str, str]] = []
-
-    for _, row in df.iterrows():
-        value = _clean_ean(row["Barcode"])
-        if not value or value in seen:
-            continue
-        seen.add(value)
-        products.append(
-            {
-                "ean": value,
-                "modelo": str(row.get("Modelo", "")).strip(),
-                "color": str(row.get("Color", "")).strip(),
-            }
-        )
-
-    return products
-
-
-def _extract_clean_eans(df: pd.DataFrame) -> list[str]:
-    """Extrae EAN limpios desde Barcode sin prefijo y sin duplicados."""
-    return [product["ean"] for product in _extract_luxoptica_products(df)]
-
-
 def _load_market_pending_rows(images_root: Path) -> list[dict[str, object]]:
     pending_path = images_root / ".market_pending.json"
     if not pending_path.exists():
@@ -416,66 +303,6 @@ def _load_image_catalog(images_root: Path) -> pd.DataFrame:
         columns=["Modelo", "EAN", "Mercado", "Archivo", "Ruta", "Descargada", "Fecha"],
     )
     return catalog.sort_values("Descargada", ascending=False).reset_index(drop=True)
-
-
-def _chunk_list(items: list[str], chunk_size: int) -> list[list[str]]:
-    return [items[i : i + chunk_size] for i in range(0, len(items), chunk_size)]
-
-
-def generate_luxoptica_request_files(
-    df: pd.DataFrame,
-    output_dir: Path,
-    batch_size: int = 250,
-    max_total_eans: int | None = None,
-) -> list[Path]:
-    """Genera archivos txt para solicitud de imágenes con lotes de EAN."""
-    products = _extract_luxoptica_products(df)
-    if max_total_eans is not None and max_total_eans > 0:
-        products = products[:max_total_eans]
-    if not products:
-        return []
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    batches = _chunk_list(products, batch_size)
-    generated_files: list[Path] = []
-
-    for idx, batch in enumerate(batches, start=1):
-        file_name = f"upc-products-images-request-{timestamp}-lote-{idx:03d}.txt"
-        file_path = output_dir / file_name
-        file_path.write_text("\n".join(product["ean"] for product in batch) + "\n", encoding="utf-8")
-        manifest_path = file_path.with_suffix(".manifest.json")
-        manifest_path.write_text(
-            json.dumps({"products": batch}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        generated_files.append(file_path)
-
-    return generated_files
-
-
-def split_report_warnings(report) -> tuple[list[str], list[str], list[str]]:
-    """Separa incidencias bloqueantes, de riesgo medio e informativas para la UI."""
-    blocking: list[str] = []
-    medium: list[str] = []
-    info: list[str] = []
-
-    if report.discarded > 0:
-        medium.append(f"Se descartaron {report.discarded} filas durante la transformacion.")
-    if report.discarded_accessories > 0:
-        info.append(f"{report.discarded_accessories} filas fueron marcadas como accesorios.")
-    if report.discarded_invalid_product > 0:
-        medium.append(f"{report.discarded_invalid_product} filas no cumplian criterio de producto valido.")
-    if report.leading_zero_real_loss_columns > 0:
-        blocking.append("Hay perdida real de ceros iniciales en al menos una columna critica.")
-    if report.invalid_yes_no_rows > 0:
-        blocking.append(f"Hay {report.invalid_yes_no_rows} filas con valores invalidos SI/NO.")
-    if report.unmatched_brand_names:
-        medium.append(f"Marcas con incidencia abierta: {', '.join(report.unmatched_brand_names)}")
-    for key, values in report.anomalous_values.items():
-        blocking.append(f"Valores anómalos en {key}: {', '.join(values)}")
-
-    return blocking, medium, info
 
 
 def _read_env_setting(key: str, default: str = "") -> str:
@@ -2224,29 +2051,24 @@ LUXOPTICA_PENDING_PAGE = st.Page(render_luxoptica_pending_page, title="Pendiente
 ALERTA_PEDIDOS_PAGE = st.Page(render_alerta_pedidos_page, title="Alerta Pedidos", icon="🔔", url_path="alerta-pedidos")
 SETTINGS_PAGE = st.Page(render_settings_page, title="Configuración", icon="⚙️", url_path="config")
 
-navigation = st.navigation(
-    (
-        {
-            "Inicio": [HOME_PAGE],
-            "Master Data": [MASTER_IMPORT_PAGE, MASTER_DICTIONARY_PAGE, MASTER_DRYRUN_PAGE],
-        }
-        if st.session_state.get("auth_role") == "masterdata"
-        else {
-            "Inicio": [HOME_PAGE],
-            "Análisis ABC": [
-                ABC_HOME_PAGE,
-                ABC_SEARCH_PAGE,
-                ABC_REPORTS_PAGE,
-                ABC_HISTORY_PAGE,
-                ABC_DETAIL_PAGE,
-            ],
-            "Master Data": [MASTER_IMPORT_PAGE, MASTER_DICTIONARY_PAGE, MASTER_DRYRUN_PAGE],
-            "Repositorio de imágenes": [LUXOPTICA_IMAGES_PAGE, LUXOPTICA_PENDING_PAGE],
-            "Alertas": [ALERTA_PEDIDOS_PAGE],
-            "Configuración": [SETTINGS_PAGE],
-        }
-    ),
-    position="sidebar",
+navigation = build_navigation(
+    st,
+    st.session_state.get("auth_role"),
+    {
+        "home": HOME_PAGE,
+        "abc_home": ABC_HOME_PAGE,
+        "abc_search": ABC_SEARCH_PAGE,
+        "abc_reports": ABC_REPORTS_PAGE,
+        "abc_history": ABC_HISTORY_PAGE,
+        "abc_detail": ABC_DETAIL_PAGE,
+        "master_import": MASTER_IMPORT_PAGE,
+        "master_dryrun": MASTER_DRYRUN_PAGE,
+        "master_dictionary": MASTER_DICTIONARY_PAGE,
+        "luxoptica_images": LUXOPTICA_IMAGES_PAGE,
+        "luxoptica_pending": LUXOPTICA_PENDING_PAGE,
+        "alerts": ALERTA_PEDIDOS_PAGE,
+        "settings": SETTINGS_PAGE,
+    },
 )
 
 navigation.run()
