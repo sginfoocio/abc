@@ -121,9 +121,6 @@ MASTERDATA_DOWNLOAD_COLUMNS = [
     "PVO",
     "PVP",
 ]
-ALERT_RECIPIENT_EMAIL_ENV = "ALERT_RECIPIENT_EMAIL"
-ALERT_RECIPIENT_EMAIL_DEFAULT = "roberto@diagonaleyewear.com"
-ALERT_RECIPIENT_EMAILS_EXTRA = ["virginia.nunez@diagonaleyewear.com"]
 
 st.set_page_config(
     page_title=APP_TITLE,
