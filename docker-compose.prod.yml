@@ -3,8 +3,7 @@
 
 services:
   abcd-app:
-    # En producción, usar imagen específica por versión
-    image: registry.diagonaleyewear.net/abcd-control:latest
+    image: ${ABCD_IMAGE_REF:-registry.diagonaleyewear.net/abcd-control:latest}
     
     # Restart automático
     restart: always
@@ -47,8 +46,10 @@ services:
       - ./masterdata_data:/app/data
 
   abcd-luxoptica-monitor:
-    image: registry.diagonaleyewear.net/abcd-control:latest
+    image: ${ABCD_IMAGE_REF:-registry.diagonaleyewear.net/abcd-control:latest}
     restart: always
+    healthcheck:
+      disable: true
 
   # Opcional: Reverse proxy Nginx integrado
   # nginx:
