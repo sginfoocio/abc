@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 from datetime import date, datetime, timedelta
 import hmac
@@ -35,15 +36,7 @@ from graph_mail_downloader import (
     download_luxoptica_mail_attachments,
     load_m365_config,
     _refresh_pending_market_images,
-    send_alert_email,
     validate_m365_config,
-)
-from watchlist_config import add_customer, load_watchlist, remove_customer, save_watchlist
-from check_pedidos_vigilados import find_matching_orders
-from order_alerts import (
-    OrderAlertStore,
-    build_alert_email_html,
-    import_legacy_notification_file,
 )
 from abcd_snapshots import (
     build_abcd_report_export_df,
@@ -71,6 +64,8 @@ from app_exports import (
     split_report_warnings,
 )
 from app_navigation import build_navigation
+from app_pages.alerts import render_alerts_page
+from app_pages.luxoptica import render_images_page, render_pending_page
 
 # ==============================================================================
 # CONFIG
@@ -131,9 +126,6 @@ MASTERDATA_DOWNLOAD_COLUMNS = [
     "PVO",
     "PVP",
 ]
-ALERT_RECIPIENT_EMAIL_ENV = "ALERT_RECIPIENT_EMAIL"
-ALERT_RECIPIENT_EMAIL_DEFAULT = "roberto@diagonaleyewear.com"
-ALERT_RECIPIENT_EMAILS_EXTRA = ["virginia.nunez@diagonaleyewear.com"]
 
 st.set_page_config(
     page_title=APP_TITLE,
@@ -1352,114 +1344,6 @@ def render_luxoptica_pending_panel() -> None:
         st.warning(f"No se encuentra el archivo en el servidor: {selected_path}")
 
 
-def render_luxoptica_images_page() -> None:
-    render_sidebar_shell("Repositorio de imágenes")
-    require_admin_access()
-    st.title("Imágenes")
-    st.caption("Explora las imágenes descargadas por modelo, EAN y mercado.")
-
-    images_root = Path(__file__).resolve().parent / "repo" / "images"
-    image_catalog = _load_image_catalog(images_root)
-
-    st.subheader("Visor de imágenes")
-    search_ean = st.text_input(
-        "Buscar por EAN",
-        placeholder="Introduce el EAN completo o una parte",
-        key="luxoptica_search_ean",
-    ).strip()
-    market_filter = st.selectbox(
-        "Mercado",
-        options=["Todos", "Original", "Farfetch", "Miinto"],
-        key="luxoptica_market_filter",
-    )
-
-    filtered_catalog = image_catalog
-    if search_ean:
-        filtered_catalog = filtered_catalog[
-            filtered_catalog["EAN"].str.contains(search_ean, case=False, na=False)
-        ]
-    if market_filter != "Todos":
-        filtered_catalog = filtered_catalog[filtered_catalog["Mercado"] == market_filter]
-
-    if filtered_catalog.empty:
-        st.info("No hay imágenes que coincidan con la búsqueda.")
-    else:
-        st.caption(
-            f"{len(filtered_catalog):,} imágenes | "
-            f"{filtered_catalog['EAN'].nunique():,} EAN | "
-            f"{filtered_catalog['Modelo'].nunique():,} modelos"
-        )
-        page_size = 24
-        total_pages = max(1, (len(filtered_catalog) + page_size - 1) // page_size)
-        current_page = min(
-            st.session_state.get("luxoptica_gallery_page", 1),
-            total_pages,
-        )
-        page_col, size_col = st.columns([3, 1])
-        with page_col:
-            current_page = st.number_input(
-                "Página",
-                min_value=1,
-                max_value=total_pages,
-                value=current_page,
-                step=1,
-                key="luxoptica_gallery_page_input",
-            )
-        with size_col:
-            st.caption(f"{total_pages} página(s) de {page_size} miniaturas")
-        st.session_state["luxoptica_gallery_page"] = int(current_page)
-
-        start = (int(current_page) - 1) * page_size
-        page_catalog = filtered_catalog.iloc[start : start + page_size]
-        thumbnail_columns = st.columns(4)
-        for position, (row_index, image_row) in enumerate(page_catalog.iterrows()):
-            with thumbnail_columns[position % 4]:
-                st.image(image_row["Ruta"], width="stretch")
-                st.caption(
-                    f"{image_row['EAN']} · {image_row['Mercado']}\n"
-                    f"{image_row['Archivo']} · {image_row['Fecha']}"
-                )
-                if st.button(
-                    "Ver imagen",
-                    key=f"luxoptica_view_{row_index}",
-                    width="stretch",
-                ):
-                    st.session_state["luxoptica_selected_image"] = str(image_row["Ruta"])
-                    st.rerun()
-
-        selected_path = st.session_state.get("luxoptica_selected_image")
-        if selected_path and selected_path in set(filtered_catalog["Ruta"]):
-            selected_row = filtered_catalog[filtered_catalog["Ruta"] == selected_path].iloc[0]
-            st.markdown("#### Imagen ampliada")
-            viewer_col, details_col = st.columns([2, 1])
-            with viewer_col:
-                st.image(selected_path, caption=selected_row["Archivo"], width="stretch")
-            with details_col:
-                st.write(f"**Modelo:** {selected_row['Modelo']}")
-                st.write(f"**EAN:** {selected_row['EAN']}")
-                st.write(f"**Mercado:** {selected_row['Mercado']}")
-                st.write(f"**Fecha:** {selected_row['Fecha']}")
-                st.write(f"**Archivo:** {selected_row['Archivo']}")
-
-        st.markdown("#### Estructura encontrada")
-        st.dataframe(
-            filtered_catalog[["Modelo", "EAN", "Mercado", "Archivo", "Fecha"]],
-            hide_index=True,
-            width="stretch",
-        )
-
-    render_footer()
-
-
-def render_luxoptica_pending_page() -> None:
-    render_sidebar_shell("Repositorio de imágenes")
-    require_admin_access()
-    st.title("Pendiente Luxoptica")
-    st.caption("Revisa y procesa manualmente las copias pendientes para Farfetch y Miinto.")
-    render_luxoptica_pending_panel()
-    render_footer()
-
-
 def render_master_page(master_page: str | None = None) -> None:
     render_sidebar_shell("Master Data")
     if master_page is None:
@@ -1916,127 +1800,6 @@ def render_master_dictionary_page_route() -> None:
     render_master_dictionary_page()
 
 
-def render_alerta_pedidos_page() -> None:
-    render_sidebar_shell("Alerta Pedidos")
-    require_admin_access()
-    st.title("Alerta de Pedidos de Clientes Vigilados")
-    st.caption(
-        "Mantén aquí la lista de clientes a vigilar. Se busca coincidencia en el nombre del cliente "
-        "o en la dirección de entrega. Cuando se detecte un pedido, se enviará un email de alerta."
-    )
-
-    watchlist = load_watchlist()
-
-    with st.form("watchlist_add_form", clear_on_submit=True):
-        st.subheader("Añadir cliente a vigilar")
-        new_name = st.text_input(
-            "Nombre exacto del cliente (tal cual figura en Odoo)",
-            placeholder="Ej: Óptica Ejemplo S.L.",
-        )
-        added = st.form_submit_button("Añadir", type="primary")
-
-    if added:
-        if new_name.strip():
-            watchlist = add_customer(new_name)
-            st.success(f"Cliente '{new_name.strip()}' añadido a la lista de vigilancia.")
-        else:
-            st.warning("Introduce un nombre antes de añadir.")
-
-    st.divider()
-    st.subheader("Clientes vigilados")
-    if not watchlist:
-        st.info("No hay clientes en la lista de vigilancia todavía.")
-    else:
-        clientes_editados = st.data_editor(
-            pd.DataFrame({"Cliente": watchlist}),
-            column_config={"Cliente": st.column_config.TextColumn("Cliente vigilado", required=True)},
-            hide_index=True,
-            num_rows="dynamic",
-            key="watchlist_editor",
-        )
-        if st.button("Guardar lista de clientes", type="secondary"):
-            clientes = [
-                str(nombre).strip()
-                for nombre in clientes_editados["Cliente"].dropna().tolist()
-                if str(nombre).strip()
-            ]
-            clientes = list(dict.fromkeys(clientes))
-            save_watchlist(clientes)
-            st.success(f"Lista guardada: {len(clientes)} cliente(s) vigilado(s).")
-            st.rerun()
-
-            cliente_a_quitar = st.selectbox("Cliente a quitar", options=watchlist)
-            if st.button("Quitar cliente", type="secondary"):
-                remove_customer(cliente_a_quitar)
-                st.success(f"Cliente '{cliente_a_quitar}' eliminado de la lista.")
-                st.rerun()
-
-    st.divider()
-    st.subheader("Comprobar pedidos")
-
-    col_desde, col_hasta, col_estado = st.columns([1, 1, 1])
-    hoy = date.today()
-    fecha_desde = col_desde.date_input("Desde", value=hoy - timedelta(days=30))
-    fecha_hasta = col_hasta.date_input("Hasta", value=hoy)
-    filtro_estado = col_estado.radio("Estado", options=["Pendientes", "Todos"], horizontal=True)
-
-    if st.button("Comprobar ahora", type="primary"):
-        if not watchlist:
-            st.warning("Añade al menos un cliente a la lista de vigilancia antes de comprobar.")
-        elif fecha_desde > fecha_hasta:
-            st.warning("La fecha 'Desde' no puede ser posterior a la fecha 'Hasta'.")
-        else:
-            with st.spinner("Consultando pedidos en Odoo..."):
-                try:
-                    resultados = find_matching_orders(
-                        clientes=watchlist,
-                        fecha_desde=fecha_desde,
-                        fecha_hasta=fecha_hasta + timedelta(days=1),
-                        solo_pendientes=(filtro_estado == "Pendientes"),
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    st.error(f"Error al consultar Odoo: {exc}")
-                    resultados = None
-
-            if resultados is not None:
-                if resultados.empty:
-                    st.info("No se han encontrado pedidos para los clientes vigilados en el rango indicado.")
-                else:
-                    st.success(f"Se han encontrado {len(resultados)} pedido(s).")
-                    st.dataframe(resultados, use_container_width=True, hide_index=True)
-
-                    alert_store = OrderAlertStore()
-                    legacy_notifications = (
-                        Path(__file__).resolve().parent / "alerta_pedidos_notificados.json"
-                    )
-                    import_legacy_notification_file(alert_store, legacy_notifications)
-                    batch = alert_store.claim_orders(resultados["pedido_id"].tolist())
-                    nuevos = resultados[resultados["pedido_id"].isin(batch.order_ids)]
-                    if nuevos.empty:
-                        st.info("Los pedidos ya están notificados o hay otra ejecución procesándolos.")
-                    else:
-                        destinatario = _read_env_setting(
-                            ALERT_RECIPIENT_EMAIL_ENV,
-                            ALERT_RECIPIENT_EMAIL_DEFAULT,
-                        )
-                        destinatarios = list(dict.fromkeys([destinatario, *ALERT_RECIPIENT_EMAILS_EXTRA]))
-                        with st.spinner(f"Enviando alerta por email a {', '.join(destinatarios)}..."):
-                            try:
-                                send_alert_email(
-                                    subject=f"Alerta de pedidos vigilados ({len(nuevos)})",
-                                    html_body=build_alert_email_html(nuevos.to_dict(orient="records")),
-                                    to_address=destinatarios,
-                                )
-                            except Exception as exc:  # noqa: BLE001
-                                alert_store.mark_failed(batch.batch_id, str(exc))
-                                st.error(f"No se pudo enviar el email de alerta: {exc}")
-                            else:
-                                alert_store.mark_sent(batch.batch_id, ", ".join(destinatarios))
-                                st.success(f"Email de alerta enviado a {', '.join(destinatarios)}.")
-
-    render_footer()
-
-
 HOME_PAGE = st.Page(render_home_page, title="Inicio", icon="🏠", url_path="", default=True)
 ABC_HOME_PAGE = st.Page(render_abc_home_page, title="Inicio", icon="📊", url_path="abc")
 ABC_SEARCH_PAGE = st.Page(render_abc_search_page, title="Buscar Producto", icon="🔍", url_path="abc-buscar")
@@ -2046,9 +1809,42 @@ ABC_DETAIL_PAGE = st.Page(render_abc_detail_page, title="Análisis Detallado", i
 MASTER_IMPORT_PAGE = st.Page(render_master_import_page, title="Importador Masterdata", icon="📥", url_path="master")
 MASTER_DRYRUN_PAGE = st.Page(render_master_dryrun_page, title="Dry-run Odoo", icon="🧪", url_path="master-dry-run")
 MASTER_DICTIONARY_PAGE = st.Page(render_master_dictionary_page_route, title="Diccionario", icon="📖", url_path="master-diccionario")
-LUXOPTICA_IMAGES_PAGE = st.Page(render_luxoptica_images_page, title="Imágenes", icon="🖼️", url_path="repositorio-imagenes")
-LUXOPTICA_PENDING_PAGE = st.Page(render_luxoptica_pending_page, title="Pendiente Luxoptica", icon="⏳", url_path="pendiente-luxoptica")
-ALERTA_PEDIDOS_PAGE = st.Page(render_alerta_pedidos_page, title="Alerta Pedidos", icon="🔔", url_path="alerta-pedidos")
+LUXOPTICA_IMAGES_PAGE = st.Page(
+    partial(
+        render_images_page,
+        render_sidebar_shell=render_sidebar_shell,
+        require_admin_access=require_admin_access,
+        render_footer=render_footer,
+        load_image_catalog=_load_image_catalog,
+        application_root=Path(__file__).resolve().parent,
+    ),
+    title="Imágenes",
+    icon="🖼️",
+    url_path="repositorio-imagenes",
+)
+LUXOPTICA_PENDING_PAGE = st.Page(
+    partial(
+        render_pending_page,
+        render_sidebar_shell=render_sidebar_shell,
+        require_admin_access=require_admin_access,
+        render_footer=render_footer,
+        render_pending_panel=render_luxoptica_pending_panel,
+    ),
+    title="Pendiente Luxoptica",
+    icon="⏳",
+    url_path="pendiente-luxoptica",
+)
+ALERTA_PEDIDOS_PAGE = st.Page(
+    partial(
+        render_alerts_page,
+        render_sidebar_shell=render_sidebar_shell,
+        require_admin_access=require_admin_access,
+        render_footer=render_footer,
+    ),
+    title="Alerta Pedidos",
+    icon="🔔",
+    url_path="alerta-pedidos",
+)
 SETTINGS_PAGE = st.Page(render_settings_page, title="Configuración", icon="⚙️", url_path="config")
 
 navigation = build_navigation(
