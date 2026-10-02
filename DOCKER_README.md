@@ -31,6 +31,9 @@ docker history abcd-control:latest
 
 **Lo que incluye:**
 - Configuración de servicio `abcd-app`
+- Servicio `abcd-luxoptica-monitor` (descarga de correo Luxoptica)
+- Servicio `abcd-order-alerts` (alertas automáticas de pedidos de clientes vigilados, ver
+  [docs/AlertaPedidos/SPRINTS_ALERTA_PEDIDOS_CLIENTES.md](docs/AlertaPedidos/SPRINTS_ALERTA_PEDIDOS_CLIENTES.md#operación-del-servicio-abcd-order-alerts))
 - Variables de entorno para BD
 - Puerto 8501 expuesto
 - Health check
