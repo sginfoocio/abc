@@ -166,9 +166,11 @@ tempfile, fsync y reemplazo atomico, sin reemplazar vistas ya validadas. Los mis
 EAN reutilizan archivos entre pedidos. La galeria existente muestra el mercado
 Kering a partir de metadatos y archivos comprobados, no mezclado con Luxottica.
 
-Dos lotes como maximo por proceso, en ThreadPoolExecutor fuera de Streamlit.
+Un lote de procesamiento compartido entre procesos manuales/automaticos,
+en ThreadPoolExecutor fuera de Streamlit para la via manual.
 Chromium se inicia de forma lazy solo para EAN pendientes y se cierra por lote;
 un EAN completo no provoca ni busqueda, ni descarga, ni login.
+`batch.lock` impide solapamientos de lotes; se mantienen ademas los locks por EAN.
 Un EAN ocupado queda pendiente con `ean_en_proceso`; reintentar cuando termine.
 Los EAN repetidos se consultan una vez por lote. El heartbeat mantiene viva una
 ejecucion larga. Tras 5 minutos sin heartbeat, al abrir historial o iniciar lote,
@@ -267,6 +269,128 @@ el 2026-10-09. #35 depende de `copilot/order-alerts-scheduler`. Orden: integrar
 las bases de #35, despues #35, despues #36. Solo cuando #35 se integre en la rama
 destino, ajustar base de #36 y repetir CI. No se han fusionado ni desplegado PR.
 #36 se mantiene en borrador mientras falte validar el flujo real o falle CI.
+
+## Listado de pedidos, corte y piloto inicial
+
+Fecha de corte persistente en configuracion cifrada: **01/09/2026** por defecto,
+editable en Configuracion > Kering > Procesamiento Kering. Se interpreta como
+medianoche Europe/Madrid (2026-08-31 22:00 UTC para este corte). Un filtro desde
+anterior se eleva al corte; hasta anterior devuelve vacio. No se borran historico,
+metadatos ni archivos al cambiarlo. El listado y los loaders de ambos modos usan
+`configured_orders`; se relee configuracion y pedido antes de cada ejecucion.
+
+La primera pantalla es el listado Odoo actual, incluyendo pedidos nunca
+procesados. Cruza por ID con el ultimo intento y comprueba archivos persistentes:
+numero, fecha local, estado Odoo, No procesado/En proceso/Parcial/Procesado/Error/
+Interrumpido, productos completos y pendientes, ultimo procesamiento y cambios.
+Procesado exige intento completo, firma de lineas/productos/EAN/cantidad/nombre
+sin cambios y tres vistas validas por linea. Nuevas lineas o archivos ausentes/
+corruptos provocan pendientes; un estado historico no evita la comprobacion actual.
+
+Acciones: Procesar por pedido, seleccion multiple y Procesar seleccionados.
+Listado/estado se actualizan cada 5 segundos y progreso cada 3 segundos.
+Detalle muestra productos, EAN, tres vistas disponibles/pendientes, motivos y ZIP
+del pedido actual, sin depender de que tenga historial. El historial de intentos
+continua accesible, incluidas ejecuciones sin pedidos o con error de lectura.
+Fotos compartidas por EAN: no se duplican por pedido.
+
+**Modo de prueba activo por defecto**, sin pedidos autorizados inicialmente.
+Seleccionar explicitamente uno o dos pedidos en Pedidos autorizados para prueba
+y guardar. Los no autorizados no pueden procesarse manual ni automaticamente.
+Los controles por pedido permanecen visibles, deshabilitados hasta autorizacion.
+Un lote completo no se habilita por defecto: se exige evidencia en el historial
+del piloto (dos intentos completos, uno con reutilizacion de todas las vistas,
+al menos una descarga y archivos actuales validos), y accion explicita de admin
+para desactivar modo de prueba. Si se invalida esa evidencia, se vuelve a bloquear.
+
+### Validacion real de pedidos autorizados (2026-10-09)
+
+El administrador autorizo explicitamente **P06097/6105** y **P06110/6118**,
+ambos con una linea; se guardaron solo esos IDs. Automatizacion **desactivada**.
+Consulta de Odoo desde corte: 19 pedidos, incluidos No procesado. Dos intentos
+manuales por cada piloto quedaron persistidos:
+
+| Pedido | Primera ejecucion | Segunda ejecucion | Estado actual |
+| --- | --- | --- | --- |
+| P06097 | Codigo Odoo 889652356099 resuelto exactamente a UPC de GG0998S-001, talla M; tres originales descargados | Tres vistas reutilizadas, tries=0, sin llamadas Kering para el EAN | Procesado |
+| P06110 | Codigo 2532000985790 no encontrado en el portal; producto_no_encontrado, sin inferir equivalencia | Mismo error acotado, sin fotografias falsas | Error |
+
+El piloto es **parcial**, no una validacion masiva operativa. No se corrige Odoo
+ni se inventa una relacion para el codigo no encontrado. El lote completo sigue
+bloqueado porque uno de los pilotos no se completo. Cambios de corte, frontera
+del propio dia 01/09, EAN compartidos, concurrencia y programador se validan
+offline con simuladores; no se ha habilitado el servicio real ni activado auto.
+
+## Procesamiento automatico cada X horas
+
+Configuracion compartida: auto_enabled=false inicial; auto_interval_hours=6
+inicial, finito y >0; mismo cutoff_date, proveedor/contactos y piloto que la via
+manual. Se muestra ultima ejecucion, proxima ejecucion y resultado persistidos.
+Modificar intervalo recalcula el siguiente vencimiento sobre el final previo;
+desactivar evita proximos lotes, no aborta una descarga que ya este en curso.
+
+`kering_jobs.py` es un proceso servidor independiente de Streamlit. Servicio
+Docker **abcd-kering-scheduler**, misma imagen y volumen `/app/data`, sin crontab
+ni necesidad de navegador/app abiertos. Inicio del servicio no activa descargas:
+es obligatorio auto_enabled en la configuracion. No se ha desplegado en esta PR.
+
+Cada vencimiento consulta desde corte hasta el dia actual completo de Madrid;
+en piloto consulta solo los IDs autorizados. Compara lineas/fotos/historial y
+procesa nuevos, incompletos o cambiados. Pedidos completos sin cambios se omiten;
+un EAN completo reutilizado no provoca busqueda ni descarga. Cada pedido se relee
+antes de ejecutarlo y se revalida proveedor/corte/alcance. Origen **Manual** o
+**Automatico** en runs/historial (la interfaz muestra el acento).
+
+SQLite conserva ultima/proxima ejecucion, ID y resultado. `batch.lock` se adquiere
+antes de leer decisiones de programacion; no se solapan procesos automaticos
+entre si ni con los manuales. `schema.lock` protege migraciones simultaneas y
+locks por EAN siguen protegiendo imagenes. No usar NFS/multiples servidores sin
+sustituir el mecanismo de coordinacion; ambos contenedores deben compartir volumen.
+
+Al recuperar el bloqueo libre tras reinicio, intentos abandonados se marcan
+Interrumpido. Una ejecucion automatica interrumpida espera otro intervalo antes
+de reintentarse. Errores de acceso/consulta esperan intervalo, con minimo 5 min
+para Error/Parcial/Interrumpido; errores de configuracion esperan 5 min.
+El daemon revisa configuracion como maximo cada minuto, no repite continuamente
+logins ni busquedas ante errores. Fallos por producto no detienen otros pedidos.
+Resultados y errores usan codigos fijos sin credenciales.
+
+Usar el mismo Docker secret/clave en **ambos servicios**:
+
+```yaml
+services:
+  abcd-app:
+    environment:
+      KERING_ENCRYPTION_KEY_FILE: /run/secrets/kering_key
+    secrets: [kering_key]
+  abcd-kering-scheduler:
+    environment:
+      KERING_ENCRYPTION_KEY_FILE: /run/secrets/kering_key
+    secrets: [kering_key]
+secrets:
+  kering_key:
+    file: /etc/abcd-secrets/kering.key
+```
+
+Si se usa gestor de secretos por variable, inyectar la misma KERING_ENCRYPTION_KEY
+en ambos. No copiar claves/credenciales a Git ni a imagen Docker. El servicio
+recibe DB_* del proyecto y solo hace lectura Odoo. Filesystem read_only, /tmp
+escribible para Chromium y volumen de datos persistente. Signal TERM/INT permite
+terminar ordenadamente entre iteraciones; si hay terminacion forzosa, se recupera
+el historial en el proximo arranque. `python kering_jobs.py --once` ejecuta una
+revision controlada respetando configuracion/alcance, sin activar el programador.
+
+### Pruebas de esta ampliacion
+
+42 pruebas Kering offline; **113** en la suite exacta del workflow, aprobadas.
+Lint estricto, py_compile, locks y YAML Compose pasan localmente. Dieciseis avisos
+de deprecacion SQLite datetime en Python 3.13. Casos: frontera UTC/Madrid del corte,
+persistencia sin perdida, No procesado visible, accion Procesar/detalle/ZIP,
+segunda ejecucion sin llamadas, EAN compartidos, cambios/corrupcion, intervalo,
+desactivacion, modo piloto, bloqueos manual/auto, decisiones dentro del bloqueo,
+reinicio/interrupcion, errores de consulta persistidos y espera acotada.
+No se ejecuta Kering/Odoo real en CI; las validaciones reales autorizadas se
+describen aparte. Build Docker local no disponible: validar build remoto de PR.
 
 Dependencias nuevas: cryptography (Fernet), filelock (bloqueo entre procesos),
 tzdata (zonas en Windows). Pillow, SQLAlchemy, Streamlit y Playwright ya existian.

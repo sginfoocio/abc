@@ -3,8 +3,8 @@ from datetime import date, datetime, timezone
 import pytest
 from cryptography.fernet import Fernet
 
-from kering_images import ConfigStore, PORTAL_URL, utc_interval
-from kering_images import ImageStore, VIEWS, execute_run, process_ean
+from kering_images import ConfigStore, PORTAL_URL, utc_interval, DEFAULT_SETTINGS, configured_orders
+from kering_images import ImageStore, VIEWS, execute_run, process_ean, purchase_status, latest_attempts, batch_lock
 from kering_images import read_orders, InterventionRequired, UnverifiedPortal, BatchService
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
@@ -68,7 +68,7 @@ def test_encrypted_configuration(tmp_path, monkeypatch):
     config = dict(url=PORTAL_URL, username="offline-user", password="offline-secret", supplier_id=7)
     store.save(config)
     assert b"offline-secret" not in (tmp_path / "config.enc").read_bytes()
-    assert store.load() == config
+    assert store.load() == {**DEFAULT_SETTINGS, **config}
     with pytest.raises(ValueError):
         store.save(dict(config, url="https://example.org"))
 
@@ -85,6 +85,281 @@ def test_reuse_and_repair_only_pending(tmp_path):
     process_ean(store, portal, ean)
     assert portal.calls[-1] == (ean, ("frontal", "lateral"))
     assert len(store.valid_views(ean)) == 3
+
+
+def test_cutoff_persists_and_query_includes_full_madrid_day(tmp_path, monkeypatch):
+    import kering_images
+    config_store = ConfigStore(tmp_path)
+    config = {"url": PORTAL_URL, "username": "offline", "password": "offline", "supplier_id": 7}
+    config_store.save(config)
+    config = config_store.load()
+    assert config["cutoff_date"] == "2026-09-01"
+    assert not config["auto_enabled"] and config["test_mode"]
+    reader = Mock(return_value=[order()])
+    monkeypatch.setattr(kering_images, "read_orders", reader)
+    configured_orders(None, config, date(2026, 8, 1), date(2026, 9, 1), [1])
+    assert reader.call_args.args[2:4] == (date(2026, 9, 1), date(2026, 9, 1))
+    assert utc_interval(date(2026, 9, 1), date(2026, 9, 1)) == (
+        datetime(2026, 8, 31, 22), datetime(2026, 9, 1, 22))
+    assert configured_orders(None, config, date(2026, 8, 1), date(2026, 8, 31)) == []
+    assert reader.call_count == 1
+    image_store = ImageStore(tmp_path)
+    image_store.create_run([order()], "offline", 7, date(2026, 3, 29), date(2026, 3, 29))
+    config_store.save({**config, "cutoff_date": "2026-10-01"})
+    assert ConfigStore(tmp_path).load()["cutoff_date"] == "2026-10-01"
+    assert len(image_store.history()) == 1
+
+
+def test_purchase_listing_uses_current_lines_and_files(tmp_path):
+    store = ImageStore(tmp_path)
+    current = order()
+    assert purchase_status(store, current)["status"] == "No procesado"
+    run = store.create_run([current], "offline", 7, date(2026, 3, 29), date(2026, 3, 29))
+    execute_run(store, run, lambda _: current, FakePortal())
+    latest = latest_attempts(store)[1]
+    assert latest["origin"] == "Manual"
+    assert purchase_status(store, current, latest)["status"] == "Procesado"
+    assert purchase_status(store, order(eans=("0012345678901", "0002")), latest)["changed"]
+    store.path("0012345678901", "frontal").unlink()
+    status = purchase_status(store, current, latest)
+    assert status["status"] == "Parcial" and status["pending"] == 1
+    assert status["needs_processing"]
+
+
+def test_shared_batch_lock_blocks_a_second_service(tmp_path):
+    store = ImageStore(tmp_path)
+    service = BatchService(store)
+    from filelock import Timeout
+    with batch_lock(store):
+        with pytest.raises(Timeout):
+            service.submit([order()], "offline", 7, date(2026, 3, 29), date(2026, 3, 29), lambda _: order(), FakePortal())
+    service.executor.shutdown(wait=True)
+    assert not store.history()
+
+
+def pilot_config(config_store, **changes):
+    config_store.save({"url": PORTAL_URL, "username": "offline", "password": "offline",
+                       "supplier_id": 7, "test_order_ids": [1, 2], "auto_enabled": True,
+                       "auto_interval_hours": 1, **changes})
+    return config_store.load()
+
+
+def pilot_order(order_id=1, eans=("0012345678901",), when="2026-09-01 00:00:00"):
+    return {**order(order_id, eans), "date_order": when}
+
+
+def test_scheduler_cutoff_scope_reuse_and_restart(tmp_path, monkeypatch):
+    import kering_jobs as jobs
+    from kering_images import configured_orders as query
+    store = ImageStore(tmp_path)
+    config_store = ConfigStore(tmp_path)
+    pilot_config(config_store)
+    now = [datetime(2026, 10, 9, 10, tzinfo=timezone.utc).timestamp()]
+    orders = [pilot_order(1, when="2026-08-31 21:59:59"), pilot_order(2)]
+    requests = []
+    def reader(engine, config, start, end, ids=None):
+        requests.append((start, end, ids))
+        return [row for row in orders if (ids is None or row["id"] in ids) and start <= jobs.order_day(row) <= end]
+    monkeypatch.setattr(jobs, "configured_orders", reader)
+    portal = FakePortal()
+    factory = Mock(return_value=portal)
+    scheduler = jobs.KeringScheduler(store, config_store, lambda: None, factory, lambda: now[0])
+    assert scheduler.tick()["result"] == "Completado"
+    assert [row["order_id"] for row in store.history()] == [2]
+    assert store.history()[0]["origin"] == jobs.AUTO_ORIGIN
+    assert requests[0][0] == date(2026, 9, 1) and requests[0][2] == [1, 2]
+    assert len(portal.calls) == 1
+    before = len(requests)
+    restarted = jobs.KeringScheduler(ImageStore(tmp_path), ConfigStore(tmp_path), lambda: None, factory, lambda: now[0])
+    assert restarted.tick()["next_run"] == now[0] + 3600
+    assert len(requests) == before
+    now[0] += 3600
+    orders[0] = pilot_order(1)
+    assert restarted.tick()["result"] == "Completado"
+    assert len(portal.calls) == 1
+    latest = latest_attempts(store)
+    assert purchase_status(store, orders[0], latest[1])["status"] == "Procesado"
+    now[0] += 3600
+    assert restarted.tick()["result"] == "Sin pendientes"
+    assert len(store.history()) == 2 and len(portal.calls) == 1
+    config_store.save({**config_store.load(), "cutoff_date": "2026-10-10"})
+    now[0] += 3600
+    assert restarted.tick()["result"] == "Sin pendientes"
+    assert len(store.history()) == 2 and len(store.valid_views("0012345678901")) == 3
+
+
+def test_scheduler_waits_for_manual_and_recovers_interruption(tmp_path, monkeypatch):
+    import kering_jobs as jobs
+    store = ImageStore(tmp_path)
+    config_store = ConfigStore(tmp_path)
+    config = pilot_config(config_store)
+    now = datetime(2026, 10, 9, 10, tzinfo=timezone.utc).timestamp()
+    reader = Mock(return_value=[pilot_order()])
+    monkeypatch.setattr(jobs, "configured_orders", reader)
+    scheduler = jobs.KeringScheduler(store, config_store, lambda: None, FakePortal, lambda: now)
+    with batch_lock(store):
+        assert scheduler.tick()["result"] == "Esperando lote activo"
+    reader.assert_not_called()
+    run_id = store.create_run([pilot_order()], "programador", 7, date(2026, 9, 1), date(2026, 10, 9), jobs.AUTO_ORIGIN)
+    scheduler.write_state(now - 10, None, now + 3500, "En proceso", run_id)
+    assert scheduler.tick()["result"] == "Interrumpido"
+    assert scheduler.tick()["next_run"] == now + 3600
+    reader.assert_not_called()
+    assert store.history()[0]["status"] == "Interrumpido"
+
+
+def test_pilot_blocks_unselected_and_old_manual_orders_and_rechecks_cut(tmp_path, monkeypatch):
+    import kering_jobs as jobs
+    store = ImageStore(tmp_path)
+    config_store = ConfigStore(tmp_path)
+    config = pilot_config(config_store, auto_enabled=False, test_order_ids=[1])
+    start, end = date(2026, 8, 1), date(2026, 10, 9)
+    with pytest.raises(ValueError):
+        jobs.prepare_selection(store, config, [pilot_order(2)], start, end)
+    with pytest.raises(ValueError):
+        jobs.prepare_selection(store, config, [pilot_order(1, when="2026-08-31 21:59:59")], start, end)
+    assert jobs.prepare_selection(store, config, [pilot_order()], start, end) == date(2026, 9, 1)
+    reader = Mock(return_value=[pilot_order()])
+    loader = jobs.make_loader(store, config_store, lambda: None, start, end, 7, reader)
+    assert loader(1)["id"] == 1
+    config_store.save({**config, "cutoff_date": "2026-10-01"})
+    with pytest.raises(ValueError):
+        loader(1)
+    assert not store.history()
+
+
+def test_scheduler_error_backoff_and_configuration_gate(tmp_path, monkeypatch):
+    import kering_jobs as jobs
+    store = ImageStore(tmp_path)
+    config_store = ConfigStore(tmp_path)
+    config = pilot_config(config_store, auto_interval_hours=0.01, test_order_ids=[1])
+    now = [datetime(2026, 10, 9, 10, tzinfo=timezone.utc).timestamp()]
+    monkeypatch.setattr(jobs, "configured_orders", Mock(return_value=[pilot_order()]))
+    factory = Mock(side_effect=RuntimeError("offline-secret"))
+    scheduler = jobs.KeringScheduler(store, config_store, lambda: None, factory, lambda: now[0])
+    assert scheduler.tick()["result"] == "Error"
+    assert scheduler.tick()["next_run"] == now[0] + 300
+    assert factory.call_count == 1
+    assert "offline-secret" not in json.dumps(store.history())
+    config_store.save({**config, "auto_enabled": False})
+    assert scheduler.tick()["next_run"] is None
+    for value in (0, -1, float("inf"), float("nan")):
+        with pytest.raises(ValueError):
+            config_store.save({**config, "auto_interval_hours": value})
+    with pytest.raises(ValueError):
+        config_store.save({**config, "test_mode": False})
+
+
+def test_cutoff_sql_boundary_and_manual_loader(tmp_path):
+    import kering_jobs as jobs
+    engine = create_engine("sqlite://")
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE purchase_order(id INTEGER,name TEXT,partner_id INTEGER,date_order TEXT,state TEXT)"))
+        connection.execute(text("CREATE TABLE purchase_order_line(id INTEGER,order_id INTEGER,product_id INTEGER,display_type TEXT,name TEXT,product_qty REAL)"))
+        connection.execute(text("CREATE TABLE product_product(id INTEGER,barcode TEXT)"))
+        connection.execute(text("INSERT INTO purchase_order VALUES(1,'OLD',7,'2026-08-31 21:59:59','purchase'),(2,'CUT',7,'2026-08-31 22:00:00','purchase'),(3,'END',7,'2026-09-01 21:59:59','purchase'),(4,'NEXT',7,'2026-09-01 22:00:00','purchase')"))
+    config_store = ConfigStore(tmp_path)
+    config = pilot_config(config_store, test_order_ids=[1, 2])
+    assert [row["id"] for row in configured_orders(engine, config, date(2026, 8, 1), date(2026, 9, 1))] == [2, 3]
+    loader = jobs.make_loader(ImageStore(tmp_path), config_store, lambda: engine, date(2026, 8, 1), date(2026, 9, 1), 7)
+    with pytest.raises(ValueError):
+        loader(1)
+    assert loader(2)["name"] == "CUT"
+
+
+def test_unlimited_mode_requires_download_reuse_and_history(tmp_path):
+    from kering_images import trial_validated
+    from kering_jobs import check_permission
+    store = ImageStore(tmp_path)
+    config_store = ConfigStore(tmp_path)
+    config = pilot_config(config_store, test_order_ids=[1])
+    assert not trial_validated(store, config)
+    portal = FakePortal()
+    for _ in range(2):
+        run_id = store.create_run([pilot_order()], "offline", 7, date(2026, 9, 1), date(2026, 10, 9))
+        execute_run(store, run_id, lambda _: pilot_order(), portal)
+    assert len(portal.calls) == 1 and trial_validated(store, config)
+    config_store.save({**config, "test_mode": False, "full_lot_validated": True})
+    check_permission(store, config_store.load(), [1, 2, 3])
+    store.path("0012345678901", "frontal").unlink()
+    with pytest.raises(ValueError):
+        check_permission(store, config_store.load(), [3])
+
+
+def test_order_first_ui_processes_one_pilot_and_reuses_images(tmp_path, monkeypatch):
+    import kering_images_ui as ui
+    from streamlit.testing.v1 import AppTest
+    monkeypatch.setenv("KERING_DATA_ROOT", str(tmp_path))
+    config_store = ConfigStore(tmp_path)
+    pilot_config(config_store, test_order_ids=[1], auto_enabled=False)
+    current = pilot_order()
+    portal = FakePortal()
+    batch = BatchService(ImageStore(tmp_path))
+    batch.executor.shutdown(wait=True)
+    batch.executor = ThreadPoolExecutor(max_workers=1)
+    monkeypatch.setattr(ui, "service", lambda: batch)
+    monkeypatch.setattr(ui, "configured_orders", lambda *args, **kwargs: [current])
+    monkeypatch.setattr(ui, "create_portal", lambda _: portal)
+    app = AppTest.from_string("import streamlit as st\nfrom kering_images_ui import render_kering_page\nst.session_state['auth_role']='admin'\nrender_kering_page(None)")
+    try:
+        app.run()
+        assert not app.exception
+        listing = next(frame.value for frame in app.dataframe if "Seleccionar" in frame.value.columns)
+        assert listing.iloc[0]["Procesamiento"] == "No procesado"
+        button = next(button for button in app.button if button.label == "Procesar")
+        assert not button.disabled
+        button.click().run()
+        batch.executor.submit(lambda: None).result(timeout=10)
+        app.run()
+        assert not app.exception
+        listing = next(frame.value for frame in app.dataframe if "Seleccionar" in frame.value.columns)
+        assert listing.iloc[0]["Procesamiento"] == "Procesado"
+        assert listing.iloc[0]["Completos"] == 1
+        next(button for button in app.button if button.label == "Detalle").click().run()
+        assert app.get("download_button") and not app.exception
+        next(button for button in app.button if button.label == "Procesar").click().run()
+        batch.executor.submit(lambda: None).result(timeout=10)
+        assert len(portal.calls) == 1 and len(batch.store.history()) == 2
+        assert all(row["origin"] == "Manual" for row in batch.store.history())
+    finally:
+        batch.executor.shutdown(wait=True)
+
+
+def test_schedule_query_failure_has_persistent_execution(tmp_path, monkeypatch):
+    import kering_jobs as jobs
+    store = ImageStore(tmp_path)
+    config_store = ConfigStore(tmp_path)
+    pilot_config(config_store, test_order_ids=[1])
+    monkeypatch.setattr(jobs, "configured_orders", Mock(side_effect=RuntimeError("offline-secret")))
+    now = datetime(2026, 10, 9, 10, tzinfo=timezone.utc).timestamp()
+    scheduler = jobs.KeringScheduler(store, config_store, lambda: None, FakePortal, lambda: now)
+    status = scheduler.tick()
+    assert status["result"] == "Error"
+    executions = ImageStore(tmp_path).executions()
+    assert len(executions) == 1 and executions[0]["origin"] == jobs.AUTO_ORIGIN
+    assert executions[0]["status"] == "Error" and executions[0]["ended"] is not None
+    assert "offline-secret" not in json.dumps(executions)
+
+
+def test_scheduler_rechecks_persisted_due_inside_shared_lock(tmp_path, monkeypatch):
+    import kering_jobs as jobs
+    from contextlib import contextmanager
+    store = ImageStore(tmp_path)
+    config_store = ConfigStore(tmp_path)
+    pilot_config(config_store, test_order_ids=[1])
+    now = datetime(2026, 10, 9, 10, tzinfo=timezone.utc).timestamp()
+    scheduler = jobs.KeringScheduler(store, config_store, lambda: None, FakePortal, lambda: now)
+    reader = Mock(return_value=[pilot_order()])
+    monkeypatch.setattr(jobs, "configured_orders", reader)
+    @contextmanager
+    def updated_lock(current_store):
+        with batch_lock(current_store):
+            scheduler.write_state(now - 10, now, now + 3600, "Completado", "other-process")
+            yield
+    monkeypatch.setattr(jobs, "batch_lock", updated_lock)
+    assert scheduler.tick()["next_run"] == now + 3600
+    reader.assert_not_called()
+    assert not store.history()
 
 
 def test_confirmed_detail_is_not_mislabeled_as_lateral(tmp_path):
@@ -128,7 +403,7 @@ def test_odoo_read_only_date_supplier_cancel_and_display_lines():
     engine = create_engine("sqlite://")
     with engine.begin() as connection:
         connection.execute(text("CREATE TABLE purchase_order(id INTEGER, name TEXT, partner_id INTEGER, date_order TEXT, state TEXT)"))
-        connection.execute(text("CREATE TABLE purchase_order_line(id INTEGER, order_id INTEGER, product_id INTEGER, display_type TEXT)"))
+        connection.execute(text("CREATE TABLE purchase_order_line(id INTEGER, order_id INTEGER, product_id INTEGER, display_type TEXT, name TEXT, product_qty REAL)"))
         connection.execute(text("CREATE TABLE product_product(id INTEGER, barcode TEXT)"))
         for order_id, supplier, when, state in [
             (1, 7, "2026-03-28 23:00:00", "purchase"),
@@ -141,10 +416,10 @@ def test_odoo_read_only_date_supplier_cancel_and_display_lines():
             connection.execute(text("INSERT INTO purchase_order VALUES(:id, :name, :supplier, :when, :state)"),
                                dict(id=order_id, name=f"PO{order_id}", supplier=supplier, when=when, state=state))
         connection.execute(text("INSERT INTO product_product VALUES(1, '0012345678901')"))
-        connection.execute(text("INSERT INTO purchase_order_line VALUES(1,1,1,NULL),(2,1,NULL,'line_note'),(3,1,NULL,'line_section'),(4,2,2,NULL)"))
+        connection.execute(text("INSERT INTO purchase_order_line(id,order_id,product_id,display_type) VALUES(1,1,1,NULL),(2,1,NULL,'line_note'),(3,1,NULL,'line_section'),(4,2,2,NULL)"))
     orders = read_orders(engine, 7, date(2026, 3, 29), date(2026, 3, 29))
     assert [item["id"] for item in orders] == [1, 2]
-    assert orders[0]["lines"] == [dict(id=1, product_id=1, ean="0012345678901")]
+    assert orders[0]["lines"] == [dict(id=1, product_id=1, ean="0012345678901", product_name="", quantity="")]
     assert orders[1]["lines"][0]["ean"] == ""
     calls = []
     event.listen(engine, "before_cursor_execute", lambda conn, cursor, sql, params, context, many: calls.append((sql, params)))
@@ -166,7 +441,7 @@ def test_supplier_commercial_contacts_are_explicit_and_exact():
         connection.execute(text("INSERT INTO res_partner VALUES(7,'Kering',7,1),(8,'Contacto A',7,1),(9,'Kering parecido',9,1),(10,'Contacto archivado',7,0)"))
         connection.execute(text("CREATE TABLE purchase_order(id INTEGER, name TEXT, partner_id INTEGER, date_order TEXT, state TEXT)"))
         connection.execute(text("INSERT INTO purchase_order VALUES(1,'PO1',7,'2026-03-29 10:00:00','purchase'),(2,'PO2',8,'2026-03-29 10:00:00','purchase'),(3,'PO3',9,'2026-03-29 10:00:00','purchase'),(4,'PO4',10,'2026-03-29 10:00:00','cancel')"))
-        connection.execute(text("CREATE TABLE purchase_order_line(id INTEGER, order_id INTEGER, product_id INTEGER, display_type TEXT)"))
+        connection.execute(text("CREATE TABLE purchase_order_line(id INTEGER, order_id INTEGER, product_id INTEGER, display_type TEXT, name TEXT, product_qty REAL)"))
         connection.execute(text("CREATE TABLE product_product(id INTEGER, barcode TEXT)"))
     dates = (date(2026, 3, 29), date(2026, 3, 29))
     assert [row["id"] for row in read_orders(engine, 7, *dates)] == [1]
@@ -378,7 +653,7 @@ def test_orders_and_history_ui_are_offline(tmp_path, monkeypatch):
     store = ImageStore(tmp_path)
     run = store.create_run([order()], "offline", 7, date(2026, 3, 29), date(2026, 3, 29))
     execute_run(store, run, lambda _: order(), FakePortal())
-    monkeypatch.setattr(ui, "read_orders", lambda *args, **kwargs: [order()])
+    monkeypatch.setattr(ui, "configured_orders", lambda *args, **kwargs: [pilot_order()])
     ui.service.clear()
     app = AppTest.from_string("import streamlit as st\nfrom kering_images_ui import render_kering_page\nst.session_state['auth_role']='admin'\nrender_kering_page(None)")
     app.run()
@@ -395,23 +670,25 @@ def test_ui_injects_configured_adapter_and_sql_scope(monkeypatch):
     import kering_images_ui as ui
     from unittest.mock import Mock
     config = dict(url=PORTAL_URL, username="offline-user", password="offline-secret", supplier_id=7,
-                  include_commercial_contacts=True)
+                  include_commercial_contacts=True, cutoff_date="2026-03-01", test_order_ids=[1])
+    ConfigStore(ui.data_root()).save(config)
     portal = ui.create_portal(config)
     assert "offline-secret" not in repr(portal)
     assert portal._config == config
     factory = Mock(return_value=portal)
     batch = Mock()
+    batch.store = ImageStore(ui.data_root())
     batch.submit.return_value = "offline-run"
     reader = Mock(return_value=[order()])
     monkeypatch.setattr(ui, "create_portal", factory)
     monkeypatch.setattr(ui, "service", lambda: batch)
-    monkeypatch.setattr(ui, "read_orders", reader)
+    monkeypatch.setattr(ui, "configured_orders", reader)
     assert ui.submit_orders(None, config, [order()], date(2026, 3, 29), date(2026, 3, 29)) == "offline-run"
     assert batch.submit.call_args.kwargs["portal"] is portal
     loader = batch.submit.call_args.args[-1]
     loader(1)
     assert reader.call_args.args[-1] == [1]
-    assert reader.call_args.kwargs["include_commercial_contacts"] is True
+    assert reader.call_args.args[1]["include_commercial_contacts"] is True
 
 
 def portal_snapshot(ean="0012345678901", image_count=3):

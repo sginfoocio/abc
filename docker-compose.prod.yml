@@ -51,6 +51,10 @@ services:
     healthcheck:
       disable: true
 
+  abcd-kering-scheduler:
+    image: ${ABCD_IMAGE_REF:-registry.diagonaleyewear.net/abcd-control:latest}
+    restart: always
+
   # Opcional: Reverse proxy Nginx integrado
   # nginx:
   #   image: nginx:alpine

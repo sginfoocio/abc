@@ -8,10 +8,17 @@ import pandas as pd
 import streamlit as st
 
 from kering_images import (
-    BatchService, ConfigStore, ImageStore, VIEWS, STATES, data_root, read_orders, read_suppliers,
-    read_supplier_contacts, displayed_views,
+    BatchService, ConfigStore, ImageStore, VIEWS, STATES, data_root, configured_orders, read_suppliers,
+    read_supplier_contacts, displayed_views, purchase_status, latest_attempts, trial_validated, batch_busy,
 )
 from kering_portal import KeringPortal
+from kering_jobs import prepare_selection, make_loader, schedule_status
+
+
+SAVE_ICON = ":material/save:"
+DATE_FORMAT = "DD/MM/YYYY"
+TIME_FORMAT = "%d/%m/%Y %H:%M"
+MADRID = ZoneInfo("Europe/Madrid")
 
 
 @st.cache_resource
@@ -56,9 +63,9 @@ def render_kering_settings(engine) -> None:
             value=config.get("include_commercial_contacts", False),
         )
         clear = st.checkbox("Eliminar credenciales guardadas")
-        save = st.form_submit_button("Guardar Kering", icon=":material/save:")
+        save = st.form_submit_button("Guardar Kering", icon=SAVE_ICON)
     if save:
-        save_settings(store, {"url": url.strip(), "username": "" if clear else username.strip(),
+        save_settings(store, {**store.load(), "url": url.strip(), "username": "" if clear else username.strip(),
                               "password": "" if clear else password or config["password"], "supplier_id": supplier,
                               "include_commercial_contacts": include_contacts})
     if st.button("Ver contactos asociados al proveedor guardado", disabled=not config["supplier_id"]):
@@ -73,6 +80,44 @@ def render_kering_settings(engine) -> None:
             st.error("No se pudo iniciar la prueba de acceso.")
     if st.session_state.get("kering_access_probe"):
         render_access_probe()
+    render_job_settings(store)
+
+
+def render_job_settings(config_store):
+    config = config_store.load()
+    store = service().store
+    validated = trial_validated(store, config)
+    st.subheader("Procesamiento Kering")
+    with st.form("kering_job_settings"):
+        cutoff = st.date_input("Fecha de corte", date.fromisoformat(config["cutoff_date"]), format=DATE_FORMAT)
+        automatic = st.toggle("Procesamiento autom\u00e1tico", value=config["auto_enabled"])
+        hours = st.number_input("Intervalo (horas)", min_value=0.0, value=float(config["auto_interval_hours"]), step=1.0)
+        test_mode = st.toggle("Modo de prueba", value=config["test_mode"] if validated else True, disabled=not validated)
+        saved = st.form_submit_button("Guardar procesamiento", icon=SAVE_ICON)
+    if saved:
+        save_settings(config_store, {**config_store.load(), "cutoff_date": cutoff.isoformat(),
+                                   "auto_enabled": automatic, "auto_interval_hours": hours,
+                                   "test_mode": test_mode, "full_lot_validated": validated and not test_mode})
+    if not validated:
+        st.info("Validaci\u00f3n inicial de pedidos pendiente")
+    render_scheduler_status()
+
+
+def format_timestamp(value):
+    return datetime.fromtimestamp(value, MADRID).strftime(TIME_FORMAT) if value else "-"
+
+
+@st.fragment(run_every="5s")
+def render_scheduler_status():
+    try:
+        config = ConfigStore(data_root()).load()
+        status = schedule_status(service().store, config)
+        previous, upcoming = st.columns(2)
+        previous.metric("\u00daltima ejecuci\u00f3n autom\u00e1tica", format_timestamp(status["last_finished"] or status["last_started"]))
+        upcoming.metric("Pr\u00f3xima ejecuci\u00f3n", format_timestamp(status["next_run"]))
+        st.write(f"Resultado: {status['result']}")
+    except Exception:
+        st.error("No se pudo consultar el estado del programador.")
 
 
 def show_supplier_contacts(engine, supplier_id):
@@ -130,7 +175,7 @@ def local_order_time(value):
     instant = datetime.fromisoformat(str(value))
     if instant.tzinfo is None:
         instant = instant.replace(tzinfo=timezone.utc)
-    return instant.astimezone(ZoneInfo("Europe/Madrid"))
+    return instant.astimezone(MADRID)
 
 
 def pending_summary(store, order):
@@ -141,20 +186,20 @@ def pending_summary(store, order):
 
 
 def submit_orders(engine, config, selected, start, end):
-    supplier = int(config["supplier_id"])
-
-    def loader(order_id):
-        orders = read_orders(resolve_engine(engine), supplier, start, end, [order_id],
-                             include_commercial_contacts=config.get("include_commercial_contacts", False))
-        if not orders:
-            raise ValueError("pedido_fuera_de_seleccion")
-        return orders[0]
-
     try:
+        store = service().store
+        config_store = ConfigStore(data_root())
+        current_config = config_store.load()
+        if current_config["supplier_id"] != config["supplier_id"]:
+            raise ValueError("El proveedor ha cambiado")
+        start = prepare_selection(store, current_config, selected, start, end)
+        supplier = int(current_config["supplier_id"])
+        loader = make_loader(store, config_store, lambda: resolve_engine(engine), start, end, supplier,
+                             reader=configured_orders)
         return service().submit(selected, st.session_state.get("auth_user", "admin"), supplier, start, end, loader,
-                                portal=create_portal(config))
+                                portal=create_portal(current_config), origin="Manual")
     except Exception:
-        st.error("No se pudo iniciar el lote. Compruebe el almacenamiento o espere a que terminen los lotes activos.")
+        st.error("No se pudo iniciar: revise corte, pedidos autorizados o lotes activos.")
         return None
 
 
@@ -188,45 +233,116 @@ def render_kering_page(engine) -> None:
         return
     orders_tab, history_tab = st.tabs(["Pedidos", "Historial"])
     with orders_tab:
+        cutoff = date.fromisoformat(config["cutoff_date"])
         with st.form("kering_order_dates"):
             left, right = st.columns(2)
-            start = left.date_input("Fecha desde", date.today() - timedelta(days=30))
-            end = right.date_input("Fecha hasta", date.today())
-            search = st.form_submit_button("Consultar pedidos", icon=":material/search:")
-        if search:
-            try:
-                include_contacts = config.get("include_commercial_contacts", False)
-                st.session_state["kering_orders"] = read_orders(resolve_engine(engine), config["supplier_id"], start, end,
-                                                                include_commercial_contacts=include_contacts)
-                st.session_state["kering_interval"] = (start, end, config["supplier_id"], include_contacts)
-            except Exception:
-                st.error("No se pudieron leer los pedidos. Compruebe fechas, esquema Odoo y permisos de lectura.")
-                st.session_state.pop("kering_orders", None)
-        orders = st.session_state.get("kering_orders", [])
-        interval = st.session_state.get("kering_interval")
-        if interval and interval[2:] != (config["supplier_id"], config.get("include_commercial_contacts", False)):
-            orders = []
-        if orders:
-            frame = pd.DataFrame([{"Seleccionar": False, "ID": order["id"], "Pedido": order["name"],
-                                   "Fecha": local_order_time(order["date_order"]).strftime("%d/%m/%Y %H:%M"),
-                                   "Estado": order["state"], "Productos": pending_summary(batch.store, order)} for order in orders])
-            edited = st.data_editor(frame, hide_index=True, width="stretch",
-                                    disabled=["ID", "Pedido", "Fecha", "Estado", "Productos"],
-                                    key=f"kering_selection_{interval}")
-            selected_ids = set(edited.loc[edited["Seleccionar"], "ID"])
-            if st.button("Descargar imagenes", icon=":material/download:", disabled=not selected_ids):
-                selected = [order for order in orders if order["id"] in selected_ids]
-                st.session_state["kering_run"] = submit_orders(engine, config, selected, interval[0], interval[1])
-        elif interval:
-            st.info("No hay pedidos para esta seleccion.")
+            start = left.date_input("Fecha desde", cutoff, min_value=cutoff, format=DATE_FORMAT)
+            end = right.date_input("Fecha hasta", max(cutoff, date.today()), min_value=cutoff, format=DATE_FORMAT)
+            st.form_submit_button("Consultar pedidos", icon=":material/search:")
+        render_order_list(engine, start, end)
         if st.session_state.get("kering_run"):
             render_progress(st.session_state["kering_run"])
     with history_tab:
         render_history(engine, config, batch.store)
 
 
+@st.fragment(run_every="5s")
+def render_order_list(engine, start, end):
+    try:
+        config = ConfigStore(data_root()).load()
+        store = service().store
+        orders = configured_orders(resolve_engine(engine), config, start, end)
+        latest = latest_attempts(store)
+        cache = {}
+        rows = [purchase_row(store, order, latest.get(order["id"]), cache) for order in orders]
+    except Exception:
+        st.error("No se pudieron consultar los pedidos y su estado actual.")
+        return
+    if not orders:
+        st.info("Sin pedidos para este corte e intervalo.")
+        return
+    render_pilot_selection(config, orders)
+    edited = st.data_editor(pd.DataFrame(rows), hide_index=True, width="stretch",
+                            disabled=[key for key in rows[0] if key != "Seleccionar"],
+                            key=f"kering_selection_{config['supplier_id']}_{config['cutoff_date']}_{start}_{end}")
+    selected_ids = set(edited.loc[edited["Seleccionar"], "ID"])
+    selected = [order for order in orders if order["id"] in selected_ids]
+    allowed = set(config["test_order_ids"])
+    busy = batch_busy(store)
+    permitted = bool(selected) and (not config["test_mode"] or len(selected) <= 2 and selected_ids <= allowed)
+    if st.button("Procesar seleccionados", icon=":material/download:", disabled=not permitted or busy):
+        st.session_state["kering_run"] = submit_orders(engine, config, selected, start, end)
+        if st.session_state["kering_run"]:
+            st.rerun()
+    render_order_actions(engine, config, orders, start, end, busy)
+    detail_id = st.session_state.get("kering_detail_id")
+    current_order = next((order for order in orders if order["id"] == detail_id), None)
+    if current_order is not None:
+        render_current_order(store, current_order, latest.get(detail_id))
+
+
+def render_order_actions(engine, config, orders, start, end, busy):
+    allowed = set(config["test_order_ids"])
+    page_size = 20
+    pages = (len(orders) - 1) // page_size + 1
+    current = st.number_input("P\u00e1gina de acciones", min_value=1, max_value=pages, value=1, key="kering_actions_page")
+    for order in orders[(current - 1) * page_size:current * page_size]:
+        title, process, detail = st.columns([4, 1, 1])
+        title.write(order["name"])
+        if process.button("Procesar", key=f"kering_process_{order['id']}", icon=":material/download:",
+                          disabled=busy or config["test_mode"] and order["id"] not in allowed):
+            st.session_state["kering_run"] = submit_orders(engine, config, [order], start, end)
+            if st.session_state["kering_run"]:
+                st.rerun()
+        if detail.button("Detalle", key=f"kering_detail_{order['id']}", icon=":material/image:"):
+            st.session_state["kering_detail_id"] = order["id"]
+
+
+def purchase_row(store, order, latest, cache):
+    status = purchase_status(store, order, latest, cache)
+    return {"Seleccionar": False, "ID": order["id"], "Pedido": order["name"],
+            "Fecha": local_order_time(order["date_order"]).strftime(TIME_FORMAT),
+            "Odoo": order["state"], "Procesamiento": status["status"],
+            "Completos": status["complete"], "Pendientes": status["pending"],
+            "\u00daltimo procesamiento": format_timestamp(status["last_processed"]),
+            "Cambios": status["changed"]}
+
+
+def render_pilot_selection(config, orders):
+    if not config["test_mode"]:
+        return
+    names = {order["id"]: order["name"] for order in orders}
+    options = list(dict.fromkeys(list(names) + config["test_order_ids"]))
+    ids = st.multiselect("Pedidos autorizados para prueba", options, default=config["test_order_ids"],
+                         format_func=lambda value: names.get(value, f"ID {value}"), max_selections=2,
+                         key=f"kering_pilot_{config['supplier_id']}_{config['cutoff_date']}")
+    if st.button("Guardar selecci\u00f3n de prueba", icon=SAVE_ICON):
+        config_store = ConfigStore(data_root())
+        save_settings(config_store, {**config_store.load(), "test_order_ids": ids})
+        st.rerun()
+
+
+def render_current_order(store, order, latest):
+    st.subheader(order["name"])
+    status = purchase_status(store, order, latest)
+    st.write(f"{status['status']} | {status['complete']} completos | {status['pending']} pendientes")
+    results = json.loads(latest["results"]) if latest else {}
+    for line in order["lines"]:
+        st.write(line.get("product_name") or f"Producto {line['product_id']}")
+        if line["ean"]:
+            render_product(store, line["ean"], results.get(line["ean"], {}))
+        else:
+            st.warning(f"Linea {line['id']}: sin EAN")
+    if latest and latest["error"]:
+        st.warning(latest["error"])
+    st.download_button("ZIP del pedido", store.zip_order(order), file_name=f"kering-{order['id']}.zip",
+                       mime="application/zip", icon=":material/folder_zip:", key=f"kering_current_zip_{order['id']}")
+
+
 def render_history(engine, config, store):
     st.button("Actualizar historial", icon=":material/refresh:")
+    with st.expander("Ejecuciones"):
+        st.dataframe(store.executions(), hide_index=True, width="stretch")
     rows = store.history()
     number = st.text_input("Numero de pedido")
     states = st.multiselect("Estado del intento", STATES)
@@ -242,7 +358,7 @@ def render_history(engine, config, store):
     if not filtered:
         st.info("Sin intentos registrados para estos filtros.")
         return
-    display = pd.DataFrame(filtered)[["number", "order_date", "status", "attempt", "user", "started", "ended", "error", "run_id"]]
+    display = pd.DataFrame(filtered)[["number", "order_date", "status", "origin", "attempt", "user", "started", "ended", "error", "run_id"]]
     st.dataframe(display, hide_index=True, width="stretch")
     selected = st.selectbox("Detalle de intento", range(len(filtered)),
                             format_func=lambda index: f"{filtered[index]['number']} | intento {filtered[index]['attempt']} | {filtered[index]['status']}")
@@ -257,7 +373,7 @@ def filter_history(rows, number, states, dates):
         if dates:
             order_from, order_until, execution_from, execution_until = dates
             order_day = local_order_time(row["order_date"]).date()
-            execution_day = datetime.fromtimestamp(row["started"], ZoneInfo("Europe/Madrid")).date()
+            execution_day = datetime.fromtimestamp(row["started"], MADRID).date()
             if not order_from <= order_day <= order_until or not execution_from <= execution_day <= execution_until:
                 continue
         filtered.append(row)
@@ -317,5 +433,5 @@ def gallery_rows() -> list[dict]:
             timestamp = path.stat().st_mtime
             rows.append({"Modelo": "Kering", "EAN": ean, "Mercado": "Kering", "Archivo": view,
                          "Ruta": str(path), "Descargada": timestamp,
-                         "Fecha": datetime.fromtimestamp(timestamp).strftime("%d/%m/%Y %H:%M")})
+                         "Fecha": datetime.fromtimestamp(timestamp).strftime(TIME_FORMAT)})
     return rows

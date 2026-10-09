@@ -7,6 +7,7 @@ import json
 import os
 import tempfile
 import hashlib
+import math
 import sqlite3
 import uuid
 import time as clock
@@ -25,7 +26,13 @@ from sqlalchemy import bindparam, text
 PORTAL_URL = "https://my.keringeyewear.com/keringeyewear/es/login"
 VIEWS = ("frontal", "lateral", "perspectiva")
 IMAGE_VIEWS = VIEWS + ("detalle",)
-STATES = ("Pendiente", "En proceso", "Completo", "Parcial", "Error", "Interrumpido")
+IN_PROGRESS = "En proceso"
+BEGIN_WRITE = "BEGIN IMMEDIATE"
+STATES = ("Pendiente", IN_PROGRESS, "Completo", "Parcial", "Error", "Interrumpido")
+DEFAULT_SETTINGS = {
+    "cutoff_date": "2026-09-01", "auto_enabled": False, "auto_interval_hours": 6.0,
+    "test_mode": True, "test_order_ids": [], "full_lot_validated": False,
+}
 
 
 class PortalUnavailable(Exception):
@@ -92,7 +99,7 @@ def read_orders(engine, supplier_id: int, start: date, end: date, order_ids=None
         )"""
     query = text(f"""
         SELECT po.id, po.name, po.partner_id, po.date_order, po.state,
-               pol.id AS line_id, pol.product_id, pp.barcode
+               pol.id AS line_id, pol.product_id, pp.barcode, pol.name AS product_name, pol.product_qty
         FROM purchase_order po
         LEFT JOIN purchase_order_line pol ON pol.order_id = po.id
           AND COALESCE(pol.display_type, '') = '' AND pol.product_id IS NOT NULL
@@ -120,9 +127,24 @@ def read_orders(engine, supplier_id: int, start: date, end: date, order_ids=None
         })
         if row["line_id"] is not None:
             barcode = row["barcode"]
-            order["lines"].append({"id": row["line_id"], "product_id": row["product_id"],
-                                   "ean": barcode.strip() if isinstance(barcode, str) else ""})
+            order["lines"].append(purchase_line(row, barcode))
     return list(orders.values())
+
+
+def purchase_line(row, barcode):
+    return {"id": row["line_id"], "product_id": row["product_id"],
+            "ean": barcode.strip() if isinstance(barcode, str) else "",
+            "product_name": row["product_name"] or "",
+            "quantity": str(row["product_qty"]) if row["product_qty"] is not None else ""}
+
+
+def configured_orders(engine, config, start: date, end: date, order_ids=None):
+    cutoff = date.fromisoformat(config.get("cutoff_date", DEFAULT_SETTINGS["cutoff_date"]))
+    start = max(start, cutoff)
+    if end < start:
+        return []
+    return read_orders(engine, config["supplier_id"], start, end, order_ids,
+                       include_commercial_contacts=config.get("include_commercial_contacts", False))
 
 
 def read_suppliers(engine) -> list[dict]:
@@ -162,7 +184,7 @@ class ImageStore:
         self.root = root
         root.mkdir(parents=True, exist_ok=True)
         self.database = root / "history.sqlite3"
-        with self.connect() as connection:
+        with FileLock(root / "schema.lock", timeout=30), self.connect() as connection:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.executescript("""
                 CREATE TABLE IF NOT EXISTS images (
@@ -178,7 +200,14 @@ class ImageStore:
                     results TEXT DEFAULT '{}', error TEXT DEFAULT '',
                     PRIMARY KEY(run_id, order_id)
                 );
+                CREATE TABLE IF NOT EXISTS schedule_state (
+                    id INTEGER PRIMARY KEY CHECK(id=1), last_started REAL, last_finished REAL,
+                    next_run REAL, result TEXT, run_id TEXT
+                );
             """)
+            columns = {row["name"] for row in connection.execute("PRAGMA table_info(runs)")}
+            if "origin" not in columns:
+                connection.execute("ALTER TABLE runs ADD COLUMN origin TEXT NOT NULL DEFAULT 'Manual'")
 
     @contextmanager
     def connect(self):
@@ -233,37 +262,62 @@ class ImageStore:
     def recover(self, now=None) -> None:
         timestamp = clock.time() if now is None else now
         with self.connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(BEGIN_WRITE)
             connection.execute("""UPDATE attempts SET status='Interrumpido', error='ejecucion_interrumpida'
                 WHERE run_id IN (SELECT id FROM runs WHERE ended IS NULL AND heartbeat < ?)
                 AND status IN ('Pendiente', 'En proceso')""", (timestamp - 300,))
             connection.execute("""UPDATE runs SET status='Interrumpido', ended=?
                 WHERE ended IS NULL AND heartbeat < ?""", (timestamp, timestamp - 300))
 
-    def create_run(self, orders: list[dict], user: str, supplier: int, start: date, end: date) -> str:
+    def recover_abandoned(self, now=None):
+        timestamp = clock.time() if now is None else now
+        with self.connect() as connection:
+            connection.execute(BEGIN_WRITE)
+            connection.execute("""UPDATE attempts SET status='Interrumpido', error='ejecucion_interrumpida'
+                WHERE run_id IN (SELECT id FROM runs WHERE ended IS NULL)
+                AND status IN ('Pendiente','En proceso')""")
+            connection.execute("UPDATE runs SET status='Interrumpido', ended=? WHERE ended IS NULL", (timestamp,))
+
+    def create_run(self, orders: list[dict], user: str, supplier: int, start: date, end: date,
+                   origin: str = "Manual") -> str:
         run_id = uuid.uuid4().hex
         now = clock.time()
         with self.connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            connection.execute("INSERT INTO runs VALUES(?,?,?,?,?,?,?,?,?)",
-                               (run_id, user, supplier, str(start), str(end), now, None, now, "Pendiente"))
-            for order in orders:
-                previous = connection.execute("SELECT COALESCE(MAX(attempt),0) FROM attempts WHERE order_id=?",
-                                              (order["id"],)).fetchone()[0]
-                connection.execute("""INSERT INTO attempts
-                    (run_id, order_id, number, supplier, order_date, attempt, status, snapshot, results)
-                    VALUES(?,?,?,?,?,?,?,?,?)""", (run_id, order["id"], order["name"], supplier,
-                    order["date_order"], previous + 1, "Pendiente", json.dumps(order), json.dumps({
-                        line["ean"]: {"views": dict.fromkeys(VIEWS, "Pendiente"), "reason": "", "tries": 0}
-                        for line in order["lines"] if line["ean"]
-                    })))
+            connection.execute(BEGIN_WRITE)
+            connection.execute("""INSERT INTO runs
+                (id,user,supplier,start_date,end_date,started,ended,heartbeat,status,origin)
+                VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                               (run_id, user, supplier, str(start), str(end), now, None, now, "Pendiente", origin))
+            self.insert_orders(connection, run_id, supplier, orders)
         return run_id
+
+    def insert_orders(self, connection, run_id, supplier, orders):
+        for order in orders:
+            previous = connection.execute("SELECT COALESCE(MAX(attempt),0) FROM attempts WHERE order_id=?",
+                                          (order["id"],)).fetchone()[0]
+            connection.execute("""INSERT INTO attempts
+                (run_id, order_id, number, supplier, order_date, attempt, status, snapshot, results)
+                VALUES(?,?,?,?,?,?,?,?,?)""", (run_id, order["id"], order["name"], supplier,
+                order["date_order"], previous + 1, "Pendiente", json.dumps(order), json.dumps({
+                    line["ean"]: {"views": dict.fromkeys(VIEWS, "Pendiente"), "reason": "", "tries": 0}
+                    for line in order["lines"] if line["ean"]
+                })))
+
+    def add_orders(self, run_id, orders):
+        with self.connect() as connection:
+            connection.execute(BEGIN_WRITE)
+            supplier = connection.execute("SELECT supplier FROM runs WHERE id=?", (run_id,)).fetchone()[0]
+            self.insert_orders(connection, run_id, supplier, orders)
+
+    def executions(self):
+        with self.connect() as connection:
+            return [dict(row) for row in connection.execute("SELECT * FROM runs ORDER BY started DESC")]
 
     def history(self) -> list[dict]:
         self.recover()
         with self.connect() as connection:
             return [dict(row) for row in connection.execute("""
-                SELECT attempts.*, runs.user, runs.started, runs.ended, runs.start_date, runs.end_date
+                SELECT attempts.*, runs.user, runs.started, runs.ended, runs.start_date, runs.end_date, runs.origin
                 FROM attempts JOIN runs ON runs.id=attempts.run_id ORDER BY started DESC, order_id
             """)]
 
@@ -276,6 +330,83 @@ class ImageStore:
                         extension = {"JPEG": "jpg", "PNG": "png", "WEBP": "webp"}[image.format]
                     archive.write(path, f"kering/{ean}/{view}.{extension}")
         return buffer.getvalue()
+
+
+def line_signature(order):
+    return sorted((line["id"], line["product_id"], line["ean"], line.get("product_name", ""),
+                   str(line.get("quantity", ""))) for line in order["lines"])
+
+
+def purchase_status(store, order, latest=None, views_cache=None):
+    cache = {} if views_cache is None else views_cache
+    complete = count_complete_lines(store, order, cache)
+    pending = len(order["lines"]) - complete
+    changed = latest is not None and line_signature(order) != line_signature(json.loads(latest["snapshot"]))
+    if latest is None:
+        status = "No procesado"
+    elif latest["status"] in {"Pendiente", IN_PROGRESS} and latest["ended"] is None:
+        status = IN_PROGRESS
+    elif not pending and not changed and latest["status"] == "Completo":
+        status = "Procesado"
+    elif latest["status"] in {"Error", "Interrumpido"} and not changed:
+        status = latest["status"]
+    else:
+        status = "Parcial"
+    return {"status": status, "complete": complete, "pending": pending, "changed": changed,
+            "last_processed": latest["ended"] or latest["started"] if latest else None,
+            "needs_processing": status not in {"Procesado", IN_PROGRESS}}
+
+
+def count_complete_lines(store, order, cache):
+    complete = 0
+    for line in order["lines"]:
+        ean = line["ean"]
+        if ean and ean not in cache:
+            cache[ean] = store.valid_views(ean)
+        complete += int(bool(ean) and len(cache.get(ean, {})) >= 3)
+    return complete
+
+
+def latest_attempts(store):
+    latest = {}
+    for attempt in store.history():
+        latest.setdefault(attempt["order_id"], attempt)
+    return latest
+
+
+def trial_validated(store, config):
+    ids = config.get("test_order_ids", [])
+    if not ids or len(ids) > 2:
+        return False
+    history = store.history()
+    downloaded = False
+    for order_id in ids:
+        attempts = [row for row in history if row["order_id"] == order_id and row["status"] == "Completo"]
+        if len(attempts) < 2:
+            return False
+        snapshot = json.loads(attempts[0]["snapshot"])
+        if not snapshot["lines"] or purchase_status(store, snapshot, attempts[0])["status"] != "Procesado":
+            return False
+        outcomes = [json.loads(row["results"]) for row in attempts]
+        reused = any(result and all(value == "Reutilizada" for entry in result.values()
+                                   for value in entry["views"].values()) for result in outcomes)
+        downloaded = downloaded or any(value == "Descargada" for result in outcomes
+                                       for entry in result.values() for value in entry["views"].values())
+        if not reused:
+            return False
+    return downloaded
+
+
+def batch_lock(store):
+    return FileLock(store.root / "batch.lock", timeout=0, thread_local=False)
+
+
+def batch_busy(store):
+    try:
+        with batch_lock(store):
+            return False
+    except Timeout:
+        return True
 
 
 def process_ean(store: ImageStore, portal, ean: str) -> dict:
@@ -430,7 +561,7 @@ class BatchService:
         self.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="kering")
         self.slots = BoundedSemaphore(2)
 
-    def work(self, run_id, loader, portal):
+    def work(self, run_id, loader, portal, lock):
         try:
             execute_run(self.store, run_id, loader, portal)
         finally:
@@ -439,16 +570,20 @@ class BatchService:
                 if close:
                     close()
             finally:
+                lock.release()
                 self.slots.release()
 
-    def submit(self, orders, user, supplier, start, end, loader, portal=None) -> str:
+    def submit(self, orders, user, supplier, start, end, loader, portal=None, origin="Manual") -> str:
         if not self.slots.acquire(blocking=False):
-            raise ValueError("Hay dos lotes activos; espere a que termine uno")
+            raise ValueError("Hay lotes activos; espere a que terminen")
+        lock = batch_lock(self.store)
         try:
-            self.store.recover()
-            run_id = self.store.create_run(orders, user, supplier, start, end)
-            self.executor.submit(self.work, run_id, loader, portal or UnverifiedPortal())
+            lock.acquire()
+            self.store.recover_abandoned()
+            run_id = self.store.create_run(orders, user, supplier, start, end, origin)
+            self.executor.submit(self.work, run_id, loader, portal or UnverifiedPortal(), lock)
         except Exception:
+            lock.release()
             self.slots.release()
             raise
         return run_id
@@ -496,8 +631,8 @@ class ConfigStore:
     def load(self) -> dict:
         path = self.root / "config.enc"
         if not path.exists():
-            return {"url": PORTAL_URL, "username": "", "password": "", "supplier_id": 0}
-        return json.loads(self.cipher().decrypt(path.read_bytes()))
+            return {**DEFAULT_SETTINGS, "url": PORTAL_URL, "username": "", "password": "", "supplier_id": 0}
+        return {**DEFAULT_SETTINGS, **json.loads(self.cipher().decrypt(path.read_bytes()))}
 
     def save(self, config: dict) -> None:
         from urllib.parse import urlsplit
@@ -507,4 +642,15 @@ class ConfigStore:
             raise ValueError("URL Kering no permitida")
         if int(config["supplier_id"]) <= 0:
             raise ValueError("Seleccione un proveedor Odoo")
+        config = {**DEFAULT_SETTINGS, **config}
+        date.fromisoformat(config["cutoff_date"])
+        interval = float(config["auto_interval_hours"])
+        if not math.isfinite(interval) or interval <= 0:
+            raise ValueError("El intervalo debe ser mayor que cero")
+        ids = list(dict.fromkeys(int(value) for value in config["test_order_ids"]))
+        if len(ids) > 2 or any(value <= 0 for value in ids):
+            raise ValueError("Autorice uno o dos pedidos de prueba")
+        if not config["test_mode"] and not config["full_lot_validated"]:
+            raise ValueError("El lote completo requiere validar previamente descarga e historial")
+        config["test_order_ids"] = ids
         atomic_write(self.root / "config.enc", self.cipher().encrypt(json.dumps(config).encode()))

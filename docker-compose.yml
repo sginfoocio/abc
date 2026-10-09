@@ -117,6 +117,45 @@ services:
     networks:
       - abcd-network
 
+  abcd-kering-scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${ABCD_IMAGE_REF:-abcd-control:local}
+    command: ["python", "kering_jobs.py"]
+    environment:
+      - DB_HOST=${DB_HOST}
+      - DB_PORT=${DB_PORT}
+      - DB_NAME=${DB_NAME}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - KERING_DATA_ROOT=/app/data/kering
+      - KERING_ENCRYPTION_KEY=${KERING_ENCRYPTION_KEY}
+      - KERING_ENCRYPTION_KEY_FILE=${KERING_ENCRYPTION_KEY_FILE:-}
+      - TZ=Europe/Madrid
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./masterdata_data:/app/data
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    tmpfs:
+      - /tmp
+    healthcheck:
+      disable: true
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+    networks:
+      - abcd-network
+
 networks:
   abcd-network:
     driver: bridge
