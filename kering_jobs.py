@@ -186,7 +186,7 @@ class KeringScheduler:
 
 def db_engine():
     config = load_db_config()
-    return create_engine(URL.create("postgresql", username=config.user, password=config.password,
+    return create_engine(URL.create("postgresql+psycopg2", username=config.user, password=config.password,
                                     host=config.host, port=config.port, database=config.database))
 
 

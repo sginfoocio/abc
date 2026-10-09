@@ -13,7 +13,7 @@ import pandas as pd
 import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, URL
 from streamlit_cookies_controller import CookieController
 
 from db_loader import load_odoo_dataframe
@@ -138,9 +138,15 @@ st.set_page_config(
 def get_db_engine():
     """Obtiene conexión a BD (cacheada)"""
     config = load_db_config()
-    return create_engine(
-        f"postgresql://{config.user}:{config.password}@{config.host}:{config.port}/{config.database}"
+    url = URL.create(
+        "postgresql+psycopg2",
+        username=config.user,
+        password=config.password,
+        host=config.host,
+        port=config.port,
+        database=config.database,
     )
+    return create_engine(url)
 
 @st.cache_data(ttl=300)  # Cache por 5 minutos
 def load_data_cached():
