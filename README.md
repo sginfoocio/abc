@@ -2,6 +2,13 @@
 
 > Aplicación web Streamlit para gestionar la clasificación ABCD de 13,454 productos con análisis de demanda, períodos de agotamiento y optimización de inventario.
 
+## Imágenes Kering (Borrador)
+
+Configuración cifrada, selección de pedidos Odoo e historial persistente:
+[documentación y límites de validación](docs/KERING_IMAGES.md).
+Adaptador Playwright basado en el portal autenticado observado; consulta la guía
+para distinguir validación offline, evidencia real y comprobaciones pendientes.
+
 ## 🎯 ¿Qué Es?
 
 Sistema inteligente que clasifica productos en 4 categorías:

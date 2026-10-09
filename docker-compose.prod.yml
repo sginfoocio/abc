@@ -52,6 +52,10 @@ services:
     healthcheck:
       disable: true
 
+  abcd-kering-scheduler:
+    image: ${ABCD_IMAGE_REF:-registry.diagonaleyewear.net/abcd-control:latest}
+    restart: always
+
   abcd-order-alerts:
     image: ${ABCD_IMAGE_REF:-registry.diagonaleyewear.net/abcd-control:latest}
     restart: always
