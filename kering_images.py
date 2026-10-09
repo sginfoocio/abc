@@ -14,15 +14,17 @@ from io import BytesIO
 from zipfile import ZipFile
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event, Thread, BoundedSemaphore
+from contextlib import contextmanager
 
 from cryptography.fernet import Fernet
 from filelock import FileLock, Timeout
 from PIL import Image, ImageOps
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 
 PORTAL_URL = "https://my.keringeyewear.com/keringeyewear/es/login"
 VIEWS = ("frontal", "lateral", "perspectiva")
+IMAGE_VIEWS = VIEWS + ("detalle",)
 STATES = ("Pendiente", "En proceso", "Completo", "Parcial", "Error", "Interrumpido")
 
 
@@ -34,37 +36,84 @@ class InterventionRequired(Exception):
     pass
 
 
+class PortalFailure(Exception):
+    code = "fallo_portal"
+    retryable = True
+
+
+class LoginFailed(PortalFailure):
+    code = "login_fallido"
+    retryable = False
+
+
+class SessionExpired(PortalFailure):
+    code = "sesion_caducada"
+
+
+class PortalTimeout(PortalFailure):
+    code = "timeout_portal"
+
+
+class ProductNotFound(PortalFailure):
+    code = "producto_no_encontrado"
+    retryable = False
+
+
+def displayed_views(valid) -> tuple[str, ...]:
+    ordered = tuple(view for view in IMAGE_VIEWS if view in valid)
+    if len(ordered) >= 3:
+        return ordered[:3]
+    return tuple("detalle" if view == "lateral" and "detalle" in valid else view for view in VIEWS)
+
+
 class UnverifiedPortal:
     def fetch(self, ean: str, pending: tuple[str, ...]) -> dict[str, bytes]:
         raise PortalUnavailable()
 
 
-def read_orders(engine, supplier_id: int, start: date, end: date, order_ids=None) -> list[dict]:
+def read_orders(engine, supplier_id: int, start: date, end: date, order_ids=None,
+                include_commercial_contacts: bool = False) -> list[dict]:
     lower, upper = utc_interval(start, end)
-    query = text("""
+    parameters = {"supplier": int(supplier_id), "lower": lower, "upper": upper}
+    ids_filter = ""
+    if order_ids is not None:
+        selected = tuple(dict.fromkeys(int(value) for value in order_ids))
+        if not selected:
+            return []
+        parameters["order_ids"] = selected
+        ids_filter = "AND po.id IN :order_ids"
+    supplier_filter = "po.partner_id = :supplier"
+    if include_commercial_contacts:
+        supplier_filter = """po.partner_id IN (
+            SELECT contact.id FROM res_partner contact
+            JOIN res_partner selected ON selected.id = :supplier
+            WHERE COALESCE(contact.commercial_partner_id, contact.id)
+                = COALESCE(selected.commercial_partner_id, selected.id)
+        )"""
+    query = text(f"""
         SELECT po.id, po.name, po.partner_id, po.date_order, po.state,
                pol.id AS line_id, pol.product_id, pp.barcode
         FROM purchase_order po
         LEFT JOIN purchase_order_line pol ON pol.order_id = po.id
           AND COALESCE(pol.display_type, '') = '' AND pol.product_id IS NOT NULL
         LEFT JOIN product_product pp ON pp.id = pol.product_id
-        WHERE po.partner_id = :supplier AND po.state != 'cancel'
+        WHERE {supplier_filter} AND po.state != 'cancel'
           AND po.date_order >= :lower AND po.date_order < :upper
+          {ids_filter}
         ORDER BY po.id, pol.id
     """)
+    if order_ids is not None:
+        query = query.bindparams(bindparam("order_ids", expanding=True))
     with engine.connect() as connection:
         transaction = connection.begin()
         try:
             if engine.dialect.name == "postgresql":
                 connection.execute(text("SET TRANSACTION READ ONLY"))
-            rows = connection.execute(query, {"supplier": supplier_id, "lower": lower, "upper": upper}).mappings().all()
+            rows = connection.execute(query, parameters).mappings().all()
         finally:
             transaction.rollback()
     orders = {}
-    selected = None if order_ids is None else {int(value) for value in order_ids}
     for row in rows:
-        if selected is not None and row["id"] not in selected:
-            continue
         order = orders.setdefault(row["id"], {
             "id": row["id"], "name": row["name"], "supplier_id": row["partner_id"],
             "date_order": str(row["date_order"]), "state": row["state"], "lines": [],
@@ -79,8 +128,21 @@ def read_orders(engine, supplier_id: int, start: date, end: date, order_ids=None
 def read_suppliers(engine) -> list[dict]:
     with engine.connect() as connection:
         return [dict(row) for row in connection.execute(text(
-            "SELECT id, name FROM res_partner WHERE active = TRUE AND supplier_rank > 0 ORDER BY name"
+            "SELECT id, name, COALESCE(commercial_partner_id, id) AS commercial_partner_id "
+            "FROM res_partner WHERE active = TRUE AND supplier_rank > 0 ORDER BY name"
         )).mappings()]
+
+
+def read_supplier_contacts(engine, supplier_id: int) -> list[dict]:
+    with engine.connect() as connection:
+        return [dict(row) for row in connection.execute(text("""
+            SELECT contact.id, contact.name, contact.active,
+                   COALESCE(contact.commercial_partner_id, contact.id) AS commercial_partner_id
+            FROM res_partner contact JOIN res_partner selected ON selected.id = :supplier
+            WHERE COALESCE(contact.commercial_partner_id, contact.id)
+                = COALESCE(selected.commercial_partner_id, selected.id)
+            ORDER BY contact.id
+        """), {"supplier": int(supplier_id)}).mappings()]
 
 
 def image_fingerprint(content: bytes) -> str:
@@ -118,14 +180,19 @@ class ImageStore:
                 );
             """)
 
+    @contextmanager
     def connect(self):
         connection = sqlite3.connect(self.database, timeout=30)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA synchronous=FULL")
-        return connection
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA synchronous=FULL")
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def path(self, ean: str, view: str) -> Path:
-        if not ean.isascii() or not ean.isdigit() or len(ean) > 20 or view not in VIEWS:
+        if not ean.isascii() or not ean.isdigit() or len(ean) > 20 or view not in IMAGE_VIEWS:
             raise ValueError("ean_o_vista_invalida")
         return self.root / "images" / "kering" / ean / f"{view}.img"
 
@@ -219,18 +286,24 @@ def process_ean(store: ImageStore, portal, ean: str) -> dict:
     try:
         with FileLock(lock_path, timeout=0):
             valid = store.valid_views(ean)
-            results = {view: "Reutilizada" if view in valid else "Pendiente" for view in VIEWS}
-            pending = tuple(view for view in VIEWS if view not in valid)
-            if not pending:
+            results = {view: "Reutilizada" if view in valid else "Pendiente" for view in displayed_views(valid)}
+            pending = tuple(view for view in displayed_views(valid) if view not in valid)
+            if len(valid) >= 3:
                 return {"views": results, "reason": "", "tries": 0}
             images, reason, tries = fetch_pending(portal, ean, pending)
             reason = save_pending(store, ean, pending, images, results, reason)
-            return {"views": results, "reason": reason if "Pendiente" in results.values() else "", "tries": tries}
+            return {
+                "views": results,
+                "reason": reason if "Pendiente" in results.values() else "",
+                "tries": tries,
+                "identity": getattr(portal, "identities", {}).get(ean, {}),
+            }
     except Timeout:
         return {"views": dict.fromkeys(VIEWS, "Pendiente"), "reason": "ean_en_proceso", "tries": 0}
 
 
 def fetch_pending(portal, ean, pending):
+    reason = "fallo_portal"
     for tries in range(1, 4):
         try:
             return portal.fetch(ean, pending), "vistas_no_disponibles", tries
@@ -238,18 +311,27 @@ def fetch_pending(portal, ean, pending):
             return {}, "intervencion_captcha_o_mfa", tries
         except PortalUnavailable:
             return {}, "portal_no_verificado", tries
+        except PortalFailure as error:
+            reason = error.code
+            if not error.retryable:
+                return {}, reason, tries
         except Exception:
             pass
-    return {}, "fallo_portal", 3
+    return {}, reason, 3
 
 
 def save_pending(store, ean, pending, images, results, reason):
-    for view in pending:
+    candidates = list(pending)
+    if "detalle" in images and "lateral" in pending and "lateral" not in images:
+        candidates.append("detalle")
+    for view in candidates:
         if view not in images:
             continue
         try:
             if store.save_view(ean, view, images[view]):
                 results[view] = "Descargada"
+                if view == "detalle":
+                    results.pop("lateral", None)
             else:
                 reason = "vista_duplicada"
         except (OSError, ValueError, Image.DecompressionBombError, SyntaxError):
@@ -287,8 +369,9 @@ def execute_order(store, attempt, loader, portal, cache):
         cached = cache.get(ean)
         cache_valid = cached and all(view in valid for view, outcome in cached["views"].items() if outcome != "Pendiente")
         if cache_valid:
-            results[ean] = {"views": {view: "Reutilizada" if view in valid else "Pendiente" for view in VIEWS},
-                            "reason": cache[ean]["reason"], "tries": 0}
+            results[ean] = {"views": {view: "Reutilizada" if view in valid else "Pendiente" for view in displayed_views(valid)},
+                            "reason": cache[ean]["reason"], "tries": 0,
+                            "identity": cache[ean].get("identity", {})}
         else:
             results[ean] = process_ean(store, portal, ean)
             cache[ean] = results[ean]
@@ -351,7 +434,12 @@ class BatchService:
         try:
             execute_run(self.store, run_id, loader, portal)
         finally:
-            self.slots.release()
+            try:
+                close = getattr(portal, "close", None)
+                if close:
+                    close()
+            finally:
+                self.slots.release()
 
     def submit(self, orders, user, supplier, start, end, loader, portal=None) -> str:
         if not self.slots.acquire(blocking=False):

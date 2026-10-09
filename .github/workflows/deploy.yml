@@ -174,22 +174,20 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: Verify dependency locks
-        run: |
-          uv pip compile requirements.in --python-version 3.11 --python-platform x86_64-unknown-linux-gnu --custom-compile-command "uv pip compile requirements.in --python-version 3.11 --python-platform x86_64-unknown-linux-gnu" -o /tmp/requirements.txt
-          uv pip compile requirements-dev.in --python-version 3.11 --python-platform x86_64-unknown-linux-gnu --custom-compile-command "uv pip compile requirements-dev.in --python-version 3.11 --python-platform x86_64-unknown-linux-gnu" -o /tmp/requirements-dev.txt
-          diff -u requirements.txt /tmp/requirements.txt
-          diff -u requirements-dev.txt /tmp/requirements-dev.txt
+        run: python scripts/dependency_locks.py
 
       - name: Run offline tests
         run: python -m pytest -q tests test_transform_luxottica_masterdata.py test_validate_masterdata_odoo_dryrun.py
 
       - name: Lint with flake8
         run: |
+          flake8 kering_images.py kering_images_ui.py kering_portal.py scripts/dependency_locks.py scripts/validate_kering_portal.py tests/test_kering_images.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 app_enhanced.py db_loader.py engine.py auth_session.py order_alerts.py adyen_reconciliation.py adyen_reconciliation_ui.py tests/test_adyen_reconciliation.py tests/test_auth_session.py tests/test_order_alerts.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 app_enhanced.py db_loader.py engine.py auth_session.py order_alerts.py tests/test_auth_session.py tests/test_order_alerts.py --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
 
       - name: Check syntax
         run: |
+          python -m py_compile kering_images.py kering_images_ui.py kering_portal.py scripts/dependency_locks.py scripts/validate_kering_portal.py
           python -m py_compile app_enhanced.py
           python -m py_compile db_loader.py
           python -m py_compile engine.py

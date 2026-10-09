@@ -9,7 +9,9 @@ import streamlit as st
 
 from kering_images import (
     BatchService, ConfigStore, ImageStore, VIEWS, STATES, data_root, read_orders, read_suppliers,
+    read_supplier_contacts, displayed_views,
 )
+from kering_portal import KeringPortal
 
 
 @st.cache_resource
@@ -44,25 +46,76 @@ def render_kering_settings(engine) -> None:
         url = st.text_input("URL del portal Kering", config["url"])
         username = st.text_input("Usuario Kering", config["username"])
         password = st.text_input("Contrase\u00f1a Kering", type="password")
-        supplier = st.selectbox("Proveedor Odoo Kering", options,
-                                index=options.index(config["supplier_id"]) if config["supplier_id"] in options else 0,
-                                format_func=lambda value: names[value])
+        supplier = st.selectbox(
+            "Proveedor Odoo Kering", options,
+            index=options.index(config["supplier_id"]) if config["supplier_id"] in options else 0,
+            format_func=lambda value: names[value],
+        )
+        include_contacts = st.checkbox(
+            "Incluir contactos de la misma entidad comercial Odoo",
+            value=config.get("include_commercial_contacts", False),
+        )
         clear = st.checkbox("Eliminar credenciales guardadas")
         save = st.form_submit_button("Guardar Kering", icon=":material/save:")
     if save:
         save_settings(store, {"url": url.strip(), "username": "" if clear else username.strip(),
-                              "password": "" if clear else password or config["password"], "supplier_id": supplier})
+                              "password": "" if clear else password or config["password"], "supplier_id": supplier,
+                              "include_commercial_contacts": include_contacts})
+    if st.button("Ver contactos asociados al proveedor guardado", disabled=not config["supplier_id"]):
+        show_supplier_contacts(engine, config["supplier_id"])
     if st.button("Comprobar configuracion Kering", icon=":material/check_circle:"):
+        check_local_configuration(store, names)
+    running = st.session_state.get("kering_access_probe")
+    if st.button("Probar acceso a Kering", icon=":material/login:", disabled=running is not None and not running.done()):
         try:
-            current = store.load()
-            store.cipher()
-            if not current["username"] or not current["password"] or current["supplier_id"] not in names or not current["supplier_id"]:
-                st.warning("Faltan credenciales o proveedor Odoo.")
-            else:
-                st.success("Cifrado y proveedor disponibles. No se ha comprobado el acceso autenticado a Kering.")
+            st.session_state["kering_access_probe"] = service().executor.submit(probe_access, store.load())
         except Exception:
-            st.error("No se pudo comprobar la configuracion del servidor.")
-    st.warning("Descarga real bloqueada: falta verificar busqueda por EAN, correspondencia exacta y vistas en una sesion autenticada de Kering.")
+            st.error("No se pudo iniciar la prueba de acceso.")
+    if st.session_state.get("kering_access_probe"):
+        render_access_probe()
+
+
+def show_supplier_contacts(engine, supplier_id):
+    try:
+        st.dataframe(read_supplier_contacts(resolve_engine(engine), supplier_id), hide_index=True)
+    except Exception:
+        st.error("No se pudieron consultar los contactos del proveedor.")
+
+
+def check_local_configuration(store, names):
+    try:
+        current = store.load()
+        store.cipher()
+        if not current["username"] or not current["password"] or current["supplier_id"] not in names or not current["supplier_id"]:
+            st.warning("Faltan credenciales o proveedor Odoo.")
+        else:
+            st.success("Cifrado y proveedor disponibles. No se ha comprobado el acceso autenticado a Kering.")
+    except Exception:
+        st.error("No se pudo comprobar la configuracion del servidor.")
+
+
+def create_portal(config):
+    return KeringPortal(config)
+
+
+def probe_access(config):
+    return create_portal(config).check_access()
+
+
+@st.fragment(run_every="2s")
+def render_access_probe():
+    future = st.session_state["kering_access_probe"]
+    if not future.done():
+        st.info("Comprobando acceso a Kering...")
+        return
+    try:
+        result = future.result()
+        if result["ok"]:
+            st.success("Acceso autenticado a Kering confirmado. Esta prueba no descarga productos.")
+        else:
+            st.warning(f"Acceso no confirmado: {result['code']}")
+    except Exception:
+        st.error("No se pudo comprobar el acceso a Kering.")
 
 
 def save_settings(store, values):
@@ -82,7 +135,7 @@ def local_order_time(value):
 
 def pending_summary(store, order):
     total = len(order["lines"])
-    complete = sum(bool(line["ean"]) and len(store.valid_views(line["ean"])) == 3 for line in order["lines"])
+    complete = sum(bool(line["ean"]) and len(store.valid_views(line["ean"])) >= 3 for line in order["lines"])
     missing = sum(not line["ean"] for line in order["lines"])
     return f"{complete}/{total} completos; {total - complete} pendientes; {missing} sin EAN"
 
@@ -91,13 +144,15 @@ def submit_orders(engine, config, selected, start, end):
     supplier = int(config["supplier_id"])
 
     def loader(order_id):
-        orders = read_orders(resolve_engine(engine), supplier, start, end, [order_id])
+        orders = read_orders(resolve_engine(engine), supplier, start, end, [order_id],
+                             include_commercial_contacts=config.get("include_commercial_contacts", False))
         if not orders:
             raise ValueError("pedido_fuera_de_seleccion")
         return orders[0]
 
     try:
-        return service().submit(selected, st.session_state.get("auth_user", "admin"), supplier, start, end, loader)
+        return service().submit(selected, st.session_state.get("auth_user", "admin"), supplier, start, end, loader,
+                                portal=create_portal(config))
     except Exception:
         st.error("No se pudo iniciar el lote. Compruebe el almacenamiento o espere a que terminen los lotes activos.")
         return None
@@ -122,7 +177,6 @@ def render_progress(run_id):
 def render_kering_page(engine) -> None:
     admin_only()
     st.title("Im\u00e1genes Kering")
-    st.warning("Portal autenticado no verificado. No se realizan descargas reales. Los archivos existentes pueden reutilizarse y registrarse en el historial.")
     try:
         config = ConfigStore(data_root()).load()
         batch = service()
@@ -141,14 +195,16 @@ def render_kering_page(engine) -> None:
             search = st.form_submit_button("Consultar pedidos", icon=":material/search:")
         if search:
             try:
-                st.session_state["kering_orders"] = read_orders(resolve_engine(engine), config["supplier_id"], start, end)
-                st.session_state["kering_interval"] = (start, end, config["supplier_id"])
+                include_contacts = config.get("include_commercial_contacts", False)
+                st.session_state["kering_orders"] = read_orders(resolve_engine(engine), config["supplier_id"], start, end,
+                                                                include_commercial_contacts=include_contacts)
+                st.session_state["kering_interval"] = (start, end, config["supplier_id"], include_contacts)
             except Exception:
                 st.error("No se pudieron leer los pedidos. Compruebe fechas, esquema Odoo y permisos de lectura.")
                 st.session_state.pop("kering_orders", None)
         orders = st.session_state.get("kering_orders", [])
         interval = st.session_state.get("kering_interval")
-        if interval and interval[2] != config["supplier_id"]:
+        if interval and interval[2:] != (config["supplier_id"], config.get("include_commercial_contacts", False)):
             orders = []
         if orders:
             frame = pd.DataFrame([{"Seleccionar": False, "ID": order["id"], "Pedido": order["name"],
@@ -235,7 +291,10 @@ def render_product(store, ean, result):
     st.subheader(ean)
     valid = store.valid_views(ean)
     st.write(result.get("reason", ""))
-    for column, view in zip(st.columns(3), VIEWS):
+    identity = result.get("identity")
+    if identity:
+        st.write(identity)
+    for column, view in zip(st.columns(3), displayed_views(valid)):
         with column:
             if view in valid:
                 st.image(str(valid[view]), caption=view, width="stretch")

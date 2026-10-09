@@ -8,7 +8,7 @@ from kering_images import ImageStore, VIEWS, execute_run, process_ean
 from kering_images import read_orders, InterventionRequired, UnverifiedPortal, BatchService
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, event
 import json
 from zipfile import ZipFile
 import socket
@@ -19,8 +19,12 @@ def no_external_network(monkeypatch):
     def reject(*args, **kwargs):
         raise AssertionError("Las pruebas Kering son offline")
     monkeypatch.setattr(socket, "create_connection", reject)
+    monkeypatch.setattr(socket.socket, "connect", reject)
+    monkeypatch.setattr("kering_portal.sync_playwright", reject)
 from io import BytesIO
 from PIL import Image
+from unittest.mock import Mock, MagicMock
+from contextlib import nullcontext
 
 
 def photo(color):
@@ -80,6 +84,25 @@ def test_reuse_and_repair_only_pending(tmp_path):
     assert len(store.valid_views(ean)) == 3
 
 
+def test_confirmed_detail_is_not_mislabeled_as_lateral(tmp_path):
+    class DetailPortal(FakePortal):
+        def fetch(self, ean, pending):
+            result = super().fetch(ean, pending)
+            if "lateral" in result:
+                result["detalle"] = result.pop("lateral")
+            return result
+    store = ImageStore(tmp_path)
+    portal = DetailPortal()
+    result = process_ean(store, portal, "0001")
+    assert set(result["views"]) == {"frontal", "perspectiva", "detalle"}
+    assert "lateral" not in store.valid_views("0001")
+    assert process_ean(store, portal, "0001")["tries"] == 0
+    assert len(portal.calls) == 1
+    store.path("0001", "frontal").unlink()
+    process_ean(store, portal, "0001")
+    assert portal.calls[-1] == ("0001", ("frontal",))
+
+
 def test_history_reuse_missing_ean_and_changed_lines(tmp_path):
     store = ImageStore(tmp_path)
     portal = FakePortal()
@@ -120,7 +143,33 @@ def test_odoo_read_only_date_supplier_cancel_and_display_lines():
     assert [item["id"] for item in orders] == [1, 2]
     assert orders[0]["lines"] == [dict(id=1, product_id=1, ean="0012345678901")]
     assert orders[1]["lines"][0]["ean"] == ""
-    assert [item["id"] for item in read_orders(engine, 7, date(2026, 3, 29), date(2026, 3, 29), [2])] == [2]
+    calls = []
+    event.listen(engine, "before_cursor_execute", lambda conn, cursor, sql, params, context, many: calls.append((sql, params)))
+    assert [item["id"] for item in read_orders(engine, 7, date(2026, 3, 29), date(2026, 3, 29), [2, 2])] == [2]
+    assert "po.id IN (?)" in calls[-1][0]
+    assert calls[-1][1][-1] == 2
+    count = len(calls)
+    assert read_orders(engine, 7, date(2026, 3, 29), date(2026, 3, 29), []) == []
+    assert len(calls) == count
+    with pytest.raises(ValueError):
+        read_orders(engine, 7, date(2026, 3, 29), date(2026, 3, 29), ["2); DROP TABLE purchase_order;--"])
+
+
+def test_supplier_commercial_contacts_are_explicit_and_exact():
+    from kering_images import read_supplier_contacts
+    engine = create_engine("sqlite://")
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE res_partner(id INTEGER, name TEXT, commercial_partner_id INTEGER, active BOOLEAN)"))
+        connection.execute(text("INSERT INTO res_partner VALUES(7,'Kering',7,1),(8,'Contacto A',7,1),(9,'Kering parecido',9,1),(10,'Contacto archivado',7,0)"))
+        connection.execute(text("CREATE TABLE purchase_order(id INTEGER, name TEXT, partner_id INTEGER, date_order TEXT, state TEXT)"))
+        connection.execute(text("INSERT INTO purchase_order VALUES(1,'PO1',7,'2026-03-29 10:00:00','purchase'),(2,'PO2',8,'2026-03-29 10:00:00','purchase'),(3,'PO3',9,'2026-03-29 10:00:00','purchase'),(4,'PO4',10,'2026-03-29 10:00:00','cancel')"))
+        connection.execute(text("CREATE TABLE purchase_order_line(id INTEGER, order_id INTEGER, product_id INTEGER, display_type TEXT)"))
+        connection.execute(text("CREATE TABLE product_product(id INTEGER, barcode TEXT)"))
+    dates = (date(2026, 3, 29), date(2026, 3, 29))
+    assert [row["id"] for row in read_orders(engine, 7, *dates)] == [1]
+    assert [row["id"] for row in read_orders(engine, 7, *dates, include_commercial_contacts=True)] == [1, 2]
+    assert [row["id"] for row in read_orders(engine, 8, *dates, [2], include_commercial_contacts=True)] == [2]
+    assert [row["id"] for row in read_supplier_contacts(engine, 8)] == [7, 8, 10]
 
 
 def test_partial_duplicate_and_html_are_not_complete(tmp_path):
@@ -337,3 +386,185 @@ def test_orders_and_history_ui_are_offline(tmp_path, monkeypatch):
     assert not app.exception
     assert any("Seleccionar" in frame.value.columns for frame in app.dataframe)
     ui.service.clear()
+
+
+def test_ui_injects_configured_adapter_and_sql_scope(monkeypatch):
+    import kering_images_ui as ui
+    from unittest.mock import Mock
+    config = dict(url=PORTAL_URL, username="offline-user", password="offline-secret", supplier_id=7,
+                  include_commercial_contacts=True)
+    portal = ui.create_portal(config)
+    assert "offline-secret" not in repr(portal)
+    assert portal._config == config
+    factory = Mock(return_value=portal)
+    batch = Mock()
+    batch.submit.return_value = "offline-run"
+    reader = Mock(return_value=[order()])
+    monkeypatch.setattr(ui, "create_portal", factory)
+    monkeypatch.setattr(ui, "service", lambda: batch)
+    monkeypatch.setattr(ui, "read_orders", reader)
+    assert ui.submit_orders(None, config, [order()], date(2026, 3, 29), date(2026, 3, 29)) == "offline-run"
+    assert batch.submit.call_args.kwargs["portal"] is portal
+    loader = batch.submit.call_args.args[-1]
+    loader(1)
+    assert reader.call_args.args[-1] == [1]
+    assert reader.call_args.kwargs["include_commercial_contacts"] is True
+
+
+def portal_snapshot(ean="0012345678901", image_count=3):
+    return {"ean": ean, "upc": "001234567890", "reference": "OFFLINE-001", "size": "TALLA M",
+            "images": [{"url": f"https://picture.kecdn.net/offline-{index}", "reference": "OFFLINE-001"}
+                       for index in range(image_count)]}
+
+
+def configured_portal():
+    from kering_portal import KeringPortal
+    return KeringPortal(dict(url=PORTAL_URL, username="offline-user", password="offline-secret"))
+
+
+def test_portal_resolves_only_exact_code_and_downloads_pending(monkeypatch):
+    from kering_portal import exact_product
+    portal = configured_portal()
+    page = MagicMock()
+    portal._page = page
+    monkeypatch.setattr(portal, "_check_session", lambda: None)
+    page.expect_navigation.return_value = nullcontext()
+    page.locator.return_value.evaluate_all.return_value = [
+        "https://my.keringeyewear.com/es/p/111", "https://my.keringeyewear.com/es/p/222"]
+    page.evaluate.side_effect = [portal_snapshot("9999999999999"), portal_snapshot()]
+    snapshot = portal._find_product("0012345678901")
+    assert exact_product(snapshot, "0012345678901")
+    assert not exact_product(snapshot, "12345678901")
+    assert portal.identities["0012345678901"]["color"] == "001"
+    assert portal.identities["0012345678901"]["size"] == "TALLA M"
+    read_image = Mock(return_value=photo((25, 50, 75)))
+    monkeypatch.setattr(portal, "_read_image", read_image)
+    collected = {}
+    portal._download(snapshot, ("frontal",), collected)
+    assert set(collected) == {"frontal"}
+    assert read_image.call_args.args[0] == "https://picture.kecdn.net/offline-1"
+
+
+def test_real_portal_partial_then_only_pending_and_no_calls_for_complete(tmp_path, monkeypatch):
+    portal = configured_portal()
+    monkeypatch.setattr(portal, "_start", lambda: None)
+    find = Mock(side_effect=[portal_snapshot(image_count=2), portal_snapshot()])
+    monkeypatch.setattr(portal, "_find_product", find)
+    downloads = []
+    def read_image(url):
+        downloads.append(url)
+        index = int(url.rsplit("-", 1)[1])
+        return photo((index * 60, 10, 50))
+    monkeypatch.setattr(portal, "_read_image", read_image)
+    store = ImageStore(tmp_path)
+    first = process_ean(store, portal, "0012345678901")
+    assert first["views"]["lateral"] == "Pendiente"
+    process_ean(store, portal, "0012345678901")
+    assert downloads.count("https://picture.kecdn.net/offline-0") == 1
+    assert downloads.count("https://picture.kecdn.net/offline-1") == 1
+    assert downloads.count("https://picture.kecdn.net/offline-2") == 1
+    assert process_ean(store, portal, "0012345678901")["tries"] == 0
+    assert find.call_count == 2
+
+
+def test_expired_session_reauth_once_and_bounded_timeouts(monkeypatch, tmp_path):
+    from kering_images import SessionExpired
+    from playwright.sync_api import TimeoutError as BrowserTimeout
+    portal = configured_portal()
+    start = Mock()
+    close = Mock()
+    monkeypatch.setattr(portal, "_start", start)
+    monkeypatch.setattr(portal, "close", close)
+    monkeypatch.setattr(portal, "_find_product", Mock(side_effect=[SessionExpired(), portal_snapshot()]))
+    monkeypatch.setattr(portal, "_download", lambda snapshot, pending, collected: collected.update(frontal=photo((10, 20, 30))))
+    assert set(portal.fetch("0012345678901", ("frontal",))) == {"frontal"}
+    assert start.call_count == 2 and close.call_count == 1
+    start.side_effect = BrowserTimeout("offline-secret")
+    start.reset_mock()
+    result = process_ean(ImageStore(tmp_path), portal, "0012345678901")
+    assert result["reason"] == "timeout_portal"
+    assert start.call_count == 3
+    assert "offline-secret" not in json.dumps(result)
+
+
+def test_login_uses_configuration_and_authentication_marker(monkeypatch):
+    import kering_portal
+    portal = configured_portal()
+    manager = MagicMock()
+    page = manager.chromium.launch.return_value.new_context.return_value.new_page.return_value
+    page.url = PORTAL_URL
+    page.expect_navigation.return_value = nullcontext()
+    page.locator.return_value.filter.return_value.count.return_value = 0
+    logout = Mock()
+    logout.count.side_effect = [0, 1]
+    page.locator.side_effect = lambda selector: logout if selector == 'a[href="/es/logout"]' else MagicMock(count=lambda: 0, filter=lambda **kwargs: Mock(count=lambda: 0))
+    page.get_by_text.return_value.count.return_value = 0
+    page.get_by_role.return_value.count.return_value = 0
+    monkeypatch.setattr(kering_portal, "sync_playwright", lambda: Mock(start=lambda: manager))
+    portal._start()
+    page.get_by_placeholder.assert_any_call("MAIL", exact=True)
+    page.get_by_placeholder.assert_any_call("CONTRASEÑA", exact=True)
+    assert page.get_by_placeholder.return_value.fill.call_args_list[0].args == ("offline-user",)
+    assert page.get_by_placeholder.return_value.fill.call_args_list[1].args == ("offline-secret",)
+    assert "offline-secret" not in repr(portal)
+    portal.close()
+
+
+def test_login_failure_and_intervention_are_safe_and_not_retried(monkeypatch, tmp_path):
+    from kering_images import LoginFailed
+    for exception, reason in ((LoginFailed, "login_fallido"), (InterventionRequired, "intervencion_captcha_o_mfa")):
+        portal = configured_portal()
+        start = Mock(side_effect=exception("offline-secret"))
+        monkeypatch.setattr(portal, "_start", start)
+        assert portal.check_access() == {"ok": False, "code": reason}
+        result = process_ean(ImageStore(tmp_path), portal, "0012345678901")
+        assert result["reason"] == reason
+        assert start.call_count == 2
+        assert "offline-secret" not in json.dumps(result)
+
+
+def test_media_rejects_html_redirects_and_untrusted_hosts(monkeypatch):
+    from kering_images import SessionExpired
+    from kering_portal import allowed_url
+    portal = configured_portal()
+    context = MagicMock()
+    portal._context = context
+    response = context.request.get.return_value
+    response.status = 200
+    response.ok = True
+    response.headers = {"content-type": "text/html"}
+    assert portal._read_image("https://picture.kecdn.net/offline") is None
+    response.body.assert_not_called()
+    response.status = 302
+    with pytest.raises(SessionExpired):
+        portal._read_image("https://picture.kecdn.net/offline")
+    assert response.dispose.call_count == 2
+    assert not allowed_url("https://attacker.example/p/1")
+    assert not allowed_url("https://my.keringeyewear.com@attacker.example")
+    assert not allowed_url("http://picture.kecdn.net/offline", media=True)
+
+
+def test_real_validation_requires_explicit_network_consent():
+    from scripts.validate_kering_portal import main
+    with pytest.raises(SystemExit):
+        main(["--ean", "0001"])
+
+
+def test_sqlite_connections_are_closed_even_after_error(tmp_path, monkeypatch):
+    import sqlite3
+    original_connect = sqlite3.connect
+    connections = []
+    def tracked_connect(*args, **kwargs):
+        connection = original_connect(*args, **kwargs)
+        connections.append(connection)
+        return connection
+    monkeypatch.setattr(sqlite3, "connect", tracked_connect)
+    store = ImageStore(tmp_path)
+    store.history()
+    with pytest.raises(RuntimeError):
+        with store.connect():
+            raise RuntimeError("offline")
+    for connection in connections:
+        with pytest.raises(sqlite3.ProgrammingError):
+            connection.execute("SELECT 1")
+    store.database.unlink()

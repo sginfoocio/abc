@@ -35,6 +35,8 @@ COPY adyen_reconciliation.py .
 COPY adyen_reconciliation_ui.py .
 COPY kering_images.py .
 COPY kering_images_ui.py .
+COPY kering_portal.py .
+COPY scripts/validate_kering_portal.py ./scripts/validate_kering_portal.py
 COPY db_loader.py .
 COPY engine.py .
 COPY auth_session.py .

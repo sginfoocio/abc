@@ -6,7 +6,8 @@
 
 Configuración cifrada, selección de pedidos Odoo e historial persistente:
 [documentación y límites de validación](docs/KERING_IMAGES.md).
-La descarga real sigue bloqueada hasta verificar el portal autenticado.
+Adaptador Playwright basado en el portal autenticado observado; consulta la guía
+para distinguir validación offline, evidencia real y comprobaciones pendientes.
 
 ## 🎯 ¿Qué Es?
 
