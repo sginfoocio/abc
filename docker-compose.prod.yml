@@ -94,5 +94,4 @@ services:
   #     - prometheus_data:/prometheus
   #   restart: always
 
-volumes:
-  # prometheus_data: {}
+volumes: {}
