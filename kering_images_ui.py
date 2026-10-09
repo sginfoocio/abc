@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
+from sqlalchemy.exc import OperationalError
 
 from kering_images import (
     BatchService, ConfigStore, ImageStore, VIEWS, STATES, data_root, configured_orders, read_suppliers,
@@ -248,15 +249,20 @@ def render_kering_page(engine) -> None:
 
 @st.fragment(run_every="5s")
 def render_order_list(engine, start, end):
+    stage = "configuracion"
     try:
         config = ConfigStore(data_root()).load()
+        stage = "almacenamiento"
         store = service().store
+        stage = "odoo"
         orders = configured_orders(resolve_engine(engine), config, start, end)
+        stage = "historial"
         latest = latest_attempts(store)
+        stage = "estado"
         cache = {}
         rows = [purchase_row(store, order, latest.get(order["id"]), cache) for order in orders]
-    except Exception:
-        st.error("No se pudieron consultar los pedidos y su estado actual.")
+    except Exception as error:
+        st.error(order_list_error(error, stage))
         return
     if not orders:
         st.info("Sin pedidos para este corte e intervalo.")
@@ -279,6 +285,23 @@ def render_order_list(engine, start, end):
     current_order = next((order for order in orders if order["id"] == detail_id), None)
     if current_order is not None:
         render_current_order(store, current_order, latest.get(detail_id))
+
+
+def order_list_error(error, stage):
+    if stage == "odoo" and isinstance(error, OperationalError):
+        return (
+            "No se pudo acceder a PostgreSQL de Odoo. Compruebe que el servidor acepta conexiones "
+            "y que el acceso de red y la configuracion de base de datos son correctos. "
+            "No se han iniciado nuevas descargas. Codigo: ODOO_CONEXION."
+        )
+    messages = {
+        "configuracion": "No se pudo leer la configuracion cifrada de Kering. Codigo: KERING_CONFIG.",
+        "almacenamiento": "No se pudo abrir el almacenamiento Kering. Codigo: KERING_ALMACENAMIENTO.",
+        "odoo": "No se pudieron leer los pedidos de Odoo. Codigo: ODOO_CONSULTA.",
+        "historial": "No se pudo leer el historial Kering. Codigo: KERING_HISTORIAL.",
+        "estado": "No se pudo calcular el estado actual de los pedidos. Codigo: KERING_ESTADO.",
+    }
+    return messages.get(stage, "No se pudo cargar el listado Kering. Codigo: KERING_LISTADO.")
 
 
 def render_order_actions(engine, config, orders, start, end, busy):

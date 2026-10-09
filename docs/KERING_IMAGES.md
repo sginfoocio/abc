@@ -392,6 +392,22 @@ reinicio/interrupcion, errores de consulta persistidos y espera acotada.
 No se ejecuta Kering/Odoo real en CI; las validaciones reales autorizadas se
 describen aparte. Build Docker local no disponible: validar build remoto de PR.
 
+## Diagnostico del listado
+
+El listado identifica la etapa que falla sin mostrar excepciones ni datos
+sensibles: KERING_CONFIG, KERING_ALMACENAMIENTO, ODOO_CONEXION, ODOO_CONSULTA,
+KERING_HISTORIAL o KERING_ESTADO. Un fallo de acceso PostgreSQL no se presenta
+como un problema de fotografias ni inicia descargas nuevas.
+
+Revision del 2026-10-09: conexion rechazada al PostgreSQL remoto configurado
+en el puerto estandar 5432, antes de consultar pedidos. La URL interpretaba
+correctamente la configuracion; tambien fallo la prueba con URL.create.
+No era un tunel local ni un error del historial. Debe revisarse disponibilidad
+del servicio remoto, listen_addresses/puerto y firewall/acceso de red con su
+responsable. No se reiniciaron servicios de produccion ni se modifico Odoo.
+Los archivos e intentos persistentes se conservan. Pruebas offline de UI verifican
+los codigos de error y que SQL, usuarios y secretos no aparezcan en el aviso.
+
 Dependencias nuevas: cryptography (Fernet), filelock (bloqueo entre procesos),
 tzdata (zonas en Windows). Pillow, SQLAlchemy, Streamlit y Playwright ya existian.
 Los locks de produccion/desarrollo se generan con uv para Python 3.11/Linux.

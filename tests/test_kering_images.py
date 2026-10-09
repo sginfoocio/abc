@@ -362,6 +362,33 @@ def test_scheduler_rechecks_persisted_due_inside_shared_lock(tmp_path, monkeypat
     assert not store.history()
 
 
+def test_order_list_connection_failure_is_specific_and_secret_free(tmp_path, monkeypatch):
+    import kering_images_ui as ui
+    from sqlalchemy.exc import OperationalError
+    from streamlit.testing.v1 import AppTest
+    monkeypatch.setenv("KERING_DATA_ROOT", str(tmp_path))
+    pilot_config(ConfigStore(tmp_path), auto_enabled=False)
+    monkeypatch.setattr(ui, "service", lambda: Mock(store=ImageStore(tmp_path)))
+    failure = OperationalError("private-sql", {}, Exception("offline-secret user host password"))
+    monkeypatch.setattr(ui, "configured_orders", Mock(side_effect=failure))
+    app = AppTest.from_string("from datetime import date\nfrom kering_images_ui import render_order_list\nrender_order_list(None, date(2026,9,1), date(2026,10,9))")
+    app.run()
+    assert not app.exception
+    assert "ODOO_CONEXION" in app.error[0].value
+    assert "offline-secret" not in app.error[0].value
+    assert "private-sql" not in app.error[0].value
+    assert not app.button
+
+
+def test_order_list_error_distinguishes_history_and_row_calculation():
+    from kering_images_ui import order_list_error
+    error = RuntimeError("offline-secret")
+    assert "KERING_HISTORIAL" in order_list_error(error, "historial")
+    assert "KERING_ESTADO" in order_list_error(error, "estado")
+    assert "ODOO_CONSULTA" in order_list_error(error, "odoo")
+    assert "offline-secret" not in order_list_error(error, "configuracion")
+
+
 def test_confirmed_detail_is_not_mislabeled_as_lateral(tmp_path):
     class DetailPortal(FakePortal):
         def fetch(self, ean, pending):
