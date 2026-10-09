@@ -45,7 +45,11 @@ unicamente detalle. Las carpetas de validacion se eliminaron al terminar.
 Se corrigio durante la prueba el cierre explicito de conexiones SQLite, necesario
 para poder limpiar temporales en Windows. No se imprime config ni secretos.
 
-La PR permanece en borrador para revision y mientras CI no termine en verde.
+La PR permanece en borrador para revision. CI y build Docker remotos pasaron
+para el codigo validado: run 37903991259, commit 06f6170, el 2026-10-09.
+Verify dependency locks, pruebas offline, lint y sintaxis: success;
+build-and-push: success (build de PR, sin publicacion de imagen ni despliegue).
+Deploy to Server: skipped. No se han fusionado PR ni desplegado cambios.
 CAPTCHA/MFA y caducidad
 se prueban con simuladores, no con desafios reales. No se ha encontrado todavia
 una ficha real con menos de tres originales; el parcial manual es un repositorio
@@ -217,7 +221,7 @@ que debe recuperar solo una vista. No imprime credenciales ni las recibe por CLI
 El parcial corresponde a datos locales, no demuestra una ficha real incompleta.
 El flujo con credenciales configuradas ya paso para las dos referencias arriba.
 Pendientes: ampliar familias y encontrar una ficha realmente incompleta;
-build Docker local no disponible, comprobar build/CI remoto.
+build Docker local no disponible. Build/CI remoto ya comprobados en verde.
 
 ## Validacion offline
 
@@ -269,4 +273,6 @@ tzdata (zonas en Windows). Pillow, SQLAlchemy, Streamlit y Playwright ya existia
 Los locks de produccion/desarrollo se generan con uv para Python 3.11/Linux.
 El Dockerfile se ha actualizado para copiar los modulos; no se ha probado un
 build Docker local porque no hay motor Docker disponible. Chromium local si esta
-instalado y se utilizo en las dos validaciones reales anteriores.
+instalado y se utilizo en las dos validaciones reales anteriores. El build Docker
+remoto de GitHub Actions si paso; no equivale a desplegar ni a probar el portal
+real desde dentro del contenedor de produccion.
