@@ -15,7 +15,10 @@ import socket
 
 
 @pytest.fixture(autouse=True)
-def no_external_network(monkeypatch):
+def no_external_network(monkeypatch, tmp_path):
+    monkeypatch.delenv("KERING_ENCRYPTION_KEY_FILE", raising=False)
+    monkeypatch.setenv("KERING_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("KERING_DATA_ROOT", str(tmp_path / "kering-offline"))
     def reject(*args, **kwargs):
         raise AssertionError("Las pruebas Kering son offline")
     monkeypatch.setattr(socket, "create_connection", reject)
