@@ -39,7 +39,7 @@ services:
       MASTERDATA_PASSWORD: ${MASTERDATA_PASSWORD}
 
       # Microsoft 365 / Graph API (descarga Luxoptica)
-      M365_DOWNLOAD_ROOT: ${M365_DOWNLOAD_ROOT:-/app/repo/images}
+      IMAGE_REPOSITORY_ROOT: ${IMAGE_REPOSITORY_ROOT:-/app/repo/images}
       MASTERDATA_DICTIONARY_PATH: ${MASTERDATA_DICTIONARY_PATH:-/app/data/masterdata_dictionary.json}
 
       AUTH_REMEMBER_DAYS: ${AUTH_REMEMBER_DAYS}
@@ -72,7 +72,7 @@ services:
       - ./watchlist_clientes.json:/app/watchlist_clientes.json:ro
       - ./alerta_pedidos_notificados.json:/app/alerta_pedidos_notificados.json:ro
       - ./masterdata_data:/app/data
-      - ./repo/images:/app/repo/images
+      - ${IMAGE_REPOSITORY_HOST_ROOT:-./image_repository}:${IMAGE_REPOSITORY_ROOT:-/app/repo/images}
       - ./luxoptica_data:/app/docs/Luxoptica
     
     # Restart policy
@@ -116,13 +116,13 @@ services:
       - M365_CLIENT_ID=${M365_CLIENT_ID}
       - M365_CLIENT_SECRET=${M365_CLIENT_SECRET}
       - M365_MAILBOX=${M365_MAILBOX}
-      - M365_DOWNLOAD_ROOT=${M365_DOWNLOAD_ROOT:-/app/repo/images}
+      - IMAGE_REPOSITORY_ROOT=${IMAGE_REPOSITORY_ROOT:-/app/repo/images}
       - MASTERDATA_DICTIONARY_PATH=${MASTERDATA_DICTIONARY_PATH:-/app/data/masterdata_dictionary.json}
       - TZ=Europe/Madrid
       - PYTHONUNBUFFERED=1
     volumes:
       - ./masterdata_data:/app/data
-      - ./repo/images:/app/repo/images
+      - ${IMAGE_REPOSITORY_HOST_ROOT:-./image_repository}:${IMAGE_REPOSITORY_ROOT:-/app/repo/images}
       - ./luxoptica_data:/app/docs/Luxoptica
     restart: unless-stopped
     healthcheck:
@@ -139,12 +139,14 @@ services:
     environment:
       <<: *odoo-env
       KERING_DATA_ROOT: /app/data/kering
+      IMAGE_REPOSITORY_ROOT: ${IMAGE_REPOSITORY_ROOT:-/app/repo/images}
       KERING_ENCRYPTION_KEY: ${KERING_ENCRYPTION_KEY:-}
       KERING_ENCRYPTION_KEY_FILE: ${KERING_ENCRYPTION_KEY_FILE:-}
       TZ: Europe/Madrid
       PYTHONUNBUFFERED: "1"
     volumes:
       - ./masterdata_data:/app/data
+      - ${IMAGE_REPOSITORY_HOST_ROOT:-./image_repository}:${IMAGE_REPOSITORY_ROOT:-/app/repo/images}
     restart: unless-stopped
     read_only: true
     cap_drop: [ALL]

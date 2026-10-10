@@ -9,6 +9,13 @@ Configuración cifrada, selección de pedidos Odoo e historial persistente:
 Adaptador Playwright basado en el portal autenticado observado; consulta la guía
 para distinguir validación offline, evidencia real y comprobaciones pendientes.
 
+## Repositorio común de imágenes por EAN
+
+Luxoptica y Kering comparten `IMAGE_REPOSITORY_ROOT`, sin copias por pedido o
+proveedor. Antes de desplegar este cambio, seguir el
+[plan de inventario, simulación, migración y recuperación](docs/IMAGE_REPOSITORY.md).
+No ejecutar la migración en producción ni retirar originales sin validación.
+
 ## 🎯 ¿Qué Es?
 
 Sistema inteligente que clasifica productos en 4 categorías:

@@ -6,7 +6,6 @@ from zoneinfo import ZoneInfo
 import json
 import os
 import tempfile
-import hashlib
 import math
 import sqlite3
 import uuid
@@ -19,8 +18,9 @@ from contextlib import contextmanager
 
 from cryptography.fernet import Fernet
 from filelock import FileLock, Timeout
-from PIL import Image, ImageOps
+from PIL import Image
 from sqlalchemy import bindparam, text
+from image_repository import ImageRepository, image_fingerprint
 
 
 PORTAL_URL = "https://my.keringeyewear.com/keringeyewear/es/login"
@@ -173,21 +173,22 @@ def read_supplier_contacts(engine, supplier_id: int) -> list[dict]:
         """), {"supplier": int(supplier_id)}).mappings()]
 
 
-def image_fingerprint(content: bytes) -> str:
-    if len(content) > 30 * 1024 * 1024:
-        raise ValueError("imagen_invalida")
+def kering_image_name(view: str) -> str:
+    if view not in IMAGE_VIEWS:
+        raise ValueError("ean_o_vista_invalida")
+    return f"{view}.img"
+
+
+def kering_zip_name(view: str, content: bytes) -> str:
     with Image.open(BytesIO(content)) as image:
-        image.verify()
-    with Image.open(BytesIO(content)) as image:
-        if image.format not in {"JPEG", "PNG", "WEBP"} or min(image.size) < 600:
-            raise ValueError("imagen_invalida")
-        pixels = ImageOps.exif_transpose(image).convert("RGB")
-        return hashlib.sha256(pixels.resize((64, 64)).tobytes()).hexdigest()
+        extension = {"JPEG": "jpg", "PNG": "png", "WEBP": "webp"}[image.format]
+    return f"{view}.{extension}"
 
 
 class ImageStore:
     def __init__(self, root: Path):
         self.root = root
+        self.repository = ImageRepository()
         root.mkdir(parents=True, exist_ok=True)
         self.database = root / "history.sqlite3"
         with FileLock(root / "schema.lock", timeout=30), self.connect() as connection:
@@ -229,41 +230,26 @@ class ImageStore:
     def path(self, ean: str, view: str) -> Path:
         if not ean.isascii() or not ean.isdigit() or len(ean) > 20 or view not in IMAGE_VIEWS:
             raise ValueError("ean_o_vista_invalida")
-        return self.root / "images" / "kering" / ean / f"{view}.img"
+        valid = self.valid_views(ean)
+        if view in valid:
+            return valid[view]
+        records = [record for record in self.repository.records(ean) if record.view == view]
+        return records[0].path if records else self.repository.root / ean / kering_image_name(view)
 
     def valid_views(self, ean: str) -> dict[str, Path]:
-        valid = {}
-        seen = set()
-        with self.connect() as connection:
-            rows = connection.execute("SELECT * FROM images WHERE ean=?", (ean,)).fetchall()
-        for row in rows:
-            try:
-                path = self.path(ean, row["view"])
-                content = path.read_bytes()
-                fingerprint = image_fingerprint(content)
-                if hashlib.sha256(content).hexdigest() != row["digest"] or fingerprint in seen:
-                    continue
-                if fingerprint != row["pixels"]:
-                    continue
-            except (OSError, ValueError, Image.DecompressionBombError, SyntaxError):
-                continue
-            seen.add(fingerprint)
-            valid[row["view"]] = path
-        return valid
+        return self.repository.valid_views(ean)
 
     def save_view(self, ean: str, view: str, content: bytes) -> bool:
-        existing = self.valid_views(ean)
-        if view in existing:
-            return False
-        fingerprint = image_fingerprint(content)
-        if any(image_fingerprint(path.read_bytes()) == fingerprint for path in existing.values()):
-            return False
-        path = self.path(ean, view)
-        with self.connect() as connection:
-            connection.execute("INSERT OR REPLACE INTO images VALUES(?,?,?,?)",
-                               (ean, view, hashlib.sha256(content).hexdigest(), fingerprint))
-        atomic_write(path, content)
-        return True
+        with self.repository.lock(ean):
+            existing = self.valid_views(ean)
+            if view in existing:
+                return False
+            fingerprint = image_fingerprint(content)
+            if any(image_fingerprint(path.read_bytes()) == fingerprint for path in existing.values()):
+                return False
+            self.repository.save(ean, kering_image_name(view), content, provider="Kering",
+                                 origin="kering_portal", view=view)
+            return True
 
     def recover(self, now=None) -> None:
         timestamp = clock.time() if now is None else now
@@ -299,6 +285,8 @@ class ImageStore:
 
     def insert_orders(self, connection, run_id, supplier, orders):
         for order in orders:
+            self.repository.associate_order("Kering", str(order["id"]),
+                                            [line["ean"] for line in order["lines"] if line["ean"]])
             previous = connection.execute("SELECT COALESCE(MAX(attempt),0) FROM attempts WHERE order_id=?",
                                           (order["id"],)).fetchone()[0]
             connection.execute("""INSERT INTO attempts
@@ -331,10 +319,12 @@ class ImageStore:
         buffer = BytesIO()
         with ZipFile(buffer, "w") as archive:
             for ean in dict.fromkeys(line["ean"] for line in order["lines"] if line["ean"]):
-                for view, path in self.valid_views(ean).items():
-                    with Image.open(path) as image:
-                        extension = {"JPEG": "jpg", "PNG": "png", "WEBP": "webp"}[image.format]
-                    archive.write(path, f"kering/{ean}/{view}.{extension}")
+                with self.repository.lock(ean):
+                    records = self.repository.records(ean)
+                    for view, path in self.valid_views(ean).items():
+                        record = next(record for record in records if record.path == path and record.view == view)
+                        content = self.repository.verified_bytes(record)
+                        archive.writestr(f"{ean}/{kering_zip_name(view, content)}", content)
         return buffer.getvalue()
 
 
@@ -418,10 +408,8 @@ def batch_busy(store):
 def process_ean(store: ImageStore, portal, ean: str) -> dict:
     if not ean.isascii() or not ean.isdigit() or len(ean) > 20:
         return {"views": dict.fromkeys(VIEWS, "Pendiente"), "reason": "ean_invalido", "tries": 0}
-    lock_path = store.root / "locks" / f"{ean}.lock"
-    lock_path.parent.mkdir(exist_ok=True)
     try:
-        with FileLock(lock_path, timeout=0):
+        with store.repository.lock(ean).acquire(timeout=0):
             valid = store.valid_views(ean)
             results = {view: "Reutilizada" if view in valid else "Pendiente" for view in displayed_views(valid)}
             pending = tuple(view for view in displayed_views(valid) if view not in valid)

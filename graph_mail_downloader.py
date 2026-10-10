@@ -7,7 +7,6 @@ import base64
 import json
 import os
 import re
-import shutil
 import zipfile
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -17,6 +16,9 @@ from sqlalchemy import bindparam, create_engine, text
 from sqlalchemy.engine import URL
 
 from db_config import load_db_config, load_env_file
+from filelock import FileLock
+from image_repository import ImageRepository, atomic_write, collision_name, file_checksum, repository_root
+import hashlib
 
 
 M365_TENANT_ID_ENV = "M365_TENANT_ID"
@@ -51,7 +53,7 @@ def load_m365_config() -> M365Config:
         client_id=os.getenv(M365_CLIENT_ID_ENV, "").strip(),
         client_secret=os.getenv(M365_CLIENT_SECRET_ENV, "").strip(),
         mailbox=os.getenv(M365_MAILBOX_ENV, "images@diagonaleyewear.com").strip(),
-        download_root=Path(os.getenv(M365_DOWNLOAD_ROOT_ENV, "docs/Luxoptica/descargas").strip() or "docs/Luxoptica/descargas"),
+        download_root=repository_root(),
     )
 
 
@@ -215,13 +217,13 @@ def _load_state(state_file: Path) -> dict[str, Any]:
         return {"processed_message_ids": []}
     try:
         return json.loads(state_file.read_text(encoding="utf-8"))
-    except Exception:
-        return {"processed_message_ids": []}
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"No se puede leer el estado {state_file}") from error
 
 
 def _save_state(state_file: Path, state: dict[str, Any]) -> None:
     state_file.parent.mkdir(parents=True, exist_ok=True)
-    state_file.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write(state_file, json.dumps(state, ensure_ascii=False, indent=2).encode("utf-8"))
 
 
 def _parse_graph_dt(value: str) -> datetime:
@@ -247,10 +249,16 @@ def _detect_lote_from_subject(subject: str) -> str:
 
 def _save_attachment_bytes(content: bytes, root: Path, received_at: datetime, lote: str, file_name: str) -> Path:
     date_folder = received_at.astimezone(timezone.utc).strftime("%Y-%m-%d")
-    target_dir = root / date_folder / lote
+    target_dir = root / ".incoming" / date_folder / lote
     target_dir.mkdir(parents=True, exist_ok=True)
     out_path = target_dir / _sanitize_filename(file_name)
-    out_path.write_bytes(content)
+    checksum = hashlib.sha256(content).hexdigest()
+    if out_path.exists() and hashlib.sha256(out_path.read_bytes()).hexdigest() != checksum:
+        out_path = target_dir / collision_name(out_path.name, checksum)
+    if out_path.exists() and hashlib.sha256(out_path.read_bytes()).hexdigest() != checksum:
+        raise ValueError(f"Conflicto en archivo recibido: {out_path}")
+    if not out_path.exists():
+        atomic_write(out_path, content)
     return out_path
 
 
@@ -350,26 +358,35 @@ def _market_view_from_image_name(file_name: str) -> str | None:
     return views.get((parts[-2], parts[-1]))
 
 
+def _market_image_names(file_name: str, market_ids: dict[str, str]) -> dict[str, str]:
+    view = _market_view_from_image_name(file_name)
+    if view is None or Path(file_name).suffix.lower() != ".png":
+        return {}
+    names = {}
+    if market_ids.get("Farfetch"):
+        names["Farfetch"] = f"{market_ids['Farfetch']}_{view}.png"
+    if market_ids.get("Miinto"):
+        names["Miinto"] = f"{market_ids['Miinto']}_{view}.jpeg"
+    return names
+
+
 def _create_market_images(source: Path, ean_dir: Path, market_ids: dict[str, str]) -> list[Path]:
-    view = _market_view_from_image_name(source.name)
-    if view is None or source.suffix.lower() != ".png":
-        return []
-
+    repository = ImageRepository(ean_dir.parent)
+    records = [record for record in repository.records(ean_dir.name)
+               if record.path == source and not record.market and _market_image_names(record.name, market_ids)]
     created: list[Path] = []
-    farfetch_id = market_ids.get("Farfetch")
-    if farfetch_id:
-        destination = ean_dir / "Farfetch" / f"{farfetch_id}_{view}.png"
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
-        created.append(destination)
-
-    miinto_id = market_ids.get("Miinto")
-    if miinto_id:
-        destination = ean_dir / "Miinto" / f"{miinto_id}_{view}.jpeg"
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
-        created.append(destination)
-
+    for original in records:
+        for market, name in _market_image_names(original.name, market_ids).items():
+            if any(record.name == name and record.market == market and record.checksum == original.checksum
+                   and record.provider == original.provider and record.origin == original.origin
+                   for record in repository.records(original.ean)):
+                continue
+            record, _ = repository.save(
+                original.ean, name, repository.verified_bytes(original), provider=original.provider,
+                origin=original.origin, view=original.view, market=market, metadata=original.metadata,
+                date=original.date, allow_invalid=True,
+            )
+            created.append(record.path)
     return created
 
 
@@ -378,19 +395,19 @@ def _market_pending_file(images_root: Path) -> Path:
 
 
 def _refresh_pending_market_images(images_root: Path) -> tuple[int, int]:
-    """Reintenta crear copias de mercado para originales que aun no tenian ID."""
-    pending_file = _market_pending_file(images_root)
-    if not images_root.exists():
-        return 0, 0
+    with FileLock(images_root / ".market.lock", timeout=120):
+        return _refresh_pending_market_images_locked(images_root)
 
+
+def _refresh_pending_market_images_locked(images_root: Path) -> tuple[int, int]:
+    """Reintenta registrar variantes sin duplicar los bytes de los originales."""
+    pending_file = _market_pending_file(images_root)
+    repository = ImageRepository(images_root)
     pending_entries: dict[str, dict[str, Any]] = {}
-    for source in images_root.glob("*/*/*.png"):
-        if source.parent.name in {"Farfetch", "Miinto", "Pendientes"}:
+    for record in repository.records():
+        if record.market or not _market_image_names(record.name, {"Farfetch": "check"}):
             continue
-        if source.parent.name == "ean-no-identificado" or source.parent.parent.name == "ean-no-identificado":
-            continue
-        ean = source.parent.name
-        pending_entries[str(source)] = {"ean": ean, "missing_markets": ["Farfetch", "Miinto"]}
+        pending_entries[str(record.path)] = {"ean": record.ean, "missing_markets": ["Farfetch", "Miinto"]}
 
     market_ids_by_ean = _get_market_ids_by_ean({entry["ean"] for entry in pending_entries.values()})
     completed = 0
@@ -400,7 +417,8 @@ def _refresh_pending_market_images(images_root: Path) -> tuple[int, int]:
         market_ids = market_ids_by_ean.get(entry["ean"], {})
         created_paths = _create_market_images(source, source.parent, market_ids)
         created += len(created_paths)
-        missing = [market for market in ("Farfetch", "Miinto") if not market_ids.get(market)]
+        registered = {record.market for record in repository.records(entry["ean"]) if record.path == source}
+        missing = [market for market in ("Farfetch", "Miinto") if market not in registered]
         if missing:
             entry["missing_markets"] = missing
             pending_entries[source_name] = entry
@@ -418,7 +436,7 @@ def _refresh_pending_market_images(images_root: Path) -> tuple[int, int]:
 
 def _extract_zip(archive_path: Path, images_root: Path) -> list[Path]:
     extracted_paths: list[Path] = []
-    target_dir = images_root.resolve()
+    repository = ImageRepository(images_root)
     eans_by_image_key = _load_eans_by_image_key()
     matched_eans = set(eans_by_image_key.values())
     market_ids_by_ean = _get_market_ids_by_ean(matched_eans)
@@ -428,33 +446,23 @@ def _extract_zip(archive_path: Path, images_root: Path) -> list[Path]:
             if member.is_dir():
                 continue
 
-            file_name = _sanitize_filename(Path(member.filename).name)
-            model_dir = target_dir / _model_from_image_name(file_name)
+            file_name = _sanitize_filename(Path(member.filename.replace("\\", "/")).name)
+            if Path(file_name).suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp"}:
+                continue
             image_key = _image_model_color_key(file_name)
-            ean = eans_by_image_key.get(image_key, "ean-no-identificado") if image_key else "ean-no-identificado"
-            destination = (model_dir / ean / file_name).resolve()
-            if destination != target_dir and target_dir not in destination.parents:
-                raise ValueError(f"Ruta insegura en ZIP: {member.filename}")
-
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            with archive.open(member) as source, destination.open("wb") as target:
-                target.write(source.read())
-            extracted_paths.append(destination)
+            ean = eans_by_image_key.get(image_key) if image_key else None
+            if ean is None:
+                raise ValueError(f"EAN no identificado para {file_name}; ZIP conservado en {archive_path}")
+            view = _market_view_from_image_name(file_name) or "unknown"
+            record, _ = repository.save(
+                ean, file_name, archive.read(member), provider="Luxoptica",
+                origin=f"ZIP:{archive_path.name}:{member.filename}", view=view,
+                metadata={"modelo": _model_from_image_name(file_name)}, allow_invalid=True,
+            )
+            extracted_paths.append(record.path)
             market_ids = market_ids_by_ean.get(ean, {})
-            extracted_paths.extend(_create_market_images(destination, destination.parent, market_ids))
-            if ean != "ean-no-identificado" and (
-                not market_ids.get("Farfetch") or not market_ids.get("Miinto")
-            ):
-                pending_file = _market_pending_file(target_dir)
-                pending = _load_state(pending_file)
-                pending[str(destination)] = {
-                    "ean": ean,
-                    "missing_markets": [
-                        market for market in ("Farfetch", "Miinto") if not market_ids.get(market)
-                    ],
-                }
-                _save_state(pending_file, pending)
-
+            extracted_paths.extend(_create_market_images(record.path, record.path.parent, market_ids))
+    _refresh_pending_market_images(repository.root)
     return extracted_paths
 
 
@@ -467,7 +475,11 @@ def _download_zip_link(url: str, target_dir: Path) -> Path | None:
             return None
 
         file_name = Path(final_path).name or "luxoptica-images.zip"
-        archive_path = target_dir / _sanitize_filename(file_name)
+        # Stage each response independently; never replace a previous archive.
+        import tempfile
+        descriptor, temporary = tempfile.mkstemp(dir=target_dir, suffix=".zip")
+        os.close(descriptor)
+        archive_path = Path(temporary)
         total_bytes = int(response.headers.get("content-length", "0") or 0)
         print(f"   Descargando {file_name} ({total_bytes / 1024 / 1024:.1f} MB)...", flush=True)
         downloaded_bytes = len(first_chunk)
@@ -486,6 +498,17 @@ def _download_zip_link(url: str, target_dir: Path) -> Path | None:
                             print(f"      {downloaded_bytes / 1024 / 1024:.0f} MB", flush=True)
                         next_report += 50 * 1024 * 1024
         print(f"   Descarga completada: {archive_path}", flush=True)
+        saved = target_dir / _sanitize_filename(file_name)
+        checksum = file_checksum(archive_path)
+        if saved.exists() and file_checksum(saved) != checksum:
+            saved = target_dir / collision_name(saved.name, checksum)
+        if saved.exists():
+            if file_checksum(saved) != checksum:
+                raise ValueError(f"Conflicto en ZIP recibido: {saved}")
+            archive_path.unlink()
+        else:
+            archive_path.replace(saved)
+        archive_path = saved
     return archive_path
 
 
@@ -494,6 +517,15 @@ def download_luxoptica_mail_attachments(
     subject_hint: str = "image",
     lookback_days: int = 7,
     top_messages: int = 100,
+) -> DownloadSummary:
+    root = repository_root()
+    root.mkdir(parents=True, exist_ok=True)
+    with FileLock(root / ".mail.lock", timeout=120):
+        return _download_luxoptica_mail_attachments(sender_hint, subject_hint, lookback_days, top_messages)
+
+
+def _download_luxoptica_mail_attachments(
+    sender_hint: str, subject_hint: str, lookback_days: int, top_messages: int,
 ) -> DownloadSummary:
     config = load_m365_config()
     missing = validate_m365_config(config)
@@ -531,7 +563,7 @@ def download_luxoptica_mail_attachments(
 
     for msg in messages:
         message_id = msg.get("id", "")
-        if not message_id or msg.get("isRead", False):
+        if not message_id or message_id in processed_ids or msg.get("isRead", False):
             continue
 
         received_at = _parse_graph_dt(msg.get("receivedDateTime", ""))
@@ -553,7 +585,7 @@ def download_luxoptica_mail_attachments(
 
         if not msg.get("hasAttachments", False):
             body = _get_message_body(token, config.mailbox, message_id)
-            target_dir = root / received_at.astimezone(timezone.utc).strftime("%Y-%m-%d") / _detect_lote_from_subject(subject)
+            target_dir = root / ".incoming" / received_at.astimezone(timezone.utc).strftime("%Y-%m-%d") / _detect_lote_from_subject(subject)
             target_dir.mkdir(parents=True, exist_ok=True)
             downloaded_from_link = False
             links = _find_download_links(body)
@@ -616,6 +648,19 @@ def download_luxoptica_mail_attachments(
             if saved.suffix.lower() == ".zip":
                 extracted_paths = _extract_zip(saved, root)
                 saved_paths.extend(str(path) for path in extracted_paths)
+            elif saved.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}:
+                key = _image_model_color_key(saved.name)
+                ean = _load_eans_by_image_key().get(key) if key else None
+                if not ean:
+                    raise ValueError(f"EAN no identificado; adjunto conservado en {saved}")
+                record, _ = ImageRepository(root).save(
+                    ean, _sanitize_filename(file_name), content_bytes, provider="Luxoptica",
+                    origin=f"Graph:{message_id}:{att_id}",
+                    view=_market_view_from_image_name(file_name) or "unknown",
+                    date=received_at.isoformat(), metadata={"modelo": _model_from_image_name(file_name)},
+                    allow_invalid=True,
+                )
+                saved_paths.append(str(record.path))
 
         _mark_message_read(token, config.mailbox, message_id)
         newly_processed.append(message_id)

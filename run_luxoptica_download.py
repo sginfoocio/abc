@@ -60,7 +60,7 @@ def main():
             print(f"\n⏳ No hay imágenes aún (esperando respuesta de Luxoptica)")
         
         print(f"\n📊 Próxima ejecución: Programada automáticamente cada hora")
-        print(f"   Log de estado: docs/Luxoptica/descargas/.mail_download_state.json")
+        print(f"   Log de estado: {config.download_root / '.mail_download_state.json'}")
         
         return 0
         

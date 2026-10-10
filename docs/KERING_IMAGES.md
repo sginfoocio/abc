@@ -1,5 +1,13 @@
 # Imagenes Kering (PR borrador, adaptador real)
 
+## Repositorio comun por EAN
+
+Las rutas `images/kering/<EAN>` de las secciones historicas siguientes describen
+el almacenamiento anterior. Las nuevas descargas, galerias y ZIP usan
+`IMAGE_REPOSITORY_ROOT/<EAN>` y reutilizan originales de cualquier proveedor.
+El historial/configuracion permanece en `KERING_DATA_ROOT`. Consultar las
+[reglas de nombres y plan de migracion](IMAGE_REPOSITORY.md) antes del despliegue.
+
 ## Correccion de acceso no confirmado (2026-10-10)
 
 La PR original #36 ya esta fusionada. El commit eb519f9 no estaba en main.

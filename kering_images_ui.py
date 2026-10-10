@@ -14,6 +14,7 @@ from kering_images import (
 )
 from kering_portal import KeringPortal
 from kering_jobs import prepare_selection, make_loader, schedule_status
+from image_repository import ImageRepository
 
 
 SAVE_ICON = ":material/save:"
@@ -446,17 +447,4 @@ def render_product(store, ean, result):
 
 
 def gallery_rows() -> list[dict]:
-    root = data_root()
-    if not (root / "history.sqlite3").exists():
-        return []
-    store = ImageStore(root)
-    with store.connect() as connection:
-        eans = [row[0] for row in connection.execute("SELECT DISTINCT ean FROM images")]
-    rows = []
-    for ean in eans:
-        for view, path in store.valid_views(ean).items():
-            timestamp = path.stat().st_mtime
-            rows.append({"Modelo": "Kering", "EAN": ean, "Mercado": "Kering", "Archivo": view,
-                         "Ruta": str(path), "Descargada": timestamp,
-                         "Fecha": datetime.fromtimestamp(timestamp).strftime(TIME_FORMAT)})
-    return rows
+    return ImageRepository().catalog_rows()

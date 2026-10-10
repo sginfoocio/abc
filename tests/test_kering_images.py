@@ -19,6 +19,7 @@ def no_external_network(monkeypatch, tmp_path):
     monkeypatch.delenv("KERING_ENCRYPTION_KEY_FILE", raising=False)
     monkeypatch.setenv("KERING_ENCRYPTION_KEY", Fernet.generate_key().decode())
     monkeypatch.setenv("KERING_DATA_ROOT", str(tmp_path / "kering-offline"))
+    monkeypatch.setenv("IMAGE_REPOSITORY_ROOT", str(tmp_path / "common-images"))
     def reject(*args, **kwargs):
         raise AssertionError("Las pruebas Kering son offline")
     monkeypatch.setattr(socket, "create_connection", reject)
@@ -520,7 +521,7 @@ def test_interrupt_retry_and_zip(tmp_path):
     assert store.history()[0]["attempt"] == 2
     with ZipFile(BytesIO(store.zip_order(order()))) as archive:
         assert len(archive.namelist()) == 3
-        assert all(name.startswith("kering/0012345678901/") for name in archive.namelist())
+        assert all(name.startswith("0012345678901/") for name in archive.namelist())
 
 
 def test_bounded_retries_and_intervention_no_secrets(tmp_path):
@@ -657,15 +658,15 @@ def test_file_disappears_between_orders_in_same_batch(tmp_path):
 
 
 def test_atomic_write_failure_recovers_without_orphan(tmp_path, monkeypatch):
-    import kering_images
+    import image_repository
     store = ImageStore(tmp_path)
-    writer = kering_images.atomic_write
+    writer = image_repository.atomic_write
     def interrupted(path, content):
         raise OSError("offline interrupted write")
-    monkeypatch.setattr(kering_images, "atomic_write", interrupted)
+    monkeypatch.setattr(image_repository, "atomic_write", interrupted)
     assert process_ean(store, FakePortal(), "0001")["reason"] == "imagen_invalida"
     assert not store.valid_views("0001")
-    monkeypatch.setattr(kering_images, "atomic_write", writer)
+    monkeypatch.setattr(image_repository, "atomic_write", writer)
     assert process_ean(store, FakePortal(), "0001")["reason"] == ""
     assert len(store.valid_views("0001")) == 3
 

@@ -2,7 +2,7 @@
 """Monitor periódico de correos de Luxottica.
 
 Comprueba cada X minutos si ha llegado un correo con adjuntos y, en caso
-afirmativo, los descarga a docs/Luxoptica/descargas.
+afirmativo, los registra en IMAGE_REPOSITORY_ROOT por EAN.
 """
 
 from __future__ import annotations
