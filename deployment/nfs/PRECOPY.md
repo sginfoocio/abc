@@ -362,3 +362,12 @@ backups posteriores; verificar4servicios/StartedAt iguales. No promocionar
 a source ni ejecutar cierreB hasta autorizacion de parada. ViaA/LVM intacta
 y pendiente de validacion/autorizacion. Un container de precopia que falla
 no justifica borrar candidata/originales: conservarlogs/versiones y revisar.
+
+Preflight real detecto `Kering/config.enc`0:0/0600, no legible1037. No se
+amplian permisos activos ni se usa un copiadorprivilegiado para saltarlos.
+Config cifrada/keys/.env pertenecen al flujo LOCAL privado de respaldo,
+no a NAS/candidataimagenes; excluidos EXPLICITAMENTE, enumerados en recibo
+como estadoLOCAL pendiente de captura autorizada. Los originales permanecen
+intactos. Captura consistente sigue bloqueada hasta preservar config/clave
+localmente con lector autorizado en ventana, sin imprimir secretos ni colocar
+claves en logs/Git/NAS. Esta exclusion no equivale a descarte del config.

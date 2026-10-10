@@ -9,12 +9,13 @@ def test_live_audit_retains_unknown_images_and_excludes_local_state(tmp_path):
     (tmp_path / "unknown.png").write_bytes(b"nonreusable-original")
     (tmp_path / "history.sqlite3").write_bytes(b"SQLite format 3\0")
     (tmp_path / "history.sqlite3-wal").write_bytes(b"wal")
+    (tmp_path / "config.enc").write_bytes(b"private-config-local")
     (tmp_path / "staging").mkdir()
     (tmp_path / "staging" / "excluded.png").write_bytes(b"excluded")
     report = audit_source(tmp_path)
     assert report["files"] == 1
     assert report["bytes"] == len(b"nonreusable-original")
-    assert sorted(report["excluded_sqlite_or_locks"]) == ["history.sqlite3", "history.sqlite3-wal"]
+    assert sorted(report["excluded_local_state"]) == ["config.enc", "history.sqlite3", "history.sqlite3-wal"]
 
 
 def test_live_audit_blocks_unlisted_sqlite_extension(tmp_path):

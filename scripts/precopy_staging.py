@@ -15,7 +15,8 @@ from scripts.verify_staging_exports import verify_layout
 
 ROLES = ("Luxoptica", "Kering", "Common", "Luxoptica-manifests", "Luxoptica-docs")
 EXCLUDES = ("staging/", "*.sqlite3", "*.sqlite3-wal", "*.sqlite3-shm", "*.sqlite3-journal",
-            "*.db", "*.db-wal", "*.db-shm", "*.db-journal", "*.lock")
+            "*.db", "*.db-wal", "*.db-shm", "*.db-journal", "*.lock",
+            "config.enc", "*.key", ".env")
 
 
 def excluded(name: str) -> bool:
@@ -26,7 +27,7 @@ def excluded(name: str) -> bool:
 def audit_source(root: Path) -> dict:
     if root.resolve() != root or not root.is_dir():
         raise ValueError(f"Missing or aliased source: {root}")
-    summary = {"files": 0, "bytes": 0, "excluded_sqlite_or_locks": []}
+    summary = {"files": 0, "bytes": 0, "excluded_local_state": []}
     device = root.stat().st_dev
 
     def walk_error(error):
@@ -44,7 +45,7 @@ def audit_source(root: Path) -> dict:
             if not stat.S_ISREG(info.st_mode):
                 raise ValueError(f"Source special file: {path}")
             if excluded(name):
-                summary["excluded_sqlite_or_locks"].append(str(path.relative_to(root)))
+                summary["excluded_local_state"].append(str(path.relative_to(root)))
                 continue
             with path.open("rb") as stream:
                 if stream.read(16) == b"SQLite format 3\0":
