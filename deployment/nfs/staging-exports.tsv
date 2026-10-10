@@ -1,0 +1,6 @@
+# share mount minimum_available_bytes
+cloud-migration-source /mnt/cloud-migration-source 25769803776
+cloud-imagenes-staging /mnt/cloud-imagenes-staging 8589934592
+cloud-migration-backups /mnt/cloud-migration-backups 68719476736
+cloud-migration-recovery /mnt/cloud-migration-recovery 25769803776
+cloud-image-work /mnt/cloud-image-work 17179869184

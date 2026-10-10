@@ -1,5 +1,10 @@
 # Synology NFS: PREPARADO, NO ACTIVADO
 
+**Lista unica vigente DSM/montajes para staging:** [STAGING.md](STAGING.md).
+Sustituye propuestas anteriores de fuente local y work dentro de backups:
+cinco exportaciones dedicadas, SQLite local, instalador y preflight comunes.
+Los apartados siguientes conservan la evolucion y la evidencia historica.
+
 Objetivo: imágenes en `192.168.1.32:/volume1/cloud-imagenes`, montadas en el
 servidor `192.168.1.55` bajo `/mnt/cloud-imagenes`. Sólo bytes de imágenes y locks
 compartidos deben vivir en NFS. SQLite, WAL, historial, estado de correo, recibos,
@@ -253,11 +258,9 @@ Docker para modificar unidades, permisos del host o eludir sudo.
 
 Provisionar en Synology, con autorizacion limitada a 192.168.1.55 y SYS:
 
-| Uso | Exportacion propuesta (NO existente) | Montaje host |
-| --- | --- | --- |
-| Backups imagenes/ZIP y staging voluminoso `.work` | `192.168.1.32:/volume1/cloud-migration-backups` | `/mnt/cloud-migration-backups` |
-| Imagenes de ensayo | `192.168.1.32:/volume1/cloud-imagenes-staging` | `/mnt/cloud-imagenes-staging` |
-| Recuperacion sin solaparse con backup | `192.168.1.32:/volume1/cloud-migration-recovery` | `/mnt/cloud-migration-recovery` |
+La lista anterior de tres destinos queda consolidada y ampliada en
+[STAGING.md](STAGING.md). Backups conserva su ubicacion, pero work tiene ahora
+exportacion propia; tambien se concreta la fuente congelada completa.
 
 No sustituir estas raices por subdirectorios del repositorio activo. Verificacion
 real `showmount -e` solo publica cloud-imagenes para .55, mas tres exportaciones

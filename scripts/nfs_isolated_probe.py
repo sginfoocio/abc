@@ -11,7 +11,7 @@ from nfs_repository_guard import require_nfs
 
 
 ROOT = Path("/isolated-nfs")
-SOURCE = "192.168.1.32:/volume1/cloud-imagenes"
+SOURCE = os.getenv("NFS_PROBE_SOURCE", "192.168.1.32:/volume1/cloud-imagenes")
 STATE = Path("/tmp/nfs-probe-state")
 
 

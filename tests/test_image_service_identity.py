@@ -38,7 +38,20 @@ def test_only_image_writers_use_cloud_identity_in_preparation_override():
 
 def test_staging_identity_and_owner_only_permission_proposal():
     config = compose_config("deployment/nfs/staging.compose.yml")
-    assert config["services"]["image-storage-staging"]["user"] == "1037:100"
+    service = config["services"]["image-storage-staging"]
+    assert service["user"] == "1037:100"
+    environment = service["environment"]
+    assert environment["IMAGE_REPOSITORY_WORK_ROOT"] == "/staging/work"
+    assert environment["IMAGE_REPOSITORY_WORK_NFS_SOURCE"].endswith("/cloud-image-work")
+    volumes = {volume["target"]: volume for volume in service["volumes"]}
+    assert volumes["/staging/source"]["source"] == "/mnt/cloud-migration-source"
+    assert volumes["/staging/source"]["read_only"]
+    history = volumes["/staging/source/Kering/history.sqlite3"]
+    assert history["source"].startswith("/opt/cloud-image-staging/state/")
+    assert history["read_only"]
+    assert volumes["/staging/state"]["source"] == "/opt/cloud-image-staging/state"
+    assert volumes["/staging/work"]["source"] != volumes["/staging/backups"]["source"]
+    assert all(not volume["bind"]["create_host_path"] for volume in service["volumes"])
     script = (ROOT / "deployment/nfs/set-image-permissions.sh").read_text()
     assert "chown 1037:100" in script
     assert "chmod 0700" in script

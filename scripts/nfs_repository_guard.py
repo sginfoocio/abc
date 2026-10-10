@@ -47,5 +47,6 @@ def require_nfs(root: Path, source: str = EXPECTED_SOURCE,
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path("/mnt/cloud-imagenes"))
+    parser.add_argument("--source", default=EXPECTED_SOURCE)
     arguments = parser.parse_args()
-    print(require_nfs(arguments.root))
+    print(require_nfs(arguments.root, arguments.source))

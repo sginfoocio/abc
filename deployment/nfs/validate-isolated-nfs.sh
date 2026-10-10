@@ -3,7 +3,7 @@
 set -eu
 IMAGE="${1:?Supply isolated probe image}"
 NAME="cloud-nfs-isolated-$(date +%s)-$$"
-SOURCE=192.168.1.32:/volume1/cloud-imagenes
+SOURCE="${2:-192.168.1.32:/volume1/cloud-imagenes}"
 GATEWAY=
 restore_network() {
     docker exec "$NAME" ip link set eth0 up
@@ -35,15 +35,16 @@ cleanup() {
 }
 trap cleanup EXIT
 docker run -d --name "$NAME" --memory=512m --cpus=1 --cap-add=SYS_ADMIN --cap-add=NET_ADMIN \
-    --security-opt apparmor=unconfined --security-opt seccomp=unconfined "$IMAGE" >/dev/null
+    --security-opt apparmor=unconfined --security-opt seccomp=unconfined \
+    -e NFS_PROBE_SOURCE="$SOURCE" "$IMAGE" >/dev/null
 # No host network, host PID namespace, host mounts or docker socket.
 docker exec "$NAME" mkdir -m 000 /isolated-nfs
-if docker exec "$NAME" python /probe-code/nfs_repository_guard.py --root /isolated-nfs; then
+if docker exec "$NAME" python /probe-code/nfs_repository_guard.py --root /isolated-nfs --source "$SOURCE"; then
     echo "Missing-mount guard failed"; exit 1
 fi
 docker exec "$NAME" mount -t nfs -o vers=4.1,hard,nosharecache,timeo=10,retrans=2,sec=sys \
     "$SOURCE" /isolated-nfs
-docker exec "$NAME" python /probe-code/nfs_repository_guard.py --root /isolated-nfs
+docker exec "$NAME" python /probe-code/nfs_repository_guard.py --root /isolated-nfs --source "$SOURCE"
 docker exec "$NAME" python /probe-code/nfs_isolated_probe.py setup
 GATEWAY="$(docker exec "$NAME" sh -c "ip route show default | cut -d ' ' -f 3")"
 test -n "$GATEWAY"
@@ -69,11 +70,11 @@ docker exec "$NAME" python /probe-code/nfs_isolated_probe.py locks
 docker exec "$NAME" python /probe-code/nfs_isolated_probe.py cleanup
 docker exec "$NAME" rm /tmp/nfs-probe-state/directory
 docker exec "$NAME" umount /isolated-nfs
-if docker exec "$NAME" python /probe-code/nfs_repository_guard.py --root /isolated-nfs; then
+if docker exec "$NAME" python /probe-code/nfs_repository_guard.py --root /isolated-nfs --source "$SOURCE"; then
     echo "Post-unmount guard failed"; exit 1
 fi
 docker restart "$NAME" >/dev/null
-if docker exec "$NAME" python /probe-code/nfs_repository_guard.py --root /isolated-nfs; then
+if docker exec "$NAME" python /probe-code/nfs_repository_guard.py --root /isolated-nfs --source "$SOURCE"; then
     echo "Restart accepted missing mount"; exit 1
 fi
 echo "Missing mount rejected inside container before mount, after unmount and after restart"
