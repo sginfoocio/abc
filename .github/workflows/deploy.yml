@@ -100,7 +100,7 @@ jobs:
           test "$(docker inspect "$IMAGE" --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = "$EXPECTED_VERSION"
           docker run --rm --network none -e EXPECTED_COMMIT -e EXPECTED_BUILD -e EXPECTED_PUBLISHED -e EXPECTED_VERSION "$IMAGE" python -c "
           import os
-          import cloud_dashboard, kering_images_ui, kering_portal, kering_jobs, graph_mail_downloader, image_exports, luxoptica_auto_upload
+          import cloud_dashboard, kering_images_ui, kering_portal, kering_jobs, graph_mail_downloader, image_exports, luxoptica_auto_upload, repository_storage
           from build_info import load_build_info
           info = load_build_info()
           assert info['commit'] == os.environ['EXPECTED_COMMIT']
@@ -217,6 +217,7 @@ jobs:
 
       - name: Lint with flake8
         run: |
+          flake8 repository_storage.py scripts/nfs_repository_guard.py scripts/test_nfs_image_storage.py tests/test_repository_storage.py tests/test_nfs_repository_guard.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 cloud_dashboard.py process_activity.py build_info.py scripts/write_build_info.py tests/test_cloud_dashboard.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 graph_mail_downloader.py luxoptica_auto_upload.py poll_luxoptica_mail.py save_abcd_weekly_snapshot.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 image_naming.py image_exports.py image_repository.py migrate_image_repository.py kering_media.py tests/test_kering_image_sections.py --count --select=E9,F63,F7,F82 --show-source --statistics
@@ -226,6 +227,7 @@ jobs:
 
       - name: Check syntax
         run: |
+          python -m py_compile repository_storage.py scripts/nfs_repository_guard.py scripts/test_nfs_image_storage.py
           python -m py_compile cloud_dashboard.py process_activity.py build_info.py scripts/write_build_info.py
           python -m py_compile image_naming.py image_exports.py image_repository.py migrate_image_repository.py graph_mail_downloader.py kering_media.py tests/test_kering_image_sections.py
           python -m py_compile kering_images.py kering_images_ui.py kering_portal.py kering_jobs.py scripts/dependency_locks.py scripts/validate_kering_portal.py

@@ -472,7 +472,8 @@ def _extract_clean_eans(df: pd.DataFrame) -> list[str]:
 
 
 def _load_market_pending_rows(images_root: Path) -> list[dict[str, object]]:
-    pending_path = images_root / ".market_pending.json"
+    from repository_storage import state_root
+    pending_path = state_root(images_root) / ".market_pending.json"
     if not pending_path.exists():
         return []
 

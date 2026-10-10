@@ -38,6 +38,8 @@ COPY kering_images_ui.py .
 COPY kering_portal.py .
 COPY kering_jobs.py .
 COPY image_repository.py image_naming.py image_exports.py kering_media.py .
+COPY repository_storage.py .
+COPY scripts/nfs_repository_guard.py ./scripts/nfs_repository_guard.py
 COPY cloud_dashboard.py process_activity.py build_info.py .
 COPY assets ./assets
 COPY logo ./logo

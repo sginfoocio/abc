@@ -10,15 +10,24 @@ local o en copias de seguridad independientes, no en un SQLite activo sobre NFS.
 
 - SSH como rubensg (UID/GID 1000:1000).
 - TCP 111 y 2049 del NAS accesibles. **No acredita exportación ni autorización**.
-- `mount.nfs`, `showmount` y `rpcinfo` no disponibles. `nfs-common` no instalado.
+- Actualizacion posterior: `mount.nfs` instalado y montaje real comprobado.
 - Sudo no interactivo requiere contraseña; no se usa Docker para eludirlo.
-- No existe montaje NFS en el servidor ni `/mnt/cloud-imagenes`.
+- `/mnt/cloud-imagenes`: origen exacto `192.168.1.32:/volume1/cloud-imagenes`,
+  NFS 4.1, rw, hard, TCP, sec=sys, clientaddr=192.168.1.55.
 - App, monitor Luxoptica y scheduler Kering ejecutan actualmente como **0:0**.
   No se han cambiado permisos, usuarios, configuración NFS, servicios ni imágenes.
-- Disco local: aproximadamente 5 GB libres. Capacidad NAS **no comprobada**.
-- Pruebas reales de creación/lectura/rename/checksum/locks **bloqueadas** hasta
-  disponer del cliente y del montaje. Los tests del guard son simulados, no una
-  validación funcional NFS.
+- Disco local: 5.332.529.152 B libres; NAS imagenes: 3.041.245.659.136 B libres.
+- Pruebas **reales** de escritura/lectura/fsync/rename/SHA-256/flock entre dos
+  procesos correctas como host 1000:1000 y dentro de la imagen actual como 0:0,
+  con red del contenedor deshabilitada. Carpetas temporales unicas eliminadas.
+  Ninguna imagen existente leida, modificada o migrada por estas pruebas.
+- Directorio de prueba propio 1000:1000 con modo 700: escritura correcta.
+  La exportacion existente sigue 0:0 y 777; no se ha cambiado su ACL.
+- Una creacion temporal desde el contenedor root devuelve propietario 0:0
+  y modo 777. No acredita una politica segura de squash ni la ausencia de
+  mapeos administrativos: comprobar configuracion Synology con su administrador.
+- No se simulo una interrupcion de red/desmontaje sobre el montaje compartido.
+  Las pruebas de guard y de migracion en pytest usan datos sinteticos separados.
 
 ## Preparación de Synology (administrador del NAS)
 
@@ -37,20 +46,28 @@ preparar permisos de almacenamiento local y el PATH de Python/Playwright
 
 Con sudo autorizado y sin modificar aún Compose ni el repositorio activo:
 
+La unidad visible actualmente es la unidad dinamica del montaje existente:
+`FragmentPath` vacio, `SourcePath=/proc/self/mountinfo`, `is-enabled=not-found`.
+No es persistente y no hay entrada fstab. Reutilizar su mismo nombre escapado;
+no crear una segunda unidad ni un segundo montaje. Plantilla y unidad generada
+estan preparadas en `/home/rubensg/cloud-nfs-preparation-20261010`.
+
+Con autorizacion sudo, instalar la unidad sobre ese mismo nombre y habilitarla
+para el siguiente arranque, sin desmontar ni reiniciar el montaje actual:
+
 ```sh
-sudo apt-get install nfs-common
-showmount -e 192.168.1.32
-sudo mkdir -p /mnt/cloud-imagenes
-sudo chmod 000 /mnt/cloud-imagenes
 UNIT="$(systemd-escape --path --suffix=mount /mnt/cloud-imagenes)"
-sudo install -m 0644 cloud-images.mount.template "/etc/systemd/system/$UNIT"
+sudo install -m 0644 "/home/rubensg/cloud-nfs-preparation-20261010/$UNIT" "/etc/systemd/system/$UNIT"
 sudo systemctl daemon-reload
-sudo systemctl enable --now "$UNIT"
+sudo systemctl enable "$UNIT"
+systemctl show "$UNIT" -p FragmentPath -p SourcePath -p UnitFileState
 findmnt -T /mnt/cloud-imagenes -o TARGET,SOURCE,FSTYPE,OPTIONS
 ```
 
-El modo 000 protege la carpeta subyacente para escritores no root cuando NFS
-no está montado. **No basta mientras los contenedores sean root**.
+No ejecutar chmod/chown sobre `/mnt/cloud-imagenes` mientras esta montado:
+afectaria al NAS. El eventual modo 000 de la carpeta local subyacente solo se
+prepara en una ventana con el montaje ausente y escritores detenidos.
+**No basta mientras los contenedores sean root**.
 El montaje usa `hard`, TCP y NFS 4.1; nunca `soft`, `nolock` ni un montaje
 automático que permita escribir en el directorio local. Se espera la red al
 arrancar. Si Synology sólo permite otra versión/export path, revisar y validar;
@@ -59,7 +76,11 @@ no degradar silenciosamente.
 `scripts/nfs_repository_guard.py --root /mnt/cloud-imagenes` verifica en
 mountinfo la fuente exacta, filesystem NFS, montaje raíz, rw y hard.
 No crea directorios. Rechaza montaje ausente, local, export distinto, subdirectorio
-o soft. Está **preparado pero aún no integrado en cada escritor**.
+o soft. El codigo preparado lo integra en el repositorio, consulta/resolucion,
+locks, Graph y migracion; comprueba tambien antes de publicar bytes mediante
+rename. **No esta desplegado**. Comprobar mountinfo no elimina la carrera entre
+la comprobacion y un desmontaje forzado; el bloqueo de activacion incluye
+identidad no root, carpeta subyacente protegida y supervision del montaje.
 
 Después del montaje, ejecutar `scripts/test_nfs_image_storage.py` como UID/GID
 real del escritor, primero con identidad actual para comprobar squash y después
@@ -75,9 +96,15 @@ La configuración activa Docker tiene `restart: unless-stopped`; un ExecStartPre
 externo por sí solo no impide que Docker restaure esos contenedores al arrancar.
 Antes del corte deben prepararse y validarse conjuntamente:
 
-1. Separar `IMAGE_REPOSITORY_STATE_ROOT` local (catálogo/WAL/estado/recibos) de
-   `IMAGE_REPOSITORY_ROOT` NFS. **El código actual no implementa esa variable**:
-   guarda `.catalog.sqlite3` y `.migration` bajo la raíz de imágenes.
+1. El codigo preparado implementa `IMAGE_REPOSITORY_STATE_ROOT` local
+   (catalogo/WAL/correo/pendientes/planes/recibos) y
+   `IMAGE_REPOSITORY_BACKUP_ROOT` independiente (imagenes y archivos ZIP).
+   SQLite/historial/configuracion originales se respaldan bajo estado local.
+   `KERING_DATA_ROOT`, `PROCESS_ACTIVITY_PATH` y otras bases mantienen volumen
+   local. Mantener el comportamiento anterior cuando no se configura separacion.
+   No copiar SQLite activo: copia consistente y verificacion antes del corte.
+   Un catalogo/estado legacy sin copia separada provoca un bloqueo, no un
+   catalogo nuevo vacio ni repeticion silenciosa de correo.
 2. Integrar el guard en todos los escritores (Graph, Kering, galería/revisión,
    migración y réplica), antes de mkdir/open/rename, además del arranque.
    No admitir fallback ni éxito ante fallos de NFS. Locks compartidos en NFS;
@@ -96,8 +123,11 @@ Antes del corte deben prepararse y validarse conjuntamente:
    checksum y recuperación de locks en ventana aislada; no desmontar a la fuerza
    ni usar lazy unmount con escritores activos.
 
-No basta definir variables: todo lo anterior bloquea la activación. No se ha
-instalado la unidad ni cambiado Compose/.env/UID/permisos del NAS.
+No basta definir variables: todo lo anterior bloquea la activacion. No se ha
+instalado la unidad ni cambiado Compose/.env/UID/permisos del NAS. La plantilla
+de variables `storage.env.template` es solo de preparacion; no cargarla en
+produccion. Falta crear/verificar la exportacion independiente de backups
+e indicar su ruta/origen; no se ha inventado una exportacion.
 
 ## Simulación de capacidad (basada en inventario previo, no plan ejecutable)
 
@@ -109,48 +139,70 @@ antes de aplicar porque producción ha seguido funcionando.
 | --- | ---: | ---: |
 | Originales actuales, ya ocupados | 18.780.210.777 B | 0 |
 | Imágenes únicas por EAN/checksum | 0 adicionales | 5.011.781.184 B |
-| Backup completo actual (conservador) | 18.780.210.777 B adicionales | 0 |
+| Backup de SQLite, JSON y demas metadatos | 771.372 B adicionales | 0 |
+| Backup de imagenes originales | 0 | 9.893.383.353 B, exportacion independiente |
+| Backup de archivos ZIP/archivos comprimidos | 0 | 8.886.056.052 B, exportacion independiente |
 | SQLite activo, WAL, historial, planes/recibos | local; medir crecimiento/reserva | 0 |
-| Recuperación de ensayo | hasta 18.780.210.777 B adicionales si local | 0 |
-| Temporal de copia | tamaño máximo de archivo, medir del inventario | máximo de imagen individual, medir del inventario |
+| Recuperacion de ensayo | 771.372 B metadatos | 18.779.439.405 B en destino independiente, si se ensaya alli |
+| Temporal de copia de migracion | 220.332 B | 9.616.571 B imagenes; 4.804.982.367 B backups |
 | ZIP bajo demanda | hasta 256 MiB por sesión concurrente | 0 |
 
-El tamaño bruto de imágenes del inventario es 9.893.383.353 B; deduplicación
-estimada a 5.011.781.184 B. Los backups son una **copia adicional**, no los
-originales ya ocupados. Con ~5 GB libres, incluso trasladando imágenes a NAS
-no cabe el backup completo local. Requiere ampliar disco o aprobar un destino
-independiente de backups; no borrar originales ni depositar SQLite activo en NAS.
-La recuperación en otro almacenamiento reduce la necesidad local pero debe
-aprobarse y medirse. No se ha contado una réplica adicional como gratis.
+El usuario ha elegido una exportacion NAS **independiente** para backups de
+imagenes. Incluye originales y ZIP completos, no solo fotografias deduplicadas.
+Su origen, montaje y capacidad estan pendientes de provision administrativa.
+La copia de archivos se transmite por bloques; el temporal de un ZIP de backup
+vive en esa exportacion, no en el disco local. Conserva todos los bytes
+inventariados y nunca elimina originales. No contar una replica como gratis.
 
 Los temporales/SQLite son reservas, no una predicción exacta de su concurrencia.
 El informe privado derivado registra máximos concretos y separa bytes/GiB.
-Resultado del recálculo: temporal máximo de origen **4.804.982.367 B** (un archivo
-grande, no una imagen), máximo de imagen **9.616.571 B**, SQLite inventariado
-**110.592 B**. Con backup completo local, su copia temporal, una copia de SQLite
-y una sesión ZIP, mínimo adicional local **23.853.739.192 B (22,22 GiB)**;
-NAS imágenes + un temporal **5.021.397.755 B (4,68 GiB)**. Falta reserva para
-crecimiento, concurrencia y snapshots del Synology. Ensayo de recuperación
-local añade hasta **18.780.210.777 B**. Espacio local medido **5.336.969.216 B**.
+Resultado del recalculo: SQLite inventariado **110.592 B**, plan privado previo
+**4.522.307 B**. Minimo adicional local (metadatos, su temporal, copia de SQLite,
+plan previo y una sesion ZIP): **274.060.059 B (0,26 GiB)**. NAS imagenes +
+temporal: **5.021.397.755 B (4,68 GiB)**. Exportacion independiente de backups +
+temporal: **23.584.421.772 B (21,96 GiB)**; capacidad alli aun no comprobada.
+No incluye crecimiento de catalogo/recibos, historiales activos fuera del
+inventario, nuevo plan, concurrencia ni snapshots. No es garantia de capacidad.
+
+Graph mantiene `.incoming` local: un ZIP recibido puede requerir otros
+**4.804.982.367 B** antes de extraerlo. Sumado al minimo local anterior consume
+**5.079.042.426 B**, frente a **5.332.529.152 B** disponibles: solo quedan
+253.486.726 B de margen, insuficiente para afirmar operacion segura. Reservar
+mas espacio o limitar y medir concurrencia antes de activar; el traslado de
+backups no resuelve automaticamente el cache de descargas.
 No hubo cambios de tamaño/mtime ni fuentes ausentes respecto al inventario
 previo, pero esa comprobación no sustituye nuevos checksums con escrituras pausadas.
-Si se escoge backup externo, recalcular; no cambiar `apply` para omitir backups.
-El algoritmo de migración actual ubica backups en la misma raíz, por lo que
-**no puede aplicarse tal cual a NFS** con estos requisitos.
+Los nuevos inventarios generan planes v2 con raices firmadas de estado/backups;
+`apply`, `verify` y `recover` usan esa separacion. Un plan v1 conserva su
+comportamiento legacy; si pretende cambiar raices, se rechaza y se exige nuevo
+inventario. Esta simulacion derivada del plan anterior NO es un plan ejecutable.
 
 ## Réplica y montaje sobre sí mismo
 
 No ejecutar `sync-nas` contra esta misma exportación como origen y destino,
-ni mediante otro bind o alias. El control actual compara rutas resueltas, no
-identidad remota: debe añadirse comparación mountinfo de servidor/export +
-subruta y comprobación de identidad de archivos. Rechazar misma exportación
-antes de mkdir/copiar. Backup consistente SQLite local mediante API backup;
+ni mediante otro bind o alias. El control preparado compara rutas, samefile
+y mountinfo y rechaza la misma exportacion NFS antes de crear/copiar.
+`sync-nas` legacy se bloquea con almacenamiento separado: requiere un mecanismo
+de snapshot/recuperacion independiente, no una copia sobre si mismo.
+Backup consistente SQLite local mediante API backup;
 no copiar WAL activo ni exportar el catálogo activo desde NFS.
 
-Estado final: **preparación únicamente**, no montaje instalado, repositorio
-activo sin cambios, no migración ni copia a NAS, sin permisos ampliados.
+Estado final: **preparacion unicamente**, montaje manual real comprobado,
+persistencia no instalada, repositorio activo sin cambios, no migracion,
+sin permisos ampliados. Solo se escribieron temporales aislados de prueba.
 
-Pruebas offline: **9 correctas**, lint y compilación correctos. Cubren montaje
+Suite offline completa: **269 correctas**, lint/compilacion correctos; 16 avisos
+preexistentes de adaptador datetime SQLite. Pruebas offline del guard:
+**9 correctas**, mas regresiones de separacion,
+historial, backups ZIP, recuperación y compatibilidad. Cubren montaje
 esperado, exportación incorrecta, filesystem local, soft, ro, subdirectorio,
 desmontaje/overmount y carpeta ausente sin crear fallback. No son pruebas de
 NFS real ni de ACL del Synology.
+
+Smoke adicional del codigo preparado dentro de la imagen Linux actual:
+imports, catalogo local, backup de imagen/ZIP separado, repeticion idempotente,
+recuperacion y rechazo de montaje ausente correctos. Datos sinteticos en `/tmp`,
+red deshabilitada y raiz de contenedor solo lectura; no monta datos productivos.
+No sustituye a un build Docker nuevo/CI ni valida reinicio o perdida de red.
+App sigue healthy y conserva el bind activo
+`/opt/abcd-control/image_repository`. No se publico ni desplego esta rama.

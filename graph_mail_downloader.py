@@ -243,8 +243,10 @@ def _detect_lote_from_subject(subject: str) -> str:
 
 
 def _save_attachment_bytes(content: bytes, root: Path, received_at: datetime, lote: str, file_name: str) -> Path:
+    from repository_storage import state_root, check_image_root
+    check_image_root(root)
     date_folder = received_at.astimezone(timezone.utc).strftime("%Y-%m-%d")
-    target_dir = root / ".incoming" / date_folder / lote
+    target_dir = state_root(root) / ".incoming" / date_folder / lote
     target_dir.mkdir(parents=True, exist_ok=True)
     out_path = target_dir / _sanitize_filename(file_name)
     checksum = hashlib.sha256(content).hexdigest()
@@ -374,10 +376,13 @@ def _create_market_images(source: Path, ean_dir: Path, market_ids: dict[str, str
 
 
 def _market_pending_file(images_root: Path) -> Path:
-    return images_root / ".market_pending.json"
+    from repository_storage import state_root
+    return state_root(images_root) / ".market_pending.json"
 
 
 def _refresh_pending_market_images(images_root: Path) -> tuple[int, int]:
+    from repository_storage import check_image_root
+    check_image_root(images_root)
     with FileLock(images_root / ".market.lock", timeout=120):
         return _refresh_pending_market_images_locked(images_root)
 
@@ -502,6 +507,8 @@ def download_luxoptica_mail_attachments(
     top_messages: int = 100,
 ) -> DownloadSummary:
     root = repository_root()
+    from repository_storage import check_image_root
+    check_image_root(root)
     root.mkdir(parents=True, exist_ok=True)
     with FileLock(root / ".mail.lock", timeout=120):
         from process_activity import record_process
@@ -535,7 +542,8 @@ def _download_luxoptica_mail_attachments(
             flush=True,
         )
 
-    state_file = root / ".mail_download_state.json"
+    from repository_storage import state_root
+    state_file = state_root(root) / ".mail_download_state.json"
     state = _load_state(state_file)
     processed_ids: set[str] = set(state.get("processed_message_ids", []))
 
@@ -573,7 +581,7 @@ def _download_luxoptica_mail_attachments(
 
         if not msg.get("hasAttachments", False):
             body = _get_message_body(token, config.mailbox, message_id)
-            target_dir = root / ".incoming" / received_at.astimezone(timezone.utc).strftime("%Y-%m-%d") / _detect_lote_from_subject(subject)
+            target_dir = state_root(root) / ".incoming" / received_at.astimezone(timezone.utc).strftime("%Y-%m-%d") / _detect_lote_from_subject(subject)
             target_dir.mkdir(parents=True, exist_ok=True)
             downloaded_from_link = False
             links = _find_download_links(body)

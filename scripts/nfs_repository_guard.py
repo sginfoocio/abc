@@ -17,6 +17,8 @@ def require_nfs(root: Path, source: str = EXPECTED_SOURCE,
     root = Path(os.path.abspath(root))
     if not root.is_dir() or root.resolve() != root:
         raise RuntimeError("NFS repository missing or symlinked; local fallback forbidden")
+    if not mountinfo.is_file():
+        raise RuntimeError("Cannot verify mountinfo; NFS writes forbidden")
     matches = []
     for line in mountinfo.read_text(encoding="utf-8").splitlines():
         before, separator, after = line.partition(" - ")
