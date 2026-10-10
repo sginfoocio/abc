@@ -415,7 +415,19 @@ local persistente **nuevo y desechable** para catalogo/SQLite WAL/SHM y streamin
 modo owner-only, tmpfs solo para navegador/tmp; comprueba tambien que1038:100
 no accede al estado. No monta ni modifica almacenamiento de produccion.
 
-Regresion local actualizada: **281 pruebas correctas**, lint y compilacion
-correctos; mismos16 avisos SQLite preexistentes. Nuevo build/smoke1037 en CI
-pendiente de publicar este ajuste. No aplicar los overrides ni el script de
-permisos hasta comprobar el artefacto y las ACL DSM, y preparar estado local.
+Validacion de este ajuste: **281 pruebas correctas en CI**, lint/compilacion
+correctos; local279 correctas y2 testsCompose omitidos porque no hay Docker
+local, mismos16 avisos SQLite. Compose nativo tambien validado en el servidor,
+sin iniciar servicios ni imprimir su configuracion.
+
+[CI38055117566](https://github.com/sginfoocio/abc/actions/runs/38055117566)
+correcto: nuevo build y smoke1037:100 con navegador, volumen local, catalogo,
+SQLite/WAL/SHM, streaming y recuperacion sinteticos. UID1038/GID100 no obtiene
+lectura/escritura/travesia del estado local. Build
+`actions-38055117566-1`, version `sha-56c35b619b4e` del merge de prueba real;
+identidad/labels verificadas. No publicar imagen ni desplegar en evento PR.
+El primer CI detecto dependencia YAML no declarada de los tests; se corrigio
+usando DockerCompose nativo, sin agregar una dependencia.
+
+No aplicar los overrides ni el script de permisos hasta confirmar las ACL DSM
+y preparar estado local. El build/smoke positivo no cambia esos bloqueos.
