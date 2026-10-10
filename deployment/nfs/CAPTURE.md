@@ -5,6 +5,16 @@ Esta entrega NO autoriza parar escritores. Se necesita una ventana explicita
 antes de ejecutar los comandos de mantenimiento de este documento.
 La replica antigua **no bloquea** el ensayo por decision del responsable.
 
+**Revision posterior b9edc02**: [PRECOPY.md](PRECOPY.md) separa precopia,
+cierre coherente e indisponibilidad/verificacion. Su protocolo de dos fases
+sustituye la copia integra bajo pausa del documento original siguiente.
+La parada corta queda condicionada a snapshot local verificado; sin snapshot
+se requiere cierre de contenido bajo pausa, no quick-check por fechas.
+La reserva vigente se actualiza a work64GiB/186GiB agregados; los138GiB
+de las evidencias/comandos originales siguientes son historicos.
+El aviso SQLite de alertas NO era esperado y su carrera de inicializacion
+sigue pendiente; se refuerza el test para propagar excepciones de ambos actores.
+
 ## Replica encontrada: hechos y limites
 
 No se presupone tarea DSM. Se revisaron referencias de scripts en repositorios

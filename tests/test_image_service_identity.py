@@ -70,3 +70,18 @@ def test_nonroot_smoke_is_executed_as_confirmed_nas_identity():
     assert "--user 10001:10001" not in workflow
     entrypoint = (ROOT / "scripts/cloud_image_entrypoint.sh").read_text()
     assert "umask 077" in entrypoint and 'test "$(id -G)" = 100' in entrypoint
+
+
+def test_staging_capture_uses_matching_local_history_and_source_run(monkeypatch):
+    run = "capture-synthetic"
+    snapshot = f"/opt/cloud-image-staging/state/frozen/{run}/Kering/history.sqlite3"
+    target = f"/nas/staging/source/{run}/Kering/history.sqlite3"
+    monkeypatch.setenv("STAGING_HISTORY_SNAPSHOT", snapshot)
+    monkeypatch.setenv("STAGING_HISTORY_TARGET", target)
+    config = compose_config("deployment/nfs/staging.compose.yml")
+    service = config["services"]["image-storage-staging"]
+    history = next(volume for volume in service["volumes"] if volume["target"] == target)
+    assert history["source"] == snapshot
+    assert history["read_only"]
+    assert history.get("bind", {}).get("create_host_path", False) is False
+    assert service["environment"]["IMAGE_REPOSITORY_STATE_ROOT"] == "/staging/state"

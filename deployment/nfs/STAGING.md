@@ -22,8 +22,10 @@ No cambiar permisos/propietarios de las bases activas.
 ## Capacidad AGREGADA, no backup independiente
 
 `staging-layout.tsv` reserva source24 + images8 + backups64 + recovery24 +
-work16 = **136 GiB**, mas **2 GiB libres protegidos** = **138 GiB**
-(148.176.371.712 B) medidos UNA vez en el volumen. No sumar cinco `df`.
+work64 = **184 GiB**, mas **2 GiB libres protegidos** = **186 GiB**
+(199.715.979.264 B) medidos UNA vez en el volumen. No sumar cinco `df`.
+Work reserva candidata24 + versiones retenidas24 + ZIP/extraccion16 GiB;
+16GiB anteriores no cabian para precopiar la fuente completa18,78GB.
 Estas reservas conservan margen/retencion de las propuestas previas; recalcular
 con nuevo inventario real si crecieron fuentes/archivos comprimidos.
 Work mantiene limite8 GiB por ZIP, reserva2 GiB y bloqueo entre importadores.
@@ -129,6 +131,11 @@ el ensayo; la nueva replica remota se preparara despues, sin activarla ahora.
   No inventariar la raiz NAS/productiva ni usarla como destino.
 
 ## Ensayo completo sigue condicionado
+
+La opcion de precopia y sus limites estan en [PRECOPY.md](PRECOPY.md).
+Protocolo precopia necesita work64GiB, NO los16GiB del ensayo sin precopia;
+la reserva agregada pasa a186GiB. No iniciar precopia con plantilla antigua.
+Sin snapshot local probado no se promete cierre rapido basado en mtime.
 
 Captura requiere ventana explicita para coordinar todos los escritores o
 snapshot coherente aprobado. No detener servicios activos en esta entrega.

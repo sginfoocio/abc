@@ -35,8 +35,8 @@ services:
         bind:
           create_host_path: false
       - type: bind
-        source: /opt/cloud-image-staging/state/frozen/Kering/history.sqlite3
-        target: /nas/staging/source/Kering/history.sqlite3
+        source: ${STAGING_HISTORY_SNAPSHOT:-/opt/cloud-image-staging/state/frozen/Kering/history.sqlite3}
+        target: ${STAGING_HISTORY_TARGET:-/nas/staging/source/Kering/history.sqlite3}
         read_only: true
         bind:
           create_host_path: false

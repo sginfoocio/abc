@@ -231,6 +231,7 @@ jobs:
           flake8 scripts/nfs_isolated_probe.py scripts/audit_image_identity.py tests/test_image_service_identity.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 scripts/verify_staging_exports.py scripts/test_staging_storage.py tests/test_staging_exports.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 scripts/report_migration_review.py scripts/snapshot_sqlite_copy.py tests/test_migration_review.py tests/test_sqlite_snapshot_copy.py --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 tests/test_staging_precopy_protocol.py tests/test_order_alert_service.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 cloud_dashboard.py process_activity.py build_info.py scripts/write_build_info.py tests/test_cloud_dashboard.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 graph_mail_downloader.py luxoptica_auto_upload.py poll_luxoptica_mail.py save_abcd_weekly_snapshot.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 image_naming.py image_exports.py image_repository.py migrate_image_repository.py kering_media.py tests/test_kering_image_sections.py --count --select=E9,F63,F7,F82 --show-source --statistics

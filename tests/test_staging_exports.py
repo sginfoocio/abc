@@ -142,7 +142,9 @@ def test_sibling_migration_repeat_recover_and_ean_zip(staged, monkeypatch):
 
 
 def test_manifest_reserves_one_volume_not_five_exports():
-    assert sum(preparation.read_layout(MANIFEST).values()) == 136 * 1024**3
+    roles = preparation.read_layout(MANIFEST)
+    assert roles["work"] == 64 * 1024**3
+    assert sum(roles.values()) == 184 * 1024**3
 
 
 def test_capacity_is_aggregate_and_checked_before_mkdir(tmp_path, monkeypatch):
@@ -150,7 +152,7 @@ def test_capacity_is_aggregate_and_checked_before_mkdir(tmp_path, monkeypatch):
     monkeypatch.setattr(preparation.os, "getgid", lambda: 100, raising=False)
     monkeypatch.setattr(preparation.os, "getgroups", lambda: [100], raising=False)
     monkeypatch.setattr(preparation, "require_nfs", lambda *args: None)
-    minimum = 138 * 1024**3
+    minimum = 186 * 1024**3
     monkeypatch.setattr(preparation.os, "statvfs",
                         lambda path: SimpleNamespace(f_bavail=minimum - 1, f_frsize=1), raising=False)
     with pytest.raises(RuntimeError, match="aggregate"):
