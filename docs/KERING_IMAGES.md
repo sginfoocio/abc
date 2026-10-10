@@ -1,5 +1,121 @@
 # Imagenes Kering (PR borrador, adaptador real)
 
+## Correccion de acceso no confirmado (2026-10-10)
+
+La PR original #36 ya esta fusionada. Esta correccion se publica en la rama
+existente `copilot/kering-images` y se documenta mediante comentario en esa PR;
+actualizar la rama no modifica por si solo el codigo desplegado.
+
+### Causa comprobada en codigo y limite de la evidencia
+
+`render_access_probe` muestra `Acceso no confirmado: timeout_portal` al recibir
+el codigo de `KeringPortal.check_access`. Antes, este ultimo agrupaba cualquier
+`BrowserTimeout`: apertura, espera/fill del formulario, click o navegacion.
+No habia fase ni duracion que permitiera atribuir el incidente real.
+El login exigia `expect_navigation` y comprobaba inmediatamente el marcador:
+una respuesta sin navegacion podia agotar la espera, y una sesion cuyo marcador
+apareciera tarde podia etiquetarse incorrectamente como `login_fallido`.
+No se usaba `networkidle` en Kering y no se introduce ahora.
+
+**La fase del timeout ocurrido en produccion aun no esta demostrada.** Estos
+defectos de observabilidad/espera se reproducen con simuladores; no prueban que
+DNS, TLS, Chromium o las credenciales sean la causa de ese incidente.
+
+### Contrato corregido
+
+| Fase | Limite |
+| --- | --- |
+| Validacion de configuracion | 1 s |
+| Arranque Chromium | 15 s |
+| Apertura portal (`domcontentloaded`) | 20 s |
+| Carga formulario | 10 s |
+| Envio login (fill y click) | 10 s |
+| Redireccion/respuesta observable | 15 s |
+| Comprobacion sesion | 10 s |
+
+El presupuesto compartido de autenticacion es **60 s**, no la suma de los
+limites de la tabla. Cada operacion bloqueante recibe el menor tiempo restante;
+las comprobaciones del DOM se repiten de forma acotada. El presupuesto corresponde
+al intento de autenticacion, no a la busqueda/descarga de todos los productos
+ni al cierre de recursos de Playwright.
+
+Se esperan MAIL, CONTRASENA y el boton Iniciar Sesion visible/habilitado
+(observados anteriormente), o una sesion ya autenticada. Se usa exclusivamente
+el enlace **visible** `a[href="/es/logout"]` como marcador autenticado observado,
+y se exige permanecer en el host HTTPS permitido. Cambio de URL, desaparicion del
+formulario o un marcador oculto no confirman acceso. Se admite autenticacion
+sin navegacion. Los desafios CAPTCHA/MFA interrumpen tambien las esperas.
+
+Codigos separados: `timeout_portal`, `login_fallido`,
+`intervencion_captcha_o_mfa`, `fallo_red`, `fallo_chromium`, `fallo_portal` y
+`sesion_caducada`. Se observan fallos de solicitudes de navegacion del frame
+principal y HTTP >=400; fallos de recursos secundarios no invalidan una sesion
+confirmada. Un rechazo requiere un aviso visible de credenciales incorrectas,
+no la mera ausencia de logout. **El aviso de rechazo `role=alert` y sus textos
+son una deteccion defensiva simulada, pendiente de contrastar con un rechazo
+real autorizado; no se afirma que ese DOM se haya observado en produccion.**
+Un fallo del API de Chromium anterior a la navegacion se distingue de la red.
+
+La sonda devuelve y la UI muestra eventos `{phase, duration_ms, code}`.
+El log de cada fase contiene exclusivamente esos campos, sin URL, usuario,
+contrasena, cookies, tokens, cuerpos de respuesta ni texto de excepciones.
+No activar capturas, trazas, videos ni DEBUG de Playwright para diagnosticar login.
+
+Si falla el acceso, no se busca ni descarga ningun producto, no se reintenta
+tres veces ese login en el mismo EAN y se interrumpe el lote. Se conserva el
+resultado pendiente del EAN actual, el pedido con error y los siguientes pedidos
+en `Pendiente`, junto con todos los archivos previos. El programador informa
+`Interrumpido` y mantiene intervalo/minimo de cinco minutos antes del reintento.
+Dos caducidades consecutivas de sesion tambien detienen el lote.
+
+### Validacion disponible y procedimiento en servidor
+
+Ejecutar **en el mismo runtime, usuario y entorno de la aplicacion**, con la
+configuracion cifrada y la clave ya montadas; no copiar secretos a argumentos:
+
+```sh
+python -m scripts.validate_kering_portal --diagnostics --allow-network
+python -m scripts.validate_kering_portal --access-only --allow-network
+```
+
+La primera sonda no lee credenciales: verifica DNS, TCP/443, TLS con comprobacion
+de certificado/hostname para portal y CDN, y Chromium con un DOM local visible.
+La segunda abre el portal y autentica, sin descargar productos. Compartir solo
+el JSON saneado. El codigo de salida es distinto de cero si falla.
+
+**Solo despues de acceso confirmado**, probar un unico pedido elegido y ya
+guardado en `test_order_ids`, nunca un EAN libre para el piloto de pedidos:
+
+```sh
+python -m scripts.validate_kering_portal --order-id ID_AUTORIZADO --allow-network
+```
+
+La orden valida exactamente un ID seleccionado; usa `configured_orders`,
+`prepare_selection`, `make_loader`, el bloqueo compartido y el historial durable.
+Respeta el corte configurado y el dia actual Madrid, relee permisos/proveedor/
+corte/pedido antes de procesarlo y reutiliza imagenes validas. No cambia Odoo,
+la seleccion ni la activacion de la automatizacion. Un fallo de acceso previo
+no inicia descarga; un fallo posterior conserva pendientes en historial.
+
+Evidencia local Windows (no servidor), 2026-10-10:
+DNS portal 172 ms, TCP 20 ms, TLS 389 ms; DNS CDN 158 ms, TCP 11 ms,
+TLS 116 ms; Chromium 1543 ms: todos `ok`.
+No equivale a validar el runtime Linux/contenedor desplegado.
+
+Pruebas offline cubren timeout en cada fase, presupuesto total, autenticar sin
+navegacion, marcador demorado/oculto, rechazo, CAPTCHA/MFA, fallo de red/Chromium,
+recursos secundarios fallidos, saneamiento, parada del lote, pendientes durables,
+espera del programador y piloto CLI limitado a un ID con corte compartido.
+Resultado: **67 pruebas Kering aprobadas**, lint estricto de CI y compilacion
+de sintaxis aprobados. Persisten 16 avisos previos del adaptador datetime SQLite
+en Python 3.13. No se ha ejecutado la suite completa ni un build Docker.
+
+**Pendientes reales**: acceso SSH utilizable al servidor (las conexiones
+no interactivas fueron rechazadas), DNS/TCP/TLS/Chromium en ese runtime, sonda de
+autenticacion para identificar la fase del incidente y prueba de un solo pedido
+seleccionado despues del acceso confirmado. No se han descargado pedidos reales
+durante esta correccion ni desplegado/activado el programador.
+
 ## Estado real de la integracion
 
 El 2026-10-09 se inspecciono una sesion autorizada del portal

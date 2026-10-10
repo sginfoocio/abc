@@ -795,24 +795,14 @@ def test_expired_session_reauth_once_and_bounded_timeouts(monkeypatch, tmp_path)
 
 
 def test_login_uses_configuration_and_authentication_marker(monkeypatch):
-    import kering_portal
-    portal = configured_portal()
-    manager = MagicMock()
-    page = manager.chromium.launch.return_value.new_context.return_value.new_page.return_value
-    page.url = PORTAL_URL
-    page.expect_navigation.return_value = nullcontext()
-    page.locator.return_value.filter.return_value.count.return_value = 0
-    logout = Mock()
-    logout.count.side_effect = [0, 1]
-    page.locator.side_effect = lambda selector: logout if selector == 'a[href="/es/logout"]' else MagicMock(count=lambda: 0, filter=lambda **kwargs: Mock(count=lambda: 0))
-    page.get_by_text.return_value.count.return_value = 0
-    page.get_by_role.return_value.count.return_value = 0
-    monkeypatch.setattr(kering_portal, "sync_playwright", lambda: Mock(start=lambda: manager))
+    portal, page, _ = simulated_access(monkeypatch)
     portal._start()
     page.get_by_placeholder.assert_any_call("MAIL", exact=True)
     page.get_by_placeholder.assert_any_call("CONTRASEÑA", exact=True)
-    assert page.get_by_placeholder.return_value.fill.call_args_list[0].args == ("offline-user",)
-    assert page.get_by_placeholder.return_value.fill.call_args_list[1].args == ("offline-secret",)
+    assert page.get_by_placeholder("MAIL", exact=True).fill.call_args.args == ("offline-user",)
+    assert page.get_by_placeholder("CONTRASEÑA", exact=True).fill.call_args.args == ("offline-secret",)
+    page.expect_navigation.assert_not_called()
+    assert page.goto.call_args.kwargs["wait_until"] == "domcontentloaded"
     assert "offline-secret" not in repr(portal)
     portal.close()
 
@@ -823,11 +813,215 @@ def test_login_failure_and_intervention_are_safe_and_not_retried(monkeypatch, tm
         portal = configured_portal()
         start = Mock(side_effect=exception("offline-secret"))
         monkeypatch.setattr(portal, "_start", start)
-        assert portal.check_access() == {"ok": False, "code": reason}
+        access = portal.check_access()
+        assert not access["ok"] and access["code"] == reason
         result = process_ean(ImageStore(tmp_path), portal, "0012345678901")
         assert result["reason"] == reason
         assert start.call_count == 2
         assert "offline-secret" not in json.dumps(result)
+
+
+def simulated_access(monkeypatch, scenario="success"):
+    import kering_portal
+    from types import SimpleNamespace
+    from playwright.sync_api import TimeoutError as BrowserTimeout, Error as BrowserError
+    clock = SimpleNamespace(now=0.0)
+    monkeypatch.setattr(kering_portal, "time", SimpleNamespace(
+        monotonic=lambda: clock.now, sleep=lambda seconds: setattr(clock, "now", clock.now + seconds)))
+    portal = configured_portal()
+    manager = MagicMock()
+    page = manager.chromium.launch.return_value.new_context.return_value.new_page.return_value
+    page.url = PORTAL_URL
+    page.goto.return_value.status = 200
+    fields = {name: MagicMock() for name in ("MAIL", "CONTRASEÑA")}
+    for field in fields.values():
+        field.is_visible.return_value = scenario != "carga_formulario"
+    page.get_by_placeholder.side_effect = lambda name, **kwargs: fields[name]
+    button = MagicMock()
+    button.is_visible.return_value = True
+    button.is_enabled.return_value = True
+    clicked = {"value": False}
+    def click(**kwargs):
+        if scenario == "envio_login":
+            raise BrowserTimeout("offline-secret")
+        clicked["value"] = True
+        if scenario in {"redirect_network", "subresource_network"}:
+            request = Mock(frame=page.main_frame)
+            request.is_navigation_request.return_value = scenario == "redirect_network"
+            handlers["requestfailed"](request)
+        if scenario not in {"redireccion", "captcha", "rejected", "same_url"}:
+            page.url = "https://my.keringeyewear.com/es/"
+    button.click.side_effect = click
+    empty = MagicMock()
+    empty.count.return_value = 0
+    empty.filter.return_value.count.return_value = 0
+    alert = MagicMock()
+    alert.filter.return_value.count.side_effect = lambda: int(clicked["value"] and scenario == "rejected")
+    alert.filter.return_value.first.is_visible.return_value = True
+    page.get_by_role.side_effect = lambda role, **kwargs: (
+        alert if role == "alert" else button if kwargs.get("name") == "Iniciar Sesión" else empty)
+    logout = MagicMock()
+    logout.count.return_value = 1
+    logout.first.is_visible.side_effect = lambda: (
+        clicked["value"] and scenario in {"success", "same_url", "subresource_network"} and clock.now >= 0.3)
+    challenge = MagicMock()
+    challenge.filter.return_value.count.side_effect = lambda: int(clicked["value"] and scenario == "captcha")
+    page.locator.side_effect = lambda selector: logout if selector == 'a[href="/es/logout"]' else challenge
+    page.get_by_text.return_value.count.side_effect = lambda: int(clicked["value"] and scenario == "mfa")
+    page.get_by_text.return_value.first.is_visible.return_value = True
+    handlers = {}
+    page.on.side_effect = lambda event, handler: handlers.update({event: handler})
+    if scenario == "apertura_portal":
+        page.goto.side_effect = BrowserTimeout("offline-secret")
+    if scenario == "network":
+        page.goto.side_effect = BrowserError("net::ERR_NAME_NOT_RESOLVED offline-secret")
+    if scenario == "chromium":
+        manager.chromium.launch.side_effect = BrowserError("missing executable offline-secret")
+    monkeypatch.setattr(kering_portal, "sync_playwright", lambda: Mock(start=lambda: manager))
+    return portal, page, clock
+
+
+@pytest.mark.parametrize("scenario,phase,code", [
+    ("chromium", "chromium", "fallo_chromium"),
+    ("apertura_portal", "apertura_portal", "timeout_portal"),
+    ("carga_formulario", "carga_formulario", "timeout_portal"),
+    ("envio_login", "envio_login", "timeout_portal"),
+    ("redireccion", "redireccion", "timeout_portal"),
+    ("comprobacion_sesion", "comprobacion_sesion", "timeout_portal"),
+    ("network", "apertura_portal", "fallo_red"),
+    ("redirect_network", "redireccion", "fallo_red"),
+    ("captcha", "redireccion", "intervencion_captcha_o_mfa"),
+    ("mfa", "redireccion", "intervencion_captcha_o_mfa"),
+    ("rejected", "redireccion", "login_fallido"),
+])
+def test_access_reports_exact_failing_phase_without_secrets(monkeypatch, caplog, scenario, phase, code):
+    portal, page, clock = simulated_access(monkeypatch, scenario)
+    with caplog.at_level("INFO", logger="kering_portal"):
+        result = portal.check_access()
+    assert not result["ok"] and result["code"] == code
+    assert result["phase"] == phase
+    assert result["phases"][-1]["code"] == code
+    assert result["duration_ms"] <= 60001
+    assert set(result["phases"][-1]) == {"phase", "duration_ms", "code"}
+    assert "offline-secret" not in json.dumps(result) + caplog.text
+    assert "offline-user" not in json.dumps(result) + caplog.text
+    assert portal._page is None
+    page.expect_navigation.assert_not_called()
+
+
+@pytest.mark.parametrize("scenario", ["success", "same_url", "subresource_network"])
+def test_access_waits_for_visible_session_marker_even_without_navigation(monkeypatch, scenario):
+    portal, _, clock = simulated_access(monkeypatch, scenario)
+    result = portal.check_access()
+    assert result["ok"] and result["code"] == "acceso_autenticado"
+    assert clock.now >= 0.3
+    assert result["phases"][-1]["phase"] == "comprobacion_sesion"
+
+
+def test_access_total_deadline_caps_each_phase(monkeypatch):
+    import kering_portal
+    monkeypatch.setattr(kering_portal, "ACCESS_TOTAL_MS", 250)
+    portal, page, clock = simulated_access(monkeypatch)
+    result = portal.check_access()
+    assert not result["ok"] and result["code"] == "timeout_portal"
+    assert result["duration_ms"] <= 251
+    assert clock.now < 0.3
+    assert page.goto.call_args.kwargs["timeout"] <= 250
+
+
+@pytest.mark.parametrize("scenario,code", [
+    ("comprobacion_sesion", "timeout_portal"), ("network", "fallo_red"),
+    ("captcha", "intervencion_captcha_o_mfa"), ("rejected", "login_fallido"),
+])
+def test_unconfirmed_access_stops_batch_and_preserves_pending_orders(monkeypatch, tmp_path, scenario, code):
+    portal, page, _ = simulated_access(monkeypatch, scenario)
+    find = Mock()
+    monkeypatch.setattr(portal, "_find_product", find)
+    store = ImageStore(tmp_path)
+    orders = [pilot_order(1, ("0012345678901", "0002")), pilot_order(2, ("0003",))]
+    run_id = store.create_run(orders, "offline", 7, date(2026, 9, 1), date(2026, 9, 1))
+    loader = Mock(side_effect=lambda order_id: orders[order_id - 1])
+    execute_run(store, run_id, loader, portal)
+    find.assert_not_called()
+    assert loader.call_count == 1
+    with store.connect() as connection:
+        run = connection.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
+        attempts = connection.execute("SELECT * FROM attempts WHERE run_id=? ORDER BY order_id", (run_id,)).fetchall()
+    assert run["status"] == "Interrumpido" and run["ended"] is not None
+    assert attempts[0]["error"] == code
+    result = json.loads(attempts[0]["results"])["0012345678901"]
+    assert result["tries"] == 1 and result["access_failure"]["code"] == code
+    assert attempts[1]["status"] == "Pendiente"
+    assert not store.valid_views("0012345678901")
+    assert purchase_status(store, orders[1])["needs_processing"]
+
+
+def test_scheduler_reports_auth_interruption_and_backs_off(monkeypatch, tmp_path):
+    import kering_jobs
+    portal, _, _ = simulated_access(monkeypatch, "network")
+    store = ImageStore(tmp_path)
+    config_store = ConfigStore(tmp_path)
+    pilot_config(config_store, auto_interval_hours=0.001)
+    orders = [pilot_order(1), pilot_order(2, ("0002",))]
+    monkeypatch.setattr(kering_jobs, "configured_orders",
+                        lambda engine, config, start, end, ids: [order for order in orders if order["id"] in ids])
+    now = datetime(2026, 9, 2, tzinfo=timezone.utc).timestamp()
+    scheduler = kering_jobs.KeringScheduler(store, config_store, lambda: None,
+                                           portal_factory=lambda _: portal, clock_fn=lambda: now)
+    status = scheduler.tick()
+    assert status["result"] == "Interrumpido"
+    assert status["next_run"] == now + kering_jobs.ERROR_BACKOFF
+    assert sorted(row["status"] for row in store.history()) == ["Error", "Pendiente"]
+
+
+def test_environment_diagnostics_returns_only_sanitized_errors(monkeypatch):
+    from scripts import validate_kering_portal as validation
+    def reject(*args, **kwargs):
+        raise OSError("offline-secret")
+    monkeypatch.setattr(validation.subprocess, "run", reject)
+    monkeypatch.setattr(validation, "sync_playwright", reject)
+    report = validation.diagnose_environment()
+    assert not report["passed"]
+    assert [event["code"] for event in report["phases"]] == ["fallo_red", "fallo_red", "fallo_chromium"]
+    assert "offline-secret" not in json.dumps(report)
+
+
+@pytest.mark.parametrize("access_ok", [False, True])
+def test_server_validation_selects_only_one_authorized_order_and_shared_cutoff(monkeypatch, tmp_path, access_ok):
+    from scripts import validate_kering_portal as validation
+    import kering_jobs
+    config_store = ConfigStore(tmp_path)
+    pilot_config(config_store)
+    monkeypatch.setattr(validation, "data_root", lambda: tmp_path)
+    engine = Mock()
+    monkeypatch.setattr(validation, "db_engine", lambda: engine)
+    reader = Mock(return_value=[pilot_order(1)])
+    monkeypatch.setattr(validation, "configured_orders", reader)
+    monkeypatch.setattr(kering_jobs, "configured_orders", reader)
+    portals = []
+    def factory(config):
+        portal = FakePortal()
+        portal.check_access = lambda: {"ok": access_ok, "code": "acceso_autenticado" if access_ok else "timeout_portal"}
+        portal.close = Mock()
+        portal.lookups = portal.downloads = 0
+        portal.access_events = []
+        portals.append(portal)
+        return portal
+    monkeypatch.setattr(validation, "MeasuredPortal", factory)
+    report = validation.validate_one_order(config_store, 3)
+    assert not report["passed"] and report["code"] == "pedido_no_autorizado"
+    reader.assert_not_called()
+    report = validation.validate_one_order(config_store, 1)
+    assert report["passed"] == access_ok
+    assert reader.call_args.args[2] == date(2026, 9, 1)
+    assert reader.call_args.args[-1] == [1]
+    history = ImageStore(tmp_path).history()
+    if access_ok:
+        assert len(history) == 1 and history[0]["order_id"] == 1
+        assert len(portals[-1].calls) == 1
+    else:
+        assert not history
+    assert "offline-secret" not in json.dumps(report)
 
 
 def test_media_rejects_html_redirects_and_untrusted_hosts(monkeypatch):

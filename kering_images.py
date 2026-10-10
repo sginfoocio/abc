@@ -39,6 +39,12 @@ class PortalUnavailable(Exception):
     pass
 
 
+class AccessNotConfirmed(Exception):
+    def __init__(self, code):
+        self.code = code
+        super().__init__(code)
+
+
 class InterventionRequired(Exception):
     pass
 
@@ -428,6 +434,8 @@ def process_ean(store: ImageStore, portal, ean: str) -> dict:
                 "reason": reason if "Pendiente" in results.values() else "",
                 "tries": tries,
                 "identity": getattr(portal, "identities", {}).get(ean, {}),
+                **({"access_failure": dict(portal.access_failure)}
+                   if getattr(portal, "access_failure", None) else {}),
             }
     except Timeout:
         return {"views": dict.fromkeys(VIEWS, "Pendiente"), "reason": "ean_en_proceso", "tries": 0}
@@ -444,7 +452,7 @@ def fetch_pending(portal, ean, pending):
             return {}, "portal_no_verificado", tries
         except PortalFailure as error:
             reason = error.code
-            if not error.retryable:
+            if not error.retryable or getattr(portal, "access_failure", None):
                 return {}, reason, tries
         except Exception:
             pass
@@ -509,6 +517,8 @@ def execute_order(store, attempt, loader, portal, cache):
         with store.connect() as connection:
             connection.execute("UPDATE attempts SET results=? WHERE run_id=? AND order_id=?",
                                (json.dumps(results), run_id, order["id"]))
+        if results[ean].get("access_failure"):
+            raise AccessNotConfirmed(results[ean]["reason"])
     status = order_status(order, results)
     error = "lineas_sin_ean" if any(not line["ean"] for line in order["lines"]) else ""
     with store.connect() as connection:
@@ -546,6 +556,13 @@ def execute_batch(store, run_id, loader, portal):
                                (run_id, attempt["order_id"]))
         try:
             execute_order(store, attempt, loader, portal, cache)
+        except AccessNotConfirmed as error:
+            with store.connect() as connection:
+                connection.execute("UPDATE attempts SET status='Error', error=? WHERE run_id=? AND order_id=?",
+                                   (error.code, run_id, attempt["order_id"]))
+                connection.execute("UPDATE runs SET ended=?, heartbeat=?, status='Interrumpido' WHERE id=?",
+                                   (clock.time(), clock.time(), run_id))
+            return
         except Exception:
             with store.connect() as connection:
                 connection.execute("UPDATE attempts SET status='Error', error='fallo_lectura_o_proceso' WHERE run_id=? AND order_id=?",
