@@ -3,6 +3,7 @@ from io import BytesIO
 import os
 from pathlib import Path
 import tempfile
+import sqlite3
 from zipfile import ZipFile
 
 from PIL import Image
@@ -14,14 +15,17 @@ import migrate_image_repository as migration
 
 
 def smoke():
-    assert os.getuid() == 10001 and os.getgid() == 10001
+    assert os.getuid() == 1037 and os.getgid() == 100
+    assert os.getgroups() == [100]
+    assert os.umask(0o077) == 0o077
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page()
         page.set_content("<title>Cloud synthetic smoke</title>")
         assert page.title() == "Cloud synthetic smoke"
         browser.close()
-    with tempfile.TemporaryDirectory(prefix="cloud-storage-smoke-") as folder:
+    with tempfile.TemporaryDirectory(prefix="cloud-storage-smoke-",
+                                     dir=os.getenv("CLOUD_SMOKE_DIRECTORY")) as folder:
         root = Path(folder)
         for key, value in {
             "IMAGE_REPOSITORY_ROOT": root / "images",
@@ -48,9 +52,21 @@ def smoke():
         assert migration.recover(plan, root / "restore")["recovered"] == 2
         assert repository.database.parent == root / "state"
         assert not list(repository.root.glob("*.sqlite3"))
+        with sqlite3.connect(root / "state" / "wal-probe.sqlite3") as connection:
+            assert connection.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+            connection.execute("CREATE TABLE probe(value TEXT)")
+            connection.execute("INSERT INTO probe VALUES('synthetic')")
+            connection.commit()
+            for suffix in ("", "-wal", "-shm"):
+                path = root / "state" / ("wal-probe.sqlite3" + suffix)
+                assert path.is_file()
+                assert path.stat().st_uid == 1037 and path.stat().st_gid == 100
+                assert path.stat().st_mode & 0o077 == 0
         with graph.incoming_lock(repository.root) as incoming:
             saved = graph._save_streamed_attachment([b"synthetic archive"], incoming, "received.zip")
             assert saved == root / "work" / "received.zip"
+            assert saved.stat().st_uid == 1037 and saved.stat().st_gid == 100
+            assert saved.stat().st_mode & 0o077 == 0
         os.environ["IMAGE_REPOSITORY_NFS_SOURCE"] = "synthetic:/not-mounted"
         absent = root / "absent"
         try:
@@ -60,7 +76,7 @@ def smoke():
         else:
             raise AssertionError("Missing NFS gate accepted")
         assert not absent.exists()
-    print("Nonroot artifact storage smoke passed: isolated state, backups, streamed archives, "
+    print("Nonroot 1037:100 artifact storage smoke passed: isolated state, SQLite/WAL/SHM, backups, streamed archives, "
           "migration/recovery and missing-mount gate; synthetic data only")
 
 

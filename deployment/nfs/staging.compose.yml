@@ -2,7 +2,7 @@
 services:
   image-storage-staging:
     image: ${STAGING_IMAGE:?Set verified build artifact}
-    user: "10001:10001"
+    user: "1037:100"
     environment:
       HOME: /home/cloud-images
       IMAGE_REPOSITORY_ROOT: /staging/images

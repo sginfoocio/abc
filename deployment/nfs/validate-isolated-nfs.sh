@@ -48,7 +48,9 @@ docker exec "$NAME" python /probe-code/nfs_isolated_probe.py setup
 GATEWAY="$(docker exec "$NAME" sh -c "ip route show default | cut -d ' ' -f 3")"
 test -n "$GATEWAY"
 docker exec "$NAME" ip link set eth0 down
-docker exec -d "$NAME" sh -c 'python /probe-code/nfs_isolated_probe.py write > /tmp/nfs-write.log 2>&1'
+docker exec "$NAME" chown 1037:100 /tmp/nfs-probe-state
+docker exec "$NAME" chmod 0700 /tmp/nfs-probe-state
+docker exec -d --user 1037:100 "$NAME" sh -c 'umask 077; python /probe-code/nfs_isolated_probe.py write > /tmp/nfs-write.log 2>&1'
 sleep 5
 docker exec "$NAME" test -f /tmp/nfs-probe-state/writer-started
 if docker exec "$NAME" test -f /tmp/nfs-probe-state/writer-finished; then

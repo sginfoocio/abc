@@ -110,8 +110,16 @@ jobs:
           assert cloud_dashboard.LOGO.is_file()
           print('Artifact identity and runtime imports verified; network disabled')
           "
-          docker run --rm --network none --read-only --user 10001:10001 --tmpfs /tmp:size=536870912,mode=1777 \
+          VOLUME="cloud-identity-smoke-${{ github.run_id }}-${{ github.run_attempt }}"
+          docker volume create "$VOLUME" >/dev/null
+          trap 'docker volume rm "$VOLUME" >/dev/null' EXIT
+          docker run --rm --network none --read-only --user 0:0 --mount "type=volume,source=$VOLUME,target=/smoke" \
+            "$IMAGE" sh -c 'mkdir /smoke/state; chown 1037:100 /smoke/state; chmod 0700 /smoke/state'
+          docker run --rm --network none --read-only --user 1037:100 --tmpfs /tmp:size=536870912,mode=1777 \
+            --mount "type=volume,source=$VOLUME,target=/smoke" -e CLOUD_SMOKE_DIRECTORY=/smoke/state \
             -e HOME=/home/cloud-images -e PYTHONPATH=/app "$IMAGE" python scripts/smoke_image_storage.py
+          docker run --rm --network none --read-only --user 1038:100 --mount "type=volume,source=$VOLUME,target=/smoke" \
+            "$IMAGE" python -c "import os; assert all(not os.access('/smoke/state', mode) for mode in (os.R_OK, os.W_OK, os.X_OK)); print('Other UID in users GID100 denied local state')"
 
       - name: Validate Secrets
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -220,6 +228,7 @@ jobs:
       - name: Lint with flake8
         run: |
           flake8 repository_storage.py image_work_storage.py scripts/nfs_repository_guard.py scripts/test_nfs_image_storage.py scripts/smoke_image_storage.py tests/test_image_work_storage.py tests/test_repository_storage.py tests/test_nfs_repository_guard.py --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 scripts/nfs_isolated_probe.py scripts/audit_image_identity.py tests/test_image_service_identity.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 cloud_dashboard.py process_activity.py build_info.py scripts/write_build_info.py tests/test_cloud_dashboard.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 graph_mail_downloader.py luxoptica_auto_upload.py poll_luxoptica_mail.py save_abcd_weekly_snapshot.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 image_naming.py image_exports.py image_repository.py migrate_image_repository.py kering_media.py tests/test_kering_image_sections.py --count --select=E9,F63,F7,F82 --show-source --statistics

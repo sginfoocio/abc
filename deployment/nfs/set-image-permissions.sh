@@ -10,10 +10,14 @@ test -z "$(find "$ROOT" -mindepth 1 -maxdepth 1 -print -quit)" || {
     exit 1
 }
 stat -c 'Before: %u:%g %a' "$ROOT"
-chown 10001:10001 "$ROOT"
-chmod 2770 "$ROOT"
+test "${CLOUD_NAS_ACL_VERIFIED:-}" = "1037-owner-only" || {
+    echo "Verify DSM ACL grants cloud rw/traversal and no general users access; activation blocked"
+    exit 1
+}
+chown 1037:100 "$ROOT"
+chmod 0700 "$ROOT"
 stat -c 'After: %u:%g %a' "$ROOT"
-test "$(stat -c '%u:%g %a' "$ROOT")" = "10001:10001 2770" || {
+test "$(stat -c '%u:%g %a' "$ROOT")" = "1037:100 700" || {
     echo "Synology ACL/mapping did not retain requested permissions; activation blocked"
     exit 1
 }

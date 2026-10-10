@@ -209,12 +209,16 @@ App sigue healthy y conserva el bind activo
 
 ## Continuacion de 9fbf069: comandos y bloqueos administrativos
 
-Identidad definida para servicios de imagenes de staging: **10001:10001**,
+Identidad actual confirmada del NAS para servicios de imagenes: **1037:100**,
 usuario `cloud-images` en el artefacto Docker. No existe colision con una cuenta
-10001 del host en la consulta realizada. El build coloca Python en `/opt/venv`
+administrativa del contenedor; GID100 es `users`, no un permiso compartido.
+El build coloca Python en `/opt/venv`
 y Chromium en `/opt/playwright`, legibles sin acceder a `/root/.local`.
 La identidad por defecto de produccion no cambia; el override de staging fija
-`user: 10001:10001`, sin capacidades y sin red.
+`user: 1037:100`, sin capacidades y sin red. El override de preparacion
+`image-services.identity.compose.yml` fija la misma identidad para app,
+monitor Luxoptica y scheduler Kering, **sin aplicarse a contenedores activos**.
+El entrypoint establece umask077 y rechaza grupos suplementarios para UID1037.
 
 Scripts preparados en `/home/rubensg/cloud-nfs-preparation-20261010`:
 
@@ -222,15 +226,23 @@ Scripts preparados en `/home/rubensg/cloud-nfs-preparation-20261010`:
 cd /home/rubensg/cloud-nfs-preparation-20261010
 sh -n install-persistent-mount.sh
 sudo sh ./install-persistent-mount.sh
-sudo sh ./set-image-permissions.sh
+# Solo despues de revisar ACL DSM y repetir los tests efectivos:
+sudo env CLOUD_NAS_ACL_VERIFIED=1037-owner-only sh ./set-image-permissions.sh
+sudo sh ./prepare-local-state.sh
 ```
 
 El primero comprueba exportacion/unidad/fstab, verifica la plantilla, instala
 la unidad con el mismo nombre dinamico y ejecuta solo daemon-reload/enable.
 **No stop/restart/remount/--now**. Si existe ya una definicion persistente,
 rechaza reemplazarla. El segundo exige exportacion vacia y actua solo sobre el
-directorio raiz: `chown 10001:10001` y `chmod 2770`, nunca `-R`; verifica que
+directorio raiz: `chown 1037:100` y `chmod 0700`, nunca `-R`; verifica que
 Synology retiene exactamente esos valores. No cambia squash ni asigna admin.
+No conceder rwx al grupo `users`, ni modo2770, ni ACL heredada `users`/everyone
+con lectura/escritura. En DSM revisar ACL de la carpeta compartida y travesia:
+permitir al usuario `cloud` lectura/escritura/listar/crear/renombrar/eliminar
+sus archivos; conservar ACL administrativas preexistentes del NAS sin asignar
+cloud al grupo administrators. No aplicar una denegacion de users que anule
+el permiso individual cloud. Las herramientas NFS no equivalen a synoacltool.
 No ejecutar simultaneamente con otra provision/escritura en esa exportacion.
 
 La exportacion se comprobo vacia y sigue 0:0, 777. Sudo no interactivo sigue
@@ -305,7 +317,7 @@ el corte permanece bloqueado; no activar un fallback local.
 `staging.compose.yml` no publica puertos, no monta pedidos ni credenciales,
 no tiene red, no reinicia automaticamente y rechaza binds ausentes. Antes de
 usarlo, provisionar las tres exportaciones y el estado local
-`/opt/cloud-image-staging/state` con 10001:10001, permisos 0700. Montar solamente
+`/opt/cloud-image-staging/state` con 1037:100, permisos 0700. Montar solamente
 copias anonimizadas en `/staging/source` (solo lectura), un directorio privado
 de planes local y el destino independiente `/staging/recovery`.
 
@@ -360,3 +372,50 @@ y proteccion de carpeta local subyacente siguen pendientes de instalar y
 validar. En una caida de red con hard, mountinfo no detecta falta de respuesta:
 no se inventa exito ni se escribe en local; se requiere supervision externa
 de disponibilidad antes de activar automatizaciones.
+
+### Actualizacion: identidad NAS confirmada 1037:100
+
+El fallo historico UID10001 anterior no se borra de la evidencia. Tras confirmar
+el usuario NAS `cloud` UID1037/GID100, se repitio el montaje aislado:
+
+- UID1037/GID100: lectura, escritura, fsync, rename y checksum correctos.
+- Root export rw/travesia efectivos para UID1037. UID1038 con **el mismo
+  GID100** no obtiene lectura, escritura ni travesia en la raiz.
+- Carpeta temporal propia 1037:100, modo0700: cloud escribe; UID1038/GID100
+  recibe PermissionError. No se concede acceso al grupo users.
+- Corte/reconexion del namespace aislado, escritura como1037 pendiente/resumida,
+  checksum correcto y flock de dos procesos como1037 serializados al reconectar.
+- Guardas en contenedor siguen rechazando montaje ausente antes/despues de
+  montar y despues del reinicio. Temporales eliminados; raiz compartida aun
+  0:0/777 y exportacion vacia; app healthy.
+
+`nfs4_getfacl` devuelve salida vacia: **no se han podido enumerar ACL DSM**.
+Los tests acreditan acceso efectivo para los dos usuarios probados, no ausencia
+de permisos para todas las identidades del NAS. Antes de ejecutar el ajuste
+owner-only, confirmar en DSM que no existen grants generales users/everyone
+ni pertenencia a administrators para cloud. No se modificaron esas ACL.
+
+Auditoria productiva solo lectura, sin abrir contenidos ni bases:
+`masterdata_data`, su subdirectorio kering y la raiz local de imagenes son0:0/755;
+history.sqlite3, process_activity.sqlite3, order_alerts.sqlite3 y catalogo
+son0:0/644. En binds de auditoria solo lectura no son escribibles por1037;
+sus modos POSIX tampoco conceden escritura a1037. No autoriza cambiar la
+identidad activa sin preparar datos/ACL locales. No copiar WAL/SHM activo.
+
+`prepare-local-state.sh` crea solo estado **nuevo de staging**1037:100/0700;
+rechaza estado existente y NAS. No hace chown recursivo de masterdata_data,
+ni altera bases compartidas con alertas. Para el futuro corte se requiere
+copia consistente SQLite/local con permisos por usuario y plan revisado para
+historial, configuracion y process_activity compartidos; permanece bloqueado.
+Los temporales voluminosos siguen en `.work` de exportacion independiente,
+no provisionada: su capacidad/ACL reales no quedan acreditadas por cloud-imagenes.
+
+El smoke CI actualizado usa1037:100 sin grupos adicionales, volumen Docker
+local persistente **nuevo y desechable** para catalogo/SQLite WAL/SHM y streaming,
+modo owner-only, tmpfs solo para navegador/tmp; comprueba tambien que1038:100
+no accede al estado. No monta ni modifica almacenamiento de produccion.
+
+Regresion local actualizada: **281 pruebas correctas**, lint y compilacion
+correctos; mismos16 avisos SQLite preexistentes. Nuevo build/smoke1037 en CI
+pendiente de publicar este ajuste. No aplicar los overrides ni el script de
+permisos hasta comprobar el artefacto y las ACL DSM, y preparar estado local.

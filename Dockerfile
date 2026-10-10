@@ -43,6 +43,7 @@ COPY repository_storage.py image_work_storage.py .
 COPY migrate_image_repository.py .
 COPY scripts/nfs_repository_guard.py ./scripts/nfs_repository_guard.py
 COPY scripts/smoke_image_storage.py ./scripts/smoke_image_storage.py
+COPY scripts/cloud_image_entrypoint.sh ./scripts/cloud_image_entrypoint.sh
 COPY cloud_dashboard.py process_activity.py build_info.py .
 COPY assets ./assets
 COPY logo ./logo
@@ -94,13 +95,16 @@ level = info\n\
 
 # Navegador requerido por la subida automatica a Luxottica.
 RUN python -m playwright install --with-deps chromium
-RUN groupadd --gid 10001 cloud-images && useradd --uid 10001 --gid 10001 --create-home cloud-images \
+RUN (getent group 100 >/dev/null || groupadd --gid 100 users) \
+    && useradd --uid 1037 --gid 100 --create-home cloud-images \
     && cp -r /root/.streamlit /home/cloud-images/.streamlit \
-    && chown -R 10001:10001 /home/cloud-images/.streamlit
+    && chown -R 1037:100 /home/cloud-images/.streamlit \
+    && chmod 0700 /home/cloud-images /home/cloud-images/.streamlit
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health', timeout=5)" || exit 1
 
 # Comando para ejecutar la aplicación
+ENTRYPOINT ["sh", "/app/scripts/cloud_image_entrypoint.sh"]
 CMD ["streamlit", "run", "app_enhanced.py", "--server.address", "0.0.0.0"]
