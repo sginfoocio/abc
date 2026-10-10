@@ -841,9 +841,15 @@ def simulated_access(monkeypatch, scenario="success"):
     button.is_visible.return_value = True
     button.is_enabled.return_value = True
     clicked = {"value": False}
+    consent = {"visible": False, "dismissed": False}
     def click(**kwargs):
         if scenario == "envio_login":
             raise BrowserTimeout("offline-secret")
+        if scenario == "delayed_consent":
+            consent["visible"] = True
+            locator_handlers["consent"]()
+            if not consent["dismissed"]:
+                raise BrowserTimeout("offline-secret")
         clicked["value"] = True
         if scenario in {"redirect_network", "subresource_network"}:
             request = Mock(frame=page.main_frame)
@@ -861,12 +867,26 @@ def simulated_access(monkeypatch, scenario="success"):
     page.get_by_role.side_effect = lambda role, **kwargs: (
         alert if role == "alert" else button if kwargs.get("name") == "Iniciar Sesión" else empty)
     logout = MagicMock()
-    logout.count.return_value = 1
-    logout.first.is_visible.side_effect = lambda: (
-        clicked["value"] and scenario in {"success", "same_url", "subresource_network"} and clock.now >= 0.3)
+    logout.count.side_effect = lambda: int(clicked["value"] and scenario != "search_only")
+    logout.first.is_visible.return_value = False
+    search = MagicMock()
+    search.filter.return_value.count.side_effect = lambda: int(
+        clicked["value"] and scenario in {"success", "same_url", "subresource_network", "delayed_consent", "search_only"}
+        and clock.now >= 0.3)
     challenge = MagicMock()
     challenge.filter.return_value.count.side_effect = lambda: int(clicked["value"] and scenario == "captcha")
-    page.locator.side_effect = lambda selector: logout if selector == 'a[href="/es/logout"]' else challenge
+    consent_banner = MagicMock()
+    consent_button = MagicMock()
+    def dismiss(**kwargs):
+        consent["dismissed"] = True
+        consent["visible"] = False
+    consent_button.click.side_effect = dismiss
+    page.locator.side_effect = lambda selector: {
+        'a[href="/es/logout"]': logout, "#onetrust-banner-sdk": consent_banner,
+        "#onetrust-reject-all-handler": consent_button, ".showSearchBar": search,
+    }.get(selector, challenge)
+    locator_handlers = {}
+    page.add_locator_handler.side_effect = lambda locator, handler: locator_handlers.update({"consent": handler})
     page.get_by_text.return_value.count.side_effect = lambda: int(clicked["value"] and scenario == "mfa")
     page.get_by_text.return_value.first.is_visible.return_value = True
     handlers = {}
@@ -893,6 +913,7 @@ def simulated_access(monkeypatch, scenario="success"):
     ("captcha", "redireccion", "intervencion_captcha_o_mfa"),
     ("mfa", "redireccion", "intervencion_captcha_o_mfa"),
     ("rejected", "redireccion", "login_fallido"),
+    ("search_only", "comprobacion_sesion", "timeout_portal"),
 ])
 def test_access_reports_exact_failing_phase_without_secrets(monkeypatch, caplog, scenario, phase, code):
     portal, page, clock = simulated_access(monkeypatch, scenario)
@@ -909,13 +930,22 @@ def test_access_reports_exact_failing_phase_without_secrets(monkeypatch, caplog,
     page.expect_navigation.assert_not_called()
 
 
-@pytest.mark.parametrize("scenario", ["success", "same_url", "subresource_network"])
+@pytest.mark.parametrize("scenario", ["success", "same_url", "subresource_network", "delayed_consent"])
 def test_access_waits_for_visible_session_marker_even_without_navigation(monkeypatch, scenario):
     portal, _, clock = simulated_access(monkeypatch, scenario)
     result = portal.check_access()
     assert result["ok"] and result["code"] == "acceso_autenticado"
     assert clock.now >= 0.3
     assert result["phases"][-1]["phase"] == "comprobacion_sesion"
+def test_consent_handler_uses_observed_id_and_remaining_budget(monkeypatch):
+    portal, page, clock = simulated_access(monkeypatch, "delayed_consent")
+    result = portal.check_access()
+    assert result["ok"]
+    page.add_locator_handler.assert_called_once()
+    reject = page.locator("#onetrust-reject-all-handler")
+    reject.click.assert_called_once()
+    assert 0 < reject.click.call_args.kwargs["timeout"] <= 10000
+    assert not page.get_by_role("button", name="Rechazarlas todas", exact=True).count()
 
 
 def test_access_total_deadline_caps_each_phase(monkeypatch):
@@ -991,7 +1021,7 @@ def test_server_validation_selects_only_one_authorized_order_and_shared_cutoff(m
     from scripts import validate_kering_portal as validation
     import kering_jobs
     config_store = ConfigStore(tmp_path)
-    pilot_config(config_store)
+    pilot_config(config_store, auto_enabled=False)
     monkeypatch.setattr(validation, "data_root", lambda: tmp_path)
     engine = Mock()
     monkeypatch.setattr(validation, "db_engine", lambda: engine)
@@ -1001,6 +1031,15 @@ def test_server_validation_selects_only_one_authorized_order_and_shared_cutoff(m
     portals = []
     def factory(config):
         portal = FakePortal()
+        original_fetch = portal.fetch
+        def fetch(ean, pending):
+            images = original_fetch(ean, pending)
+            if "lateral" in images:
+                images["detalle"] = images.pop("lateral")
+            return images
+        portal.fetch = fetch
+        portal.identities = {"0012345678901": {"ean": "0012345678901", "upc": "",
+                            "model": "OFFLINE", "color": "001", "size": "M"}}
         portal.check_access = lambda: {"ok": access_ok, "code": "acceso_autenticado" if access_ok else "timeout_portal"}
         portal.close = Mock()
         portal.lookups = portal.downloads = 0
@@ -1012,7 +1051,12 @@ def test_server_validation_selects_only_one_authorized_order_and_shared_cutoff(m
     assert not report["passed"] and report["code"] == "pedido_no_autorizado"
     reader.assert_not_called()
     report = validation.validate_one_order(config_store, 1)
-    assert report["passed"] == access_ok
+    if access_ok:
+        assert report["status"] == "Completo"
+        assert report["images"][0]["identity_verified"]
+        assert report["passed"]
+    else:
+        assert not report["passed"]
     assert reader.call_args.args[2] == date(2026, 9, 1)
     assert reader.call_args.args[-1] == [1]
     history = ImageStore(tmp_path).history()
@@ -1022,6 +1066,35 @@ def test_server_validation_selects_only_one_authorized_order_and_shared_cutoff(m
     else:
         assert not history
     assert "offline-secret" not in json.dumps(report)
+
+
+def test_order_image_evidence_requires_exact_identity_and_three_original_views(tmp_path):
+    from scripts.validate_kering_portal import order_image_evidence
+    store = ImageStore(tmp_path)
+    ean = "0012345678901"
+    for index, view in enumerate(("frontal", "perspectiva", "detalle")):
+        store.save_view(ean, view, photo((index * 70, 20, 30)))
+    results = {ean: {"views": dict.fromkeys(("frontal", "perspectiva", "detalle"), "Reutilizada")}}
+    prior = [{"results": json.dumps({ean: {"identity": {
+        "ean": ean, "upc": "", "model": "OFFLINE", "color": "001", "size": "M"}}})}]
+    evidence = order_image_evidence(store, pilot_order(), results, prior)[0]
+    assert evidence["valid_three_views"] and evidence["identity_verified"] and evidence["associated_with_order"]
+    assert len(evidence["views"]) == 3
+    assert not order_image_evidence(store, pilot_order(), results, [])[0]["identity_verified"]
+
+
+def test_server_order_probe_refuses_enabled_automation(monkeypatch, tmp_path):
+    from scripts import validate_kering_portal as validation
+    config_store = ConfigStore(tmp_path)
+    pilot_config(config_store, auto_enabled=True)
+    monkeypatch.setattr(validation, "data_root", lambda: tmp_path)
+    monkeypatch.setattr(validation, "db_engine", Mock(return_value=Mock()))
+    reader = Mock()
+    monkeypatch.setattr(validation, "configured_orders", reader)
+    result = validation.validate_one_order(config_store, 1)
+    assert result == {"passed": False, "code": "automatizacion_activa"}
+    reader.assert_not_called()
+    assert not ImageStore(tmp_path).history()
 
 
 def test_media_rejects_html_redirects_and_untrusted_hosts(monkeypatch):

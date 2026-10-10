@@ -11,6 +11,7 @@ import subprocess
 import time
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
+from PIL import Image
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -27,9 +28,9 @@ class MeasuredPortal(KeringPortal):
         self.lookups = 0
         self.downloads = 0
 
-    def fetch(self, ean, pending):
+    def _find_product(self, ean):
         self.lookups += 1
-        return super().fetch(ean, pending)
+        return super()._find_product(ean)
 
     def _read_image(self, url):
         self.downloads += 1
@@ -92,6 +93,8 @@ def validate_one_order(config_store, order_id):
     try:
         with batch_lock(store):
             config = config_store.load()
+            if config.get("auto_enabled", False):
+                return {"passed": False, "code": "automatizacion_activa"}
             if order_id not in config.get("test_order_ids", []):
                 return {"passed": False, "code": "pedido_no_autorizado"}
             start = date.fromisoformat(config["cutoff_date"])
@@ -109,8 +112,15 @@ def validate_one_order(config_store, order_id):
                 loader = make_loader(store, config_store, lambda: engine, start, end, config["supplier_id"])
                 execute_run(store, run_id, loader, portal)
                 with store.connect() as connection:
-                    attempt = connection.execute("SELECT status,error FROM attempts WHERE run_id=?", (run_id,)).fetchone()
-                return {"passed": attempt["status"] == "Completo", "access": probe,
+                    attempt = connection.execute("SELECT status,error,results FROM attempts WHERE run_id=?", (run_id,)).fetchone()
+                    history = connection.execute(
+                        "SELECT results FROM attempts WHERE order_id=? ORDER BY attempt DESC LIMIT 20",
+                        (order_id,)).fetchall()
+                evidence = order_image_evidence(store, orders[0], json.loads(attempt["results"]), history)
+                return {"passed": attempt["status"] == "Completo" and all(
+                            item["valid_three_views"] and item["identity_verified"] for item in evidence),
+                        "order_id": order_id, "order_date": orders[0]["date_order"],
+                        "cutoff_date": config["cutoff_date"], "access": probe, "images": evidence,
                         "status": attempt["status"], "code": attempt["error"],
                         "lookups": portal.lookups, "downloads": portal.downloads,
                         "phases": portal.access_events}
@@ -118,6 +128,27 @@ def validate_one_order(config_store, order_id):
                 portal.close()
     finally:
         engine.dispose()
+
+
+def order_image_evidence(store, order, results, history):
+    evidence = []
+    for ean in sorted({line["ean"] for line in order["lines"]}):
+        valid = store.valid_views(ean)
+        identity = next((json.loads(row["results"]).get(ean, {}).get("identity")
+                         for row in history if json.loads(row["results"]).get(ean, {}).get("identity")), {})
+        verified = ean in (identity.get("ean"), identity.get("upc")) and all(
+            identity.get(field) for field in ("model", "color", "size"))
+        views = []
+        for view, path in sorted(valid.items()):
+            with Image.open(path) as image:
+                views.append({"view": view, "width": image.width, "height": image.height})
+        evidence.append({"ean": ean, "views": views,
+                         "valid_three_views": set(valid) == {"frontal", "perspectiva", "detalle"},
+                         "identity_verified": bool(verified),
+                         "associated_with_order": ean in results,
+                         "outcomes": results.get(ean, {}).get("views", {}),
+                         "code": results.get(ean, {}).get("reason", "")})
+    return evidence
 
 
 def validate(config, ean, root):

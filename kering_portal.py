@@ -84,6 +84,8 @@ class KeringPortal:
                 self._browser = self._manager.chromium.launch(headless=True, timeout=self._remaining_ms())
                 self._context = self._browser.new_context(viewport={"width": 1440, "height": 1000})
                 self._page = self._context.new_page()
+                self._page.add_locator_handler(
+                    self._page.locator("#onetrust-banner-sdk"), self._dismiss_consent)
                 self._page.on("requestfailed", self._navigation_failed)
                 self._page.on("response", self._navigation_response)
                 self._page.set_default_timeout(TIMEOUT_MS)
@@ -104,6 +106,10 @@ class KeringPortal:
         if remaining <= 0:
             raise BrowserTimeout("access deadline")
         return max(1, int(remaining * 1000))
+
+    def _dismiss_consent(self):
+        timeout = self._remaining_ms() if self._access_deadline is not None else TIMEOUT_MS
+        self._page.locator("#onetrust-reject-all-handler").click(timeout=timeout)
 
     @contextmanager
     def _access_phase(self, phase):
@@ -183,13 +189,11 @@ class KeringPortal:
     def _authenticated(self):
         self._intervention()
         logout = self._page.locator('a[href="/es/logout"]')
-        return logout.count() > 0 and logout.first.is_visible()
+        search = self._page.locator(".showSearchBar").filter(visible=True)
+        return logout.count() > 0 and search.count() > 0
 
     def _login(self):
         with self._access_phase("carga_formulario"):
-            reject = self._page.get_by_role("button", name="Rechazarlas todas", exact=True)
-            if reject.count() and reject.is_visible():
-                reject.click(timeout=self._remaining_ms())
             mail = self._page.get_by_placeholder("MAIL", exact=True)
             password = self._page.get_by_placeholder("CONTRASEÑA", exact=True)
             submit = self._page.get_by_role("button", name="Iniciar Sesión", exact=True)
@@ -214,7 +218,7 @@ class KeringPortal:
 
     def _find_product(self, ean):
         self._check_session()
-        self._page.locator('.showSearchBar').first.evaluate("el => el.click()")
+        self._page.locator('.showSearchBar').filter(visible=True).first.click()
         search = self._page.locator('#hard-js-site-search-input')
         search.fill(ean)
         with self._page.expect_navigation(wait_until="domcontentloaded", timeout=TIMEOUT_MS):

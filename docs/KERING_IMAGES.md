@@ -2,9 +2,10 @@
 
 ## Correccion de acceso no confirmado (2026-10-10)
 
-La PR original #36 ya esta fusionada. Esta correccion se publica en la rama
-existente `copilot/kering-images` y se documenta mediante comentario en esa PR;
-actualizar la rama no modifica por si solo el codigo desplegado.
+La PR original #36 ya esta fusionada. El commit eb519f9 no estaba en main.
+Se prepara una PR nueva desde main 7c12daa en `copilot/kering-access-phases`,
+con solo las correcciones pendientes. Se conserva la correccion posterior de
+Compose de main. Publicar la rama no actualiza el codigo desplegado.
 
 ### Causa comprobada en codigo y limite de la evidencia
 
@@ -17,9 +18,21 @@ una respuesta sin navegacion podia agotar la espera, y una sesion cuyo marcador
 apareciera tarde podia etiquetarse incorrectamente como `login_fallido`.
 No se usaba `networkidle` en Kering y no se introduce ahora.
 
-**La fase del timeout ocurrido en produccion aun no esta demostrada.** Estos
-defectos de observabilidad/espera se reproducen con simuladores; no prueban que
-DNS, TLS, Chromium o las credenciales sean la causa de ese incidente.
+La validacion posterior en el contenedor Cloud identifica **envio_login**:
+los campos se rellenan (17/14 ms), pero el click agota 10 s porque lo intercepta
+el banner OneTrust. Se observa `#onetrust-banner-sdk`,
+`#onetrust-reject-all-handler` y `.onetrust-pc-dark-filter`; el boton por texto
+`Rechazarlas todas` no existe en ese runtime. Se registra un handler de Playwright
+para rechazar por ID observado tambien cuando el consentimiento aparece tarde.
+No se fuerza el click ni se aumenta el timeout.
+
+Tras corregirlo pasan envio y redireccion, pero la comprobacion de sesion
+agota 10 s: logout esta dentro de menus ocultos. Se contrasta DOM anonimo
+(0 enlaces logout y 0 busquedas visibles) frente al autenticado (enlaces logout
+y control de catalogo visible). Se exige **ambos**: logout presente y
+`.showSearchBar` visible, en host HTTPS permitido. No se acepta logout oculto
+aislado ni busqueda aislada. Se selecciona tambien la busqueda visible para
+evitar el primer control oculto del DOM.
 
 ### Contrato corregido
 
@@ -41,9 +54,10 @@ ni al cierre de recursos de Playwright.
 
 Se esperan MAIL, CONTRASENA y el boton Iniciar Sesion visible/habilitado
 (observados anteriormente), o una sesion ya autenticada. Se usa exclusivamente
-el enlace **visible** `a[href="/es/logout"]` como marcador autenticado observado,
-y se exige permanecer en el host HTTPS permitido. Cambio de URL, desaparicion del
-formulario o un marcador oculto no confirman acceso. Se admite autenticacion
+la pareja `a[href="/es/logout"]` presente y `.showSearchBar` visible como
+marcadores autenticados observados; se exige permanecer en el host HTTPS permitido.
+Cambio de URL, desaparicion del formulario o un marcador oculto aislado no
+confirman acceso. Se admite autenticacion
 sin navegacion. Los desafios CAPTCHA/MFA interrumpen tambien las esperas.
 
 Codigos separados: `timeout_portal`, `login_fallido`,
@@ -106,15 +120,58 @@ Pruebas offline cubren timeout en cada fase, presupuesto total, autenticar sin
 navegacion, marcador demorado/oculto, rechazo, CAPTCHA/MFA, fallo de red/Chromium,
 recursos secundarios fallidos, saneamiento, parada del lote, pendientes durables,
 espera del programador y piloto CLI limitado a un ID con corte compartido.
-Resultado: **67 pruebas Kering aprobadas**, lint estricto de CI y compilacion
-de sintaxis aprobados. Persisten 16 avisos previos del adaptador datetime SQLite
-en Python 3.13. No se ha ejecutado la suite completa ni un build Docker.
+La prueba CLI rechaza automatizacion activada y confirma exactamente frontal,
+perspectiva y detalle, dimensiones, identidad exacta EAN/UPC/modelo/color/talla
+y asociacion al pedido. En reutilizacion recupera la evidencia de identidad del
+historial previo; no inventa una nueva comprobacion de portal.
 
-**Pendientes reales**: acceso SSH utilizable al servidor (las conexiones
-no interactivas fueron rechazadas), DNS/TCP/TLS/Chromium en ese runtime, sonda de
-autenticacion para identificar la fase del incidente y prueba de un solo pedido
-seleccionado despues del acceso confirmado. No se han descargado pedidos reales
-durante esta correccion ni desplegado/activado el programador.
+### Evidencia real en Cloud, 2026-10-10
+
+SSH desde Windows local a rubensg@s2026; runtime `abcd-control` en /app,
+Python 3.11, imagen `sha256:73b129ad852db398adfe33682f51c596071c32850e5a81ca5d3c26919b7b1f44`.
+Checkout servidor sigue main 7c12daa. Los modulos de la rama se cargaron solamente
+en memoria en procesos `docker exec`: **no se despliega ni reemplaza codigo**.
+Las imagenes y dos intentos de validacion del pedido si quedan persistentes.
+
+| Sonda del runtime | Duracion ms | Codigo |
+| --- | ---: | --- |
+| DNS portal | 282 | ok |
+| TCP portal | 19 | ok |
+| TLS portal (certificado/hostname verificados) | 61 | ok |
+| DNS CDN | 186 | ok |
+| TCP CDN | 15 | ok |
+| TLS CDN | 54 | ok |
+| Chromium | 898 | ok |
+
+Acceso con credenciales cifradas ya configuradas, sin imprimir secretos:
+`acceso_autenticado`, 7907 ms. Fases: configuracion 0, Chromium 695,
+apertura 2502, formulario 176, envio 1886, redireccion 1934, sesion 714 ms,
+todas ok. No se exportaron cookies, tokens, respuesta de cuenta ni capturas.
+
+Se procesa exclusivamente el ID **6094**, fecha **2026-09-03 08:50:40 UTC**,
+posterior al corte vigente **2026-09-01**. Seleccion guardada: 6094/6095;
+6095 no se procesa durante la validacion. Auto desactivado antes y despues.
+
+| EAN/UPC de linea | Vistas originales | Dimensiones por vista | Identidad | Repeticion |
+| --- | --- | --- | --- | --- |
+| 889652494821 | frontal, perspectiva, detalle | 2400x1286 | exacta, modelo/color/talla verificados | tres reutilizadas |
+| 889652494838 | frontal, perspectiva, detalle | 2400x1286 | exacta, modelo/color/talla verificados | tres reutilizadas |
+
+Primera pasada: 6 descargas y 3 invocaciones de busqueda para dos EAN
+(primer EAN requirio dos intentos; segundo uno). Resultado Completo.
+Segunda: **0 busquedas, 0 descargas, tries=0** en ambas lineas; Completo.
+La sonda de acceso independiente de la segunda pasada si abre el portal,
+pero el procesamiento del pedido no lo hace. Auditoria posterior con el codigo
+desplegado confirma `Procesado`, 2 lineas completas, 0 pendientes, sin cambios,
+dos intentos finalizados y ZIP valido con exactamente 6 PNG correspondientes.
+La identidad de la pasada reutilizada se acredita por el intento anterior;
+el historial de reutilizacion no contiene una identidad recapturada.
+No se modifica Odoo ni se activa automatizacion ni se procesa otro pedido.
+
+**Pendientes**: revision/fusion de la PR y despliegue autorizado para que Cloud
+use de forma persistente la correccion. La prueba en memoria no actualiza
+produccion. CAPTCHA/MFA y rechazo explicito siguen validados solo por simulacion.
+Resultados locales y checks remotos se detallan en la PR.
 
 ## Estado real de la integracion
 
