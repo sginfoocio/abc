@@ -12,12 +12,19 @@ from pathlib import Path
 import shutil
 import sqlite3
 import tempfile
+from typing import Callable
 from zipfile import ZipFile
 
 from filelock import FileLock
 from PIL import Image, ImageOps
 
 from db_config import load_env_file
+from service_stop import acquire, checkpoint, request_timeout
+from repository_storage import (
+    state_root, backup_root, check_image_root, require_distinct_replica, check_write_path, validate_state_root,
+    excluded_staging_path,
+    staging_root,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -56,7 +63,10 @@ def image_fingerprint(content: bytes) -> str:
         return hashlib.sha256(pixels.resize((64, 64)).tobytes()).hexdigest()
 
 
-def atomic_write(path: Path, content: bytes) -> None:
+def atomic_write(path: Path, content: bytes, *, guard: Callable[[], None] | None = None) -> None:
+    if guard is not None:
+        guard()
+    check_write_path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=".image-", suffix=".tmp")
     try:
@@ -64,6 +74,9 @@ def atomic_write(path: Path, content: bytes) -> None:
             stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
+        check_write_path(path)
+        if guard is not None:
+            guard()
         os.replace(temporary, path)
     finally:
         if os.path.exists(temporary):
@@ -84,7 +97,10 @@ def file_checksum(path: Path) -> str:
     return digest.hexdigest()
 
 
-def copy_verified(source: Path, destination: Path, expected: str) -> None:
+def copy_verified(source: Path, destination: Path, expected: str, *, guard: Callable[[], None] | None = None) -> None:
+    if guard is not None:
+        guard()
+    check_write_path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():
         if file_checksum(destination) != expected:
@@ -98,6 +114,9 @@ def copy_verified(source: Path, destination: Path, expected: str) -> None:
             raise ValueError(f"El origen cambio durante la copia: {source}")
         with open(temporary, "r+b") as stream:
             os.fsync(stream.fileno())
+        check_write_path(destination)
+        if guard is not None:
+            guard()
         os.replace(temporary, destination)
     finally:
         if os.path.exists(temporary):
@@ -121,12 +140,23 @@ class ImageRecord:
 
 
 class ImageRepository:
-    def __init__(self, root: Path | None = None):
+    def __init__(self, root: Path | None = None, *, state: Path | None = None, backups: Path | None = None):
         self.root = (root if root is not None else repository_root()).resolve()
+        check_image_root(self.root)
+        self.state_root = state.resolve() if state is not None else state_root(self.root)
+        validate_state_root(self.root, self.state_root)
+        self.backup_root = backups.resolve() if backups is not None else backup_root(self.root)
         self.root.mkdir(parents=True, exist_ok=True)
-        self.database = self.root / ".catalog.sqlite3"
+        self.state_root.mkdir(parents=True, exist_ok=True)
+        self.database = self.state_root / ".catalog.sqlite3"
+        if self.state_root != self.root and (self.root / ".catalog.sqlite3").exists() and not self.database.exists():
+            raise ValueError("Catalogo legacy existente; separar mediante copia verificada antes de activar")
+        if self.state_root != self.root:
+            for name in (".mail_download_state.json", ".market_pending.json"):
+                if (self.root / name).exists() and not (self.state_root / name).exists():
+                    raise ValueError("Estado legacy existente; separar mediante copia verificada antes de activar")
         self._locks: dict[str, FileLock] = {}
-        with self.maintenance_lock(), self.connect() as connection:
+        with acquire(self.maintenance_lock()), self.connect() as connection:
             connection.executescript("""
                 CREATE TABLE IF NOT EXISTS assets (
                     id INTEGER PRIMARY KEY, ean TEXT NOT NULL, checksum TEXT NOT NULL,
@@ -154,9 +184,11 @@ class ImageRepository:
             """)
 
     def maintenance_lock(self) -> FileLock:
+        check_image_root(self.root)
         return FileLock(self.root / ".repository.lock", timeout=120)
 
     def lock(self, ean: str) -> FileLock:
+        check_image_root(self.root)
         validate_ean(ean)
         directory = self.root / ".locks"
         directory.mkdir(exist_ok=True)
@@ -166,7 +198,9 @@ class ImageRepository:
 
     @contextmanager
     def connect(self):
-        connection = sqlite3.connect(self.database, timeout=120)
+        check_image_root(self.root)
+        validate_state_root(self.root, self.state_root)
+        connection = sqlite3.connect(self.database, timeout=request_timeout(120))
         try:
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys=ON")
@@ -177,9 +211,12 @@ class ImageRepository:
             connection.close()
 
     def resolve(self, relative: str) -> Path:
+        check_image_root(self.root)
         path = (self.root / relative).resolve()
         if self.root not in path.parents:
             raise ValueError("ruta_fuera_del_repositorio")
+        if staging_root() is not None:
+            check_write_path(path)
         return path
 
     def records(self, ean: str | None = None) -> list[ImageRecord]:
@@ -195,7 +232,8 @@ class ImageRepository:
             row["id"], row["ean"], row["checksum"], row["pixels"], self.resolve(row["path"]),
             row["provider"], row["origin"], row["view"], row["market"], row["name"],
             row["date"], json.loads(row["metadata"]),
-        ) for row in rows]
+        ) for row in rows if not excluded_staging_path(Path(row["path"])) and not
+            excluded_staging_path((self.root / row["path"]).resolve().relative_to(self.root))]
 
     def verified_bytes(self, record: ImageRecord) -> bytes:
         content = record.path.read_bytes()
@@ -258,7 +296,8 @@ class ImageRepository:
         if instant.tzinfo is None:
             raise ValueError("fecha_imagen_sin_zona_horaria")
         timestamp = instant.astimezone(timezone.utc).isoformat()
-        with self.lock(ean), self.maintenance_lock(), self.connect() as connection:
+        checkpoint()
+        with acquire(self.lock(ean)), acquire(self.maintenance_lock()), self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             asset = connection.execute("SELECT * FROM assets WHERE ean=? AND checksum=?",
                                        (ean, checksum)).fetchone()
@@ -273,7 +312,7 @@ class ImageRepository:
                     index += 1
                     destination = self.resolve(f"{ean}/{collision_name(name, checksum, index)}")
             if not destination.exists():
-                atomic_write(destination, content)
+                atomic_write(destination, content, guard=lambda: check_image_root(self.root))
             if file_checksum(destination) != checksum:
                 raise ValueError(f"Fallo verificando escritura: {destination}")
             relative = destination.relative_to(self.root).as_posix()
@@ -370,8 +409,9 @@ class ImageRepository:
 
     def _sync_nas(self, target: Path) -> int:
         target = target.resolve()
-        if target == self.root or target in self.root.parents or self.root in target.parents:
-            raise ValueError("El NAS debe ser una replica separada")
+        require_distinct_replica(self.root, target)
+        if self.state_root != self.root or self.backup_root != self.root:
+            raise ValueError("Replica completa requiere destino de estado/backup independiente; sync-nas legacy no permitido")
         target.mkdir(parents=True, exist_ok=True)
         with FileLock(target / ".repository.lock", timeout=120), self.maintenance_lock():
             seen: set[Path] = set()
@@ -390,6 +430,9 @@ class ImageRepository:
             with self.connect() as connection:
                 backups = list(connection.execute("SELECT backup,checksum FROM migrations"))
             for relative, digest in backups:
+                if excluded_staging_path(Path(relative)):
+                    LOGGER.warning("Backup staging excluido de replica: %s", relative)
+                    continue
                 source = self.resolve(relative)
                 copy_verified(source, target / relative, digest)
             for plan in (self.root / ".migration").glob("*/plan.json"):
