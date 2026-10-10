@@ -371,3 +371,29 @@ como estadoLOCAL pendiente de captura autorizada. Los originales permanecen
 intactos. Captura consistente sigue bloqueada hasta preservar config/clave
 localmente con lector autorizado en ventana, sin imprimir secretos ni colocar
 claves en logs/Git/NAS. Esta exclusion no equivale a descarte del config.
+
+Preflight1037 tambien encontro159ficheros Kering (117.102.652B) privados
+para su propietario original. No se modifican owners/modos. Para la precopia
+se usa el lector de propietario con bindRO de Kering SOLO (sin acceso NAS),
+auditando aliases/extensiones y transfiriendo tar por stdin al escritor1037
+sin capacidades, bajo work/reader-seed-RUN0700. No mapeoNFSadministrador,
+no sudo/systemd/LVM ni permisos ampliados. SQLite/config/keys permanecen
+excluidos para captura LOCAL posterior. La semilla y sus bytes se retienen.
+
+El rsync principal lee esa semilla Kering RO y los otros4origenes vivos RO.
+Por ello esa precopia NO representa un punto coherente global, aun si todos
+los rsync terminan0. Su procedencia incluye origen productivo real y recibo
+LOCAL de semilla (state reader-seed-not-migratable); conservarlo junto al
+recibo de candidata. La raiz Kering de CIERREB debe volver a ser el origen
+productivo congelado por parada, no la semilla anterior. Si sigue privado1037,
+usar el mismo canal lectorRO->escritor1037 bajo pausa con retencion de
+versiones y comprobacion decontenido, o bloquear: no hacer cierre quick-check
+contra semilla para aparentar fuente consistente. No borrar semilla/candidata.
+
+La CI posterior detecto tambien un detalle de deadline: el tiempo podia
+agotarse durante sleep y producirTimeoutError en vez del ultimo SQLiteBUSY.
+Se conserva la excepcion original en ambas vias de agotamiento, test
+determinista de scheduling, no debilitacion deasserts. Presupuesto10s/
+errorespropagados/recuperacion/locksiguen iguales. Esto se valida en nuevoCI;
+no confundir la contencion externa inyectada del test con la carrera init
+ya coordinada ni con un fallo productivo observado.
