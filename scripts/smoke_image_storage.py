@@ -13,6 +13,7 @@ import graph_mail_downloader as graph
 from image_repository import ImageRepository
 import migrate_image_repository as migration
 from scripts.snapshot_sqlite_copy import snapshot, digest
+from scripts.smoke_order_alerts import concurrent_alerts
 
 
 def smoke():
@@ -40,6 +41,13 @@ def smoke():
         graph._load_eans_by_image_key = lambda: {"imagekey": "0012345678901"}
         migration._load_eans_by_image_key = lambda: {}
         repository = ImageRepository()
+        alerts = root / "alerts"
+        alerts.mkdir()
+        outcomes = concurrent_alerts(alerts)
+        assert sum(sent for sent, _ in outcomes) == 1
+        assert all(error is None for _, error in outcomes)
+        assert (alerts / "email-ledger.txt").read_text().splitlines() == ["synthetic-order"]
+        assert all(not sent and error is None for sent, error in concurrent_alerts(alerts))
         buffer = BytesIO()
         Image.new("RGB", (600, 600), (10, 20, 30)).save(buffer, "PNG")
         source = root / "source"
@@ -91,7 +99,8 @@ def smoke():
             raise AssertionError("Missing NFS gate accepted")
         assert not absent.exists()
     print("Nonroot 1037:100 artifact storage smoke passed: isolated state, SQLite/WAL/SHM, backups, streamed archives, "
-          "migration/recovery, consistent WAL snapshot/local recovery and missing-mount gate; synthetic data only")
+          "migration/recovery, concurrent alert processes, consistent WAL snapshot/local recovery "
+          "and missing-mount gate; synthetic data only")
 
 
 if __name__ == "__main__":

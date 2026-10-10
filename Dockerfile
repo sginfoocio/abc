@@ -44,6 +44,7 @@ COPY migrate_image_repository.py .
 COPY scripts/nfs_repository_guard.py ./scripts/nfs_repository_guard.py
 COPY scripts/verify_staging_exports.py scripts/test_staging_storage.py ./scripts/
 COPY scripts/report_migration_review.py scripts/snapshot_sqlite_copy.py ./scripts/
+COPY scripts/smoke_order_alerts.py ./scripts/
 COPY deployment/nfs/staging-layout.tsv ./deployment/nfs/staging-layout.tsv
 COPY scripts/smoke_image_storage.py ./scripts/smoke_image_storage.py
 COPY scripts/cloud_image_entrypoint.sh ./scripts/cloud_image_entrypoint.sh

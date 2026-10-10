@@ -298,6 +298,20 @@ no asignar por defecto esos20GB ni considerarlos extentsLV libres.
 
 ## Aviso SQLite de alertas: fallo pendiente, NO esperado
 
+**Actualizacion posterior e37813d:** se corrige `OrderAlertStore` con lock
+de inicializacion por ruta canonica compartido entre procesos. Presupuesto
+total10s para lock+init, reintentos cortos SOLO para SQLite BUSY/LOCKED;
+otros errores se propagan. No reintentar envios ni transacciones de claims.
+Todas las conexiones usan busy timeout10s, synchronousFULL y cierre explicito.
+Si ya esta enWAL no se intenta volver a cambiarlo. Schema idempotente bajo
+lock, lock liberado ante error/muerte del proceso, deduplicacion transaccional
+existente conservada. Tests reforzados NO debilitados.
+Tests nuevos:6procesos de arranque/envio simultaneos, reinicio sin duplicar,
+recuperacion de enviofallido, bloqueoSQLite externo/liberacion/timeout,
+lockinit timeout/muerte y corrupcion no silenciada; smoke del artefacto
+tambien ejecuta actores independientes con emails sintéticos locales.
+El siguiente parrafo conserva el diagnostico HISTORICO anterior al arreglo.
+
 CI38077641374: un hilo murio en `OrderAlertStore.__init__` al ejecutar
 `PRAGMA journal_mode=WAL`, `sqlite3.OperationalError: database is locked`.
 No era la contencion gestionada de `claim_orders` ni una simulacion esperada.
@@ -326,3 +340,25 @@ regresion determinista, separado de la captura; no tocar bases activas.
  excepciones; resultado intermitente anterior sigue pendiente.
 - Protocolo rsync probado con datos sinteticos, no precopia productiva ni
  parada, snapshot, migracion/recoveryreal o replica remota ejecutados.
+
+## Precopia real autorizada: ejecutor acotado preparado
+
+`scripts/precopy_staging.py` no ejecuta stop/start/migracion/snapshot/replica.
+Valida exportexacta/roles0700/186GiB, permiso local y fuentesRO sin aliases/
+tipos especiales. Lee cabeceras16B para bloquear SQLite con extension no
+enumerada, mantiene invalidas/unknown y nombres. Precopia solo inicial nueva,
+locklocal compartido no bloqueante, candidate24GiB+versiones/ZIP reserva.
+Rsync10MiB/s, sindelete/inplace/ignoreexisting, backup-dir privado porrol;
+logs/recibo locales privados, estados precopy-running/candidate-not-migratable
+o incomplete. Exit23/24 o permiso invalido es fallo explicitamente retenido.
+No firma inventario migrable, no acredita checksums de origen activo.
+
+HerramientaDocker separada con rsync (faltaba en imagenauxiliar), a partir
+de imagenlocal auxiliar validada, codigo dePR copiado al build. No publicar,
+recrear servicios ni cargar secretos. RUN nuevo e identidad1037:100 con
+origenes bindsRO y destinos work/local exclusivamente. Tras resultado:
+registrar candidato/no migrable, recuentos/bytes y exclusiones SQLite para
+backups posteriores; verificar4servicios/StartedAt iguales. No promocionar
+a source ni ejecutar cierreB hasta autorizacion de parada. ViaA/LVM intacta
+y pendiente de validacion/autorizacion. Un container de precopia que falla
+no justifica borrar candidata/originales: conservarlogs/versiones y revisar.
