@@ -51,7 +51,11 @@ def test_staging_identity_and_owner_only_permission_proposal():
     assert history["read_only"]
     assert volumes["/staging/state"]["source"] == "/opt/cloud-image-staging/state"
     assert volumes["/staging/work"]["source"] != volumes["/staging/backups"]["source"]
-    assert all(not volume["bind"]["create_host_path"] for volume in service["volumes"])
+    # Compose versions may omit false-valued defaults from their normalized JSON.
+    assert all(volume.get("bind", {}).get("create_host_path", False) is False
+               for volume in service["volumes"])
+    source = (ROOT / "deployment/nfs/staging.compose.yml").read_text()
+    assert source.count("create_host_path: false") == len(service["volumes"])
     script = (ROOT / "deployment/nfs/set-image-permissions.sh").read_text()
     assert "chown 1037:100" in script
     assert "chmod 0700" in script
