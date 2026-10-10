@@ -138,7 +138,7 @@ class KeringScheduler:
         finally:
             finished = self.clock()
             interval = float(config["auto_interval_hours"]) * 3600
-            if result in {"Error", "Parcial"}:
+            if result in {"Error", "Parcial", "Interrumpido"}:
                 interval = max(interval, ERROR_BACKOFF)
             due = finished + interval if config.get("auto_enabled") else None
             self.write_state(now, finished, due, result, run_id)
@@ -174,6 +174,10 @@ class KeringScheduler:
                 close()
         if not pending:
             return "Sin pendientes"
+        with self.store.connect() as connection:
+            run = connection.execute("SELECT status FROM runs WHERE id=?", (run_id,)).fetchone()
+        if run["status"] == "Interrumpido":
+            return "Interrumpido"
         outcomes = [row["status"] for row in self.store.history() if row["run_id"] == run_id]
         if all(value == "Completo" for value in outcomes):
             result = "Completado"

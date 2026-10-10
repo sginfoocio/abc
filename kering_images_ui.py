@@ -160,6 +160,8 @@ def render_access_probe():
             st.success("Acceso autenticado a Kering confirmado. Esta prueba no descarga productos.")
         else:
             st.warning(f"Acceso no confirmado: {result['code']}")
+        if result.get("phases"):
+            st.dataframe(result["phases"], hide_index=True)
     except Exception:
         st.error("No se pudo comprobar el acceso a Kering.")
 
