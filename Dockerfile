@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copiar requirements e instalar dependencias Python
 COPY requirements.txt .
-RUN pip install --user --no-cache-dir -r requirements.txt
+RUN python -m venv /opt/venv && /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
 
 # Stage final
 FROM python:3.11-slim
@@ -27,7 +27,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV TZ=Europe/Madrid
 
 # Copiar dependencias instaladas desde el builder
-COPY --from=builder /root/.local /root/.local
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH=/opt/venv/bin:$PATH
 
 # Copiar archivos de la aplicación
 COPY app_enhanced.py .
@@ -38,8 +39,10 @@ COPY kering_images_ui.py .
 COPY kering_portal.py .
 COPY kering_jobs.py .
 COPY image_repository.py image_naming.py image_exports.py kering_media.py .
-COPY repository_storage.py .
+COPY repository_storage.py image_work_storage.py .
+COPY migrate_image_repository.py .
 COPY scripts/nfs_repository_guard.py ./scripts/nfs_repository_guard.py
+COPY scripts/smoke_image_storage.py ./scripts/smoke_image_storage.py
 COPY cloud_dashboard.py process_activity.py build_info.py .
 COPY assets ./assets
 COPY logo ./logo
@@ -70,7 +73,7 @@ COPY poll_luxoptica_mail.py .
 RUN mkdir -p ~/.streamlit
 
 # Configurar PATH
-ENV PATH=/root/.local/bin:$PATH
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
 ENV PYTHONUNBUFFERED=1
 
 # Configurar Streamlit
@@ -91,6 +94,9 @@ level = info\n\
 
 # Navegador requerido por la subida automatica a Luxottica.
 RUN python -m playwright install --with-deps chromium
+RUN groupadd --gid 10001 cloud-images && useradd --uid 10001 --gid 10001 --create-home cloud-images \
+    && cp -r /root/.streamlit /home/cloud-images/.streamlit \
+    && chown -R 10001:10001 /home/cloud-images/.streamlit
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \

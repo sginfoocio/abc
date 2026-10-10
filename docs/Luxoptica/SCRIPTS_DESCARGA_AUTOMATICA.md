@@ -201,6 +201,18 @@ Las imágenes organizadas en `repo/images/` se sincronizan con el Synology
 mediante el servicio rsync. El módulo remoto validado es `Fotos` y el destino
 corresponde a la carpeta compartida `/volume1/Fotos`.
 
+Esta replica remota se conserva, pero **no equivale al backup completo de
+migracion**: excluye ZIP y no verifica por si misma planes/recibos/recuperacion.
+En la comprobacion del 10/10/2026 desde Cloud 192.168.1.55, el acceso TCP 873 y
+el listado rsync agotaron su timeout. No se escribio en el NAS remoto.
+Preparacion NFS y backups independientes:
+[plan de almacenamiento](../../deployment/nfs/README.md).
+Con el layout separado, los adjuntos voluminosos van a
+`IMAGE_REPOSITORY_WORK_ROOT`; JSON de estado y SQLite permanecen locales en
+`IMAGE_REPOSITORY_STATE_ROOT`. No sincronizar estas raices ni locks/metadatos
+privados al modulo publico Fotos. Antes del corte, revisar el origen de la
+tarea rsync para la nueva raiz por EAN manteniendo la replica, sin `--delete`.
+
 ### Comprobar conectividad y módulo
 
 Desde el equipo que realiza la sincronización:

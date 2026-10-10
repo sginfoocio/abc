@@ -3,12 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import tempfile
 import base64
 import json
 import os
 import re
 import zipfile
 from typing import Any
+from collections.abc import Iterable
 from urllib.parse import unquote, urlparse
 
 import requests
@@ -21,6 +23,7 @@ from image_repository import ImageRepository, atomic_write, collision_name, file
 import hashlib
 from image_naming import sanitize_filename as _sanitize_filename
 from image_naming import market_view_from_image_name as _market_view_from_image_name
+from image_work_storage import work_root, check_work_root, require_capacity, archive_limit, incoming_lock, positive_setting
 
 
 M365_TENANT_ID_ENV = "M365_TENANT_ID"
@@ -243,10 +246,16 @@ def _detect_lote_from_subject(subject: str) -> str:
 
 
 def _save_attachment_bytes(content: bytes, root: Path, received_at: datetime, lote: str, file_name: str) -> Path:
-    from repository_storage import state_root, check_image_root
+    from repository_storage import check_image_root
     check_image_root(root)
     date_folder = received_at.astimezone(timezone.utc).strftime("%Y-%m-%d")
-    target_dir = state_root(root) / ".incoming" / date_folder / lote
+    incoming = work_root(root)
+    check_work_root(incoming)
+    incoming.mkdir(parents=True, exist_ok=True)
+    if len(content) > archive_limit():
+        raise ValueError("Adjunto supera GRAPH_IMAGE_MAX_ARCHIVE_BYTES")
+    require_capacity(incoming, len(content))
+    target_dir = incoming / date_folder / lote
     target_dir.mkdir(parents=True, exist_ok=True)
     out_path = target_dir / _sanitize_filename(file_name)
     checksum = hashlib.sha256(content).hexdigest()
@@ -255,7 +264,7 @@ def _save_attachment_bytes(content: bytes, root: Path, received_at: datetime, lo
     if out_path.exists() and hashlib.sha256(out_path.read_bytes()).hexdigest() != checksum:
         raise ValueError(f"Conflicto en archivo recibido: {out_path}")
     if not out_path.exists():
-        atomic_write(out_path, content)
+        atomic_write(out_path, content, guard=lambda: check_work_root(incoming))
     return out_path
 
 
@@ -430,6 +439,8 @@ def _extract_zip(archive_path: Path, images_root: Path) -> list[Path]:
     market_ids_by_ean = _get_market_ids_by_ean(matched_eans)
 
     with zipfile.ZipFile(archive_path) as archive:
+        if len(archive.infolist()) > positive_setting("GRAPH_IMAGE_MAX_ZIP_ENTRIES", 50000):
+            raise ValueError("ZIP supera GRAPH_IMAGE_MAX_ZIP_ENTRIES; archivo conservado")
         for member in archive.infolist():
             if member.is_dir():
                 continue
@@ -437,6 +448,8 @@ def _extract_zip(archive_path: Path, images_root: Path) -> list[Path]:
             file_name = _sanitize_filename(Path(member.filename.replace("\\", "/")).name)
             if Path(file_name).suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp"}:
                 continue
+            if member.file_size > positive_setting("GRAPH_IMAGE_MAX_ENTRY_BYTES", 30 * 1024**2):
+                raise ValueError("Imagen ZIP supera GRAPH_IMAGE_MAX_ENTRY_BYTES; archivo conservado")
             image_key = _image_model_color_key(file_name)
             ean = eans_by_image_key.get(image_key) if image_key else None
             if ean is None:
@@ -454,50 +467,58 @@ def _extract_zip(archive_path: Path, images_root: Path) -> list[Path]:
     return extracted_paths
 
 
+def _save_streamed_attachment(chunks: Iterable[bytes], target_dir: Path, file_name: str) -> Path:
+    incoming = work_root(repository_root())
+    check_work_root(incoming)
+    if incoming != target_dir and incoming not in target_dir.parents:
+        raise ValueError("Destino de adjunto fuera de temporales")
+    require_capacity(incoming, archive_limit())
+    target_dir.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(dir=target_dir, suffix=".part")
+    staged = Path(temporary)
+    try:
+        total = 0
+        with os.fdopen(descriptor, "wb") as stream:
+            for chunk in chunks:
+                total += len(chunk)
+                if total > archive_limit():
+                    raise ValueError("Adjunto supera GRAPH_IMAGE_MAX_ARCHIVE_BYTES")
+                require_capacity(incoming, len(chunk))
+                stream.write(chunk)
+            stream.flush()
+            os.fsync(stream.fileno())
+        saved = target_dir / _sanitize_filename(file_name)
+        digest = file_checksum(staged)
+        if saved.exists() and file_checksum(saved) != digest:
+            saved = target_dir / collision_name(saved.name, digest)
+        if saved.exists():
+            if file_checksum(saved) != digest:
+                raise ValueError("Conflicto en adjunto recibido")
+        else:
+            check_work_root(incoming)
+            staged.replace(saved)
+        return saved
+    finally:
+        check_work_root(incoming)
+        if staged.exists():
+            staged.unlink()
+
+
 def _download_zip_link(url: str, target_dir: Path) -> Path | None:
     with requests.get(url, allow_redirects=True, stream=True, timeout=120) as response:
         response.raise_for_status()
-        first_chunk = next(response.iter_content(64), b"")
         final_path = unquote(urlparse(response.url).path)
         if not final_path.lower().endswith(".zip"):
             return None
 
         file_name = Path(final_path).name or "luxoptica-images.zip"
-        # Stage each response independently; never replace a previous archive.
-        import tempfile
-        descriptor, temporary = tempfile.mkstemp(dir=target_dir, suffix=".zip")
-        os.close(descriptor)
-        archive_path = Path(temporary)
         total_bytes = int(response.headers.get("content-length", "0") or 0)
+        if total_bytes > archive_limit():
+            raise ValueError("ZIP supera GRAPH_IMAGE_MAX_ARCHIVE_BYTES")
         print(f"   Descargando {file_name} ({total_bytes / 1024 / 1024:.1f} MB)...", flush=True)
-        downloaded_bytes = len(first_chunk)
-        next_report = 50 * 1024 * 1024
-        with archive_path.open("wb") as archive_file:
-            archive_file.write(first_chunk)
-            for chunk in response.iter_content(1024 * 1024):
-                if chunk:
-                    archive_file.write(chunk)
-                    downloaded_bytes += len(chunk)
-                    if downloaded_bytes >= next_report:
-                        if total_bytes:
-                            progress = downloaded_bytes / total_bytes * 100
-                            print(f"      {downloaded_bytes / 1024 / 1024:.0f}/{total_bytes / 1024 / 1024:.0f} MB ({progress:.0f}%)", flush=True)
-                        else:
-                            print(f"      {downloaded_bytes / 1024 / 1024:.0f} MB", flush=True)
-                        next_report += 50 * 1024 * 1024
-        print(f"   Descarga completada: {archive_path}", flush=True)
-        saved = target_dir / _sanitize_filename(file_name)
-        checksum = file_checksum(archive_path)
-        if saved.exists() and file_checksum(saved) != checksum:
-            saved = target_dir / collision_name(saved.name, checksum)
-        if saved.exists():
-            if file_checksum(saved) != checksum:
-                raise ValueError(f"Conflicto en ZIP recibido: {saved}")
-            archive_path.unlink()
-        else:
-            archive_path.replace(saved)
-        archive_path = saved
-    return archive_path
+        saved = _save_streamed_attachment(response.iter_content(1024 * 1024), target_dir, file_name)
+        print("   ZIP descargado y verificado.", flush=True)
+        return saved
 
 
 def download_luxoptica_mail_attachments(
@@ -508,11 +529,11 @@ def download_luxoptica_mail_attachments(
 ) -> DownloadSummary:
     root = repository_root()
     from repository_storage import check_image_root
-    check_image_root(root)
-    root.mkdir(parents=True, exist_ok=True)
-    with FileLock(root / ".mail.lock", timeout=120):
-        from process_activity import record_process
-        with record_process("luxoptica-mail") as receipt:
+    from process_activity import record_process
+    with record_process("luxoptica-mail") as receipt:
+        check_image_root(root)
+        root.mkdir(parents=True, exist_ok=True)
+        with FileLock(root / ".mail.lock", timeout=120), incoming_lock(root):
             summary = _download_luxoptica_mail_attachments(sender_hint, subject_hint, lookback_days, top_messages)
             receipt["counts"] = {"Correos revisados": summary.messages_scanned,
                                  "Adjuntos descargados": summary.attachments_downloaded}
@@ -581,7 +602,8 @@ def _download_luxoptica_mail_attachments(
 
         if not msg.get("hasAttachments", False):
             body = _get_message_body(token, config.mailbox, message_id)
-            target_dir = state_root(root) / ".incoming" / received_at.astimezone(timezone.utc).strftime("%Y-%m-%d") / _detect_lote_from_subject(subject)
+            target_dir = work_root(root) / received_at.astimezone(timezone.utc).strftime("%Y-%m-%d") / _detect_lote_from_subject(subject)
+            check_work_root(work_root(root))
             target_dir.mkdir(parents=True, exist_ok=True)
             downloaded_from_link = False
             links = _find_download_links(body)
@@ -625,19 +647,20 @@ def _download_luxoptica_mail_attachments(
             if not att_id:
                 continue
 
-            content_bytes: bytes
             if att.get("contentBytes"):
-                content_bytes = base64.b64decode(att["contentBytes"])
+                if len(att["contentBytes"]) > 4 * ((archive_limit() + 2) // 3):
+                    raise ValueError("Adjunto supera GRAPH_IMAGE_MAX_ARCHIVE_BYTES")
+                saved = _save_attachment_bytes(base64.b64decode(att["contentBytes"]), root,
+                                               received_at, lote_folder, file_name)
             else:
-                value_resp = requests.get(
+                target_dir = work_root(root) / received_at.astimezone(timezone.utc).strftime("%Y-%m-%d") / lote_folder
+                with requests.get(
                     _attachment_value_url(config.mailbox, message_id, att_id),
                     headers=_graph_headers(token),
-                    timeout=60,
-                )
-                value_resp.raise_for_status()
-                content_bytes = value_resp.content
-
-            saved = _save_attachment_bytes(content_bytes, root, received_at, lote_folder, file_name)
+                    timeout=60, stream=True,
+                ) as value_resp:
+                    value_resp.raise_for_status()
+                    saved = _save_streamed_attachment(value_resp.iter_content(1024 * 1024), target_dir, file_name)
             saved_paths.append(str(saved))
             attachments_downloaded += 1
 
@@ -645,12 +668,14 @@ def _download_luxoptica_mail_attachments(
                 extracted_paths = _extract_zip(saved, root)
                 saved_paths.extend(str(path) for path in extracted_paths)
             elif saved.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}:
+                if saved.stat().st_size > positive_setting("GRAPH_IMAGE_MAX_ENTRY_BYTES", 30 * 1024**2):
+                    raise ValueError("Imagen supera GRAPH_IMAGE_MAX_ENTRY_BYTES; adjunto conservado")
                 key = _image_model_color_key(saved.name)
                 ean = _load_eans_by_image_key().get(key) if key else None
                 if not ean:
                     raise ValueError(f"EAN no identificado; adjunto conservado en {saved}")
                 record, _ = ImageRepository(root).save(
-                    ean, _sanitize_filename(file_name), content_bytes, provider="Luxoptica",
+                    ean, _sanitize_filename(file_name), saved.read_bytes(), provider="Luxoptica",
                     origin=f"Graph:{message_id}:{att_id}",
                     view=_market_view_from_image_name(file_name) or "unknown",
                     date=received_at.isoformat(), metadata={"modelo": _model_from_image_name(file_name)},

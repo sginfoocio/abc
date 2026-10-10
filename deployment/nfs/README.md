@@ -206,3 +206,157 @@ red deshabilitada y raiz de contenedor solo lectura; no monta datos productivos.
 No sustituye a un build Docker nuevo/CI ni valida reinicio o perdida de red.
 App sigue healthy y conserva el bind activo
 `/opt/abcd-control/image_repository`. No se publico ni desplego esta rama.
+
+## Continuacion de 9fbf069: comandos y bloqueos administrativos
+
+Identidad definida para servicios de imagenes de staging: **10001:10001**,
+usuario `cloud-images` en el artefacto Docker. No existe colision con una cuenta
+10001 del host en la consulta realizada. El build coloca Python en `/opt/venv`
+y Chromium en `/opt/playwright`, legibles sin acceder a `/root/.local`.
+La identidad por defecto de produccion no cambia; el override de staging fija
+`user: 10001:10001`, sin capacidades y sin red.
+
+Scripts preparados en `/home/rubensg/cloud-nfs-preparation-20261010`:
+
+```sh
+cd /home/rubensg/cloud-nfs-preparation-20261010
+sh -n install-persistent-mount.sh
+sudo sh ./install-persistent-mount.sh
+sudo sh ./set-image-permissions.sh
+```
+
+El primero comprueba exportacion/unidad/fstab, verifica la plantilla, instala
+la unidad con el mismo nombre dinamico y ejecuta solo daemon-reload/enable.
+**No stop/restart/remount/--now**. Si existe ya una definicion persistente,
+rechaza reemplazarla. El segundo exige exportacion vacia y actua solo sobre el
+directorio raiz: `chown 10001:10001` y `chmod 2770`, nunca `-R`; verifica que
+Synology retiene exactamente esos valores. No cambia squash ni asigna admin.
+No ejecutar simultaneamente con otra provision/escritura en esa exportacion.
+
+La exportacion se comprobo vacia y sigue 0:0, 777. Sudo no interactivo sigue
+requiriendo autenticacion: **los scripts no se han ejecutado**. No se utiliza
+Docker para modificar unidades, permisos del host o eludir sudo.
+
+### Propuesta concreta de backups y recuperacion
+
+Provisionar en Synology, con autorizacion limitada a 192.168.1.55 y SYS:
+
+| Uso | Exportacion propuesta (NO existente) | Montaje host |
+| --- | --- | --- |
+| Backups imagenes/ZIP y staging voluminoso `.work` | `192.168.1.32:/volume1/cloud-migration-backups` | `/mnt/cloud-migration-backups` |
+| Imagenes de ensayo | `192.168.1.32:/volume1/cloud-imagenes-staging` | `/mnt/cloud-imagenes-staging` |
+| Recuperacion sin solaparse con backup | `192.168.1.32:/volume1/cloud-migration-recovery` | `/mnt/cloud-migration-recovery` |
+
+No sustituir estas raices por subdirectorios del repositorio activo. Verificacion
+real `showmount -e` solo publica cloud-imagenes para .55, mas tres exportaciones
+de otros clientes; **no se ha probado capacidad ni permisos de las propuestas**.
+El volumen montado de imagenes dispone de 3.048.893.317.120 B en la nueva
+consulta; puede compartir pool con las propuestas, pero no prueba cuota ni
+reserva de esas carpetas. No escribir en exportaciones ajenas.
+
+Reserva propuesta: al menos **64 GiB** para backups + un temporal de copia
+(21,96 GiB), ZIP retenidos y 8 GiB de descarga activa + 2 GiB libres protegidos;
+al menos **24 GiB** independientes para recuperacion completa y **8 GiB** para
+imagenes staging. Medir cuotas/libres con df y statvfs despues de provisionar,
+e incluir snapshots/retencion. Backups y temporales comparten capacidad y deben
+contabilizarse juntos, no sumarse como espacio libre independiente.
+
+La copia remota `188.227.143.110::Fotos` (`/volume1/Fotos`) mediante rsync se
+conserva en la documentacion y no se modifica. TCP 873 y listado rsync desde
+.55 exceden el timeout en esta comprobacion: acceso remoto bloqueado.
+No se intentaron credenciales ni se escribio en ese NAS. Esa replica excluye
+ZIP y no acredita plan, backups de todos los originales, checksums de recibos
+ni recuperacion: no equivale a la exportacion de backup de migracion.
+
+### Graph: reserva y concurrencia resueltas en codigo, activacion bloqueada
+
+`IMAGE_REPOSITORY_WORK_ROOT=/app/image-backups/.work` traslada ZIP/adjuntos
+voluminosos a la exportacion independiente. SQLite y los JSON de estado siguen
+locales. La variable de fuente y la raiz exacta de montaje son obligatorias
+en NFS; montaje ausente bloquea antes de crear `.work`.
+
+Los importadores adquieren un lock compartido `.incoming.lock` durante consulta,
+descarga y extraccion: solo un importador Graph activo entre servicios usando
+esta configuracion. El limite por archivo es 8 GiB; antes de contactar Graph
+se requieren 8 GiB + **2 GiB libres protegidos**. Cada bloque comprueba cuota y
+capacidad de nuevo; un fallo genera error, limpia su `.part` cuando el montaje
+esta verificado y no reemplaza ni elimina archivos anteriores.
+Los adjuntos HTTP y ZIP por enlace se transmiten por bloques de 1 MiB; no se
+carga el ZIP completo en memoria. `contentBytes` inline ya viene en la respuesta
+Graph; se limita antes de decodificar, pero ese canal no puede convertirse en
+streaming despues de recibir el JSON. No afirmar memoria acotada a 1 MiB alli.
+
+La extraccion no materializa todo el ZIP en disco local: incorpora una imagen
+cada vez al repositorio, con limite **30 MiB por entrada y 50.000 entradas**.
+Se conservan nombres/colisiones y ZIP originales; si no se puede resolver EAN,
+la descarga queda conservada y se devuelve error. Los ZIP retenidos consumen
+espacio real; no hay limpieza automatica destructiva. La reserva se vuelve a
+comprobar en la siguiente descarga. Validar retencion/cuotas en NAS antes del corte.
+
+Asi, los 4,80 GB del ZIP grande previo dejan de sumarse a los 274 MB de minimo
+local de migracion. Reservar al menos **2 GiB locales** para catalogo/historial,
+WAL, planes y exportaciones ZIP bajo demanda (256 MiB por sesion); limitar y
+medir sesiones concurrentes en la ventana de staging. No se considera seguro
+el escenario anterior de solo 253 MB de margen. Si `.work` no esta provisionado,
+el corte permanece bloqueado; no activar un fallback local.
+
+### Ensayo staging, sin produccion
+
+`staging.compose.yml` no publica puertos, no monta pedidos ni credenciales,
+no tiene red, no reinicia automaticamente y rechaza binds ausentes. Antes de
+usarlo, provisionar las tres exportaciones y el estado local
+`/opt/cloud-image-staging/state` con 10001:10001, permisos 0700. Montar solamente
+copias anonimizadas en `/staging/source` (solo lectura), un directorio privado
+de planes local y el destino independiente `/staging/recovery`.
+
+Con un artefacto cuyo smoke/identidad de build hayan pasado:
+
+```sh
+python migrate_image_repository.py inventory --source Other=/staging/source --target /staging/images --output /staging/state/plan.json
+python migrate_image_repository.py apply --plan /staging/state/plan.json
+python migrate_image_repository.py verify --plan /staging/state/plan.json
+python migrate_image_repository.py apply --plan /staging/state/plan.json
+python migrate_image_repository.py recover --plan /staging/state/plan.json --target /staging/recovery
+```
+
+Estos comandos son **dentro del contenedor staging**, nunca sobre origenes
+productivos. Verificar sumas y nombres antes/despues, historiales/asociaciones,
+segunda ejecucion idempotente, galeria/ZIP y restauracion. Los datos reales de
+Kering del commit 3c807b3 permanecen documentados; vistas desconocidas siguen
+pendientes de evidencia, no se declaran acreditadas por descargar mas fotos.
+
+### Evidencia real aislada de arranque, desconexion y permisos
+
+`validate-isolated-nfs.sh` monta la misma exportacion solo en el namespace
+de un contenedor nuevo, con red bridge propia y `nosharecache`. No usa red/PID
+del host, volumen productivo ni socket Docker dentro del contenedor. Las
+capacidades SYS_ADMIN/NET_ADMIN y perfiles relajados pertenecen exclusivamente
+a esta herramienta de prueba, no al artefacto de app ni a staging.compose.
+
+Resultados reales:
+
+- Montaje ausente rechazado por el guard dentro del contenedor antes de montar,
+  despues de desmontar su montaje aislado y despues de reiniciar el contenedor.
+- Con su interfaz propia bajada, la escritura hard-NFS permanece pendiente.
+- Tras restaurar interfaz **y ruta por defecto**, termina fsync y el checksum
+  coincide. Se corrigio el primer ensayo, que subia la interfaz pero perdia
+  la ruta; no era un fallo de recuperacion del montaje compartido.
+- Dos escritores con flock se serializan despues de reconectar.
+- Solo sus archivos temporales eliminados; exportacion compartida sigue vacia,
+  sin stop/unmount/restart del montaje host y app healthy.
+
+**Permisos minimos NO acreditados:** en una carpeta temporal propia 10001:10001
+y modo 2770, escritura como UID10001 falla con PermissionError; UID10002 tambien
+es rechazado. Propietario/mode POSIX visibles no garantizan ACL/mapeo Synology.
+El test de transporte se completo con root, claramente separado del test de
+identidad no privilegiada. No mapear UID/root a admin para hacerlo pasar:
+administrador NAS debe revisar identidad SYS, ACL de la carpeta compartida,
+travesia y permisos efectivos. Repetir el test UID10001 y rechazo UID10002
+antes de sustituir 777/activar servicios. No se cambio el 777 de la raiz.
+
+Esto valida reinicio de contenedor sin montaje, no un reinicio del servidor
+ni el futuro servicio systemd de escritores. La dependencia BindsTo/Requires
+y proteccion de carpeta local subyacente siguen pendientes de instalar y
+validar. En una caida de red con hard, mountinfo no detecta falta de respuesta:
+no se inventa exito ni se escribe en local; se requiere supervision externa
+de disponibilidad antes de activar automatizaciones.

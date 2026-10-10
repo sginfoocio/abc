@@ -110,6 +110,8 @@ jobs:
           assert cloud_dashboard.LOGO.is_file()
           print('Artifact identity and runtime imports verified; network disabled')
           "
+          docker run --rm --network none --read-only --user 10001:10001 --tmpfs /tmp:size=536870912,mode=1777 \
+            -e HOME=/home/cloud-images -e PYTHONPATH=/app "$IMAGE" python scripts/smoke_image_storage.py
 
       - name: Validate Secrets
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -217,7 +219,7 @@ jobs:
 
       - name: Lint with flake8
         run: |
-          flake8 repository_storage.py scripts/nfs_repository_guard.py scripts/test_nfs_image_storage.py tests/test_repository_storage.py tests/test_nfs_repository_guard.py --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 repository_storage.py image_work_storage.py scripts/nfs_repository_guard.py scripts/test_nfs_image_storage.py scripts/smoke_image_storage.py tests/test_image_work_storage.py tests/test_repository_storage.py tests/test_nfs_repository_guard.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 cloud_dashboard.py process_activity.py build_info.py scripts/write_build_info.py tests/test_cloud_dashboard.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 graph_mail_downloader.py luxoptica_auto_upload.py poll_luxoptica_mail.py save_abcd_weekly_snapshot.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 image_naming.py image_exports.py image_repository.py migrate_image_repository.py kering_media.py tests/test_kering_image_sections.py --count --select=E9,F63,F7,F82 --show-source --statistics
@@ -227,7 +229,7 @@ jobs:
 
       - name: Check syntax
         run: |
-          python -m py_compile repository_storage.py scripts/nfs_repository_guard.py scripts/test_nfs_image_storage.py
+          python -m py_compile repository_storage.py image_work_storage.py scripts/nfs_repository_guard.py scripts/test_nfs_image_storage.py scripts/smoke_image_storage.py
           python -m py_compile cloud_dashboard.py process_activity.py build_info.py scripts/write_build_info.py
           python -m py_compile image_naming.py image_exports.py image_repository.py migrate_image_repository.py graph_mail_downloader.py kering_media.py tests/test_kering_image_sections.py
           python -m py_compile kering_images.py kering_images_ui.py kering_portal.py kering_jobs.py scripts/dependency_locks.py scripts/validate_kering_portal.py

@@ -1,0 +1,68 @@
+"""Artifact smoke: synthetic data only, no providers, production mounts or secrets."""
+from io import BytesIO
+import os
+from pathlib import Path
+import tempfile
+from zipfile import ZipFile
+
+from PIL import Image
+from playwright.sync_api import sync_playwright
+
+import graph_mail_downloader as graph
+from image_repository import ImageRepository
+import migrate_image_repository as migration
+
+
+def smoke():
+    assert os.getuid() == 10001 and os.getgid() == 10001
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content("<title>Cloud synthetic smoke</title>")
+        assert page.title() == "Cloud synthetic smoke"
+        browser.close()
+    with tempfile.TemporaryDirectory(prefix="cloud-storage-smoke-") as folder:
+        root = Path(folder)
+        for key, value in {
+            "IMAGE_REPOSITORY_ROOT": root / "images",
+            "IMAGE_REPOSITORY_STATE_ROOT": root / "state",
+            "IMAGE_REPOSITORY_BACKUP_ROOT": root / "backups",
+            "IMAGE_REPOSITORY_WORK_ROOT": root / "work",
+        }.items():
+            os.environ[key] = str(value)
+        os.environ["GRAPH_IMAGE_MAX_ARCHIVE_BYTES"] = "1048576"
+        os.environ["IMAGE_REPOSITORY_WORK_RESERVE_BYTES"] = "1048576"
+        graph._load_eans_by_image_key = lambda: {"imagekey": "0012345678901"}
+        migration._load_eans_by_image_key = lambda: {}
+        repository = ImageRepository()
+        buffer = BytesIO()
+        Image.new("RGB", (600, 600), (10, 20, 30)).save(buffer, "PNG")
+        source = root / "source"
+        (source / "0012345678901").mkdir(parents=True)
+        (source / "0012345678901" / "original.png").write_bytes(buffer.getvalue())
+        with ZipFile(source / "originals.zip", "w") as archive:
+            archive.writestr("original.png", buffer.getvalue())
+        plan = migration.inventory([("Other", source)], repository.root)
+        assert migration.apply(plan)["verified"] == 2
+        assert migration.apply(plan)["verified"] == 2
+        assert migration.recover(plan, root / "restore")["recovered"] == 2
+        assert repository.database.parent == root / "state"
+        assert not list(repository.root.glob("*.sqlite3"))
+        with graph.incoming_lock(repository.root) as incoming:
+            saved = graph._save_streamed_attachment([b"synthetic archive"], incoming, "received.zip")
+            assert saved == root / "work" / "received.zip"
+        os.environ["IMAGE_REPOSITORY_NFS_SOURCE"] = "synthetic:/not-mounted"
+        absent = root / "absent"
+        try:
+            ImageRepository(absent)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("Missing NFS gate accepted")
+        assert not absent.exists()
+    print("Nonroot artifact storage smoke passed: isolated state, backups, streamed archives, "
+          "migration/recovery and missing-mount gate; synthetic data only")
+
+
+if __name__ == "__main__":
+    smoke()
