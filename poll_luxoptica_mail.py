@@ -2,7 +2,7 @@
 """Monitor periódico de correos de Luxottica.
 
 Comprueba cada X minutos si ha llegado un correo con adjuntos y, en caso
-afirmativo, los descarga a docs/Luxoptica/descargas.
+afirmativo, los registra en IMAGE_REPOSITORY_ROOT por EAN.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ import time
 from datetime import datetime
 
 from graph_mail_downloader import download_luxoptica_mail_attachments
+from process_activity import record_process
 
 
 def run_once(sender_hint: str, subject_hint: str, lookback_days: int, top_messages: int) -> dict:
@@ -57,12 +58,15 @@ def main() -> int:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"\n[{timestamp}] Revisando buzón...")
         try:
-            summary = run_once(
-                sender_hint=args.sender_hint,
-                subject_hint=args.subject_hint,
-                lookback_days=args.lookback_days,
-                top_messages=args.top_messages,
-            )
+            with record_process("luxoptica-monitor", enabled=not args.once, interval=interval_seconds) as receipt:
+                summary = run_once(
+                    sender_hint=args.sender_hint,
+                    subject_hint=args.subject_hint,
+                    lookback_days=args.lookback_days,
+                    top_messages=args.top_messages,
+                )
+                receipt["counts"] = {"Correos revisados": summary["messages_scanned"],
+                                     "Adjuntos descargados": summary["attachments_downloaded"]}
             print(f"  Correos revisados: {summary['messages_scanned']}")
             print(f"  Correos con adjuntos: {summary['messages_with_attachments']}")
             print(f"  Adjuntos descargados: {summary['attachments_downloaded']}")

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from io import BytesIO
 from pathlib import Path
+from image_repository import ImageRepository, IMAGE_REPOSITORY_ROOT_ENV, repository_root
 from datetime import date, datetime, timedelta
 import hmac
 import json
@@ -18,7 +19,7 @@ from streamlit_cookies_controller import CookieController
 
 from db_loader import load_odoo_dataframe
 from adyen_reconciliation_ui import render_reconciliation_page
-from kering_images_ui import render_kering_page, render_kering_settings, gallery_rows
+from kering_images_ui import render_kering_page, render_kering_settings
 from engine import run_abcd_engine
 from db_config import load_db_config, load_env_file
 from transform_luxottica_masterdata import (
@@ -38,6 +39,7 @@ from graph_mail_downloader import (
     download_luxoptica_mail_attachments,
     load_m365_config,
     _refresh_pending_market_images,
+    _model_from_image_name,
     send_alert_email,
     validate_m365_config,
 )
@@ -66,9 +68,8 @@ from auth_session import (
 # CONFIG
 # ==============================================================================
 
-APP_TITLE = "Diagonal Eyewear"
-APP_VERSION = "1.0.6"
-APP_ICON = Path(__file__).resolve().parent / "assets" / "favicon.svg"
+APP_TITLE = "Cloud"
+APP_ICON = Path(__file__).resolve().parent / "logo" / "favicon.svg"
 ABCD_SNAPSHOT_TABLE = "abcd_weekly_snapshots"
 AUTH_USERNAME_ENV = "APP_USERNAME"
 AUTH_COOKIE_SECRET_ENV = "AUTH_COOKIE_SECRET"
@@ -95,7 +96,7 @@ M365_TENANT_ID_ENV = "M365_TENANT_ID"
 M365_CLIENT_ID_ENV = "M365_CLIENT_ID"
 M365_CLIENT_SECRET_ENV = "M365_CLIENT_SECRET"
 M365_MAILBOX_ENV = "M365_MAILBOX"
-M365_DOWNLOAD_ROOT_ENV = "M365_DOWNLOAD_ROOT"
+M365_DOWNLOAD_ROOT_ENV = IMAGE_REPOSITORY_ROOT_ENV
 MASTERDATA_DICTIONARY_FILE = Path(
     os.getenv(
         "MASTERDATA_DICTIONARY_PATH",
@@ -477,8 +478,8 @@ def _load_market_pending_rows(images_root: Path) -> list[dict[str, object]]:
 
     try:
         payload = json.loads(pending_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"No se pueden leer los pendientes {pending_path}") from error
 
     if not isinstance(payload, dict):
         return []
@@ -488,13 +489,9 @@ def _load_market_pending_rows(images_root: Path) -> list[dict[str, object]]:
         if not isinstance(entry, dict):
             continue
         source = Path(source_name)
-        try:
-            relative_parts = source.relative_to(images_root).parts
-        except ValueError:
-            relative_parts = source.parts
         rows.append(
             {
-                "Modelo": relative_parts[0] if relative_parts else "",
+                "Modelo": _model_from_image_name(source.name),
                 "EAN": str(entry.get("ean", "")),
                 "Archivo": source.name,
                 "Mercados pendientes": ", ".join(entry.get("missing_markets", [])),
@@ -506,34 +503,13 @@ def _load_market_pending_rows(images_root: Path) -> list[dict[str, object]]:
 
 @st.cache_data(ttl=30)
 def _load_image_catalog(images_root: Path) -> pd.DataFrame:
-    image_extensions = {".jpg", ".jpeg", ".png"}
-    rows: list[dict[str, object]] = []
     if not images_root.exists():
         return pd.DataFrame(columns=["Modelo", "EAN", "Mercado", "Archivo", "Ruta", "Descargada", "Fecha"])
-
-    for image_path in images_root.rglob("*"):
-        if not image_path.is_file() or image_path.suffix.lower() not in image_extensions:
-            continue
-        relative = image_path.relative_to(images_root)
-        if len(relative.parts) < 3:
-            continue
-        model, ean = relative.parts[:2]
-        market = relative.parts[2] if relative.parts[2] in {"Farfetch", "Miinto"} else "Original"
-        rows.append(
-            {
-                "Modelo": model,
-                "EAN": ean,
-                "Mercado": market,
-                "Archivo": image_path.name,
-                "Ruta": str(image_path),
-                "Descargada": image_path.stat().st_mtime,
-                "Fecha": datetime.fromtimestamp(image_path.stat().st_mtime).strftime("%d/%m/%Y %H:%M"),
-            }
-        )
-
+    rows = ImageRepository(images_root).catalog_rows()
     catalog = pd.DataFrame(
         rows,
-        columns=["Modelo", "EAN", "Mercado", "Archivo", "Ruta", "Descargada", "Fecha"],
+        columns=["Modelo", "EAN", "Mercado", "Archivo", "Ruta", "Descargada", "Fecha",
+                 "Origen", "Proveedor", "Vista", "Checksum"],
     )
     return catalog.sort_values("Descargada", ascending=False).reset_index(drop=True)
 
@@ -550,6 +526,10 @@ def generate_luxoptica_request_files(
 ) -> list[Path]:
     """Genera archivos txt para solicitud de imágenes con lotes de EAN."""
     products = _extract_luxoptica_products(df)
+    repository = ImageRepository()
+    products = [product for product in products if repository.pending_views(
+        product["ean"], ("frontal", "lateral", "perspectiva")
+    )]
     if max_total_eans is not None and max_total_eans > 0:
         products = products[:max_total_eans]
     if not products:
@@ -1088,42 +1068,23 @@ def render_sidebar_shell(section_name: str) -> None:
             - Área Masterdata para transformación y validación previa a Odoo.
             """
         )
-        st.caption(f"Versión {APP_VERSION}")
+        st.caption("Cloud · Catálogo, imágenes y automatizaciones")
 
 
 def render_footer() -> None:
-    st.divider()
-    st.markdown(
-        f"""
-        <div style='text-align: center; color: #888; margin-top: 2rem;'>
-        <small>Diagonal Eyewear | Plataforma ABC y Masterdata | v{APP_VERSION}</small>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    from build_info import render_build_footer
+    render_build_footer()
 
 
 def render_home_page() -> None:
+    from cloud_dashboard import render_dashboard
     render_sidebar_shell("Inicio")
-    st.title(APP_TITLE)
-    st.subheader("Portal interno")
-    st.write("Selecciona una de las dos áreas principales.")
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.markdown("### Área ABC")
-        st.write("Análisis ABCD, búsqueda, reportes y detalle de producto.")
-        st.page_link(ABC_HOME_PAGE, label="Entrar en Análisis ABC", use_container_width=True)
-    with col2:
-        st.markdown("### Área Masterdata")
-        st.write("Transformación de Luxottica, advertencias, descargas y dry-run Odoo.")
-        st.page_link(MASTER_IMPORT_PAGE, label="Entrar en Master Data", use_container_width=True)
-    with col3:
-        st.markdown("### Configuración")
-        st.write("Guardar claves y credenciales de integración en el entorno local.")
-        st.page_link(SETTINGS_PAGE, label="Entrar en Configuración", use_container_width=True)
-
-    render_footer()
+    pages = {"master": MASTER_IMPORT_PAGE, "dictionary": MASTER_DICTIONARY_PAGE}
+    if st.session_state.get("auth_role") == "admin":
+        pages.update(images=LUXOPTICA_IMAGES_PAGE, luxpending=LUXOPTICA_PENDING_PAGE,
+                     kering=KERING_IMAGES_PAGE, alerts=ALERTA_PEDIDOS_PAGE,
+                     abchistory=ABC_HISTORY_PAGE, config=SETTINGS_PAGE)
+    render_dashboard(pages)
 
 
 def render_odoo_reconciliation_page() -> None:
@@ -1149,7 +1110,7 @@ def render_settings_page() -> None:
     current_client_id = _read_env_setting(M365_CLIENT_ID_ENV)
     current_client_secret = _read_env_setting(M365_CLIENT_SECRET_ENV)
     current_mailbox = _read_env_setting(M365_MAILBOX_ENV, "ruben.cebreiros@diagonaleyewear.com")
-    current_download_root = _read_env_setting(M365_DOWNLOAD_ROOT_ENV, "docs/Luxoptica/descargas")
+    current_download_root = str(repository_root())
 
     with st.form("settings_form", clear_on_submit=False):
         st.subheader("Essilor Luxottica")
@@ -1172,7 +1133,8 @@ def render_settings_page() -> None:
             placeholder="Deja vacío para conservar el actual",
         )
         mailbox_value = st.text_input("Mailbox objetivo", value=current_mailbox)
-        download_root_value = st.text_input("Carpeta destino descargas", value=current_download_root)
+        st.text_input("Repositorio comun (IMAGE_REPOSITORY_ROOT)", value=current_download_root, disabled=True)
+        st.caption("Cambiar en el entorno de todos los servicios tras verificar la migración y reiniciarlos.")
 
         submitted = st.form_submit_button("Guardar configuración", type="primary")
 
@@ -1184,7 +1146,6 @@ def render_settings_page() -> None:
             M365_TENANT_ID_ENV: tenant_id_value.strip(),
             M365_CLIENT_ID_ENV: client_id_value.strip(),
             M365_MAILBOX_ENV: mailbox_value.strip(),
-            M365_DOWNLOAD_ROOT_ENV: download_root_value.strip(),
         }
         keep_existing_password = not password_value.strip() and bool(current_password)
         keep_existing_client_secret = not client_secret_value.strip() and bool(current_client_secret)
@@ -1569,8 +1530,12 @@ def render_abc_page(abc_page: str | None = None) -> None:
 
 def render_luxoptica_pending_panel() -> None:
     st.subheader("Imágenes pendientes de procesar")
-    images_root = Path(__file__).resolve().parent / "repo" / "images"
-    pending_rows = _load_market_pending_rows(images_root)
+    images_root = repository_root()
+    try:
+        pending_rows = _load_market_pending_rows(images_root)
+    except RuntimeError as error:
+        st.error(str(error))
+        return
     if not pending_rows:
         st.success("No hay imágenes pendientes de procesar.")
         return
@@ -1617,9 +1582,6 @@ def render_luxoptica_pending_panel() -> None:
     )
     selected_row = pending_df.loc[pending_df["Archivo"] == selected_image_name].iloc[0]
     selected_path = Path(str(selected_row["Ruta"]))
-    if not selected_path.is_file() and len(selected_path.parts) >= 3:
-        selected_path = images_root.joinpath(*selected_path.parts[-3:])
-
     if selected_path.is_file():
         st.image(
             str(selected_path),
@@ -1639,9 +1601,8 @@ def render_luxoptica_images_page() -> None:
     st.title("Imágenes")
     st.caption("Explora las imágenes descargadas por modelo, EAN y mercado.")
 
-    images_root = Path(__file__).resolve().parent / "repo" / "images"
+    images_root = repository_root()
     image_catalog = _load_image_catalog(images_root)
-    image_catalog = pd.concat([image_catalog, pd.DataFrame(gallery_rows())], ignore_index=True)
 
     st.subheader("Visor de imágenes")
     search_ean = st.text_input(
@@ -1651,7 +1612,7 @@ def render_luxoptica_images_page() -> None:
     ).strip()
     market_filter = st.selectbox(
         "Mercado",
-        options=["Todos", "Original", "Farfetch", "Miinto", "Kering"],
+        options=["Todos", "Original", "Farfetch", "Miinto"],
         key="luxoptica_market_filter",
     )
 
@@ -1666,6 +1627,16 @@ def render_luxoptica_images_page() -> None:
     if filtered_catalog.empty:
         st.info("No hay imágenes que coincidan con la búsqueda.")
     else:
+        try:
+            selected_zip = ImageRepository(images_root).zip_eans(
+                filtered_catalog["EAN"].unique().tolist(),
+                market=None if market_filter == "Todos" else "" if market_filter == "Original" else market_filter,
+            )
+        except (OSError, ValueError) as error:
+            st.error(f"No se puede preparar el ZIP: {error}")
+        else:
+            st.download_button("ZIP de imágenes", selected_zip, file_name="imagenes-ean.zip",
+                               mime="application/zip", key="image_repository_zip")
         st.caption(
             f"{len(filtered_catalog):,} imágenes | "
             f"{filtered_catalog['EAN'].nunique():,} EAN | "
@@ -1725,7 +1696,7 @@ def render_luxoptica_images_page() -> None:
 
         st.markdown("#### Estructura encontrada")
         st.dataframe(
-            filtered_catalog[["Modelo", "EAN", "Mercado", "Archivo", "Fecha"]],
+            filtered_catalog[["Modelo", "EAN", "Mercado", "Archivo", "Fecha", "Proveedor", "Vista"]],
             hide_index=True,
             width="stretch",
         )
@@ -1882,7 +1853,6 @@ def render_master_page(master_page: str | None = None) -> None:
             request_email = st.text_input("Email para la solicitud", value=default_email, key="luxoptica_request_email_input")
             st.caption("Se generan lotes de 250 EAN máximos por archivo, sin prefijo.")
 
-            eans_available = len(_extract_clean_eans(export_df))
             col_gen_a, col_gen_b = st.columns(2)
 
             with col_gen_a:
@@ -1909,7 +1879,9 @@ def render_master_page(master_page: str | None = None) -> None:
                 )
                 st.session_state["luxoptica_request_email"] = request_email.strip() or default_email
                 st.session_state["luxoptica_generated_files"] = [str(p) for p in generated_files]
-                st.session_state["luxoptica_generated_total_eans"] = min(eans_available, limit) if limit else eans_available
+                st.session_state["luxoptica_generated_total_eans"] = sum(
+                    len(path.read_text(encoding="utf-8").splitlines()) for path in generated_files
+                )
                 st.session_state["luxoptica_processed_files"] = []
 
                 if generated_files:
@@ -1920,7 +1892,7 @@ def render_master_page(master_page: str | None = None) -> None:
                     else:
                         st.success(f"Generados {len(generated_files)} archivo(s) en docs/Luxoptica.")
                 else:
-                    st.warning("No se encontraron EAN válidos para generar archivos.")
+                    st.info("No hay EAN con vistas pendientes para generar archivos.")
 
             generated_files_raw = st.session_state.get("luxoptica_generated_files", [])
             if generated_files_raw:
@@ -2428,4 +2400,8 @@ navigation = st.navigation(
     position="sidebar",
 )
 
+from kering_images_ui import page_transition
+page_transition(st.session_state, navigation.url_path)
+from cloud_dashboard import dashboard_transition
+dashboard_transition(st.session_state, navigation.url_path)
 navigation.run()

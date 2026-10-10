@@ -5,6 +5,11 @@ import logging
 import time
 from contextlib import contextmanager
 from urllib.parse import urlsplit
+from pathlib import Path
+from image_naming import kering_filename
+from kering_media import identify_media
+from image_repository import ImageRepository, image_fingerprint
+from PIL import Image
 
 from playwright.sync_api import sync_playwright, TimeoutError as BrowserTimeout, Error as BrowserError
 
@@ -22,14 +27,15 @@ ACCESS_PHASE_MS = {
 }
 LOGGER = logging.getLogger(__name__)
 PRODUCT_LIMIT = 40
-ORIGINAL_INDEX = {"perspectiva": 0, "frontal": 1, "detalle": 2}
 PRODUCT_SNAPSHOT = """() => {
     const fields = {};
     for (const label of document.querySelectorAll('.characteristics-title')) {
         fields[label.textContent.trim()] = label.nextElementSibling?.textContent.trim() || '';
     }
     const images = [...document.querySelectorAll('#imageModal .itemModal img')]
-        .map(img => ({url: img.src, reference: img.alt}));
+        .map(img => ({url: img.src, reference: img.alt, title: img.title,
+                      label: img.getAttribute('aria-label') || '',
+                      original_name: img.getAttribute('data-filename') || ''}));
     const size = [...document.querySelectorAll('span')]
         .find(el => el.children.length === 0 && /^\\s*TALLA\\s/.test(el.textContent));
     return {ean: fields.EAN || '', upc: fields.UPC || '',
@@ -57,6 +63,8 @@ class KeringPortal:
         self._context = None
         self._page = None
         self.identities = {}
+        self.repository = None
+        self.media = {}
         self.access_events = []
         self.access_failure = None
         self._access_deadline = None
@@ -240,20 +248,45 @@ class KeringPortal:
         raise ProductNotFound() from None
 
     def _download(self, snapshot, pending, collected):
-        requested = set(pending)
-        if "lateral" in requested:
-            requested.remove("lateral")
-            requested.add("detalle")
-        for view in requested - collected.keys():
-            index = ORIGINAL_INDEX[view]
-            if index >= len(snapshot["images"]):
-                continue
-            image = snapshot["images"][index]
+        repository = self.repository or ImageRepository()
+        ean = getattr(self, "_ean", snapshot["ean"])
+        records = repository.records(ean)
+        reference, color = snapshot["reference"].rsplit("-", 1)
+        for image in snapshot["images"]:
             if image["reference"] != snapshot["reference"] or not allowed_url(image["url"], media=True):
+                continue
+            url = image["url"]
+            if url in collected:
+                continue
+            detection = identify_media(image)
+            source_name = detection["source_name"]
+            view = detection["normalized_view"]
+            existing = [record for record in records if record.origin == url or
+                        record.provider != "Kering" and view != "unknown"
+                        and record.name == source_name and record.view == view]
+            reusable = False
+            for record in existing:
+                try:
+                    image_fingerprint(repository.verified_bytes(record))
+                    reusable = True
+                    break
+                except (OSError, ValueError, SyntaxError, Image.DecompressionBombError):
+                    LOGGER.warning("kering_media_invalid ean=%s", ean)
+            if reusable:
+                if record.origin != url:
+                    repository.save(ean, record.name, repository.verified_bytes(record),
+                                    provider="Kering", origin=url, view=view,
+                                    metadata={"modelo": reference, "view_detection": detection,
+                                              "reused_from_provider": record.provider})
+                if record.view == "unknown" and view != "unknown" and not record.metadata.get("view_review"):
+                    repository.review_view(record.id, view, reviewer="kering-adapter",
+                                           reason="Verified original filename pattern", evidence=detection)
                 continue
             content = self._read_image(image["url"])
             if content is not None:
-                collected[view] = content
+                name = kering_filename(reference, color, view, Path(source_name).suffix, source_name)
+                self.media[url] = {"url": url, "name": name, "detection": detection, "view": view}
+                collected[url] = content
 
     def _read_image(self, url):
         response = self._context.request.get(url, timeout=TIMEOUT_MS, max_redirects=0)
@@ -271,6 +304,8 @@ class KeringPortal:
             response.dispose()
 
     def fetch(self, ean: str, pending: tuple[str, ...]) -> dict[str, bytes]:
+        self._ean = ean
+        self.media = {}
         collected = {}
         try:
             for attempt in range(2):

@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 import json
+from io import BytesIO
+from pathlib import Path
+from PIL import Image, ImageOps
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -14,6 +17,8 @@ from kering_images import (
 )
 from kering_portal import KeringPortal
 from kering_jobs import prepare_selection, make_loader, schedule_status
+from image_repository import ImageRepository
+from image_exports import order_export_plan, prepare_order_zip, repository_signature
 
 
 SAVE_ICON = ":material/save:"
@@ -183,7 +188,7 @@ def local_order_time(value):
 
 def pending_summary(store, order):
     total = len(order["lines"])
-    complete = sum(bool(line["ean"]) and len(store.valid_views(line["ean"])) >= 3 for line in order["lines"])
+    complete = sum(bool(line["ean"]) and set(VIEWS) <= store.valid_views(line["ean"]).keys() for line in order["lines"])
     missing = sum(not line["ean"] for line in order["lines"])
     return f"{complete}/{total} completos; {total - complete} pendientes; {missing} sin EAN"
 
@@ -206,9 +211,16 @@ def submit_orders(engine, config, selected, start, end):
         return None
 
 
-@st.fragment(run_every="3s")
 def render_progress(run_id):
-    rows = [row for row in service().store.history() if row["run_id"] == run_id]
+    store = service().store
+    with store.connect() as connection:
+        run = connection.execute("SELECT ended FROM runs WHERE id=?", (run_id,)).fetchone()
+    active = run is not None and run["ended"] is None
+    st.fragment(run_every="3s" if active else None)(_render_progress)(run_id)
+
+
+def _render_progress(run_id):
+    rows = service().store.run_history(run_id)
     if not rows:
         return
     finished = sum(row["status"] not in {"Pendiente", "En proceso"} for row in rows)
@@ -218,8 +230,14 @@ def render_progress(run_id):
         results = json.loads(row["results"])
         if results:
             with st.expander(row["number"]):
-                st.dataframe([dict(EAN=ean, **result["views"], Motivo=result["reason"], Intentos=result["tries"])
+                st.dataframe([dict(EAN=ean, **result["views"], Motivo=result["reason"], Intentos=result["tries"],
+                                   Archivos=result.get("acquisition", {}).get("available_files", "-"),
+                                   Descargados=result.get("acquisition", {}).get("downloaded_files", "-"),
+                                   Reutilizados=result.get("acquisition", {}).get("reused_files", "-"))
                               for ean, result in results.items()], hide_index=True)
+    if rows[0]["ended"] is not None and not st.session_state.get(f"kering_finished_{run_id}"):
+        st.session_state[f"kering_finished_{run_id}"] = True
+        st.rerun()
 
 
 def render_kering_page(engine) -> None:
@@ -234,58 +252,144 @@ def render_kering_page(engine) -> None:
     if not config["supplier_id"]:
         st.info("Seleccione el proveedor Kering en Configuracion.")
         return
-    orders_tab, history_tab = st.tabs(["Pedidos", "Historial"])
+    cutoff = date.fromisoformat(config["cutoff_date"])
+    schedule = schedule_status(batch.store, config)
+    st.caption(f"Corte: {cutoff:%d/%m/%Y} | Automatizacion: "
+               f"{'activa' if config['auto_enabled'] else 'inactiva'} · {config['auto_interval_hours']} h | "
+               f"Ultima ejecucion: {format_timestamp(schedule['last_finished'])} | "
+               f"Proxima: {format_timestamp(schedule['next_run'])}")
+    probe = st.session_state.get("kering_access_probe")
+    access = None
+    if probe and probe.done():
+        try:
+            access = probe.result()
+        except Exception:
+            st.error("Fallo la comprobacion de acceso. Repita la prueba en Configuracion.")
+    st.caption("Acceso Kering: " + ("confirmado" if access and access["ok"] else "no confirmado"))
+    st.link_button("Configuracion", "/config", icon=":material/settings:")
+    orders_tab, search_tab, history_tab = st.tabs(["Procesar pedidos", "Buscar imágenes", "Historial"])
     with orders_tab:
-        cutoff = date.fromisoformat(config["cutoff_date"])
-        with st.form("kering_order_dates"):
-            left, right = st.columns(2)
-            start = left.date_input("Fecha desde", cutoff, min_value=cutoff, format=DATE_FORMAT)
-            end = right.date_input("Fecha hasta", max(cutoff, date.today()), min_value=cutoff, format=DATE_FORMAT)
-            st.form_submit_button("Consultar pedidos", icon=":material/search:")
-        render_order_list(engine, start, end)
+        left, right = st.columns(2)
+        start = left.date_input("Fecha desde", cutoff, min_value=cutoff, format=DATE_FORMAT, key="kering_start")
+        end = right.date_input("Fecha hasta", max(cutoff, date.today()), min_value=cutoff,
+                               format=DATE_FORMAT, key="kering_end")
+        number = st.text_input("Numero de pedido", key="kering_order_number")
+        state = st.selectbox("Estado de imagenes", ["Todos", "Procesado", "Pendiente", "Error"],
+                            key="kering_order_state")
+        refresh = st.button("Actualizar pedidos", icon=":material/refresh:", type="primary")
+        render_order_list(engine, start, end, number, state, refresh, access)
         if st.session_state.get("kering_run"):
             render_progress(st.session_state["kering_run"])
+    with search_tab:
+        render_image_search(batch.store)
     with history_tab:
         render_history(engine, config, batch.store)
 
 
-@st.fragment(run_every="5s")
-def render_order_list(engine, start, end):
+def page_transition(state, route):
+    previous = state.get("image_page_route")
+    if route != previous:
+        state["image_page_route"] = route
+        if route == "imagenes-kering":
+            state.pop("kering_orders_loaded", None)
+
+
+def load_order_listing(engine, store, config, start, end, number="", status="Todos"):
+    orders = configured_orders(resolve_engine(engine), config, start, end)
+    latest = latest_attempts(store)
+    cache = {}
+    pairs = [(order, purchase_row(store, order, latest.get(order["id"]), cache)) for order in orders]
+    pairs = [(order, row) for order, row in pairs if number.casefold() in order["name"].casefold()
+             and (status == "Todos" or row["Procesamiento"] == status or
+                  status == "Pendiente" and row["Pendientes"] > 0 or
+                  status == "Error" and row["Procesamiento"] in {"Error", "Interrumpido"})]
+    return {"orders": [order for order, _ in pairs], "rows": [row for _, row in pairs],
+            "latest": latest, "filters": (config["supplier_id"], config["cutoff_date"], start, end, number, status),
+            "queried": datetime.now(MADRID).timestamp()}
+
+
+def render_order_list(engine, start, end, number="", status="Todos", refresh=False, access=None):
     stage = "configuracion"
     try:
         config = ConfigStore(data_root()).load()
         stage = "almacenamiento"
         store = service().store
-        stage = "odoo"
-        orders = configured_orders(resolve_engine(engine), config, start, end)
-        stage = "historial"
-        latest = latest_attempts(store)
-        stage = "estado"
-        cache = {}
-        rows = [purchase_row(store, order, latest.get(order["id"]), cache) for order in orders]
+        if refresh or "kering_orders_loaded" not in st.session_state:
+            stage = "odoo"
+            loaded = load_order_listing(engine, store, config, start, end, number, status)
+            st.session_state["kering_orders_loaded"] = loaded
     except Exception as error:
         st.error(order_list_error(error, stage))
         return
+    loaded = st.session_state["kering_orders_loaded"]
+    active_filters = (config["supplier_id"], config["cutoff_date"], start, end, number, status)
+    if active_filters != loaded["filters"]:
+        st.warning("Filtros pendientes de aplicar. Los resultados corresponden a la ultima consulta.")
+    st.caption(f"Ultima actualizacion: {format_timestamp(loaded['queried'])} | "
+               f"Filtros aplicados: {loaded['filters'][2]:%d/%m/%Y} a {loaded['filters'][3]:%d/%m/%Y} · "
+               f"{loaded['filters'][4] or 'Todos los pedidos'} · {loaded['filters'][5]}")
+    orders, rows, latest = loaded["orders"], loaded["rows"], loaded["latest"]
+    filtered_status = st.session_state.get("kering_indicator", "Todos")
+    indicators = st.columns(4)
+    counts = {"Todos": len(rows), "Procesados": sum(row["Procesamiento"] == "Procesado" for row in rows),
+              "Pendientes": sum(row["Pendientes"] > 0 for row in rows),
+              "Con error": sum(row["Procesamiento"] in {"Error", "Interrumpido"} for row in rows)}
+    for column, (label, count) in zip(indicators, counts.items()):
+        if column.button(f"{label}: {count}", key=f"kering_indicator_{label}"):
+            st.session_state["kering_indicator"] = label
+            filtered_status = label
+    st.caption(f"Filtro activo: {filtered_status} (Todos restablece)")
+    visible = [(order, row) for order, row in zip(orders, rows) if filtered_status == "Todos"
+               or filtered_status == "Procesados" and row["Procesamiento"] == "Procesado"
+               or filtered_status == "Pendientes" and row["Pendientes"] > 0
+               or filtered_status == "Con error" and row["Procesamiento"] in {"Error", "Interrumpido"}]
     if not orders:
         st.info("Sin pedidos para este corte e intervalo.")
         return
     render_pilot_selection(config, orders)
-    edited = st.data_editor(pd.DataFrame(rows), hide_index=True, width="stretch",
-                            disabled=[key for key in rows[0] if key != "Seleccionar"],
-                            key=f"kering_selection_{config['supplier_id']}_{config['cutoff_date']}_{start}_{end}")
-    selected_ids = set(edited.loc[edited["Seleccionar"], "ID"])
+    if not visible:
+        st.info("Sin resultados para el indicador seleccionado.")
+        return
+    page_count = (len(visible) - 1) // 20 + 1
+    page = st.number_input("Pagina de pedidos", min_value=1, max_value=page_count, value=1,
+                           key=f"kering_orders_page_{filtered_status}_{page_count}")
+    visible = visible[(page - 1) * 20:page * 20]
+    remembered = set(st.session_state.get("kering_selected_ids", []))
+    display = [{**{key: value for key, value in row.items() if key != "ID"},
+                "Seleccionar": order["id"] in remembered} for order, row in visible]
+    selection_key = "kering_selection_" + "_".join(str(order["id"]) for order, _ in visible)
+    edited = st.data_editor(pd.DataFrame(display), hide_index=True, width="stretch",
+                            disabled=[key for key in display[0] if key != "Seleccionar"],
+                            key=selection_key)
+    visible_ids = {order["id"] for order, _ in visible}
+    selected_ids = (remembered - visible_ids) | {
+        visible[index][0]["id"] for index, row in edited.iterrows() if row["Seleccionar"]}
+    selected_ids &= {order["id"] for order in orders}
+    st.session_state["kering_selected_ids"] = sorted(selected_ids)
     selected = [order for order in orders if order["id"] in selected_ids]
     allowed = set(config["test_order_ids"])
     busy = batch_busy(store)
     permitted = bool(selected) and (not config["test_mode"] or len(selected) <= 2 and selected_ids <= allowed)
-    if st.button("Procesar seleccionados", icon=":material/download:", disabled=not permitted or busy):
-        st.session_state["kering_run"] = submit_orders(engine, config, selected, start, end)
+    confirmed = bool(access and access["ok"])
+    blocked = ("Seleccione pedidos" if not selected else "Lote activo" if busy else
+               "Modo de prueba: autorice uno o dos pedidos" if not permitted else
+               "Acceso no confirmado: pruebe acceso en Configuracion" if not confirmed else "")
+    st.caption(blocked or "Procesar obtiene fotos; ZIP exporta las ya guardadas.")
+    if st.button("Procesar seleccionados", icon=":material/download:", disabled=bool(blocked)):
+        st.session_state["kering_run"] = submit_orders(engine, config, selected,
+                                                       loaded["filters"][2], loaded["filters"][3])
         if st.session_state["kering_run"]:
             st.rerun()
-    render_order_actions(engine, config, orders, start, end, busy)
-    detail_id = st.session_state.get("kering_detail_id")
-    current_order = next((order for order in orders if order["id"] == detail_id), None)
+    choices = {order["id"]: order for order, _ in visible}
+    current_id = st.selectbox("Ver fotos del pedido", list(choices),
+                             format_func=lambda value: choices[value]["name"], key="kering_open_order")
+    current_order = choices.get(current_id)
     if current_order is not None:
+        detail_id = current_order["id"]
+        if st.button("Procesar pendientes", disabled=busy or not confirmed or config["test_mode"]
+                     and detail_id not in allowed, icon=":material/download:"):
+            st.session_state["kering_run"] = submit_orders(engine, config, [current_order],
+                                                           loaded["filters"][2], loaded["filters"][3])
         render_current_order(store, current_order, latest.get(detail_id))
 
 
@@ -306,28 +410,13 @@ def order_list_error(error, stage):
     return messages.get(stage, "No se pudo cargar el listado Kering. Codigo: KERING_LISTADO.")
 
 
-def render_order_actions(engine, config, orders, start, end, busy):
-    allowed = set(config["test_order_ids"])
-    page_size = 20
-    pages = (len(orders) - 1) // page_size + 1
-    current = st.number_input("P\u00e1gina de acciones", min_value=1, max_value=pages, value=1, key="kering_actions_page")
-    for order in orders[(current - 1) * page_size:current * page_size]:
-        title, process, detail = st.columns([4, 1, 1])
-        title.write(order["name"])
-        if process.button("Procesar", key=f"kering_process_{order['id']}", icon=":material/download:",
-                          disabled=busy or config["test_mode"] and order["id"] not in allowed):
-            st.session_state["kering_run"] = submit_orders(engine, config, [order], start, end)
-            if st.session_state["kering_run"]:
-                st.rerun()
-        if detail.button("Detalle", key=f"kering_detail_{order['id']}", icon=":material/image:"):
-            st.session_state["kering_detail_id"] = order["id"]
-
-
 def purchase_row(store, order, latest, cache):
     status = purchase_status(store, order, latest, cache)
     return {"Seleccionar": False, "ID": order["id"], "Pedido": order["name"],
             "Fecha": local_order_time(order["date_order"]).strftime(TIME_FORMAT),
-            "Odoo": order["state"], "Procesamiento": status["status"],
+            "Odoo": {"purchase": "Confirmado", "draft": "Borrador", "sent": "Enviado",
+                     "done": "Cerrado", "to approve": "Por aprobar"}.get(order["state"], order["state"]),
+            "Procesamiento": status["status"],
             "Completos": status["complete"], "Pendientes": status["pending"],
             "\u00daltimo procesamiento": format_timestamp(status["last_processed"]),
             "Cambios": status["changed"]}
@@ -351,17 +440,18 @@ def render_current_order(store, order, latest):
     st.subheader(order["name"])
     status = purchase_status(store, order, latest)
     st.write(f"{status['status']} | {status['complete']} completos | {status['pending']} pendientes")
+    render_order_zip(store, order, f"current-{order['id']}")
     results = json.loads(latest["results"]) if latest else {}
-    for line in order["lines"]:
-        st.write(line.get("product_name") or f"Producto {line['product_id']}")
-        if line["ean"]:
-            render_product(store, line["ean"], results.get(line["ean"], {}))
-        else:
-            st.warning(f"Linea {line['id']}: sin EAN")
+    products = {line["ean"]: line for line in order["lines"] if line["ean"]}
+    if products:
+        ean = st.selectbox("Producto del pedido", list(products),
+                          format_func=lambda value: f"{products[value].get('product_name', '')} · {value}",
+                          key=f"current-product-{order['id']}")
+        render_product(store, ean, results.get(ean, {}), f"current-{order['id']}")
+    if any(not line["ean"] for line in order["lines"]):
+        st.warning("El pedido contiene productos sin EAN.")
     if latest and latest["error"]:
         st.warning(latest["error"])
-    st.download_button("ZIP del pedido", store.zip_order(order), file_name=f"kering-{order['id']}.zip",
-                       mime="application/zip", icon=":material/folder_zip:", key=f"kering_current_zip_{order['id']}")
 
 
 def render_history(engine, config, store):
@@ -383,7 +473,10 @@ def render_history(engine, config, store):
     if not filtered:
         st.info("Sin intentos registrados para estos filtros.")
         return
-    display = pd.DataFrame(filtered)[["number", "order_date", "status", "origin", "attempt", "user", "started", "ended", "error", "run_id"]]
+    display = pd.DataFrame(filtered)[["number", "order_date", "status", "origin", "attempt", "user", "started", "ended", "error"]]
+    display["order_date"] = display["order_date"].map(lambda value: local_order_time(value).strftime(TIME_FORMAT))
+    for column in ("started", "ended"):
+        display[column] = display[column].map(format_timestamp)
     st.dataframe(display, hide_index=True, width="stretch")
     selected = st.selectbox("Detalle de intento", range(len(filtered)),
                             format_func=lambda index: f"{filtered[index]['number']} | intento {filtered[index]['attempt']} | {filtered[index]['status']}")
@@ -408,16 +501,24 @@ def filter_history(rows, number, states, dates):
 def render_attempt(engine, config, store, row):
     order = json.loads(row["snapshot"])
     results = json.loads(row["results"])
+    st.caption("Fotos disponibles actualmente para los EAN del snapshot; no es una copia historica de los archivos.")
+    render_order_zip(store, order, f"history-{row['run_id']}-{row['order_id']}")
     st.write(f"Intervalo: {row['start_date']} a {row['end_date']} | Proveedor Odoo: {row['supplier']}")
     for line in order["lines"]:
         if not line["ean"]:
             st.warning(f"Linea {line['id']}: producto sin EAN")
     outcomes = [value for result in results.values() for value in result["views"].values()]
-    st.write(f"Descargadas: {outcomes.count('Descargada')} | Reutilizadas: {outcomes.count('Reutilizada')} | Pendientes: {outcomes.count('Pendiente')}")
-    for ean in dict.fromkeys(line["ean"] for line in order["lines"] if line["ean"]):
-        render_product(store, ean, results.get(ean, {}))
-    st.download_button("ZIP del pedido", store.zip_order(order), file_name=f"kering-{order['id']}.zip",
-                       mime="application/zip", icon=":material/folder_zip:")
+    st.write(f"Vistas requeridas descargadas: {outcomes.count('Descargada')} | "
+             f"Reutilizadas: {outcomes.count('Reutilizada')} | Pendientes: {outcomes.count('Pendiente')}")
+    acquisitions = [result["acquisition"] for result in results.values() if "acquisition" in result]
+    if acquisitions:
+        st.caption(f"Archivos validos: {sum(item['available_files'] for item in acquisitions)} | "
+                   f"Descargados: {sum(item['downloaded_files'] for item in acquisitions)} | "
+                   f"Reutilizados: {sum(item['reused_files'] for item in acquisitions)}")
+    products = list(dict.fromkeys(line["ean"] for line in order["lines"] if line["ean"]))
+    if products:
+        ean = st.selectbox("Producto del intento", products, key=f"history-product-{row['run_id']}-{row['order_id']}")
+        render_product(store, ean, results.get(ean, {}), f"history-{row['run_id']}-{row['order_id']}")
     if row["status"] not in {"Pendiente", "En proceso"}:
         if st.button("Reintentar pendientes y errores", icon=":material/replay:",
                      disabled=row["supplier"] != config["supplier_id"]):
@@ -428,35 +529,178 @@ def render_attempt(engine, config, store, row):
                 st.success("Nuevo intento en segundo plano. Progreso disponible en Pedidos.")
 
 
-def render_product(store, ean, result):
+def render_product(store, ean, result, prefix="product"):
     st.subheader(ean)
     valid = store.valid_views(ean)
-    st.write(result.get("reason", ""))
+    reason = result.get("reason", "")
+    if reason == "vistas_sin_identificar":
+        st.info("Fotos adquiridas; no hay senales suficientes para acreditar las vistas. Revision pendiente.")
+    elif reason:
+        st.warning("Quedan vistas pendientes. Consulte el diagnostico o revise las fotos.")
+    acquisition = result.get("acquisition")
+    if acquisition:
+        st.caption(f"Archivos validos: {acquisition['available_files']} | "
+                   f"Descargados: {acquisition['downloaded_files']} | Reutilizados: {acquisition['reused_files']}")
+    if reason:
+        with st.expander("Diagnostico tecnico"):
+            st.code(reason)
     identity = result.get("identity")
     if identity:
         st.write(identity)
     for column, view in zip(st.columns(3), displayed_views(valid)):
         with column:
-            if view in valid:
-                st.image(str(valid[view]), caption=view, width="stretch")
-            else:
+            if view not in valid:
                 st.warning(f"{view}: pendiente")
+    render_gallery(store.repository, ean, prefix)
     if result:
         st.write(result["views"])
 
 
 def gallery_rows() -> list[dict]:
-    root = data_root()
-    if not (root / "history.sqlite3").exists():
-        return []
-    store = ImageStore(root)
-    with store.connect() as connection:
-        eans = [row[0] for row in connection.execute("SELECT DISTINCT ean FROM images")]
-    rows = []
-    for ean in eans:
-        for view, path in store.valid_views(ean).items():
-            timestamp = path.stat().st_mtime
-            rows.append({"Modelo": "Kering", "EAN": ean, "Mercado": "Kering", "Archivo": view,
-                         "Ruta": str(path), "Descargada": timestamp,
-                         "Fecha": datetime.fromtimestamp(timestamp).strftime(TIME_FORMAT)})
-    return rows
+    return ImageRepository().catalog_rows()
+
+
+def render_order_zip(store, order, key):
+    try:
+        plan = cached_export_plan(store.repository, order)
+    except (OSError, ValueError) as error:
+        st.error(str(error))
+        return
+    missing = [product["ean"] for product in plan.manifest["products"] if not product["files"]]
+    st.caption(f"{len(plan.files)} fotos exportables | EAN sin fotos: {', '.join(missing) or 'ninguno'}")
+    if plan.manifest["partial"]:
+        st.warning("Contenido parcial: faltan vistas requeridas o hay lineas sin EAN.")
+        st.write({p["ean"]: p["missing_views"] for p in plan.manifest["products"] if p["missing_views"]})
+    partial_allowed = (st.checkbox("Permitir exportacion parcial", key=f"partial-{key}")
+                       if plan.manifest["partial"] else True)
+    cached = st.session_state.get("kering_prepared_zip")
+    if cached and cached["order_id"] == order["id"] and cached["signature"] != plan.signature:
+        st.session_state.pop("kering_prepared_zip", None)
+        cached = None
+    if st.button(f"Preparar {len(plan.files)} fotos · ZIP", key=f"prepare-{key}",
+                 disabled=not plan.files or not partial_allowed, icon=":material/folder_zip:"):
+        try:
+            with prepare_order_zip(store.repository, order, plan) as export:
+                cached = {"signature": plan.signature, "bytes": export.stream.read(), "name": plan.filename,
+                          "order_id": order["id"]}
+            st.session_state["kering_prepared_zip"] = cached
+            st.success("ZIP preparado con fotos actuales y manifiesto.")
+        except (OSError, ValueError) as error:
+            st.error(f"No se pudo preparar el ZIP: {error}")
+    if cached and cached["signature"] == plan.signature and partial_allowed:
+        st.download_button(f"Descargar {len(plan.files)} fotos · ZIP", cached["bytes"],
+                           file_name=cached["name"], mime="application/zip", key=f"download-{key}")
+
+
+def cached_export_plan(repository, order):
+    signature = repository_signature(repository, order)
+    plans = st.session_state.setdefault("kering_export_plans", {})
+    if signature not in plans:
+        plan = order_export_plan(repository, order)
+        if len(plans) >= 4:
+            plans.pop(next(iter(plans)))
+        plans[signature] = plan
+    return plans[signature]
+
+
+@st.cache_data(max_entries=64, show_spinner=False)
+def thumbnail(path, signature):
+    with Image.open(Path(path)) as image:
+        image = ImageOps.exif_transpose(image)
+        image.thumbnail((360, 240))
+        buffer = BytesIO()
+        image.convert("RGB").save(buffer, format="JPEG")
+        return buffer.getvalue()
+
+
+def render_gallery(repository, ean, prefix="product"):
+    records = repository.records(ean)
+    origins = st.multiselect("Origen", sorted({r.provider for r in records}), key=f"{prefix}-{ean}-origins")
+    views = st.multiselect("Vista", sorted({r.view for r in records}), key=f"{prefix}-{ean}-views")
+    markets = st.multiselect("Mercado", sorted({r.market or "Original" for r in records}),
+                             key=f"{prefix}-{ean}-markets")
+    filtered = [r for r in records if (not origins or r.provider in origins)
+                and (not views or r.view in views) and (not markets or (r.market or "Original") in markets)]
+    covered = cached_export_plan(repository, {"id": ean, "name": ean, "lines": [{"ean": ean}]}).manifest["products"][0]
+    st.caption(f"{len(filtered)} fotos | Pendientes: {', '.join(covered['missing_views']) or 'ninguna'}")
+    if not filtered:
+        st.info("Sin fotos para estos filtros.")
+        return
+    pages = (len(filtered) - 1) // 12 + 1
+    page = st.number_input("Pagina de fotos", min_value=1, max_value=pages, value=1,
+                           key=f"{prefix}-{ean}-page-{pages}")
+    columns = st.columns(3)
+    for index, record in enumerate(filtered[(page - 1) * 12:page * 12]):
+        with columns[index % 3]:
+            if record.path.is_file():
+                try:
+                    stat = record.path.stat()
+                    st.image(thumbnail(str(record.path), (stat.st_mtime_ns, stat.st_size)),
+                             caption=f"{record.name} · {record.provider} · {record.view} · {record.market or 'Original'}",
+                             width="stretch")
+                except (OSError, ValueError, Image.DecompressionBombError):
+                    st.warning(f"No se puede mostrar {record.name}")
+            else:
+                st.warning(f"Archivo ausente: {record.name}")
+    selected = st.selectbox("Ampliar foto", filtered, format_func=lambda r: f"{r.name} · {r.provider} · {r.market}",
+                            key=f"{prefix}-{ean}-enlarge")
+    if st.button("Ampliar", key=f"{prefix}-{ean}-show"):
+        try:
+            st.image(str(selected.path), caption=selected.name, width="stretch")
+            st.caption(f"Origen: {selected.origin} | Vista: {selected.view} | Mercado: {selected.market or 'Original'}")
+        except (OSError, ValueError):
+            st.error("No se puede abrir esta imagen.")
+    if selected.provider == "Kering":
+        with st.expander("Revisar clasificacion de la vista (sin renombrar)"):
+            st.json(selected.metadata.get("view_detection", {}))
+            if selected.metadata.get("view_review"):
+                st.json(selected.metadata["view_review"])
+            review = st.selectbox("Vista comprobada", ["unknown", *VIEWS, "detalle"],
+                                  key=f"{prefix}-{ean}-review-view")
+            reason = st.text_input("Motivo y evidencia de la revision", key=f"{prefix}-{ean}-review-reason")
+            if st.button("Confirmar revision", disabled=not reason.strip(), key=f"{prefix}-{ean}-review-save"):
+                try:
+                    repository.review_view(selected.id, review, reviewer=st.session_state.get("auth_user", "admin"),
+                                           reason=reason)
+                    st.success("Clasificacion revisada; archivo y nombre conservados. Historial registrado.")
+                    st.rerun()
+                except (OSError, ValueError):
+                    st.error("No se pudo guardar la revision de la vista.")
+
+
+def render_image_search(store):
+    mode = st.radio("Buscar por", ["EAN exacto", "Pedido", "Producto / modelo"], horizontal=True)
+    query = st.text_input("Busqueda de imagenes", key="kering_image_query").strip()
+    if not query:
+        st.info("Buscar y exportar usa solo fotos existentes; no accede al portal.")
+        return
+    if mode == "Pedido":
+        loaded = st.session_state.get("kering_orders_loaded", {})
+        orders = {order["id"]: order for order in loaded.get("orders", [])}
+        for row in store.history():
+            orders.setdefault(row["order_id"], json.loads(row["snapshot"]))
+        matches = [order for order in orders.values() if query.casefold() in order["name"].casefold()
+                   and local_order_time(order["date_order"]).date() >= date.fromisoformat(
+                       ConfigStore(data_root()).load()["cutoff_date"])]
+        if not matches:
+            st.info("Sin pedidos cargados para ese numero y corte; use Actualizar pedidos.")
+            return
+        order = st.selectbox("Pedido encontrado", matches, format_func=lambda item: item["name"])
+        render_order_zip(store, order, f"search-{order['id']}")
+        eans = list(dict.fromkeys(line["ean"] for line in order["lines"] if line["ean"]))
+        names = {line["ean"]: line.get("product_name", "") for line in order["lines"]}
+    else:
+        records = store.repository.records()
+        eans = sorted({record.ean for record in records if record.ean == query}) \
+            if mode == "EAN exacto" else sorted({record.ean for record in records
+            if query.casefold() in str(record.metadata.get("modelo", "")).casefold() or
+            query.casefold() in str(record.metadata.get("product_name", "")).casefold()})
+        names = {}
+    if not eans:
+        st.info("Sin imagenes disponibles.")
+        return
+    ean = st.selectbox("Producto / EAN", eans, format_func=lambda value: f"{names.get(value, '')} · {value}")
+    st.caption("La consulta directa del repositorio no restringe la antiguedad de las fotos.")
+    missing = cached_export_plan(store.repository, {"id": ean, "name": ean, "lines": [{"ean": ean}]}).manifest["products"][0]["missing_views"]
+    st.write(f"Vistas pendientes: {', '.join(missing) or 'ninguna'}")
+    render_gallery(store.repository, ean, "search")

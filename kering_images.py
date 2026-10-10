@@ -4,23 +4,25 @@ from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 import json
+import hashlib
+import logging
 import os
 import tempfile
-import hashlib
 import math
 import sqlite3
 import uuid
 import time as clock
 from io import BytesIO
-from zipfile import ZipFile
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event, Thread, BoundedSemaphore
 from contextlib import contextmanager
 
 from cryptography.fernet import Fernet
 from filelock import FileLock, Timeout
-from PIL import Image, ImageOps
+from PIL import Image
 from sqlalchemy import bindparam, text
+from image_repository import ImageRepository, image_fingerprint
+from image_naming import kering_filename, classified_view
 
 
 PORTAL_URL = "https://my.keringeyewear.com/keringeyewear/es/login"
@@ -73,10 +75,7 @@ class ProductNotFound(PortalFailure):
 
 
 def displayed_views(valid) -> tuple[str, ...]:
-    ordered = tuple(view for view in IMAGE_VIEWS if view in valid)
-    if len(ordered) >= 3:
-        return ordered[:3]
-    return tuple("detalle" if view == "lateral" and "detalle" in valid else view for view in VIEWS)
+    return VIEWS
 
 
 class UnverifiedPortal:
@@ -173,21 +172,22 @@ def read_supplier_contacts(engine, supplier_id: int) -> list[dict]:
         """), {"supplier": int(supplier_id)}).mappings()]
 
 
-def image_fingerprint(content: bytes) -> str:
-    if len(content) > 30 * 1024 * 1024:
-        raise ValueError("imagen_invalida")
+def kering_image_name(view: str) -> str:
+    if view not in IMAGE_VIEWS:
+        raise ValueError("ean_o_vista_invalida")
+    return f"{view}.img"
+
+
+def kering_zip_name(view: str, content: bytes) -> str:
     with Image.open(BytesIO(content)) as image:
-        image.verify()
-    with Image.open(BytesIO(content)) as image:
-        if image.format not in {"JPEG", "PNG", "WEBP"} or min(image.size) < 600:
-            raise ValueError("imagen_invalida")
-        pixels = ImageOps.exif_transpose(image).convert("RGB")
-        return hashlib.sha256(pixels.resize((64, 64)).tobytes()).hexdigest()
+        extension = {"JPEG": "jpg", "PNG": "png", "WEBP": "webp"}[image.format]
+    return f"{view}.{extension}"
 
 
 class ImageStore:
     def __init__(self, root: Path):
         self.root = root
+        self.repository = ImageRepository()
         root.mkdir(parents=True, exist_ok=True)
         self.database = root / "history.sqlite3"
         with FileLock(root / "schema.lock", timeout=30), self.connect() as connection:
@@ -229,41 +229,44 @@ class ImageStore:
     def path(self, ean: str, view: str) -> Path:
         if not ean.isascii() or not ean.isdigit() or len(ean) > 20 or view not in IMAGE_VIEWS:
             raise ValueError("ean_o_vista_invalida")
-        return self.root / "images" / "kering" / ean / f"{view}.img"
+        valid = self.valid_views(ean)
+        if view in valid:
+            return valid[view]
+        records = [record for record in self.repository.records(ean) if record.view == view]
+        return records[0].path if records else self.repository.root / ean / kering_image_name(view)
 
     def valid_views(self, ean: str) -> dict[str, Path]:
-        valid = {}
-        seen = set()
-        with self.connect() as connection:
-            rows = connection.execute("SELECT * FROM images WHERE ean=?", (ean,)).fetchall()
-        for row in rows:
-            try:
-                path = self.path(ean, row["view"])
-                content = path.read_bytes()
-                fingerprint = image_fingerprint(content)
-                if hashlib.sha256(content).hexdigest() != row["digest"] or fingerprint in seen:
-                    continue
-                if fingerprint != row["pixels"]:
-                    continue
-            except (OSError, ValueError, Image.DecompressionBombError, SyntaxError):
-                continue
-            seen.add(fingerprint)
-            valid[row["view"]] = path
-        return valid
+        return self.repository.valid_views(ean)
 
-    def save_view(self, ean: str, view: str, content: bytes) -> bool:
-        existing = self.valid_views(ean)
-        if view in existing:
-            return False
-        fingerprint = image_fingerprint(content)
-        if any(image_fingerprint(path.read_bytes()) == fingerprint for path in existing.values()):
-            return False
-        path = self.path(ean, view)
-        with self.connect() as connection:
-            connection.execute("INSERT OR REPLACE INTO images VALUES(?,?,?,?)",
-                               (ean, view, hashlib.sha256(content).hexdigest(), fingerprint))
-        atomic_write(path, content)
-        return True
+    def available_image_count(self, ean: str) -> int:
+        checksums = set()
+        for record in self.repository.records(ean):
+            if record.checksum in checksums:
+                continue
+            try:
+                image_fingerprint(self.repository.verified_bytes(record))
+                checksums.add(record.checksum)
+            except (OSError, ValueError, Image.DecompressionBombError, SyntaxError):
+                logging.getLogger(__name__).warning("kering_image_not_reusable record_id=%s", record.id)
+        return len(checksums)
+
+    def save_view(self, ean: str, view: str, content: bytes, identity: dict | None = None) -> bool:
+        with self.repository.lock(ean):
+            existing = self.valid_views(ean)
+            if view in existing:
+                return False
+            fingerprint = image_fingerprint(content)
+            if any(image_fingerprint(path.read_bytes()) == fingerprint for path in existing.values()):
+                return False
+            with Image.open(BytesIO(content)) as image:
+                extension = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp"}[image.format]
+            identity = identity or {}
+            name = kering_filename(identity.get("model", ean), identity.get("color", "unknown"),
+                                   view, extension, f"{view}{extension}")
+            self.repository.save(ean, name, content, provider="Kering", origin="kering_portal",
+                                 view=classified_view(name), metadata={"modelo": identity.get("model", ""),
+                                                                      "identity": identity})
+            return True
 
     def recover(self, now=None) -> None:
         timestamp = clock.time() if now is None else now
@@ -299,6 +302,8 @@ class ImageStore:
 
     def insert_orders(self, connection, run_id, supplier, orders):
         for order in orders:
+            self.repository.associate_order("Kering", str(order["id"]),
+                                            [line["ean"] for line in order["lines"] if line["ean"]])
             previous = connection.execute("SELECT COALESCE(MAX(attempt),0) FROM attempts WHERE order_id=?",
                                           (order["id"],)).fetchone()[0]
             connection.execute("""INSERT INTO attempts
@@ -327,15 +332,18 @@ class ImageStore:
                 FROM attempts JOIN runs ON runs.id=attempts.run_id ORDER BY started DESC, order_id
             """)]
 
+    def run_history(self, run_id: str) -> list[dict]:
+        with self.connect() as connection:
+            return [dict(row) for row in connection.execute("""
+                SELECT attempts.*, runs.user, runs.started, runs.ended, runs.start_date, runs.end_date, runs.origin
+                FROM attempts JOIN runs ON runs.id=attempts.run_id
+                WHERE attempts.run_id=? ORDER BY order_id
+            """, (run_id,))]
+
     def zip_order(self, order: dict) -> bytes:
-        buffer = BytesIO()
-        with ZipFile(buffer, "w") as archive:
-            for ean in dict.fromkeys(line["ean"] for line in order["lines"] if line["ean"]):
-                for view, path in self.valid_views(ean).items():
-                    with Image.open(path) as image:
-                        extension = {"JPEG": "jpg", "PNG": "png", "WEBP": "webp"}[image.format]
-                    archive.write(path, f"kering/{ean}/{view}.{extension}")
-        return buffer.getvalue()
+        from image_exports import prepare_order_zip
+        with prepare_order_zip(self.repository, order) as export:
+            return export.stream.read()
 
 
 def line_signature(order):
@@ -369,7 +377,7 @@ def count_complete_lines(store, order, cache):
         ean = line["ean"]
         if ean and ean not in cache:
             cache[ean] = store.valid_views(ean)
-        complete += int(bool(ean) and len(cache.get(ean, {})) >= 3)
+        complete += int(bool(ean) and set(VIEWS) <= cache.get(ean, {}).keys())
     return complete
 
 
@@ -418,22 +426,29 @@ def batch_busy(store):
 def process_ean(store: ImageStore, portal, ean: str) -> dict:
     if not ean.isascii() or not ean.isdigit() or len(ean) > 20:
         return {"views": dict.fromkeys(VIEWS, "Pendiente"), "reason": "ean_invalido", "tries": 0}
-    lock_path = store.root / "locks" / f"{ean}.lock"
-    lock_path.parent.mkdir(exist_ok=True)
     try:
-        with FileLock(lock_path, timeout=0):
+        with store.repository.lock(ean).acquire(timeout=0):
             valid = store.valid_views(ean)
             results = {view: "Reutilizada" if view in valid else "Pendiente" for view in displayed_views(valid)}
             pending = tuple(view for view in displayed_views(valid) if view not in valid)
-            if len(valid) >= 3:
-                return {"views": results, "reason": "", "tries": 0}
+            if set(VIEWS) <= valid.keys():
+                available = store.available_image_count(ean)
+                return {"views": results, "reason": "", "tries": 0,
+                        "acquisition": {"available_files": available, "downloaded_files": 0, "reused_files": available}}
+            if hasattr(portal, "repository"):
+                portal.repository = store.repository
             images, reason, tries = fetch_pending(portal, ean, pending)
-            reason = save_pending(store, ean, pending, images, results, reason)
+            reason, downloaded = save_pending(store, ean, pending, images, results, reason, portal)
+            available = store.available_image_count(ean)
+            if available and not valid and set(results.values()) == {"Pendiente"} and reason == "vistas_no_disponibles":
+                reason = "vistas_sin_identificar"
             return {
                 "views": results,
                 "reason": reason if "Pendiente" in results.values() else "",
                 "tries": tries,
                 "identity": getattr(portal, "identities", {}).get(ean, {}),
+                "acquisition": {"available_files": available, "downloaded_files": downloaded,
+                                "reused_files": max(0, available - downloaded)},
                 **({"access_failure": dict(portal.access_failure)}
                    if getattr(portal, "access_failure", None) else {}),
             }
@@ -459,23 +474,35 @@ def fetch_pending(portal, ean, pending):
     return {}, reason, 3
 
 
-def save_pending(store, ean, pending, images, results, reason):
-    candidates = list(pending)
-    if "detalle" in images and "lateral" in pending and "lateral" not in images:
-        candidates.append("detalle")
-    for view in candidates:
-        if view not in images:
-            continue
+def save_pending(store, ean, pending, images, results, reason, portal=None):
+    identity = getattr(portal, "identities", {}).get(ean, {})
+    media = getattr(portal, "media", {})
+    downloaded = set()
+    downloaded_checksums = set()
+    for view, content in images.items():
         try:
-            if store.save_view(ean, view, images[view]):
+            if view in media:
+                info = media[view]
+                record, _ = store.repository.save(
+                    ean, info["name"], content, provider="Kering", origin=info["url"],
+                    view=info["view"], metadata={"modelo": identity.get("model", ""),
+                                                "identity": identity, "view_detection": info["detection"]})
+                downloaded.add(record.view)
+                downloaded_checksums.add(record.checksum)
+            elif store.save_view(ean, view, content, identity):
+                if view not in pending:
+                    continue
                 results[view] = "Descargada"
-                if view == "detalle":
-                    results.pop("lateral", None)
+                downloaded.add(view)
+                downloaded_checksums.add(hashlib.sha256(content).hexdigest())
             else:
                 reason = "vista_duplicada"
         except (OSError, ValueError, Image.DecompressionBombError, SyntaxError):
             reason = "imagen_invalida"
-    return reason
+    valid = store.valid_views(ean)
+    for view in pending:
+        results[view] = ("Descargada" if view in downloaded else "Reutilizada") if view in valid else "Pendiente"
+    return reason, len(downloaded_checksums)
 
 
 def order_status(order: dict, results: dict) -> str:
@@ -486,8 +513,9 @@ def order_status(order: dict, results: dict) -> str:
     for line in order["lines"]:
         result = results.get(line["ean"], {})
         views = result.get("views", {})
-        complete = complete and bool(line["ean"]) and len(views) == 3 and "Pendiente" not in views.values()
-        available = available or any(value != "Pendiente" for value in views.values())
+        complete = complete and bool(line["ean"]) and all(views.get(view, "Pendiente") != "Pendiente" for view in VIEWS)
+        available = available or any(value != "Pendiente" for value in views.values()) or bool(
+            result.get("acquisition", {}).get("available_files", 0))
     if complete:
         return "Completo"
     return "Parcial" if available or any(not line["ean"] for line in order["lines"]) else "Error"
@@ -508,9 +536,12 @@ def execute_order(store, attempt, loader, portal, cache):
         cached = cache.get(ean)
         cache_valid = cached and all(view in valid for view, outcome in cached["views"].items() if outcome != "Pendiente")
         if cache_valid:
+            available = store.available_image_count(ean)
             results[ean] = {"views": {view: "Reutilizada" if view in valid else "Pendiente" for view in displayed_views(valid)},
                             "reason": cache[ean]["reason"], "tries": 0,
-                            "identity": cache[ean].get("identity", {})}
+                            "identity": cache[ean].get("identity", {}),
+                            "acquisition": {"available_files": available,
+                                            "downloaded_files": 0, "reused_files": available}}
         else:
             results[ean] = process_ean(store, portal, ean)
             cache[ean] = results[ean]

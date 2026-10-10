@@ -37,6 +37,17 @@ COPY kering_images.py .
 COPY kering_images_ui.py .
 COPY kering_portal.py .
 COPY kering_jobs.py .
+COPY image_repository.py image_naming.py image_exports.py kering_media.py .
+COPY cloud_dashboard.py process_activity.py build_info.py .
+COPY assets ./assets
+COPY logo ./logo
+COPY scripts/write_build_info.py ./scripts/write_build_info.py
+ARG BUILD_COMMIT
+ARG BUILD_VERSION
+ARG BUILD_PUBLISHED
+ARG BUILD_ID
+RUN BUILD_COMMIT="$BUILD_COMMIT" BUILD_VERSION="$BUILD_VERSION" BUILD_PUBLISHED="$BUILD_PUBLISHED" BUILD_ID="$BUILD_ID" \
+    python scripts/write_build_info.py
 COPY scripts/validate_kering_portal.py ./scripts/validate_kering_portal.py
 COPY db_loader.py .
 COPY engine.py .
@@ -62,6 +73,10 @@ ENV PYTHONUNBUFFERED=1
 
 # Configurar Streamlit
 RUN echo "\
+[theme]\n\
+primaryColor = '#417B7B'\n\
+base = 'light'\n\
+\n\
 [server]\n\
 port = 8501\n\
 headless = true\n\
