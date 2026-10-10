@@ -44,6 +44,22 @@ def require_nfs(root: Path, source: str = EXPECTED_SOURCE,
     return {"root": str(root), "source": source, "filesystem": filesystem[0]}
 
 
+def require_nfs_directory(root: Path, mount: Path, source: str,
+                          mountinfo: Path = Path("/proc/self/mountinfo")) -> dict:
+    """Allow a canonical child, but never a symlink or nested bind/overmount."""
+    root, mount = Path(os.path.abspath(root)), Path(os.path.abspath(mount))
+    receipt = require_nfs(mount, source, mountinfo)
+    if root.resolve() != root or not root.is_dir() or mount not in root.parents:
+        raise RuntimeError("NFS child missing, aliased or outside the expected mount")
+    for line in mountinfo.read_text(encoding="utf-8").splitlines():
+        fields = line.partition(" - ")[0].split()
+        point = Path(_unescape(fields[4]))
+        if point != mount and mount in point.parents and (
+                point == root or point in root.parents):
+            raise RuntimeError("Nested mount or bind alias inside NFS staging")
+    return {**receipt, "directory": str(root)}
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path("/mnt/cloud-imagenes"))

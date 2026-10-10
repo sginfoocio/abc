@@ -6,12 +6,16 @@ from contextlib import closing
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import sqlite3
 from PIL import Image
 
 from filelock import FileLock
-from repository_storage import state_root, backup_root, require_local, check_image_root, check_backup_root
+from repository_storage import (
+    state_root, backup_root, require_local, check_image_root, check_backup_root,
+    check_migration_target, check_staging_role, staging_root,
+)
 
 from graph_mail_downloader import (
     _image_model_color_key, _load_eans_by_image_key, _market_view_from_image_name,
@@ -40,6 +44,7 @@ def source_orders(root: Path) -> list[dict]:
 
 
 def inventory(sources: list[tuple[str, Path]], target: Path, mapping: dict | None = None) -> dict:
+    check_migration_target(target)
     target = target.resolve()
     entries: list[dict] = []
     orders: list[dict] = []
@@ -59,6 +64,13 @@ def inventory(sources: list[tuple[str, Path]], target: Path, mapping: dict | Non
                 content_paths[(ean, digest)] = path
     roots = []
     for provider, source in sources:
+        staged = staging_root()
+        if staged is not None:
+            check_staging_role(staged / "source", "source")
+            absolute = source.absolute()
+            if absolute.resolve() != absolute or not (
+                    absolute == staged / "source" or staged / "source" in absolute.parents):
+                raise ValueError("Origen de ensayo debe estar en source congelada")
         source = source.resolve()
         if not source.is_dir():
             raise ValueError(f"No existe origen: {source}")
@@ -73,7 +85,13 @@ def inventory(sources: list[tuple[str, Path]], target: Path, mapping: dict | Non
         source_id = hashlib.sha256(str(source).encode()).hexdigest()
         if provider == "Kering":
             orders.extend(source_orders(source))
-        for path in sorted(source.rglob("*")):
+        paths = []
+        for directory, directories, filenames in os.walk(source, followlinks=False):
+            directories[:] = [name for name in directories if name != "staging"]
+            paths.extend(Path(directory) / name for name in filenames)
+            paths.extend(Path(directory) / name for name in directories
+                         if (Path(directory) / name).is_symlink())
+        for path in sorted(paths):
             if not path.is_file():
                 continue
             if path.is_symlink() or source not in path.resolve().parents:
@@ -145,6 +163,7 @@ def inventory(sources: list[tuple[str, Path]], target: Path, mapping: dict | Non
 
 
 def check_plan(plan: dict) -> None:
+    check_migration_target(Path(plan["target"]))
     body = {key: value for key, value in plan.items() if key != "id"}
     if plan.get("version") not in {1, 2} or hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest() != plan["id"]:
         raise ValueError("Plan modificado; repetir inventario y simulacion")
@@ -297,6 +316,7 @@ def verify(plan: dict, repository: Path | None = None) -> dict:
 
 
 def recover(plan: dict, target: Path, repository: Path | None = None) -> dict:
+    check_migration_target(target, "recovery")
     verify(plan, repository)
     root = (repository or Path(plan["target"])).resolve()
     state, backups = plan_storage(plan)

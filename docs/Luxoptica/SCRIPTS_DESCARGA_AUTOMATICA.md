@@ -231,6 +231,7 @@ Antes de copiar datos, ejecutar un `dry-run`:
 
 ```powershell
 rsync -avn --itemize-changes --stats `
+   --exclude='staging/' `
    --exclude='20??-??-??/***' `
    --exclude='*.zip' `
    repo/images/ `
@@ -247,6 +248,7 @@ Cuando el `dry-run` sea correcto:
 
 ```powershell
 rsync -av --partial `
+   --exclude='staging/' `
    --exclude='20??-??-??/***' `
    --exclude='*.zip' `
    repo/images/ `
@@ -255,6 +257,11 @@ rsync -av --partial `
 
 `--partial` permite reanudar transferencias interrumpidas. No se usa `--delete`,
 por lo que la sincronización no elimina contenido existente en el NAS.
+
+`staging/` se excluye en todos los niveles: nunca replicar fuente, backups,
+recuperacion ni temporales del ensayo. La tarea DSM externa debe incorporar
+esta misma exclusion antes de usar la raiz NAS; estos comandos documentados
+no cambian automaticamente una tarea configurada fuera del repositorio.
 
 ### Requisitos del Synology
 

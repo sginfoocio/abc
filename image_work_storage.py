@@ -6,7 +6,9 @@ import shutil
 
 from filelock import FileLock
 
-from repository_storage import state_root, check_image_root, require_distinct_replica, filesystem_mount
+from repository_storage import (
+    state_root, check_image_root, require_distinct_replica, filesystem_mount, check_staging_role,
+)
 from scripts.nfs_repository_guard import require_nfs
 
 
@@ -22,6 +24,8 @@ def archive_limit() -> int:
 
 
 def check_work_root(root: Path) -> None:
+    if check_staging_role(root, "work"):
+        return
     if root.resolve() != root:
         raise ValueError("Temporales no pueden redirigirse mediante enlaces simbolicos")
     source = os.getenv("IMAGE_REPOSITORY_WORK_NFS_SOURCE", "").strip()

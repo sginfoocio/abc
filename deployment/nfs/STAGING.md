@@ -1,243 +1,178 @@
-# DSM: lista unica vigente para el ensayo completo
+# Staging en la exportacion EXISTENTE, sin nuevas exportaciones
 
-Continuacion de739f77c. Esta lista sustituye las propuestas anteriores de
-fuente local y temporales `.work` dentro de backups. **Preparacion solamente**.
-NAS192.168.1.32, cliente Cloud192.168.1.55. No tocar cloud-imagenes productivo.
+Configuracion vigente; sustituye las propuestas de cinco exportaciones y de
+cloud-staging. NAS `192.168.1.32:/volume1/cloud-imagenes`, montaje existente
+`/mnt/cloud-imagenes`. No cambiar `IMAGE_REPOSITORY_ROOT` activo de Cloud.
 
-## Carpetas compartidas que crear en DSM
+| Uso | NAS | Servidor |
+| --- | --- | --- |
+| Fuente congelada | `/volume1/cloud-imagenes/staging/source` | `/mnt/cloud-imagenes/staging/source` |
+| Imagenes por EAN de ensayo | `/volume1/cloud-imagenes/staging/images` | `/mnt/cloud-imagenes/staging/images` |
+| Backups de ensayo | `/volume1/cloud-imagenes/staging/backups` | `/mnt/cloud-imagenes/staging/backups` |
+| Recuperacion | `/volume1/cloud-imagenes/staging/recovery` | `/mnt/cloud-imagenes/staging/recovery` |
+| ZIP y temporales voluminosos | `/volume1/cloud-imagenes/staging/work` | `/mnt/cloud-imagenes/staging/work` |
 
-| Uso | Carpeta/exportacion DSM | Montaje en Cloud | Reserva minima libre |
-| --- | --- | --- | --- |
-| Fuente congelada completa (imagenes, archivos comprimidos, JSON/manifiestos) | `/volume1/cloud-migration-source` | `/mnt/cloud-migration-source` | 24 GiB |
-| Imagenes por EAN del ensayo | `/volume1/cloud-imagenes-staging` | `/mnt/cloud-imagenes-staging` | 8 GiB |
-| Backups conservados del ensayo | `/volume1/cloud-migration-backups` | `/mnt/cloud-migration-backups` | 64 GiB |
-| Recuperacion independiente | `/volume1/cloud-migration-recovery` | `/mnt/cloud-migration-recovery` | 24 GiB |
-| ZIP recibidos, streaming y temporales voluminosos | `/volume1/cloud-image-work` | `/mnt/cloud-image-work` | 16 GiB |
+`staging` y sus cinco hijos: UID1037/GID100, modo0700, umask077. Nunca permisos
+generales users/everyone, mapeo a administrador ni chmod/chown recursivo.
+SQLite, historial, planes y estado operativo permanecen **locales**:
+`/opt/cloud-image-staging/state`,1037:100/0700. History congelado local
+`state/frozen/Kering/history.sqlite3`0600; se monta read-only en el contenedor.
+No cambiar permisos/propietarios de las bases activas.
 
-No son subcarpetas del repositorio productivo. Crear cinco carpetas compartidas
-independientes, sin otros datos. El archivo `staging-exports.tsv` contiene esta
-misma lista y las reservas en bytes; instalador/preflight lo utilizan.
+## Capacidad AGREGADA, no backup independiente
 
-Aplicar **la misma regla NFS a las cinco**:
+`staging-layout.tsv` reserva source24 + images8 + backups64 + recovery24 +
+work16 = **136 GiB**, mas **2 GiB libres protegidos** = **138 GiB**
+(148.176.371.712 B) medidos UNA vez en el volumen. No sumar cinco `df`.
+Estas reservas conservan margen/retencion de las propuestas previas; recalcular
+con nuevo inventario real si crecieron fuentes/archivos comprimidos.
+Work mantiene limite8 GiB por ZIP, reserva2 GiB y bloqueo entre importadores.
+El uso del mismo pool debe contabilizar originales productivos, staging,
+snapshots, retencion, trabajos concurrentes y crecimiento.
 
-- Host/IP autorizado: **192.168.1.55**, no `*` ni toda la subred.
-- Privilegio: lectura/escritura. Seguridad **SYS**, NFS4.1/TCP.
-- Squash: **sin asignacion (No mapping)**; conservar UID1037/GID100.
-  No mapear root/usuarios a admin; no conceder pertenencia a administrators.
-- No activar escritura asincrona. No permitir puertos no privilegiados ni
-  acceso a subcarpetas montadas sin una necesidad verificada.
-- ACL DSM: usuario **cloud (1037:100)** con lectura/escritura/listado/travesia,
-  users/everyone; GID100 no concede acceso. No usar un deny de users que anule
-  el grant individual cloud. Mantener acceso administrativo propio del NAS.
-- Solo para estas carpetas nuevas/vacias, preparar propietario1037:100 y
-  modo0700 compatible con la ACL DSM. Nunca `chmod/chown -R` de carpetas ajenas,
-  ni alterar la raiz productiva777 para preparar este ensayo.
+Los backups y recovery son copias logicas separadas para el ensayo:
+**NO protegen frente al fallo del NAS/volumen**. No sustituyen el backup
+independiente requerido para migrar produccion. La replica remota Fotos sigue
+documentada, excluye ZIP y no se considera automaticamente backup completo.
 
-Las reservas suman **136 GiB**. Si comparten pool, verificar ese libre agregado
-mas snapshots/retencion/crecimiento y las cuotas individuales: cinco `df` sobre
-el mismo pool NO prueban cinco reservas independientes. 64 GiB de backups
-queda conservado por margen/retencion; los temporales ya tienen sus propios
-16 GiB. Work requiere >=10 GiB libres antes de recibir un ZIP de8 GiB con
-reserva2 GiB; la cuota16 GiB no sustituye el control por descarga.
-Recalcular desde el nuevo inventario si las fuentes crecieron.
+## Guardas y aislamiento
 
-## Comandos exactos de preparacion en Cloud
+Staging requiere explicitamente `IMAGE_REPOSITORY_STAGING_ROOT=/nas/staging`
+y `IMAGE_REPOSITORY_STAGING_MOUNT_ROOT=/nas` en el contenedor; la exportacion
+esperada permanece exactamente `192.168.1.32:/volume1/cloud-imagenes`.
+El bind completo en `/nas` permite comprobar identidad real de exportacion.
+No se acepta un bind de subcarpeta como falsa raiz NFS.
 
-Se entregan en `/home/rubensg/cloud-nfs-preparation-20261010/staging-five-exports`.
-Ejecutar **despues de crear las cinco exportaciones/ACL en DSM**:
+Las rutas images/backups/recovery/work solo pueden ser los hijos canonicos
+con esos nombres: se rechazan padres, `..`, symlinks, aliases, nested
+binds/overmounts que cubran un destino, origen=destino y solapamientos.
+Solo esas rutas hermanas pueden compartir exportacion; **no se relaja la
+prohibicion de replica sobre la misma exportacion para produccion**.
+Las escrituras de la aplicacion fuera de esos destinos NAS, incluidas source
+y raiz productiva, se rechazan. Un plan no puede usar `/nas`, `/nas/staging`
+ni source como destino. Sin modo staging, un destino que contenga staging
+tambien se rechaza antes del inventario/apply/recover.
 
-```sh
-cd /home/rubensg/cloud-nfs-preparation-20261010/staging-five-exports
-showmount -e 192.168.1.32
-sh -n install-staging-mounts.sh
-sudo sh ./install-staging-mounts.sh
-# Crear solo estado NUEVO. Rechaza estado preexistente para no alterarlo.
-sudo sh ./prepare-local-state.sh
-# El directorio privado rubensg700 no es atravesable por1037.
-# Instalar SOLO herramientas sin secretos fuera de ese directorio.
-sudo test ! -e /opt/cloud-image-staging/tools
-sudo install -d -m 0755 /opt/cloud-image-staging/tools /opt/cloud-image-staging/tools/scripts
-sudo install -m 0644 runtime-code/repository_storage.py staging-exports.tsv \
-  /opt/cloud-image-staging/tools/
-sudo install -m 0644 runtime-code/scripts/nfs_repository_guard.py \
-  runtime-code/scripts/verify_staging_exports.py /opt/cloud-image-staging/tools/scripts/
-sudo -u '#1037' -g '#100' -- sh -c \
-  'cd /opt/cloud-image-staging/tools && python3 -m scripts.verify_staging_exports --manifest staging-exports.tsv'
-```
+El bind `/nas` es rw y concede acceso filesystem al proceso1037; las guardas
+son de aplicacion, **no una sandbox kernel de datos productivos**. No ejecutar
+codigo arbitrario ni jobs de proveedor en el contenedor de ensayo. Source
+se conserva congelada por coordinacion de escritores y verificacion de
+checksums; el guard prohibe escrituras source mediante APIs de migracion.
+History tiene bind local read-only. Sin red/puertos/capacidades/restart.
+Montaje hard sin respuesta puede quedar pendiente; mountinfo no demuestra
+disponibilidad de red. No desmontar/remontar el NFS compartido para probarlo.
 
-El instalador genera las cinco unidades con `systemd-escape`, valida todas antes
-de instalar, rechaza fstab/definiciones persistentes conflictivas, conserva
-montajes ya presentes correctos y solo inicia los destinos staging ausentes.
-Opciones exactas:
+## Preparacion exacta
 
-```text
-vers=4.1,proto=tcp,hard,timeo=600,retrans=2,sec=sys,nosuid,nodev,noexec
-```
-
-El directorio local SUBYACENTE nuevo queda root0:0/mode000 antes de montar,
-para no permitir escritura1037 en fallback. No aplica chmod al directorio NAS.
-No stop/restart/remount del montaje compartido ni de Docker. Si falla un nuevo
-montaje, aborta y deja explicito el error; no crea fallback ni sustituye origen.
-Las unidades se habilitan para arranque. Persistencia del montaje productivo
-se gestiona por su instalador existente, por separado; no la modifica este.
-
-Auditoria posterior sin escribir:
+Herramientas en
+`/home/rubensg/cloud-nfs-preparation-20261010/staging-existing-export`.
+No instalar nuevas unidades/montajes ni carpetas compartidas.
+Usar el mismo artefacto actualmente disponible solo para la utilidad de
+creacion (stdlib), no para ejecutar migracion con codigo antiguo:
 
 ```sh
-while read -r SHARE ROOT MINIMUM; do
-  case "$SHARE" in ''|\#*) continue ;; esac
-  findmnt -M "$ROOT" -o TARGET,SOURCE,FSTYPE,OPTIONS
-  df -B1 "$ROOT"
-  stat -c '%n %u:%g %a' "$ROOT"
-  UNIT="$(systemd-escape --path --suffix=mount "$ROOT")"
-  systemctl show "$UNIT" -p FragmentPath -p SourcePath -p UnitFileState
-done < staging-exports.tsv
+cd /home/rubensg/cloud-nfs-preparation-20261010/staging-existing-export
+IMAGE="$(docker inspect abcd-control --format '{{.Config.Image}}')"
+docker run --rm --network none --read-only --user 1037:100 --cap-drop ALL \
+  --security-opt no-new-privileges:true \
+  --mount type=bind,src=/mnt/cloud-imagenes,dst=/nas \
+  --mount "type=bind,src=$PWD/runtime-code,dst=/tools,readonly" \
+  --mount type=bind,src=/opt/cloud-image-staging/state,dst=/state,readonly \
+  -e PYTHONPATH=/tools --workdir /tools "$IMAGE" \
+  python -m scripts.verify_staging_exports --manifest /tools/staging-layout.tsv \
+    --mount /nas --state /state --create
 ```
 
-El preflight comprueba exportacion exacta/no symlink, rw/hard, capacidad por
-destino, acceso efectivo1037 y estado local1037:100/0700 con reserva2 GiB.
-**No acredita** escritura/fsync/rename/checksum/flock, cuotas agregadas ni ACL
-de otros usuarios. Repetir esas pruebas en directorios temporales propios de
-CADA exportacion y control1038:100; no usar archivos preexistentes. El ensayo
-seguira bloqueado si alguna falla, incluso con mount activo.
+La utilidad valida montaje/capacidad antes de crear; valida todos los caminos
+existentes sin cambiar sus permisos. Solo aplica chmod0700 a directorios
+que acaba de crear. Si ACL Synology no retiene propietario/mode, aborta y
+conserva diagnostico; no amplía permisos ni afirma privacidad sin verificar.
+Una ejecucion interrumpida puede dejar directorios propios ya creados:
+revisarlos antes de repetir, nunca eliminar datos ni chmod existentes a ciegas.
+Ejecutar sin `--create` para verificar sin escribir.
 
-Con `STAGING_IMAGE` fijado a un artefacto realmente disponible/verificado,
-la herramienta aislada preparada permite probar las cinco exportaciones:
+## Retirada ACOTADA de unidades anteriores
+
+Se detecto una sola fallida: `mnt-cloud\x2dmigration\x2dsource.mount`.
+Las otras cuatro propuestas estan inactivas/dead, no fallidas: se conservan,
+no se usan para esta configuracion. No se encontro unidad cloud-staging.
+Sudo requiere autenticacion; no se usa Docker para cambiar systemd del host.
 
 ```sh
-cd /home/rubensg/cloud-nfs-preparation-20261010/staging-five-exports
-: "${STAGING_IMAGE:?Indicar artefacto verificado disponible}"
-docker build --build-arg BASE_IMAGE="$STAGING_IMAGE" \
-  -f isolation/Dockerfile.probe -t cloud-nfs-probe:staging isolation
-while read -r SHARE ROOT MINIMUM; do
-  case "$SHARE" in ''|\#*) continue ;; esac
-  sh ./validate-isolated-nfs.sh cloud-nfs-probe:staging \
-    "192.168.1.32:/volume1/$SHARE" || exit 1
-done < staging-exports.tsv
+cd /home/rubensg/cloud-nfs-preparation-20261010/staging-existing-export
+sh -n remove-failed-staging-units.sh
+sudo sh ./remove-failed-staging-units.sh
 ```
 
-La herramienta usa montaje/red propios `nosharecache`, con temporales unicos,
-write/read/fsync/rename/checksum1037, control1038, dos flock writers y
-perdida/reconexion/reinicio de SU contenedor. No desconecta montajes del host.
-SYS_ADMIN/NET_ADMIN pertenecen solo al probe, nunca a servicios de imagenes.
-Si un escritor hard sigue pendiente, conservar contenedor/temporales para
-recuperacion; no forzar eliminacion ni presentar resultado correcto.
+El script limita nombres a las cinco unidades previas y solo retira la que
+este failed, no montada, y coincida byte a byte con la plantilla anterior.
+Una unidad modificada/activa se conserva con error explicito. Deshabilita,
+elimina SOLO el fichero exacto y reset-failed. No stop/unmount/remount ni
+retirada de `mnt-cloud\x2dimagenes.mount`, no elimina directorios/datos.
 
-## Fuente completa y SQLite: coordinacion necesaria
+## Exclusiones obligatorias
 
-No se obtendra una fuente consistente copiando imagenes durante descargas,
-ni copiando solo DB mientras WAL cambia. Tampoco se autoriza aqui detener
-contenedores activos. Antes de capturar, solicitar **ventana de mantenimiento
-explicita** para coordinar app, Luxoptica, Kering y alertas; o provisionar un
-snapshot de almacenamiento coherente aprobado con iguales garantias.
-Sin esa coordinacion, captura/ensayo completo bloqueados.
+- Inventarios productivos podan cualquier directorio `staging` antes de
+  recorrerlo: no contabilizar ni importar source/backups/recovery/work.
+- Busquedas, galeria y ZIP del repositorio no devuelven registros con rutas
+  relativas bajo staging. Replica integrada tampoco copia sus backups.
+- Rsync remoto: `--exclude='staging/'` tanto dry-run como copia real, sin
+  `--delete`. La tarea externa DSM debe incorporar esa regla ANTES de replicar
+  la raiz NAS. No se ha cambiado una tarea DSM fuera del repositorio ni
+  contactado/escrito el NAS remoto: su confirmacion sigue pendiente.
+- El ensayo SOLO inventaria hijos de source congelada bajo modo staging.
+  No inventariar la raiz NAS/productiva ni usarla como destino.
 
-En la ventana aprobada, registrar estado previo y todos los escritores, impedir
-nuevos trabajos y esperar a los activos; quiescer solo los servicios acordados.
-Conservar la configuracion de automatizaciones, no activarlas al restaurar.
-No modificar pedidos Odoo ni usar credenciales en logs/capturas.
+## Ensayo completo sigue condicionado
 
-Preparar estas correspondencias del conjunto completo, sin borrar originales:
+Captura requiere ventana explicita para coordinar todos los escritores o
+snapshot coherente aprobado. No detener servicios activos en esta entrega.
+Copiar originales sin renombrar/eliminar ni omitir archivos invalidos o EAN
+ambiguos. SQLite DB+WAL a scratch LOCAL nuevo en ventana sin escritores;
+backup API sobre copia, integrity_check/foreign_key_check y checksum de DB
+cerrado. No copiar SHM/checkpoint/chown de originales activos.
 
-- `repo/images` legacy -> fuente `Luxoptica`.
-- `masterdata_data/kering` -> fuente `Kering` (imagenes/JSON/config cifrada).
-- Repositorio comun actual -> fuente `Common`, incluidos sus metadatos de
-  representaciones, pedidos y procedencias; no perder lo nuevo desde el inventario.
-- `luxoptica_data` -> `Luxoptica-manifests`, conservando todos los manifiestos.
-- SQLite de esas raices y estado compartido -> **copias locales**
-  `/opt/cloud-image-staging/state/frozen/`, nunca SQLite operativo en NFS.
-  Incluir history, catalogo, process_activity, order_alerts y auth_state si existe.
+Origenes Luxoptica/Kering/Common y manifiestos deben conservar asociaciones,
+nombres/procedencias y snapshots/results. Cualquier relacion no importada
+por herramienta es bloqueo, no entrada descartable. Inventory v2 nuevo ->
+revisar bloqueos/espacio -> apply -> verify -> repetir/reanudar ->
+recover en recovery. Comprobar checksums de todos los originales, fuente
+intacta, historial/EAN/nombres/extensiones, galeria y ZIP completo. Recuperar
+tambien SQLite a estado local nuevo: recover no activa catalogo/historial.
 
-Crear destinos NUEVOS y privados en esa ventana. Hacer copia de ficheros
-sin renombrar, filtrando SQLite/WAL/SHM hacia el flujo local siguiente; no
-excluir ZIP/archivos invalidos/EAN ambiguos del inventario para hacerlo pasar.
-No usar `rsync --delete`, no sobrescribir copias congeladas previas. Guardar
-manifiesto privado de nombres/tamanos/checksums y verificar origen contra copia.
-Conservar configuracion cifrada donde sea necesaria, nunca claves/tokens en Git.
-Antes de exponer galeria capturas, anonimizar pedidos de manera consistente
-sin cambiar EAN/nombres del conjunto privado ni bytes de imagen.
+388 EAN pendientes/7 invalidas del inventario LOCAL previo no equivalen a
+las154 claves ambiguas excluidas/0 imagenes sin EAN o invalidas/2.187 vistas
+desconocidas del inventario PRODUCTIVO previo. Reevaluar, no ocultar bloqueos.
+Kering sigue **Parcial - clasificacion pendiente**, sin inventar V1/V2/V3
+por posicion, cantidad ni nombres generados. No migration produccion,
+originales eliminados, cambio de repositorio activo, fusion ni despliegue.
 
-SQLite: con escritores coordinados, copiar DB y WAL presente a scratch
-**local nuevo** sin abrir originales. Abrir esa copia, aplicar
-`sqlite3.Connection.backup` a snapshot local nuevo, cerrar y comprobar
-`PRAGMA integrity_check` y `foreign_key_check`; conservar checksum del fichero
-cerrado y recuentos/tablas por base. No copiar SHM, hacer checkpoint del
-original, chown de DB activa ni interpretar varias copias activas como un
-snapshot global atomico. Si WAL cambia o aparece journal activo, abortar
-captura y conservar diagnostico, no forzar importacion.
+## Evidencia REAL de esta adaptacion
 
-La copia history final va en
-`/opt/cloud-image-staging/state/frozen/Kering/history.sqlite3`,1037:100/0600;
-Compose la monta read-only sobre `/staging/source/Kering/history.sqlite3`.
-En NAS preparar un punto de montaje VACIO con ese nombre dentro de Kering,
-no una DB. Es una excepcion declarada al conjunto de bytes NAS, respaldada
-por la copia local verificada; el manifiesto debe distinguirla.
-Las otras copias SQLite se conservan locales y deben incorporarse a la
-verificacion de estado/restauracion, no suponer que `apply` las importa.
+- Se crearon staging y source/images/backups/recovery/work con1037:100/0700.
+  Synology retuvo inicialmente777 para el mkdir de staging: el primer intento
+  aborto ANTES de crear hijos. Se verifico propietario1037:100 y carpeta propia
+  vacia; se corrigio SOLO ese directorio a0700. La utilidad aplica chmod0700
+  exclusivamente a directorios nuevos y valida el resultado.
+- Desde contenedor aislado1037:100: cinco carpetas privadas verificadas,
+  escritura/lectura/fsync/rename/checksum y flock de dos procesos correctos
+  en CADA una. Temporales propios limpiados. UID1038 con mismoGID100 no tiene
+  lectura/escritura/travesia de staging ni de sus cinco hijos.
+- Capacidad libre medida una vez:3.041.600.602.112 B frente a138 GiB reservados.
+  No son cinco cuotas independientes ni proteccion ante fallo del NAS.
+- Padre NAS conserva0:0/777 y montajeNFS4.1/rw/hard/SYS; estado local conserva
+ 1037:100/0700; app healthy. No imagen existente leida/escrita por los probes.
+- Sudo requiere autenticacion: retirada de la unidad fallida SOLO preparada,
+  no ejecutada. Las otras unidades inactivas no se eliminan.
+- Un timeout SSH intermedio se resolvio al reintentar; no se interpreta como
+  ensayo de perdida/reconexion del montaje NFS. Ese ensayo no se repitio
+  sobre el montaje compartido.
+- No se obtuvo fuente real ni se ejecuto migracion/recovery completa en esta
+  entrega; siguen pendientes ventana coherente, mapeos y backup independiente.
 
-Al acabar captura y comparar todos los checksums, cerrar/sellar la fuente
-(sin jobs escribiendo), restaurar exactamente los servicios autorizados
-al estado previo. El contenedor de ensayo monta la fuente **solo lectura**.
-No ampliar permisos para que una base root-owned activa funcione como1037.
-
-## Ejecucion despues de todas las puertas
-
-Usar artefacto verificado construido desde esta PR (no el codigo productivo
-actual), sin red/credenciales/puertos; ejecutar con Compose staging preparado.
-`STAGING_IMAGE` debe ser un tag/digest realmente disponible y verificado en
-el servidor, **no** un identificador ficticio ni el tag de un build CI no publicado.
-Antes de arrancar, confirmar los puntos de montaje fuente/local history y
-guardas **dentro del contenedor** para images, backups y work. Para recovery,
-usar `require_nfs(Path('/staging/recovery'),
-'192.168.1.32:/volume1/cloud-migration-recovery')` antes de copiar/restaurar.
-No convertir un fallo de montaje en exito por existir el directorio.
-
-El inventario nuevo debe usar proveedores Luxoptica y Kering separados,
-las copias locales SQLite necesarias, todos los manifiestos y un mapping
-revisado. Resolver enlaces/rutas de metadata Common sin perder nombres,
-procedencias ni asociaciones; si la herramienta no incorpora alguna relacion
-legacy, es un **bloqueo**, no un archivo descartable.
-
-Secuencia: inventario/simulacion v2 -> revisar bloqueos/espacio ->
-apply -> verify -> segundo apply -> interrupcion/reanudacion controladas ->
-recover a destino independiente. Probar tambien reconstruccion/restauracion
-LOCAL de catalogo/historial: recover copia originales, no crea por si solo
-el estado operativo. No ejecutar un plan v1 retargeteado.
-
-Comparar TODAS las entradas/originales recuperados por checksum y nombre,
-fuente intacta, extensiones originales, colisiones sin perdida, EAN/pedidos,
-historial snapshots/results, procedencias/mercados/vistas, galeria y ZIP
-completo con manifiesto. Exportacion desconocida valida no acredita vista.
-Publicar solo cifras/alias y separar prueba real del smoke sintetico.
-
-## Bloqueos vigentes, no omitidos
-
-- Comprobacion SSH de esta continuacion: cinco exportaciones/destinos ausentes.
-  Sudo requiere autenticacion; DSM/provision no ejecutados por el asistente.
-- Capacidad local20.261.662.720 B (consulta2026-10-10): no usarla para guardar
-  fuente completa18.780.210.777 B previa sin reservas; el nuevo tamano se medira.
-- ACL productiva confirmada por el responsable no acredita ACL nuevas.
-  Montajes/cuotas/permisos/probes de los cinco destinos pendientes.
-- Ventana/snapshot coherente de todos los escritores no autorizados aun.
-- Local anterior:388 EAN pendientes/7 invalidas. Productivo previo:
-  154 claves ambiguas de manifiestos excluidas,0 imagenes sin EAN/invalidas,
-  2.187 vistas desconocidas. No son resultados nuevos; no mezclar conjuntos.
-- Kering mantiene **Parcial - clasificacion pendiente**. No inferir vistas
-  por posicion/cantidad/nombre generado; no inventar significado noshad/shad.
-- No migracion productiva, originales eliminados, contenedores activos
-  reconfigurados, permisos activos modificados, fusion ni despliegue.
-
-## Validacion de la preparacion entregada
-
-Suite local:289 correctas,2 tests Compose omitidos por ausencia de Docker local,
-16 avisos SQLite preexistentes. Los10 casos nuevos cubren cinco destinos,
-capacidad al byte, identidad/grupos, ausencia de montaje sin cambios de estado
-y seleccion de exportacion en el probe. Lint de nuevos archivos y seleccion
-estandar de CI para scripts existentes, compilacion correctos.
-
-En el servidor: parser Compose nativo correcto sin iniciar servicios,
-`sh -n` de los scripts y `systemd-analyze verify` de las cinco unidades
-generadas correctos. Se eliminaron solo temporales propios de validacion.
-Carpeta de herramientas rubensg1000:1000/0700; ninguna unidad instalada ni
-exportacion montada/escrita por esta entrega. **No son pruebas NFS de los
-destinos nuevos ni un ensayo de migracion real.**
+Validacion local:289 tests correctos,2 tests Compose omitidos (sin Docker local),
+lint/compilacion correctos.16 avisos SQLite conocidos y1 aviso de hilo de alertas
+por `database is locked` en esta ejecucion completa; no es una validacion de
+alertas sin incidencias ni motivo para modificar bases activas.
+El test de concurrencia de alertas repetido aisladamente paso sin ese aviso;
+se conserva el limite observado de la suite completa.

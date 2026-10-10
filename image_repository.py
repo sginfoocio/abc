@@ -21,6 +21,8 @@ from PIL import Image, ImageOps
 from db_config import load_env_file
 from repository_storage import (
     state_root, backup_root, check_image_root, require_distinct_replica, check_write_path, validate_state_root,
+    excluded_staging_path,
+    staging_root,
 )
 
 
@@ -212,6 +214,8 @@ class ImageRepository:
         path = (self.root / relative).resolve()
         if self.root not in path.parents:
             raise ValueError("ruta_fuera_del_repositorio")
+        if staging_root() is not None:
+            check_write_path(path)
         return path
 
     def records(self, ean: str | None = None) -> list[ImageRecord]:
@@ -227,7 +231,8 @@ class ImageRepository:
             row["id"], row["ean"], row["checksum"], row["pixels"], self.resolve(row["path"]),
             row["provider"], row["origin"], row["view"], row["market"], row["name"],
             row["date"], json.loads(row["metadata"]),
-        ) for row in rows]
+        ) for row in rows if not excluded_staging_path(Path(row["path"])) and not
+            excluded_staging_path((self.root / row["path"]).resolve().relative_to(self.root))]
 
     def verified_bytes(self, record: ImageRecord) -> bytes:
         content = record.path.read_bytes()
@@ -423,6 +428,9 @@ class ImageRepository:
             with self.connect() as connection:
                 backups = list(connection.execute("SELECT backup,checksum FROM migrations"))
             for relative, digest in backups:
+                if excluded_staging_path(Path(relative)):
+                    LOGGER.warning("Backup staging excluido de replica: %s", relative)
+                    continue
                 source = self.resolve(relative)
                 copy_verified(source, target / relative, digest)
             for plan in (self.root / ".migration").glob("*/plan.json"):

@@ -41,16 +41,16 @@ def test_staging_identity_and_owner_only_permission_proposal():
     service = config["services"]["image-storage-staging"]
     assert service["user"] == "1037:100"
     environment = service["environment"]
-    assert environment["IMAGE_REPOSITORY_WORK_ROOT"] == "/staging/work"
-    assert environment["IMAGE_REPOSITORY_WORK_NFS_SOURCE"].endswith("/cloud-image-work")
+    assert environment["IMAGE_REPOSITORY_WORK_ROOT"] == "/nas/staging/work"
+    assert environment["IMAGE_REPOSITORY_STAGING_ROOT"] == "/nas/staging"
+    assert environment["IMAGE_REPOSITORY_WORK_NFS_SOURCE"].endswith("/cloud-imagenes")
     volumes = {volume["target"]: volume for volume in service["volumes"]}
-    assert volumes["/staging/source"]["source"] == "/mnt/cloud-migration-source"
-    assert volumes["/staging/source"]["read_only"]
-    history = volumes["/staging/source/Kering/history.sqlite3"]
+    assert volumes["/nas"]["source"] == "/mnt/cloud-imagenes"
+    history = volumes["/nas/staging/source/Kering/history.sqlite3"]
     assert history["source"].startswith("/opt/cloud-image-staging/state/")
     assert history["read_only"]
     assert volumes["/staging/state"]["source"] == "/opt/cloud-image-staging/state"
-    assert volumes["/staging/work"]["source"] != volumes["/staging/backups"]["source"]
+    assert environment["IMAGE_REPOSITORY_WORK_ROOT"] != environment["IMAGE_REPOSITORY_BACKUP_ROOT"]
     # Compose versions may omit false-valued defaults from their normalized JSON.
     assert all(volume.get("bind", {}).get("create_host_path", False) is False
                for volume in service["volumes"])
