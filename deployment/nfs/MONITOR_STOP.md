@@ -79,6 +79,36 @@ CI incorpora ambas comprobaciones, sin red, secretos o mounts de produccion.
 Tambien prueba fallos/deadline sin convertirlos en salida limpia, handler
 restaurado, lock contendido, limpieza del temporal y acuse fallido/reinicio.
 
+Build completo local verificado del codigo final `e7f22bb4975a9dc658701c238abd7560fc842505`,
+tag local `cloud-monitor-stop:e7f22bb`,
+ID `sha256:f74748fb48ebe721152b642909eb4af20a24ae99500b7a2a4dbc4d2a60805de8`,
+published2026-10-10T23:50:24Z/build `isolated-monitor-e7f22bb`.
+No publicado ni desplegado. Smoke del artefacto completo, runtime read-only,
+rednone/cap-dropALL, como1037:100:
+
+| Escenario | SIGTERM a salida0 | Reinicio / duplicados |
+| --- | --- | --- |
+| Reposo | 0,251s | correcto / cero |
+| Descarga parcial | 0,365s | correcto / cero |
+| SQLite bloqueado por otro proceso | 0,465s | correcto / cero |
+| fsync NFS simulado | 0,365s | correcto / cero |
+
+Ademas, cuatro contenedores con ENTRYPOINT exec y **comando productivo
+exacto**, monitor comoPID1, UID1037:GID100: todos terminaron0 en~1s desde
+SIGTERM hasta comprobacionDocker (incluye arranque del comprobador aislado).
+Smoke completo de almacenamiento tambien paso: Playwright, SQLite/WAL,
+backups/recovery sinteticos, procesos de alertas y guarda de montaje ausente.
+Se limpiaron solo volumen/containers sinteticos identificados; logs conservados.
+
+Suite completaWindows:318passed/9skipsPOSIX-Docker y16avisos datetimeSQLite
+preexistentes Kering; lint/compilacion correctos. Las primerasCI de8585aaf/
+0b2a6a1 fallaron en los cuatro actores por no heredar PYTHONPATH del runner;
+no se ampliaron tiempos ni debilitaron tests. `e7f22bb` fija entorno explicito
+en los actores y muestra error de arranque inmediatamente, mantiene al hijo
+SQLite fuera de la fixturePID1 y acota tambien la conexion del heartbeat.
+La CI del head debe quedar verde antes del rollout; consultar su resultado
+publicado en laPR, no interpretar estas pruebas locales como CI aprobada.
+
 **Limite fisico conservado:** NFS `hard` desconectado puede bloquear un
 syscall del kernel de manera no interrumpible; lo mismo ocurre con un
 fsync/disco realmente atascado. El Event y timeout de Python NO garantizan

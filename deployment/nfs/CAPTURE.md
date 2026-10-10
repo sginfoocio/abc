@@ -149,7 +149,8 @@ done
 ```
 
 `docker stop` termina procesos; no garantiza trabajo activo finalizado.
-Registrar ExitCode/estado y abortar si hubo terminacion forzada137. Una pausa
+Registrar ExitCode/estado y exigir salida0; abortar tambien con salida1 de
+drenaje fallido, no solo terminacion forzada137. Una pausa
 no crea un snapshot atomico entre varias DB: no comenzar copia hasta que
 **todos** los escritores esten detenidos. La consola de recuperacion usa
 `docker start` SOLO para los cuatro que constaban running; no `compose up`

@@ -215,7 +215,8 @@ jobs y esperar drenaje local hasta10min ANTES de iniciar la parada.
 Si no drenan o hay envios/descargas activos, no parar: abortar ventana.
 Registrar los4ID/imagen/running, salud, config/raiz y timestamps de inicio.
 Usar trap/consola independiente de CAPTURE, no activar apagados previamente.
-Todos stopped sin ExitCode137 antes de fijar fuente o copiar SQLite.
+Todos stopped con ExitCode0 antes de fijar fuente o copiar SQLite.
+Salida1 por error/deadline de drenaje tambien bloquea, no solo137.
 
 **RutaA**: despues de obtener5backups SQLite locales cerrados y fijar
 snapshot consistente validado, guardar recibo duradero de fuente+DB.
@@ -323,7 +324,7 @@ Antes de parar: fallos permisos/guardas/capacidad, snapshot no probado (rutaA),
 precopia persistente no completada, nuevos tiposDB/symlinks sin auditar,
 jobs/envios activos tras10min o sin admision cerrada -> no iniciar ventana.
 
-Durante: writer aun running/terminacion137, error de copia/SQLite/retencion,
+Durante: writer aun running/salida distinta0 (incluidos1/137), error de copia/SQLite/retencion,
 journal no revisado, NAS inaccesible/montaje cambiado, snapshot invalido/COW
 agotado -> marcar INCOMPLETE y restaurar inmediatamente. Limite de captura
 5min antes del presupuesto total de pausa:10min rutaA/55min rutaB, reservar
