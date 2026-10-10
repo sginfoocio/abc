@@ -314,6 +314,12 @@ el corte permanece bloqueado; no activar un fallback local.
 
 ### Ensayo staging, sin produccion
 
+Los comandos `Other=/staging/source` siguientes son un ejemplo minimo, no
+acreditan importacion del historial Kering. Para el ensayo completo usar
+origenes separados `Luxoptica=/staging/source/Luxoptica` y
+`Kering=/staging/source/Kering`, con `history.sqlite3` consistente en la raiz
+Kering y mapeos revisados. No sustituir ambos proveedores por `Other`.
+
 `staging.compose.yml` no publica puertos, no monta pedidos ni credenciales,
 no tiene red, no reinicia automaticamente y rechaza binds ausentes. Antes de
 usarlo, provisionar las tres exportaciones y el estado local
@@ -431,3 +437,135 @@ usando DockerCompose nativo, sin agregar una dependencia.
 
 No aplicar los overrides ni el script de permisos hasta confirmar las ACL DSM
 y preparar estado local. El build/smoke positivo no cambia esos bloqueos.
+
+## Continuacion de 22db349: ensayo condicionado a provision
+
+### Comprobacion real del 2026-10-10, sin cambios
+
+El responsable confirma en esta conversacion las ACL DSM para cloud1037:100,
+sin grants generales users/everyone. Es **confirmacion administrativa**, no
+una nueva enumeracion NFS de ACL ni un test de los destinos pendientes.
+No se aplica el ajuste de permisos del repositorio compartido.
+
+SSH al servidor confirma:
+
+- `showmount -e 192.168.1.32` publica solo cloud-imagenes para .55; las otras
+  tres exportaciones listadas son de otros clientes y no se utilizan.
+- No existen `/mnt/cloud-imagenes-staging`, `/mnt/cloud-migration-backups`,
+  `/mnt/cloud-migration-recovery`, `/opt/cloud-image-staging/state` ni
+  `/opt/cloud-image-staging/source`.
+- El montaje compartido conserva el origen esperado, NFS4.1/rw/hard/SYS.
+  Su unidad sigue dinamica: FragmentPath vacio, SourcePath=/proc/self/mountinfo.
+  Sudo no interactivo requiere autenticacion. App productiva healthy.
+- Disco local: **20.285.116.416 B disponibles (80% usado)**. Es una nueva
+  medida de capacidad, no un inventario de imagenes. Una copia completa de
+  los 18.780.210.777 B del inventario previo dejaria 1.504.905.639 B, menos
+  que la reserva local de 2 GiB, incluso antes de estado/WAL/ZIP.
+  No preparar esa copia completa en el disco local ni asumir tamano vigente.
+
+**Ensayo completo NO ejecutado**: faltan destinos y conjunto fuente congelado
+de staging. Los tests NFS reales1037 y el smoke sintetico previos se conservan;
+no equivalen a migrar/restaurar el conjunto real. CI final de 22db349:
+[38055469918](https://github.com/sginfoocio/abc/actions/runs/38055469918),
+281 tests, lint/compilacion y build/smoke1037 correctos; artefacto
+`sha-4325a6a7a878`, build `actions-38055469918-1` del merge de prueba.
+
+### Provision que debe completar el administrador
+
+1. Crear las tres carpetas compartidas/exportaciones de la tabla anterior,
+   acceso NFS SYS limitado a .55, cloud1037 con rw/travesia, sin grants de
+   grupo users/everyone ni mapeo a administrador. Reservas: backups/work
+   >=64 GiB, imagenes staging >=8 GiB, recuperacion >=24 GiB; verificar
+   tambien espacio agregado del pool y cuotas, no multiplicar el libre
+   del mismo pool por cada montaje.
+2. Proporcionar un conjunto fuente independiente y congelado. Para una copia
+   completa, proponer una **cuarta exportacion dedicada**
+   `192.168.1.32:/volume1/cloud-migration-source` >=24 GiB, montada en
+   `/mnt/cloud-migration-source`, con copias anonimizadas Luxoptica/Kering.
+   Es propuesta adicional, NO creada ni autorizada automaticamente.
+   Mantenerla separada de recuperacion, backups y destino de imagenes.
+   Adaptar el bind de `/staging/source` a ese montaje solo tras verificarlo;
+   no crear un enlace o fallback local para esconder la falta de capacidad.
+   Un conjunto representativo pequeno requiere indicar expresamente su
+   alcance; no llamarlo ensayo de todo el inventario productivo.
+3. Instalar unidades persistentes para los nuevos montajes y medir
+   `findmnt -M`, `df -B1` y permisos efectivos1037/control1038 en cada uno.
+   Para el montaje compartido existente usar exclusivamente
+   `sudo sh ./install-persistent-mount.sh`: no reiniciarlo ni desmontarlo.
+4. Preparar solo estado local nuevo con
+   `sudo sh ./prepare-local-state.sh`; comprobar1037:100/0700 y filesystem
+   local. No cambiar propietarios/modos de las bases activas.
+5. Repetir probes aislados de escritura/fsync/lectura/rename/checksum/flock
+   en cada destino provisionado; repetir dentro del artefacto verificado.
+   Provision y montajes por si solos no acreditan permisos ni recuperacion.
+
+### Criterios de aceptacion del ensayo pendiente
+
+- Inventario v2 nuevo con raices firmadas, manifiestos/mapeos revisados y cero
+  bloqueos; conservar plan privado y publicar solo cifras/alias anonimizados.
+  Nunca retargetear el plan productivo v1 ni inventar EAN para desbloquearlo.
+- Aplicar, verificar, repetir y recuperar a raiz independiente. Comparar
+  checksums/nombres/extensiones de TODOS los originales recuperados y comprobar
+  que no han cambiado las fuentes. Repetir tras interrupcion controlada solo
+  del trabajo staging y demostrar reanudacion sin sobrescribir.
+- Comparar asociaciones por EAN, snapshots/results del historial restaurado,
+  representaciones/procedencias/mercados, galeria y contenido completo del ZIP,
+  incluidos manifiesto, alternativas y nombres originales. La deduplicacion
+  fisica no elimina los nombres de representaciones para exportacion.
+- `recover` restaura originales bajo su prefijo de origen; **no activa ni
+  reconstruye por si solo el catalogo/historial operativo**. Restaurar los
+  SQLite a estado local nuevo y abrirlos con sus lectores; comprobar historial,
+  galeria/ZIP y relaciones por EAN de nuevo, no solo contar archivos recuperados.
+- Mantener Kering **Parcial - clasificacion pendiente** cuando las imagenes
+  validas carezcan de senales acreditadas; no inferir V1/V2/V3 por cantidad.
+
+### Mapeos y archivos no reutilizables: evidencia separada
+
+El inventario local anterior tenia388 EAN sin resolver y7 imagenes invalidas.
+El inventario productivo previo tenia0 imagenes sin EAN/invalidas, pero excluyo
+154 claves modelo/color ambiguas de manifiestos y registro2.187 vistas
+desconocidas. Son conjuntos/categorias distintos:154 claves no son154 archivos
+sin EAN, ni unknown equivale a imagen invalida. Ninguna de esas cifras es un
+resultado nuevo de staging. Reevaluar con el conjunto congelado, mantener los
+originales no reutilizables, y bloquear apply si persisten mapeos/validacion
+pendientes. La deteccion automatica de vistas reales Kering sigue sin evidencia.
+
+### Preparacion futura del estado local productivo y recuperacion
+
+Procedimiento **no ejecutado**, requiere ventana/corte autorizados por separado:
+
+1. Inventariar rutas persistentes y escritores. Como minimo:
+   `masterdata_data/kering/history.sqlite3`, `kering/config.enc`,
+   `process_activity.sqlite3`, `order_alerts.sqlite3`, `auth_state.sqlite3`
+   si existe, catalogo actual y JSON de correo/mercados/watchlist/diccionario.
+   Detectar tambien otros SQLite/JSON usados en el despliegue, antes del corte.
+   Nunca publicar config.enc, claves de cifrado, cookies, tokens o datos Odoo.
+2. Para una copia global coherente, detener los escritores **solo en la futura
+   ventana autorizada**. Crear backup de cada SQLite mediante
+   `sqlite3.Connection.backup` con la identidad que ya tiene acceso al origen,
+   a destino local privado NUEVO. No copiar un DB activo sin su WAL, no copiar
+   SHM ni ejecutar checkpoints/reparaciones sobre bases activas en este ensayo.
+   La API backup captura WAL comprometido; una transaccion entre varias bases
+   no es atomica, por eso se requiere ventana sin escritores para el conjunto.
+3. Validar en las COPIAS `PRAGMA integrity_check` y `foreign_key_check`,
+   tablas/recuentos e historial por pedido/EAN; guardar checksum del SQLite
+   cerrado y de JSON/config cifrada en manifiesto privado. Conservar backup
+   local inmutable y copia independiente aprobada; nunca SQLite operativo NFS.
+4. Provisionar un NUEVO estado local productivo, por ejemplo
+   `/opt/cloud-image-production/state`,1037:100/0700, sin `chown -R` de
+   masterdata_data. Instalar COPIAS revisadas en ese destino; configuracion
+   cifrada y clave con acceso minimo separado, sin descifrar en logs/Git.
+   Revisar rutas absolutas de pendientes y los binds/env de todos los escritores.
+   Alertas conserva su identidad: resolver su acceso al nuevo
+   process_activity compartido con ACL nominativa de directorio/archivos y
+   herencia WAL/SHM, probado en staging; no abrir el grupo users ni asumir que
+   permiso del fichero SQLite basta. Sin esa prueba, el corte sigue bloqueado.
+5. Ensayar recuperacion del backup local en un TERCER estado nuevo1037:100,
+   sin reemplazar bases activas. Comprobar integridad, lectura del historial,
+   snapshots/results, asociaciones, catalogo y checksums de imagenes/ZIP.
+   Validar UID/control, WAL/SHM y reinicio con los mismos binds futuros.
+6. Antes de activar, revisar plan de cambio de binds/identidad/raices,
+   guardas NFS, supervision y reservas. Rollback futuro: parar nuevos escritores,
+   volver a binds/config/artefacto anteriores y originales retenidos; no
+   sobreescribirlos con una copia vieja. Estos pasos NO autorizan activar,
+   desplegar, migrar produccion ni eliminar originales ahora.

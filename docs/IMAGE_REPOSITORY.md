@@ -165,8 +165,12 @@ creo el destino. Estas cantidades no describen el volumen de produccion.
    Recuperar estado de correo migrado antes de reactivar Graph. El historial
    Kering sigue en su raiz persistente original. Los pendientes se recalculan
    desde representaciones, no desde rutas antiguas.
-7. Replicar al NAS mediante copia verificada del catalogo y archivos. Revisar
-   jobs externos para que lean `<raiz>/<EAN>` y no rutas por proveedor/modelo.
+7. En el layout legacy, replicar al NAS mediante copia verificada del catalogo
+   y archivos. En el layout NFS separado, el catalogo operativo permanece local
+   y `sync-nas` legacy esta bloqueado: usar backups independientes y el ensayo
+   de recuperacion de `deployment/nfs/README.md`, nunca copiar la exportacion
+   de imagenes sobre si misma. Revisar jobs externos para que lean `<raiz>/<EAN>`
+   y no rutas por proveedor/modelo.
 8. Reactivar procesos y validar en piloto. Rollback: pausar, volver a codigo/
    configuracion anteriores y usar originales intactos o la recuperacion
    verificada. **Esta herramienta nunca elimina originales**. Retirada posterior
