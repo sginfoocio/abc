@@ -1,8 +1,68 @@
-# Precopia y cierre coherente: preparacion, no parada autorizada
+# Precopia y cierre coherente: protocolo y resultados
 
-Continua [CAPTURE.md](CAPTURE.md). No se ha hecho precopia de fotos reales,
-parado produccion ni creado snapshots. Este protocolo sustituye la copia
-integra durante pausa como primera opcion, SIN rebajar la coherencia.
+Continua [CAPTURE.md](CAPTURE.md). La precopia real termino y la primera
+ventana autorizada de cierre sin snapshot se aborto con restauracion
+verificada, como se detalla debajo. No existe fuente consistente promovida,
+ni migracion/recuperacion real ejecutada. No se crearon snapshots.
+Este protocolo sustituye la copia integra durante pausa SIN rebajar la coherencia.
+
+## Ventana autorizada 2026-10-10 UTC: abortada y restaurada
+
+El responsable autorizo la pausa de los cuatro servicios y confirmo que los
+usuarios estaban avisados y no iniciarian acciones manuales. Antes de parar:
+
+- Copias scratch locales comprobadas de los recibos, sin abrir/inicializar
+  las bases originales: cero procesos sin finalizar, cero avisos pendientes,
+  cero lotes/intentos/programador Kering activos.
+- Preflight del artefacto auxiliar `cloud-consistent-capture:84f095a`:
+  exportacion exacta, roles privados1037:100/0700, reserva186GiB y local2GiB;
+ 3.981 archivos/18.780.099.617B en los cinco origenes. Configuracion cifrada
+  Kering recuperable con la clave del runtime, sin imprimir ni copiar secretos
+  al NAS. Este artefacto auxiliar no sustituye los contenedores activos.
+- IDs, imagenes, Config, HostConfig y mounts previos conservados en un recibo
+  privado del operador. Watchdog independiente, conectado y con limite55min,
+  preparado para restaurar los mismos IDs incluso ante bloqueo NFS.
+
+La pausa comenzo **22:30:33Z**. `abcd-control` termino con salida0.
+`abcd-luxoptica-monitor` no termino tras SIGTERM y90s; Docker envio SIGKILL
+y registro salida**137** a22:32:05Z. Se activo el criterio de aborto
+**antes de copiar diferencias, respaldar SQLite o promover source**.
+No se siguio parando Kering ni alertas ni se reintento otra ventana.
+
+Restauracion por trap de los mismos cuatro IDs: todos running y Cloud/alertas
+healthy a**22:32:12.038329Z**, **99,04s** desde el inicio. Kering y alertas
+no llegaron a pararse; sus StartedAt permanecieron iguales. Se comprobo
+igualdad exacta de ID/imagen/Config/HostConfig/mounts en los cuatro servicios.
+El watchdog confirmo restauracion y termino. Otras apps no se tocaron.
+
+Recibo local nuevo1037:100/0600:
+`/opt/cloud-image-staging/state/closure-20261010T223000Z/status.json`,
+estado `aborted-restored`, `consistent_source=false`, `migratable=false`,
+cero pasadas de cierre y cero snapshots SQLite. La candidata y semilla
+Kering previas se conservan, sin alteraciones ni promocion:
+`/mnt/cloud-imagenes/staging/work/captures/capture-20261010T195000Z/candidate`.
+No existe `source/capture-20261010T195000Z`.
+
+**Ensayo de migracion y recuperacion bloqueado**, no ejecutado con la
+candidata viva para aparentar exito. Permanecen los bloqueos de integridad,
+mapeos ambiguos, archivos no reutilizables, vistas Kering no acreditadas y
+backup no independiente frente al fallo del NAS. Los informes anteriores
+no se presentan como un nuevo inventario de fuente congelada.
+
+El monitor activo es Python como PID1, StopSignal sin personalizacion y sin
+handler SIGTERM registrado en `/proc/<pid>/status`; el codigo vigente no
+registra SIGTERM y espera mediante `time.sleep`. Esto explica el bloqueo
+observado de parada, no un fallo de rsync/SQLite. Antes de otra ventana:
+validar parada drenada en un contenedor aislado del artefacto realmente activo
+y acordar el mecanismo de terminacion. No ampliar timeouts, aceptar137,
+modificar el contenedor activo ni desplegar un handler para hacer pasar la
+captura. Una nueva ventana requiere resolver este bloqueo y coordinar de
+nuevo admision/ausencia de trabajos.
+
+No se modifico el repositorio activo ni sus permisos; no hubo migracion
+productiva, replica remota, eliminacion de originales, fusion, despliegue
+ni cambios LVM. Las secciones historicas siguientes conservan la cronologia;
+sus afirmaciones de "no parada" describen entregas anteriores, no esta ventana.
 
 ## Conclusion de la revision
 

@@ -1,5 +1,11 @@
 # Captura consistente: procedimiento preparado, NO ejecutado
 
+Estado actualizado: [PRECOPY.md](PRECOPY.md) registra la ventana autorizada
+del2026-10-10UTC, abortada por salida137 del monitor Luxoptica, y la
+restauracion saludable de los mismos contenedores en99,04s. No se capturo
+fuente consistente ni se ejecuto el ensayo de migracion/recuperacion.
+Los comandos y restricciones de autorizacion siguientes son historicos.
+
 Staging existente, SQLite local y guardas: [STAGING.md](STAGING.md).
 Esta entrega NO autoriza parar escritores. Se necesita una ventana explicita
 antes de ejecutar los comandos de mantenimiento de este documento.
