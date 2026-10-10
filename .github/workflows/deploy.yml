@@ -118,6 +118,31 @@ jobs:
           docker run --rm --network none --read-only --user 1037:100 --tmpfs /tmp:size=536870912,mode=1777 \
             --mount "type=volume,source=$VOLUME,target=/smoke" -e CLOUD_SMOKE_DIRECTORY=/smoke/state \
             -e HOME=/home/cloud-images -e PYTHONPATH=/app "$IMAGE" python scripts/smoke_image_storage.py
+          docker run --rm --network none --read-only --user 1037:100 --tmpfs /tmp:size=536870912,mode=1777 \
+            --mount "type=volume,source=$VOLUME,target=/smoke" -e HOME=/home/cloud-images -e PYTHONPATH=/app \
+            "$IMAGE" python scripts/smoke_luxoptica_stop.py --directory /smoke/state/monitor-stop
+          for SCENARIO in idle download sqlite nfs; do
+            NAME="cloud-monitor-pid1-${{ github.run_id }}-$SCENARIO"
+            DIRECTORY="/smoke/state/pid1-$SCENARIO"
+            docker create --name "$NAME" --network none --read-only --user 1037:100 --cap-drop ALL \
+              --no-healthcheck --tmpfs /tmp:size=536870912,mode=1777 \
+              --mount "type=volume,source=$VOLUME,target=/smoke" -e HOME=/home/cloud-images \
+              -e PYTHONPATH=/app/scripts/monitor_stop_fixture:/app \
+              -e MONITOR_SMOKE_DIRECTORY="$DIRECTORY" -e MONITOR_SMOKE_SCENARIO="$SCENARIO" \
+              "$IMAGE" python poll_luxoptica_mail.py --interval-minutes 10 --sender-hint luxottica \
+              --subject-hint image --lookback-days 30 --top-messages 100 >/dev/null
+            docker start "$NAME" >/dev/null
+            docker run --rm --network none --read-only --user 1037:100 \
+              --mount "type=volume,source=$VOLUME,target=/smoke" -e PYTHONPATH=/app "$IMAGE" \
+              python scripts/smoke_luxoptica_stop.py --directory "$DIRECTORY" --wait-ready
+            docker kill --signal TERM "$NAME" >/dev/null
+            docker run --rm --network none --read-only --user 1037:100 \
+              --mount "type=volume,source=$VOLUME,target=/smoke" -e PYTHONPATH=/app "$IMAGE" \
+              python scripts/smoke_luxoptica_stop.py --directory "$DIRECTORY" --release
+            test "$(timeout 15 docker wait "$NAME")" = 0
+            docker logs "$NAME"
+            docker rm "$NAME" >/dev/null
+          done
           docker run --rm --network none --read-only --user 1038:100 --mount "type=volume,source=$VOLUME,target=/smoke" \
             "$IMAGE" python -c "import os; assert all(not os.access('/smoke/state', mode) for mode in (os.R_OK, os.W_OK, os.X_OK)); print('Other UID in users GID100 denied local state')"
 

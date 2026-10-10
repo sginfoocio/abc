@@ -19,6 +19,7 @@ from filelock import FileLock
 from PIL import Image, ImageOps
 
 from db_config import load_env_file
+from service_stop import acquire, checkpoint, request_timeout
 from repository_storage import (
     state_root, backup_root, check_image_root, require_distinct_replica, check_write_path, validate_state_root,
     excluded_staging_path,
@@ -155,7 +156,7 @@ class ImageRepository:
                 if (self.root / name).exists() and not (self.state_root / name).exists():
                     raise ValueError("Estado legacy existente; separar mediante copia verificada antes de activar")
         self._locks: dict[str, FileLock] = {}
-        with self.maintenance_lock(), self.connect() as connection:
+        with acquire(self.maintenance_lock()), self.connect() as connection:
             connection.executescript("""
                 CREATE TABLE IF NOT EXISTS assets (
                     id INTEGER PRIMARY KEY, ean TEXT NOT NULL, checksum TEXT NOT NULL,
@@ -199,7 +200,7 @@ class ImageRepository:
     def connect(self):
         check_image_root(self.root)
         validate_state_root(self.root, self.state_root)
-        connection = sqlite3.connect(self.database, timeout=120)
+        connection = sqlite3.connect(self.database, timeout=request_timeout(120))
         try:
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys=ON")
@@ -295,7 +296,8 @@ class ImageRepository:
         if instant.tzinfo is None:
             raise ValueError("fecha_imagen_sin_zona_horaria")
         timestamp = instant.astimezone(timezone.utc).isoformat()
-        with self.lock(ean), self.maintenance_lock(), self.connect() as connection:
+        checkpoint()
+        with acquire(self.lock(ean)), acquire(self.maintenance_lock()), self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             asset = connection.execute("SELECT * FROM assets WHERE ean=? AND checksum=?",
                                        (ean, checksum)).fetchone()

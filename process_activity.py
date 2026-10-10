@@ -7,6 +7,7 @@ import sqlite3
 import time
 import uuid
 from threading import Event, Thread
+from service_stop import request_timeout, StopRequested
 
 
 def activity_path() -> Path:
@@ -29,7 +30,7 @@ def record_process(process: str, *, enabled: bool | None = None, interval: int |
     path.parent.mkdir(parents=True, exist_ok=True)
     started = time.time()
     run_id = uuid.uuid4().hex
-    with closing(sqlite3.connect(path, timeout=30)) as connection, connection:
+    with closing(sqlite3.connect(path, timeout=request_timeout(30))) as connection, connection:
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA synchronous=FULL")
         connection.execute("""CREATE TABLE IF NOT EXISTS process_runs (
@@ -45,7 +46,7 @@ def record_process(process: str, *, enabled: bool | None = None, interval: int |
     def heartbeat():
         while not stopped.wait(30):
             try:
-                with closing(sqlite3.connect(path, timeout=30)) as connection, connection:
+                with closing(sqlite3.connect(path, timeout=request_timeout(30))) as connection, connection:
                     connection.execute("UPDATE process_runs SET heartbeat=? WHERE id=?", (time.time(), run_id))
             except (OSError, sqlite3.Error) as error:
                 heartbeat_errors.append(type(error).__name__)
@@ -57,6 +58,10 @@ def record_process(process: str, *, enabled: bool | None = None, interval: int |
     error_code = None
     try:
         yield receipt
+    except StopRequested:
+        receipt["result"] = "Parcial"
+        error_code = "StopRequested"
+        raise
     except BaseException as error:
         receipt["result"] = "Error"
         error_code = type(error).__name__

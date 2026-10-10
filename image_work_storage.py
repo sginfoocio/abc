@@ -10,6 +10,7 @@ from repository_storage import (
     state_root, check_image_root, require_distinct_replica, filesystem_mount, check_staging_role,
 )
 from scripts.nfs_repository_guard import require_nfs
+from service_stop import acquire, checkpoint
 
 
 def positive_setting(name: str, default: int) -> int:
@@ -67,9 +68,10 @@ def require_capacity(root: Path, required: int = 0) -> None:
 
 @contextmanager
 def incoming_lock(images: Path):
+    checkpoint()
     check_image_root(images)
     root = work_root(images)
     root.mkdir(parents=True, exist_ok=True)
-    with FileLock(root / ".incoming.lock", timeout=120):
+    with acquire(FileLock(root / ".incoming.lock", timeout=120)):
         require_capacity(root, archive_limit())
         yield root

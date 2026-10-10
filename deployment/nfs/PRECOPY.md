@@ -8,6 +8,10 @@ Este protocolo sustituye la copia integra durante pausa SIN rebajar la coherenci
 
 ## Ventana autorizada 2026-10-10 UTC: abortada y restaurada
 
+Seguimiento del bloqueo del monitor: [MONITOR_STOP.md](MONITOR_STOP.md)
+documenta reproduccion aislada, implementacion y preparacion del artefacto.
+No modifica el resultado de esta ventana ni autoriza repetirla/desplegar.
+
 El responsable autorizo la pausa de los cuatro servicios y confirmo que los
 usuarios estaban avisados y no iniciarian acciones manuales. Antes de parar:
 

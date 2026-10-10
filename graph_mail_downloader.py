@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tempfile
@@ -24,6 +25,7 @@ import hashlib
 from image_naming import sanitize_filename as _sanitize_filename
 from image_naming import market_view_from_image_name as _market_view_from_image_name
 from image_work_storage import work_root, check_work_root, require_capacity, archive_limit, incoming_lock, positive_setting
+from service_stop import checkpoint, request_timeout, acquire, database_options
 
 
 M365_TENANT_ID_ENV = "M365_TENANT_ID"
@@ -84,7 +86,8 @@ def _graph_headers(token: str) -> dict[str, str]:
 
 
 def _get_access_token(config: M365Config) -> str:
-    response = requests.post(
+    checkpoint()
+    with closing(requests.post(
         _token_url(config.tenant_id),
         data={
             "client_id": config.client_id,
@@ -92,10 +95,10 @@ def _get_access_token(config: M365Config) -> str:
             "scope": "https://graph.microsoft.com/.default",
             "grant_type": "client_credentials",
         },
-        timeout=30,
-    )
-    response.raise_for_status()
-    payload = response.json()
+        timeout=request_timeout(30),
+    )) as response:
+        response.raise_for_status()
+        payload = response.json()
     token = payload.get("access_token", "")
     if not token:
         raise RuntimeError("No se obtuvo access_token de Microsoft Graph")
@@ -111,9 +114,11 @@ def _inbox_messages_url(mailbox: str, top: int) -> str:
 
 
 def _list_inbox_messages(token: str, mailbox: str, top: int) -> list[dict[str, Any]]:
-    response = requests.get(_inbox_messages_url(mailbox, top), headers=_graph_headers(token), timeout=30)
-    response.raise_for_status()
-    payload = response.json()
+    checkpoint()
+    with closing(requests.get(_inbox_messages_url(mailbox, top), headers=_graph_headers(token),
+                              timeout=request_timeout(30))) as response:
+        response.raise_for_status()
+        payload = response.json()
     return payload.get("value", [])
 
 
@@ -130,16 +135,20 @@ def _message_body_url(mailbox: str, message_id: str) -> str:
 
 
 def _list_attachments(token: str, mailbox: str, message_id: str) -> list[dict[str, Any]]:
-    response = requests.get(_attachments_url(mailbox, message_id), headers=_graph_headers(token), timeout=30)
-    response.raise_for_status()
-    payload = response.json()
+    checkpoint()
+    with closing(requests.get(_attachments_url(mailbox, message_id), headers=_graph_headers(token),
+                              timeout=request_timeout(30))) as response:
+        response.raise_for_status()
+        payload = response.json()
     return payload.get("value", [])
 
 
 def _get_message_body(token: str, mailbox: str, message_id: str) -> str:
-    response = requests.get(_message_body_url(mailbox, message_id), headers=_graph_headers(token), timeout=30)
-    response.raise_for_status()
-    return response.json().get("body", {}).get("content", "")
+    checkpoint()
+    with closing(requests.get(_message_body_url(mailbox, message_id), headers=_graph_headers(token),
+                              timeout=request_timeout(30))) as response:
+        response.raise_for_status()
+        return response.json().get("body", {}).get("content", "")
 
 
 def send_alert_email(
@@ -164,23 +173,23 @@ def send_alert_email(
         },
         "saveToSentItems": True,
     }
-    response = requests.post(
+    with closing(requests.post(
         f"https://graph.microsoft.com/v1.0/users/{config.mailbox}/sendMail",
         headers={**_graph_headers(token), "Content-Type": "application/json"},
         json=payload,
         timeout=30,
-    )
-    response.raise_for_status()
+    )) as response:
+        response.raise_for_status()
 
 
 def _mark_message_read(token: str, mailbox: str, message_id: str) -> None:
-    response = requests.patch(
+    with closing(requests.patch(
         f"https://graph.microsoft.com/v1.0/users/{mailbox}/messages/{message_id}",
         headers={**_graph_headers(token), "Content-Type": "application/json"},
         json={"isRead": True},
-        timeout=30,
-    )
-    response.raise_for_status()
+        timeout=request_timeout(30),
+    )) as response:
+        response.raise_for_status()
 
 
 def _find_download_links(body: str) -> list[str]:
@@ -222,6 +231,12 @@ def _load_state(state_file: Path) -> dict[str, Any]:
 def _save_state(state_file: Path, state: dict[str, Any]) -> None:
     state_file.parent.mkdir(parents=True, exist_ok=True)
     atomic_write(state_file, json.dumps(state, ensure_ascii=False, indent=2).encode("utf-8"))
+    if os.name == "posix":
+        directory = os.open(state_file.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
 
 
 def _parse_graph_dt(value: str) -> datetime:
@@ -332,7 +347,8 @@ def _get_market_ids_by_ean(eans: set[str]) -> dict[str, dict[str, str]]:
             host=config.host,
             port=config.port,
             database=config.database,
-        )
+        ),
+        connect_args=database_options(),
     )
     query = text(
         """
@@ -346,9 +362,13 @@ def _get_market_ids_by_ean(eans: set[str]) -> dict[str, dict[str, str]]:
     ).bindparams(bindparam("eans", expanding=True))
     market_names = {2: "Miinto", 3: "Farfetch"}
     result: dict[str, dict[str, str]] = {}
-    with engine.connect() as conn:
-        for row in conn.execute(query, {"eans": sorted(eans)}).mappings():
-            result.setdefault(row["ean"], {})[market_names[row["siteweb_id"]]] = row["product_website_id"]
+    checkpoint()
+    try:
+        with engine.connect() as conn:
+            for row in conn.execute(query, {"eans": sorted(eans)}).mappings():
+                result.setdefault(row["ean"], {})[market_names[row["siteweb_id"]]] = row["product_website_id"]
+    finally:
+        engine.dispose()
     return result
 
 
@@ -392,7 +412,8 @@ def _market_pending_file(images_root: Path) -> Path:
 def _refresh_pending_market_images(images_root: Path) -> tuple[int, int]:
     from repository_storage import check_image_root
     check_image_root(images_root)
-    with FileLock(images_root / ".market.lock", timeout=120):
+    checkpoint()
+    with acquire(FileLock(images_root / ".market.lock", timeout=120)):
         return _refresh_pending_market_images_locked(images_root)
 
 
@@ -402,6 +423,7 @@ def _refresh_pending_market_images_locked(images_root: Path) -> tuple[int, int]:
     repository = ImageRepository(images_root)
     pending_entries: dict[str, dict[str, Any]] = {}
     for record in repository.records():
+        checkpoint()
         if record.market or not _market_image_names(record.name, {"Farfetch": "check"}):
             continue
         pending_entries[str(record.path)] = {"ean": record.ean, "missing_markets": ["Farfetch", "Miinto"]}
@@ -410,6 +432,7 @@ def _refresh_pending_market_images_locked(images_root: Path) -> tuple[int, int]:
     completed = 0
     created = 0
     for source_name, entry in list(pending_entries.items()):
+        checkpoint()
         source = Path(source_name)
         market_ids = market_ids_by_ean.get(entry["ean"], {})
         created_paths = _create_market_images(source, source.parent, market_ids)
@@ -442,6 +465,7 @@ def _extract_zip(archive_path: Path, images_root: Path) -> list[Path]:
         if len(archive.infolist()) > positive_setting("GRAPH_IMAGE_MAX_ZIP_ENTRIES", 50000):
             raise ValueError("ZIP supera GRAPH_IMAGE_MAX_ZIP_ENTRIES; archivo conservado")
         for member in archive.infolist():
+            checkpoint()
             if member.is_dir():
                 continue
 
@@ -480,6 +504,7 @@ def _save_streamed_attachment(chunks: Iterable[bytes], target_dir: Path, file_na
         total = 0
         with os.fdopen(descriptor, "wb") as stream:
             for chunk in chunks:
+                checkpoint()
                 total += len(chunk)
                 if total > archive_limit():
                     raise ValueError("Adjunto supera GRAPH_IMAGE_MAX_ARCHIVE_BYTES")
@@ -487,6 +512,7 @@ def _save_streamed_attachment(chunks: Iterable[bytes], target_dir: Path, file_na
                 stream.write(chunk)
             stream.flush()
             os.fsync(stream.fileno())
+        checkpoint()
         saved = target_dir / _sanitize_filename(file_name)
         digest = file_checksum(staged)
         if saved.exists() and file_checksum(saved) != digest:
@@ -505,7 +531,8 @@ def _save_streamed_attachment(chunks: Iterable[bytes], target_dir: Path, file_na
 
 
 def _download_zip_link(url: str, target_dir: Path) -> Path | None:
-    with requests.get(url, allow_redirects=True, stream=True, timeout=120) as response:
+    checkpoint()
+    with requests.get(url, allow_redirects=True, stream=True, timeout=request_timeout(120)) as response:
         response.raise_for_status()
         final_path = unquote(urlparse(response.url).path)
         if not final_path.lower().endswith(".zip"):
@@ -533,7 +560,8 @@ def download_luxoptica_mail_attachments(
     with record_process("luxoptica-mail") as receipt:
         check_image_root(root)
         root.mkdir(parents=True, exist_ok=True)
-        with FileLock(root / ".mail.lock", timeout=120), incoming_lock(root):
+        checkpoint()
+        with acquire(FileLock(root / ".mail.lock", timeout=120)), incoming_lock(root):
             summary = _download_luxoptica_mail_attachments(sender_hint, subject_hint, lookback_days, top_messages)
             receipt["counts"] = {"Correos revisados": summary.messages_scanned,
                                  "Adjuntos descargados": summary.attachments_downloaded}
@@ -548,13 +576,43 @@ def _download_luxoptica_mail_attachments(
     if missing:
         raise RuntimeError(f"Faltan variables de entorno de Microsoft 365: {', '.join(missing)}")
 
+    checkpoint()
     token = _get_access_token(config)
-    messages = _list_inbox_messages(token, config.mailbox, top_messages)
+    checkpoint()
 
     root = config.download_root
     if not root.is_absolute():
         root = Path(__file__).resolve().parent / root
     root.mkdir(parents=True, exist_ok=True)
+    from repository_storage import state_root
+    state_file = state_root(root) / ".mail_download_state.json"
+    state = _load_state(state_file)
+    processed_ids: set[str] = set(state.get("processed_message_ids", []))
+    pending_read: set[str] = set(state.get("pending_read_ids", []))
+
+    def acknowledge(message_id: str) -> None:
+        checkpoint()
+        _mark_message_read(token, config.mailbox, message_id)
+        pending_read.discard(message_id)
+        state["pending_read_ids"] = sorted(pending_read)
+        _save_state(state_file, state)
+
+    def completed(message_id: str, *, mark_read: bool = True) -> None:
+        processed_ids.add(message_id)
+        newly_processed.append(message_id)
+        if mark_read:
+            pending_read.add(message_id)
+        state["processed_message_ids"] = sorted(processed_ids)
+        state["pending_read_ids"] = sorted(pending_read)
+        _save_state(state_file, state)
+        if mark_read:
+            acknowledge(message_id)
+
+    for message_id in sorted(pending_read):
+        acknowledge(message_id)
+
+    checkpoint()
+    messages = _list_inbox_messages(token, config.mailbox, top_messages)
     pending_completed, pending_created = _refresh_pending_market_images(root)
     if pending_completed or pending_created:
         print(
@@ -562,11 +620,6 @@ def _download_luxoptica_mail_attachments(
             f"{pending_created} copias de mercado creadas.",
             flush=True,
         )
-
-    from repository_storage import state_root
-    state_file = state_root(root) / ".mail_download_state.json"
-    state = _load_state(state_file)
-    processed_ids: set[str] = set(state.get("processed_message_ids", []))
 
     now_utc = datetime.now(timezone.utc)
     min_dt = now_utc - timedelta(days=max(1, lookback_days))
@@ -579,6 +632,7 @@ def _download_luxoptica_mail_attachments(
     newly_processed: list[str] = []
 
     for msg in messages:
+        checkpoint()
         message_id = msg.get("id", "")
         if not message_id or message_id in processed_ids or msg.get("isRead", False):
             continue
@@ -608,6 +662,7 @@ def _download_luxoptica_mail_attachments(
             downloaded_from_link = False
             links = _find_download_links(body)
             for link in links:
+                checkpoint()
                 archive_path = _download_zip_link(link, target_dir)
                 if archive_path is None:
                     continue
@@ -617,8 +672,7 @@ def _download_luxoptica_mail_attachments(
                 downloaded_from_link = True
                 break
             if downloaded_from_link:
-                _mark_message_read(token, config.mailbox, message_id)
-                newly_processed.append(message_id)
+                completed(message_id)
             else:
                 print(
                     f"   ⚠️ Correo no leído sin ZIP de imágenes detectable: {subject or '[sin asunto]'} "
@@ -635,13 +689,14 @@ def _download_luxoptica_mail_attachments(
         ]
 
         if not file_attachments:
-            newly_processed.append(message_id)
+            completed(message_id, mark_read=False)
             continue
 
         messages_with_attachments += 1
         lote_folder = _detect_lote_from_subject(subject)
 
         for att in file_attachments:
+            checkpoint()
             att_id = att.get("id", "")
             file_name = att.get("name", "attachment.bin")
             if not att_id:
@@ -657,7 +712,7 @@ def _download_luxoptica_mail_attachments(
                 with requests.get(
                     _attachment_value_url(config.mailbox, message_id, att_id),
                     headers=_graph_headers(token),
-                    timeout=60, stream=True,
+                    timeout=request_timeout(60), stream=True,
                 ) as value_resp:
                     value_resp.raise_for_status()
                     saved = _save_streamed_attachment(value_resp.iter_content(1024 * 1024), target_dir, file_name)
@@ -683,13 +738,7 @@ def _download_luxoptica_mail_attachments(
                 )
                 saved_paths.append(str(record.path))
 
-        _mark_message_read(token, config.mailbox, message_id)
-        newly_processed.append(message_id)
-
-    if newly_processed:
-        processed_ids.update(newly_processed)
-        state["processed_message_ids"] = sorted(processed_ids)
-        _save_state(state_file, state)
+        completed(message_id)
 
     return DownloadSummary(
         messages_scanned=len(messages),
