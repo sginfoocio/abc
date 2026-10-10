@@ -1,5 +1,10 @@
 # 📦 Estructura de Archivos Docker
 
+> Cloud requiere identidad real del artefacto al construir: BUILD_COMMIT, BUILD_ID
+> y BUILD_PUBLISHED. Consulte [la configuración actual](docs/CLOUD_HOME.md#identidad-del-artefacto)
+> antes de usar los ejemplos históricos de build de esta guía. Esta PR sólo
+> construye/verifica, sin arrancar automatizaciones ni desplegar.
+
 ## Archivos Creados/Modificados
 
 ### 1. **Dockerfile**

@@ -68,9 +68,8 @@ from auth_session import (
 # CONFIG
 # ==============================================================================
 
-APP_TITLE = "Diagonal Eyewear"
-APP_VERSION = "1.0.6"
-APP_ICON = Path(__file__).resolve().parent / "assets" / "favicon.svg"
+APP_TITLE = "Cloud"
+APP_ICON = Path(__file__).resolve().parent / "logo" / "favicon.svg"
 ABCD_SNAPSHOT_TABLE = "abcd_weekly_snapshots"
 AUTH_USERNAME_ENV = "APP_USERNAME"
 AUTH_COOKIE_SECRET_ENV = "AUTH_COOKIE_SECRET"
@@ -1069,42 +1068,23 @@ def render_sidebar_shell(section_name: str) -> None:
             - Área Masterdata para transformación y validación previa a Odoo.
             """
         )
-        st.caption(f"Versión {APP_VERSION}")
+        st.caption("Cloud · Catálogo, imágenes y automatizaciones")
 
 
 def render_footer() -> None:
-    st.divider()
-    st.markdown(
-        f"""
-        <div style='text-align: center; color: #888; margin-top: 2rem;'>
-        <small>Diagonal Eyewear | Plataforma ABC y Masterdata | v{APP_VERSION}</small>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    from build_info import render_build_footer
+    render_build_footer()
 
 
 def render_home_page() -> None:
+    from cloud_dashboard import render_dashboard
     render_sidebar_shell("Inicio")
-    st.title(APP_TITLE)
-    st.subheader("Portal interno")
-    st.write("Selecciona una de las dos áreas principales.")
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.markdown("### Área ABC")
-        st.write("Análisis ABCD, búsqueda, reportes y detalle de producto.")
-        st.page_link(ABC_HOME_PAGE, label="Entrar en Análisis ABC", use_container_width=True)
-    with col2:
-        st.markdown("### Área Masterdata")
-        st.write("Transformación de Luxottica, advertencias, descargas y dry-run Odoo.")
-        st.page_link(MASTER_IMPORT_PAGE, label="Entrar en Master Data", use_container_width=True)
-    with col3:
-        st.markdown("### Configuración")
-        st.write("Guardar claves y credenciales de integración en el entorno local.")
-        st.page_link(SETTINGS_PAGE, label="Entrar en Configuración", use_container_width=True)
-
-    render_footer()
+    pages = {"master": MASTER_IMPORT_PAGE, "dictionary": MASTER_DICTIONARY_PAGE}
+    if st.session_state.get("auth_role") == "admin":
+        pages.update(images=LUXOPTICA_IMAGES_PAGE, luxpending=LUXOPTICA_PENDING_PAGE,
+                     kering=KERING_IMAGES_PAGE, alerts=ALERTA_PEDIDOS_PAGE,
+                     abchistory=ABC_HISTORY_PAGE, config=SETTINGS_PAGE)
+    render_dashboard(pages)
 
 
 def render_odoo_reconciliation_page() -> None:
@@ -2422,4 +2402,6 @@ navigation = st.navigation(
 
 from kering_images_ui import page_transition
 page_transition(st.session_state, navigation.url_path)
+from cloud_dashboard import dashboard_transition
+dashboard_transition(st.session_state, navigation.url_path)
 navigation.run()

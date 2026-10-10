@@ -21,6 +21,23 @@ def upload_to_luxoptica(
     headless: bool = False,
     keep_browser_open: bool = False,
 ) -> tuple[bool, str]:
+    from process_activity import record_process
+    with record_process("luxoptica-upload") as receipt:
+        result = _prepare_luxoptica_upload(url, username, password, ean_file, email_destino,
+                                          headless, keep_browser_open)
+        receipt["result"] = "Correcto" if result[0] else "Error"
+        return result
+
+
+def _prepare_luxoptica_upload(
+    url: str = "https://portal.luxottica.com/",
+    username: str = "",
+    password: str = "",
+    ean_file: Path | None = None,
+    email_destino: str = "images@diagonaleyewear.com",
+    headless: bool = False,
+    keep_browser_open: bool = False,
+) -> tuple[bool, str]:
     if ean_file is None:
         files = sorted((Path(__file__).resolve().parent / "docs" / "Luxoptica").glob(
             "upc-products-images-request-*.txt"), reverse=True)

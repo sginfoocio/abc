@@ -1,4 +1,13 @@
 # Variables compartidas por la app y el servicio de alertas (mismas credenciales y destinatarios).
+x-cloud-build: &cloud-build
+  context: .
+  dockerfile: Dockerfile
+  args:
+    BUILD_COMMIT: ${BUILD_COMMIT:-}
+    BUILD_ID: ${BUILD_ID:-}
+    BUILD_PUBLISHED: ${BUILD_PUBLISHED:-}
+    BUILD_VERSION: ${BUILD_VERSION:-}
+
 x-odoo-env: &odoo-env
   DB_HOST: ${DB_HOST}
   DB_PORT: ${DB_PORT}
@@ -21,12 +30,11 @@ x-order-alert-env: &order-alert-env
   ALERTA_PEDIDOS_REINTENTOS_CONSULTA: ${ALERTA_PEDIDOS_REINTENTOS_CONSULTA:-3}
   ALERTA_PEDIDOS_MAX_INTENTOS_ENVIO: ${ALERTA_PEDIDOS_MAX_INTENTOS_ENVIO:-5}
   TZ: Europe/Madrid
+  PROCESS_ACTIVITY_PATH: /app/data/process_activity.sqlite3
 
 services:
   abcd-app:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    build: *cloud-build
     image: ${ABCD_IMAGE_REF:-abcd-control:local}
     container_name: abcd-control
     ports:
@@ -100,9 +108,7 @@ services:
       - abcd-network
 
   abcd-luxoptica-monitor:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    build: *cloud-build
     image: ${ABCD_IMAGE_REF:-abcd-control:local}
     container_name: abcd-luxoptica-monitor
     command: ["python", "poll_luxoptica_mail.py", "--interval-minutes", "10", "--sender-hint", "luxottica", "--subject-hint", "image", "--lookback-days", "30", "--top-messages", "100"]
@@ -117,6 +123,7 @@ services:
       - M365_CLIENT_SECRET=${M365_CLIENT_SECRET}
       - M365_MAILBOX=${M365_MAILBOX}
       - IMAGE_REPOSITORY_ROOT=${IMAGE_REPOSITORY_ROOT:-/app/repo/images}
+      - PROCESS_ACTIVITY_PATH=/app/data/process_activity.sqlite3
       - MASTERDATA_DICTIONARY_PATH=${MASTERDATA_DICTIONARY_PATH:-/app/data/masterdata_dictionary.json}
       - TZ=Europe/Madrid
       - PYTHONUNBUFFERED=1
@@ -131,9 +138,7 @@ services:
       - abcd-network
 
   abcd-kering-scheduler:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    build: *cloud-build
     image: ${ABCD_IMAGE_REF:-abcd-control:local}
     command: ["python", "kering_jobs.py"]
     environment:
@@ -169,9 +174,7 @@ services:
 
   # Comprobación periódica de pedidos de clientes vigilados (sustituye al cron de run_alerta_pedidos.py).
   abcd-order-alerts:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    build: *cloud-build
     image: ${ABCD_IMAGE_REF:-abcd-control:local}
     container_name: abcd-order-alerts
     command: ["python", "run_alerta_pedidos.py", "--loop"]

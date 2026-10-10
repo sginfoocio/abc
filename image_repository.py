@@ -363,6 +363,12 @@ class ImageRepository:
         return buffer.getvalue()
 
     def sync_nas(self, target: Path) -> None:
+        from process_activity import record_process
+        with record_process("nas-sync") as receipt:
+            count = self._sync_nas(target)
+            receipt["counts"] = {"Archivos de imágenes verificados": count}
+
+    def _sync_nas(self, target: Path) -> int:
         target = target.resolve()
         if target == self.root or target in self.root.parents or self.root in target.parents:
             raise ValueError("El NAS debe ser una replica separada")
@@ -399,3 +405,4 @@ class ImageRepository:
             finally:
                 if os.path.exists(temporary):
                     os.unlink(temporary)
+            return len(seen)

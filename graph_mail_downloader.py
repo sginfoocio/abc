@@ -504,7 +504,12 @@ def download_luxoptica_mail_attachments(
     root = repository_root()
     root.mkdir(parents=True, exist_ok=True)
     with FileLock(root / ".mail.lock", timeout=120):
-        return _download_luxoptica_mail_attachments(sender_hint, subject_hint, lookback_days, top_messages)
+        from process_activity import record_process
+        with record_process("luxoptica-mail") as receipt:
+            summary = _download_luxoptica_mail_attachments(sender_hint, subject_hint, lookback_days, top_messages)
+            receipt["counts"] = {"Correos revisados": summary.messages_scanned,
+                                 "Adjuntos descargados": summary.attachments_downloaded}
+            return summary
 
 
 def _download_luxoptica_mail_attachments(
