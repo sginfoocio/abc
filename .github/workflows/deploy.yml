@@ -171,12 +171,14 @@ jobs:
 
       - name: Lint with flake8
         run: |
+          flake8 image_naming.py image_exports.py image_repository.py migrate_image_repository.py kering_media.py tests/test_kering_image_sections.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 kering_images.py kering_images_ui.py kering_portal.py kering_jobs.py scripts/dependency_locks.py scripts/validate_kering_portal.py tests/test_kering_images.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 app_enhanced.py db_loader.py engine.py auth_session.py order_alerts.py run_alerta_pedidos.py watchlist_config.py adyen_reconciliation.py adyen_reconciliation_ui.py tests/test_adyen_reconciliation.py tests/test_auth_session.py tests/test_order_alerts.py tests/test_order_alert_service.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 app_enhanced.py db_loader.py engine.py auth_session.py order_alerts.py run_alerta_pedidos.py watchlist_config.py adyen_reconciliation.py adyen_reconciliation_ui.py tests/test_adyen_reconciliation.py tests/test_auth_session.py tests/test_order_alerts.py tests/test_order_alert_service.py --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
 
       - name: Check syntax
         run: |
+          python -m py_compile image_naming.py image_exports.py image_repository.py migrate_image_repository.py graph_mail_downloader.py kering_media.py tests/test_kering_image_sections.py
           python -m py_compile kering_images.py kering_images_ui.py kering_portal.py kering_jobs.py scripts/dependency_locks.py scripts/validate_kering_portal.py
           python -m py_compile app_enhanced.py
           python -m py_compile db_loader.py

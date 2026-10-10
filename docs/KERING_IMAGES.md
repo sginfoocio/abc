@@ -1,5 +1,98 @@
 # Imagenes Kering (PR borrador, adaptador real)
 
+## Deteccion de vistas y alcance actual (issue #38)
+
+Esta seccion sustituye el contrato anterior que aceptaba detalle como tercera
+vista. Los resultados historicos de las pruebas reales mas abajo NO prueban
+completitud V1/V2/V3 bajo el contrato nuevo. No se ha accedido al portal ni
+desplegado esta implementacion en produccion.
+
+### Senales y limites de evidencia
+
+Se revisaron `PRODUCT_SNAPSHOT`, `_find_product`, `_download` y la evidencia
+historica documentada. El visor ofrece `img.src` (URL opaca del CDN) e `img.alt`
+(referencia modelo-color); EAN/UPC y talla son datos de la ficha, NO de la vista.
+Se capturan tambien `title`, `aria-label` y `data-filename` cuando existen,
+pero no se afirma que el portal real publique etiquetas semanticas en ellos.
+
+| Ejemplo anonimizado / senal | Evidencia | Regla actual |
+| --- | --- | --- |
+| `https://picture.kecdn.net/<identificador-opaco>`, alt `MODELO-001` | CDN y referencia observados; la documentacion no conserva una senal semantica por imagen | unknown; no permite determinar frontal/perspectiva/lateral |
+| Posicion 0/1/2 del visor | Dos muestras historicas mostraban perspectiva/frontal/detalle; no es una garantia por imagen | No usar posicion; detalle nunca acredita lateral |
+| `MODELO__001__noshad__fr.png` en nombre original | Patron real del contrato Luxoptica; presencia en Kering solo probada en fixtures offline, NO observada en las URLs opacas historicas | Adaptador acepta el patron exacto previo al renombrado como frontal |
+| `...__noshad__qt.png`, `...__shad__lt.png` | Mismo limite de evidencia | perspectiva, lateral respectivamente |
+| Dos nombres/atributos con patrones distintos | Fixture de contradiccion | unknown; revision explicita |
+| Etiqueta `front` sin contrato verificado | No hay mapeo real confirmado | unknown, no se inventa una equivalencia |
+
+`kering_media.identify_media` inspecciona SOLO senales de origen, antes de
+`kering_filename`. Guarda `original_name`, referencia, senales, fuentes, regla
+y `normalized_view` en `view_detection`. No lee el nombre generado para decidir
+la vista. Un nombre generado no se usa como evidencia en la siguiente descarga:
+la omision usa origen URL y checksum. Una senal nueva acreditada puede clasificar
+un archivo valido sin transferirlo ni cambiar su nombre, dejando evento auditado.
+
+Para las URLs opacas reales las senales disponibles no bastan. Se evaluo la
+viabilidad de clasificar por contenido: las dos muestras historicas no forman
+un conjunto etiquetado representativo ni permiten medir precision/ambiguedad
+por familia; no se entrena ni habilita un clasificador visual sin ese conjunto.
+**No se declara una precision no medida.** Las fotos quedan desconocidas y las
+vistas pendientes hasta revision explicita de cada imagen. El panel de galeria
+permite confirmar/corregir una vista con revisor y motivo, conserva los mismos
+bytes/nombre y registra cada cambio en `events`; no sobrescribe alternativas.
+La correccion tiene prioridad sobre la inferencia automatica posterior.
+
+Se conservan TODAS las imagenes del visor con referencia y CDN permitidos,
+tambien editoriales y mas de tres fotos. URLs validas existentes se omiten,
+archivos invalidos/ausentes se recuperan; checksum y bloqueo EAN evitan perdida.
+Varias fotos de una misma vista y variantes de mercado no completan otras.
+Solo frontal/perspectiva/lateral acreditadas, validas y visualmente distintas
+completan el EAN; desconocidas y detalle se muestran/exportan sin acreditacion.
+
+### Pantalla, consultas y exportacion
+
+Tres pestanas: Procesar pedidos, Buscar imagenes, Historial. El listado realiza
+una consulta al entrar realmente en la ruta y una por Actualizar pedidos. Guarda
+fecha, filtros aplicados y resultados por sesion; cambiar filtros solo muestra
+aviso pendiente. Indicadores/paginacion/seleccion/fotos no consultan Odoo.
+Una tabla paginada de 20 pedidos sustituye las acciones duplicadas; seleccion
+por ID estable, filtros y pedido abierto sobreviven a rerenders. La validacion
+Odoo antes del procesamiento y el programador son independientes.
+
+El progreso refresca solo el estado local del lote activo y termina el refresco
+cuando finaliza. Corte, roles, credenciales cifradas, piloto de uno/dos pedidos,
+bloqueos y automatizacion no cambian. Un acceso no confirmado deshabilita la
+adquisicion, nunca buscar/exportar.
+
+Buscar por EAN conserva ceros iniciales y no aplica corte al repositorio.
+Pedido busca en el listado cargado y snapshots; modelo/nombre usa metadatos
+disponibles, sin llamadas al portal. La galeria abre un producto por vez,
+pagina de 12 miniaturas reducidas y ampliacion explicita, filtros origen/vista/
+mercado y revision auditada. Fechas de pedidos/historial en Europe/Madrid.
+
+ZIP preparado SOLO con el boton, con todos los archivos validos de sus EAN,
+todos los proveedores/mercados y alternativas; EAN repetido no repite archivos.
+Conserva nombres/extensiones, usa colisiones del repositorio, nombre de pedido
+saneado y manifiesto de procedencia/faltantes. Parcial requiere confirmacion;
+vacio se deshabilita. Historial usa los EAN del snapshot y fotos actuales, no
+promete versionado historico. Planes ligeros validados se cachean por pedido,
+metadatos y stat de archivos (maximo cuatro); una sola descarga preparada por
+sesion, invalida ante cambios. Preparacion verifica checksum y firma antes/
+despues, spool de 8 MiB, limite 256 MiB/2000 archivos. Streamlit mantiene bytes
+de la descarga bajo ese limite; no hay ZIPs persistentes por pedido/proveedor.
+
+Pruebas nuevas: `tests/test_kering_image_sections.py`; regresiones de nombres,
+repositorio/migracion/NAS y piloto siguen en sus suites existentes. Docker local
+no disponible: la compilacion de imagen se valida en CI de esta misma PR.
+El inventario de migracion permanece bloqueado; originales sin eliminar.
+
+Validacion visual local con 25 pedidos y fotografias **sinteticos**, sin acceso
+Odoo/Kering: 1366x900 y 390x844, pestanas y busqueda por teclado, campos
+adaptables, mensajes de vistas pendientes y ausencia de excepciones.
+[Detalle escritorio](images/kering-desktop.png) y
+[Busqueda movil](images/kering-mobile.png). No son capturas del sitio desplegado.
+No se encontro un token verde de marca en el codigo/configuracion actual;
+se conserva la accion `primary` del tema Cloud/Streamlit, sin inventar colores.
+
 ## Repositorio comun por EAN
 
 Las rutas `images/kering/<EAN>` de las secciones historicas siguientes describen

@@ -1,4 +1,5 @@
 from datetime import date, datetime, timezone
+from pathlib import Path
 
 import pytest
 from cryptography.fernet import Fernet
@@ -302,23 +303,27 @@ def test_order_first_ui_processes_one_pilot_and_reuses_images(tmp_path, monkeypa
     monkeypatch.setattr(ui, "configured_orders", lambda *args, **kwargs: [current])
     monkeypatch.setattr(ui, "create_portal", lambda _: portal)
     app = AppTest.from_string("import streamlit as st\nfrom kering_images_ui import render_kering_page\nst.session_state['auth_role']='admin'\nrender_kering_page(None)")
+    from concurrent.futures import Future
+    probe = Future()
+    probe.set_result({"ok": True})
+    app.session_state["kering_access_probe"] = probe
     try:
         app.run()
         assert not app.exception
         listing = next(frame.value for frame in app.dataframe if "Seleccionar" in frame.value.columns)
         assert listing.iloc[0]["Procesamiento"] == "No procesado"
-        button = next(button for button in app.button if button.label == "Procesar")
+        button = next(button for button in app.button if button.label == "Procesar pendientes")
         assert not button.disabled
         button.click().run()
         batch.executor.submit(lambda: None).result(timeout=10)
-        app.run()
+        next(button for button in app.button if button.label == "Actualizar pedidos").click().run()
         assert not app.exception
         listing = next(frame.value for frame in app.dataframe if "Seleccionar" in frame.value.columns)
         assert listing.iloc[0]["Procesamiento"] == "Procesado"
         assert listing.iloc[0]["Completos"] == 1
-        next(button for button in app.button if button.label == "Detalle").click().run()
+        next(button for button in app.button if button.label.startswith("Preparar 3 fotos")).click().run()
         assert app.get("download_button") and not app.exception
-        next(button for button in app.button if button.label == "Procesar").click().run()
+        next(button for button in app.button if button.label == "Procesar pendientes").click().run()
         batch.executor.submit(lambda: None).result(timeout=10)
         assert len(portal.calls) == 1 and len(batch.store.history()) == 2
         assert all(row["origin"] == "Manual" for row in batch.store.history())
@@ -400,13 +405,14 @@ def test_confirmed_detail_is_not_mislabeled_as_lateral(tmp_path):
     store = ImageStore(tmp_path)
     portal = DetailPortal()
     result = process_ean(store, portal, "0001")
-    assert set(result["views"]) == {"frontal", "perspectiva", "detalle"}
+    assert set(result["views"]) == set(VIEWS)
+    assert result["views"]["lateral"] == "Pendiente"
     assert "lateral" not in store.valid_views("0001")
-    assert process_ean(store, portal, "0001")["tries"] == 0
-    assert len(portal.calls) == 1
+    assert process_ean(store, portal, "0001")["tries"] == 1
+    assert len(portal.calls) == 2
     store.path("0001", "frontal").unlink()
     process_ean(store, portal, "0001")
-    assert portal.calls[-1] == ("0001", ("frontal",))
+    assert portal.calls[-1] == ("0001", ("frontal", "lateral"))
 
 
 def test_history_reuse_missing_ean_and_changed_lines(tmp_path):
@@ -520,8 +526,8 @@ def test_interrupt_retry_and_zip(tmp_path):
     execute_run(store, run, lambda _: order(), FakePortal())
     assert store.history()[0]["attempt"] == 2
     with ZipFile(BytesIO(store.zip_order(order()))) as archive:
-        assert len(archive.namelist()) == 3
-        assert all(name.startswith("0012345678901/") for name in archive.namelist())
+        assert len(archive.namelist()) == 4
+        assert all(name.startswith("0012345678901/") or name == "manifest.json" for name in archive.namelist())
 
 
 def test_bounded_retries_and_intervention_no_secrets(tmp_path):
@@ -687,8 +693,8 @@ def test_orders_and_history_ui_are_offline(tmp_path, monkeypatch):
     app.run()
     assert not app.exception
     assert app.title[0].value == "Im\u00e1genes Kering"
-    assert app.get("download_button")
-    next(button for button in app.button if button.label == "Consultar pedidos").click().run()
+    assert not app.get("download_button")
+    next(button for button in app.button if button.label == "Actualizar pedidos").click().run()
     assert not app.exception
     assert any("Seleccionar" in frame.value.columns for frame in app.dataframe)
     ui.service.clear()
@@ -721,7 +727,7 @@ def test_ui_injects_configured_adapter_and_sql_scope(monkeypatch):
 
 def portal_snapshot(ean="0012345678901", image_count=3):
     return {"ean": ean, "upc": "001234567890", "reference": "OFFLINE-001", "size": "TALLA M",
-            "images": [{"url": f"https://picture.kecdn.net/offline-{index}", "reference": "OFFLINE-001"}
+            "images": [{"url": f"https://picture.kecdn.net/OFFLINE__001__{('noshad__qt', 'noshad__fr', 'shad__lt')[index % 3]}.png", "reference": "OFFLINE-001"}
                        for index in range(image_count)]}
 
 
@@ -749,8 +755,8 @@ def test_portal_resolves_only_exact_code_and_downloads_pending(monkeypatch):
     monkeypatch.setattr(portal, "_read_image", read_image)
     collected = {}
     portal._download(snapshot, ("frontal",), collected)
-    assert set(collected) == {"frontal"}
-    assert read_image.call_args.args[0] == "https://picture.kecdn.net/offline-1"
+    assert len(collected) == 3
+    assert read_image.call_count == 3
 
 
 def test_real_portal_partial_then_only_pending_and_no_calls_for_complete(tmp_path, monkeypatch):
@@ -761,16 +767,14 @@ def test_real_portal_partial_then_only_pending_and_no_calls_for_complete(tmp_pat
     downloads = []
     def read_image(url):
         downloads.append(url)
-        index = int(url.rsplit("-", 1)[1])
+        index = ("noshad__qt", "noshad__fr", "shad__lt").index(Path(url).stem.split("__", 2)[2])
         return photo((index * 60, 10, 50))
     monkeypatch.setattr(portal, "_read_image", read_image)
     store = ImageStore(tmp_path)
     first = process_ean(store, portal, "0012345678901")
     assert first["views"]["lateral"] == "Pendiente"
     process_ean(store, portal, "0012345678901")
-    assert downloads.count("https://picture.kecdn.net/offline-0") == 1
-    assert downloads.count("https://picture.kecdn.net/offline-1") == 1
-    assert downloads.count("https://picture.kecdn.net/offline-2") == 1
+    assert all(downloads.count(image["url"]) == 1 for image in portal_snapshot()["images"])
     assert process_ean(store, portal, "0012345678901")["tries"] == 0
     assert find.call_count == 2
 
@@ -1035,8 +1039,6 @@ def test_server_validation_selects_only_one_authorized_order_and_shared_cutoff(m
         original_fetch = portal.fetch
         def fetch(ean, pending):
             images = original_fetch(ean, pending)
-            if "lateral" in images:
-                images["detalle"] = images.pop("lateral")
             return images
         portal.fetch = fetch
         portal.identities = {"0012345678901": {"ean": "0012345678901", "upc": "",
@@ -1073,9 +1075,9 @@ def test_order_image_evidence_requires_exact_identity_and_three_original_views(t
     from scripts.validate_kering_portal import order_image_evidence
     store = ImageStore(tmp_path)
     ean = "0012345678901"
-    for index, view in enumerate(("frontal", "perspectiva", "detalle")):
+    for index, view in enumerate(("frontal", "perspectiva", "lateral")):
         store.save_view(ean, view, photo((index * 70, 20, 30)))
-    results = {ean: {"views": dict.fromkeys(("frontal", "perspectiva", "detalle"), "Reutilizada")}}
+    results = {ean: {"views": dict.fromkeys(("frontal", "perspectiva", "lateral"), "Reutilizada")}}
     prior = [{"results": json.dumps({ean: {"identity": {
         "ean": ean, "upc": "", "model": "OFFLINE", "color": "001", "size": "M"}}})}]
     evidence = order_image_evidence(store, pilot_order(), results, prior)[0]

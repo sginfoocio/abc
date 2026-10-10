@@ -15,8 +15,9 @@ actual: cualquier tarea externa debe inventariarse antes del cambio en Cloud.
 | Vistas Luxoptica | `_market_view_from_image_name`: `noshad__fr` -> V1 (frontal), `noshad__qt` -> V2 (perspectiva), `shad__lt` -> V3 (lateral). Otras vistas no acreditan esas tres. |
 | Farfetch | Solo originales `.png`, `<id>_V1.png`, `<id>_V2.png`, `<id>_V3.png`. |
 | Miinto | Solo originales `.png`, `<id>_V1.jpeg`, `<id>_V2.jpeg`, `<id>_V3.jpeg`. Los bytes siguen siendo PNG: **no corregir ni recodificar** como parte de esta migracion. |
-| Kering | `ImageStore.path`: `<vista>.img`, bytes originales JPEG/PNG/WEBP, sin recodificar. Vistas frontal, lateral, perspectiva, detalle. |
-| Kering ZIP | `<vista>.<jpg/png/webp>` segun formato real; antes `kering/<EAN>/`, ahora `<EAN>/`, sin proveedor. |
+| Kering anterior | `ImageStore.path`: `<vista>.img`, bytes originales JPEG/PNG/WEBP, sin recodificar. Estos archivos existentes nunca se renombran por unificar o exportar. |
+| Kering nuevo | Solo una vista acreditada antes de renombrar recibe `<modelo>__<color>__noshad__fr/qt` o `shad__lt`, con extension original. Sin evidencia conserva el nombre de origen saneado. |
+| ZIP actual | `<EAN>/<nombre solicitado>` de todas las representaciones validas, incluidas extensiones historicas `.img` y de mercado, mas `manifest.json`; sin proveedor en carpetas. |
 | Galerias | Luxoptica deducia modelo/EAN/mercado de carpetas; Kering usa `valid_views` y snapshots de pedidos por EAN. |
 | Historial | Kering `history.sqlite3`: runs, attempts, snapshots/results con EAN; configuracion cifrada independiente. Graph `.mail_download_state.json` y `.market_pending.json`. |
 | Colisiones | Luxoptica sobrescribia con `write_bytes`/`copy2`; Kering no reemplazaba vistas validas. No hay regla no destructiva de renombrado de colisiones. |
@@ -52,7 +53,11 @@ usar disco persistente local como autoridad y NAS como replica verificada.
 
 ### Granularidad Luxoptica comprobada
 
-Kering consulta el EAN bajo bloqueo y solicita solo vistas pendientes.
+Kering consulta el EAN bajo bloqueo y no abre el portal si V1/V2/V3 estan completas.
+Para un EAN parcial enumera todo el visor, omite URLs ya validas y conserva
+vistas adicionales/desconocidas. No deduce vistas del orden ni del nombre
+generado. La identificacion previa y su evidencia se describen en
+[Kering](KERING_IMAGES.md#deteccion-de-vistas-y-alcance-actual-issue-38).
 Los generadores de solicitudes Luxoptica excluyen EAN que ya tienen las tres
 vistas. El adaptador del portal Luxoptica existente selecciona **Todas las
 vistas** y Graph recibe un ZIP opaco completo: no existe en este repositorio un
@@ -82,7 +87,9 @@ python migrate_image_repository.py recover --plan "E:\staging\plan.json" --repos
 
 `inventory` es tambien la simulacion: muestra destinos propuestos, colisiones,
 checksums, alias y bloqueos. `apply` rechaza un plan alterado, originales
-cambiados o EAN sin resolver. Para resolver ambiguedades, pasar `--mapping`
+cambiados, EAN sin resolver o imagenes no reutilizables. Estas ultimas requieren
+revision/reparacion sobre una copia de staging, conservando el backup original,
+y repetir el inventario; no hay un bypass silencioso. Para resolver ambiguedades, pasar `--mapping`
 al inventario con un JSON revisado, no editar el plan:
 
 ```json
@@ -117,7 +124,8 @@ python -m pytest tests\test_image_repository.py tests\test_kering_images.py -q
 Inventario/simulacion **local**, 2026-10-10 (no Cloud): 1.211 archivos,
 1.204 imagenes, cuatro snapshots historicos de pedidos. Se detectan 388
 imagenes sin EAN univoco y siete que no cumplen la validacion de reutilizacion.
-El plan queda bloqueado hasta revisar mapeos; no se aplico la migracion ni se
+El plan queda bloqueado hasta resolver mapeos y las siete imagenes no
+reutilizables; no se aplico la migracion ni se
 creo el destino. Estas cantidades no describen el volumen de produccion.
 
 ## Plan de migracion (no ejecutado en produccion)

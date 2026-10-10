@@ -11,7 +11,6 @@ import sqlite3
 import uuid
 import time as clock
 from io import BytesIO
-from zipfile import ZipFile
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event, Thread, BoundedSemaphore
 from contextlib import contextmanager
@@ -21,6 +20,7 @@ from filelock import FileLock, Timeout
 from PIL import Image
 from sqlalchemy import bindparam, text
 from image_repository import ImageRepository, image_fingerprint
+from image_naming import kering_filename, classified_view
 
 
 PORTAL_URL = "https://my.keringeyewear.com/keringeyewear/es/login"
@@ -73,10 +73,7 @@ class ProductNotFound(PortalFailure):
 
 
 def displayed_views(valid) -> tuple[str, ...]:
-    ordered = tuple(view for view in IMAGE_VIEWS if view in valid)
-    if len(ordered) >= 3:
-        return ordered[:3]
-    return tuple("detalle" if view == "lateral" and "detalle" in valid else view for view in VIEWS)
+    return VIEWS
 
 
 class UnverifiedPortal:
@@ -239,7 +236,7 @@ class ImageStore:
     def valid_views(self, ean: str) -> dict[str, Path]:
         return self.repository.valid_views(ean)
 
-    def save_view(self, ean: str, view: str, content: bytes) -> bool:
+    def save_view(self, ean: str, view: str, content: bytes, identity: dict | None = None) -> bool:
         with self.repository.lock(ean):
             existing = self.valid_views(ean)
             if view in existing:
@@ -247,8 +244,14 @@ class ImageStore:
             fingerprint = image_fingerprint(content)
             if any(image_fingerprint(path.read_bytes()) == fingerprint for path in existing.values()):
                 return False
-            self.repository.save(ean, kering_image_name(view), content, provider="Kering",
-                                 origin="kering_portal", view=view)
+            with Image.open(BytesIO(content)) as image:
+                extension = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp"}[image.format]
+            identity = identity or {}
+            name = kering_filename(identity.get("model", ean), identity.get("color", "unknown"),
+                                   view, extension, f"{view}{extension}")
+            self.repository.save(ean, name, content, provider="Kering", origin="kering_portal",
+                                 view=classified_view(name), metadata={"modelo": identity.get("model", ""),
+                                                                      "identity": identity})
             return True
 
     def recover(self, now=None) -> None:
@@ -315,17 +318,18 @@ class ImageStore:
                 FROM attempts JOIN runs ON runs.id=attempts.run_id ORDER BY started DESC, order_id
             """)]
 
+    def run_history(self, run_id: str) -> list[dict]:
+        with self.connect() as connection:
+            return [dict(row) for row in connection.execute("""
+                SELECT attempts.*, runs.user, runs.started, runs.ended, runs.start_date, runs.end_date, runs.origin
+                FROM attempts JOIN runs ON runs.id=attempts.run_id
+                WHERE attempts.run_id=? ORDER BY order_id
+            """, (run_id,))]
+
     def zip_order(self, order: dict) -> bytes:
-        buffer = BytesIO()
-        with ZipFile(buffer, "w") as archive:
-            for ean in dict.fromkeys(line["ean"] for line in order["lines"] if line["ean"]):
-                with self.repository.lock(ean):
-                    records = self.repository.records(ean)
-                    for view, path in self.valid_views(ean).items():
-                        record = next(record for record in records if record.path == path and record.view == view)
-                        content = self.repository.verified_bytes(record)
-                        archive.writestr(f"{ean}/{kering_zip_name(view, content)}", content)
-        return buffer.getvalue()
+        from image_exports import prepare_order_zip
+        with prepare_order_zip(self.repository, order) as export:
+            return export.stream.read()
 
 
 def line_signature(order):
@@ -359,7 +363,7 @@ def count_complete_lines(store, order, cache):
         ean = line["ean"]
         if ean and ean not in cache:
             cache[ean] = store.valid_views(ean)
-        complete += int(bool(ean) and len(cache.get(ean, {})) >= 3)
+        complete += int(bool(ean) and set(VIEWS) <= cache.get(ean, {}).keys())
     return complete
 
 
@@ -413,10 +417,12 @@ def process_ean(store: ImageStore, portal, ean: str) -> dict:
             valid = store.valid_views(ean)
             results = {view: "Reutilizada" if view in valid else "Pendiente" for view in displayed_views(valid)}
             pending = tuple(view for view in displayed_views(valid) if view not in valid)
-            if len(valid) >= 3:
+            if set(VIEWS) <= valid.keys():
                 return {"views": results, "reason": "", "tries": 0}
+            if hasattr(portal, "repository"):
+                portal.repository = store.repository
             images, reason, tries = fetch_pending(portal, ean, pending)
-            reason = save_pending(store, ean, pending, images, results, reason)
+            reason = save_pending(store, ean, pending, images, results, reason, portal)
             return {
                 "views": results,
                 "reason": reason if "Pendiente" in results.values() else "",
@@ -447,22 +453,31 @@ def fetch_pending(portal, ean, pending):
     return {}, reason, 3
 
 
-def save_pending(store, ean, pending, images, results, reason):
-    candidates = list(pending)
-    if "detalle" in images and "lateral" in pending and "lateral" not in images:
-        candidates.append("detalle")
-    for view in candidates:
-        if view not in images:
-            continue
+def save_pending(store, ean, pending, images, results, reason, portal=None):
+    identity = getattr(portal, "identities", {}).get(ean, {})
+    media = getattr(portal, "media", {})
+    downloaded = set()
+    for view, content in images.items():
         try:
-            if store.save_view(ean, view, images[view]):
+            if view in media:
+                info = media[view]
+                record, _ = store.repository.save(
+                    ean, info["name"], content, provider="Kering", origin=info["url"],
+                    view=info["view"], metadata={"modelo": identity.get("model", ""),
+                                                "identity": identity, "view_detection": info["detection"]})
+                downloaded.add(record.view)
+            elif store.save_view(ean, view, content, identity):
+                if view not in pending:
+                    continue
                 results[view] = "Descargada"
-                if view == "detalle":
-                    results.pop("lateral", None)
+                downloaded.add(view)
             else:
                 reason = "vista_duplicada"
         except (OSError, ValueError, Image.DecompressionBombError, SyntaxError):
             reason = "imagen_invalida"
+    valid = store.valid_views(ean)
+    for view in pending:
+        results[view] = ("Descargada" if view in downloaded else "Reutilizada") if view in valid else "Pendiente"
     return reason
 
 
@@ -474,7 +489,7 @@ def order_status(order: dict, results: dict) -> str:
     for line in order["lines"]:
         result = results.get(line["ean"], {})
         views = result.get("views", {})
-        complete = complete and bool(line["ean"]) and len(views) == 3 and "Pendiente" not in views.values()
+        complete = complete and bool(line["ean"]) and all(views.get(view, "Pendiente") != "Pendiente" for view in VIEWS)
         available = available or any(value != "Pendiente" for value in views.values())
     if complete:
         return "Completo"

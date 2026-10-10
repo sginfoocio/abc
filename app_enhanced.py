@@ -2420,4 +2420,6 @@ navigation = st.navigation(
     position="sidebar",
 )
 
+from kering_images_ui import page_transition
+page_transition(st.session_state, navigation.url_path)
 navigation.run()

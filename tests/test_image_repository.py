@@ -200,7 +200,7 @@ def test_orders_use_eans_history_and_zip_without_copies(tmp_path):
     assert len(store.repository.order_records("Kering", "7")) == 3
     assert len(list((repository_root() / EAN).iterdir())) == 3
     with ZipFile(BytesIO(store.zip_order(order()))) as archive:
-        assert set(archive.namelist()) == {f"{EAN}/{view}.png" for view in VIEWS}
+        assert set(archive.namelist()) == {f"{EAN}/{record.name}" for record in store.repository.records(EAN)} | {"manifest.json"}
 
 
 @pytest.mark.parametrize("name,model,key,view", [
@@ -433,10 +433,10 @@ def test_inventory_detects_invalid_images_before_apply(tmp_path):
     (source / "bad.png").write_bytes(b"invalid")
     plan = migration.inventory([("Another", source.parent)], repository_root())
     assert plan["entries"][0]["valid"] is False
-    assert migration.apply(plan)["verified"] == 1
-    repository = ImageRepository()
-    assert repository.records(EAN)[0].path.read_bytes() == b"invalid"
-    assert not repository.valid_views(EAN)
+    with pytest.raises(ValueError, match="no reutilizable"):
+        migration.apply(plan)
+    assert (source / "bad.png").read_bytes() == b"invalid"
+    assert not repository_root().exists()
 
 
 def test_upload_rechecks_completed_eans_preserves_names_and_original_file(tmp_path, monkeypatch):

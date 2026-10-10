@@ -107,6 +107,7 @@ def inventory(sources: list[tuple[str, Path]], target: Path, mapping: dict | Non
                     valid = True
                 except (OSError, ValueError, Image.DecompressionBombError, SyntaxError):
                     valid = False
+                    blockers.append(f"Imagen no reutilizable; revisar o reparar antes de migrar: {path}")
             conflict = False
             destination = None
             if is_image and ean:
@@ -149,6 +150,8 @@ def legacy_root(repository: ImageRepository, plan: dict) -> Path:
 
 def apply(plan: dict) -> dict:
     check_plan(plan)
+    if any(entry["image"] and entry["valid"] is not True for entry in plan["entries"]):
+        raise ValueError("Imagen no reutilizable; revisar y repetir inventario antes de migrar")
     # Reject stale plans before copying even the first file.
     for entry in plan["entries"]:
         if checksum(Path(entry["source"])) != entry["checksum"]:
@@ -163,7 +166,7 @@ def apply(plan: dict) -> dict:
                 record, _ = repository.save(
                     entry["ean"], entry["name"], backup.read_bytes(), provider=entry["provider"],
                     origin=entry["origin"], view=entry["view"], market=entry["market"],
-                    date=entry["date"], metadata=entry["metadata"], allow_invalid=True,
+                    date=entry["date"], metadata=entry["metadata"],
                 )
                 destination = record.path.relative_to(repository.root).as_posix()
                 for order_id in entry["orders"]:

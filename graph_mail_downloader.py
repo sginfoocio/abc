@@ -19,6 +19,8 @@ from db_config import load_db_config, load_env_file
 from filelock import FileLock
 from image_repository import ImageRepository, atomic_write, collision_name, file_checksum, repository_root
 import hashlib
+from image_naming import sanitize_filename as _sanitize_filename
+from image_naming import market_view_from_image_name as _market_view_from_image_name
 
 
 M365_TENANT_ID_ENV = "M365_TENANT_ID"
@@ -205,13 +207,6 @@ def _find_download_links(body: str) -> list[str]:
     return [href for href, _, _ in links]
 
 
-def _sanitize_filename(name: str) -> str:
-    cleaned = (name or "attachment.bin").strip()
-    for ch in ['\\', '/', ':', '*', '?', '"', '<', '>', '|']:
-        cleaned = cleaned.replace(ch, "_")
-    return cleaned or "attachment.bin"
-
-
 def _load_state(state_file: Path) -> dict[str, Any]:
     if not state_file.exists():
         return {"processed_message_ids": []}
@@ -344,18 +339,6 @@ def _get_market_ids_by_ean(eans: set[str]) -> dict[str, dict[str, str]]:
         for row in conn.execute(query, {"eans": sorted(eans)}).mappings():
             result.setdefault(row["ean"], {})[market_names[row["siteweb_id"]]] = row["product_website_id"]
     return result
-
-
-def _market_view_from_image_name(file_name: str) -> str | None:
-    parts = [part.lower() for part in Path(file_name).stem.split("__")]
-    if len(parts) < 4:
-        return None
-    views = {
-        ("noshad", "fr"): "V1",
-        ("noshad", "qt"): "V2",
-        ("shad", "lt"): "V3",
-    }
-    return views.get((parts[-2], parts[-1]))
 
 
 def _market_image_names(file_name: str, market_ids: dict[str, str]) -> dict[str, str]:

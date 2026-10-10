@@ -310,6 +310,28 @@ class ImageRepository:
             connection.executemany("INSERT OR IGNORE INTO order_eans VALUES(?,?,?)",
                                    [(source, str(order_id), ean) for ean in set(eans)])
 
+    def review_view(self, record_id: int, view: str, *, reviewer: str, reason: str,
+                    evidence: dict | None = None) -> None:
+        if view not in {*IMAGE_VIEWS, "unknown"} or not reviewer.strip() or not reason.strip():
+            raise ValueError("La revision requiere vista, revisor y motivo")
+        records = [record for record in self.records() if record.id == record_id]
+        if not records:
+            raise ValueError("Imagen no encontrada para revisar")
+        record = records[0]
+        with self.lock(record.ean), self.maintenance_lock(), self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = connection.execute("SELECT * FROM representations WHERE id=?", (record_id,)).fetchone()
+            metadata = json.loads(current["metadata"])
+            review = {"previous_view": current["view"], "view": view, "reviewer": reviewer,
+                      "reason": reason, "date": datetime.now(timezone.utc).isoformat(),
+                      "evidence": evidence or {}}
+            metadata["view_review"] = review
+            connection.execute("UPDATE representations SET view=?, metadata=? WHERE id=?",
+                               (view, json.dumps(metadata, ensure_ascii=False, sort_keys=True), record_id))
+            connection.execute("INSERT INTO events(date,ean,action,details) VALUES(?,?,?,?)",
+                               (review["date"], record.ean, "view_review",
+                                json.dumps({"record_id": record_id, **review})))
+
     def order_records(self, source: str, order_id: str) -> list[ImageRecord]:
         with self.connect() as connection:
             eans = {row[0] for row in connection.execute(

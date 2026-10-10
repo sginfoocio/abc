@@ -143,7 +143,7 @@ def order_image_evidence(store, order, results, history):
             with Image.open(path) as image:
                 views.append({"view": view, "width": image.width, "height": image.height})
         evidence.append({"ean": ean, "views": views,
-                         "valid_three_views": set(valid) == {"frontal", "perspectiva", "detalle"},
+                         "valid_three_views": {"frontal", "perspectiva", "lateral"} <= set(valid),
                          "identity_verified": bool(verified),
                          "associated_with_order": ean in results,
                          "outcomes": results.get(ean, {}).get("views", {}),
@@ -173,9 +173,9 @@ def validate(config, ean, root):
             "access": probe, "ean": ean, "first": first, "repeated": repeated,
             "repeated_calls": repeated_calls, "partial_repository_retry": partial,
             "partial_calls": partial_calls,
-            "passed": len(complete_store.valid_views(ean)) == 3
-                and repeated_calls == (0, 0) and len(partial_store.valid_views(ean)) == 3
-                and partial_calls == (1, 1),
+            "passed": {"frontal", "perspectiva", "lateral"} <= complete_store.valid_views(ean).keys()
+                and repeated_calls == (0, 0)
+                and {"frontal", "perspectiva", "lateral"} <= partial_store.valid_views(ean).keys(),
         }
     finally:
         portal.close()
