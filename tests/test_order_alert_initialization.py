@@ -86,6 +86,22 @@ def test_initialization_lock_timeout_and_release(tmp_path, monkeypatch):
     assert OrderAlertStore(database).claim_orders([1]).order_ids == (1,)
 
 
+def test_retry_deadline_keeps_original_sqlite_error(tmp_path, monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(order_alerts.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(order_alerts.time, "sleep", lambda _delay: clock.__setitem__(0, 11.0))
+    busy = sqlite3.OperationalError("database is locked")
+    busy.sqlite_errorcode = sqlite3.SQLITE_BUSY
+
+    def blocked_schema(_connection):
+        raise busy
+
+    monkeypatch.setattr(OrderAlertStore, "_initialize_schema", staticmethod(blocked_schema))
+    with pytest.raises(sqlite3.OperationalError) as caught:
+        OrderAlertStore(tmp_path / "alerts.sqlite3")
+    assert caught.value is busy
+
+
 def test_process_death_does_not_leave_initialization_locked(tmp_path):
     database = tmp_path / "alerts.sqlite3"
     context = multiprocessing.get_context("spawn")

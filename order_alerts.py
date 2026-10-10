@@ -169,11 +169,14 @@ class OrderAlertStore:
         self.database_path = Path(database_path or default_order_alert_store_path()).resolve()
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         deadline = time.monotonic() + SQLITE_INITIALIZATION_TIMEOUT
+        last_busy: sqlite3.OperationalError | None = None
         # Initialization lock is separate from transactional claims; never hold it during email sends.
         with FileLock(str(self.database_path) + ".init.lock", timeout=SQLITE_INITIALIZATION_TIMEOUT):
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
+                    if last_busy is not None:
+                        raise last_busy
                     raise TimeoutError("Order alert SQLite initialization deadline exceeded")
                 try:
                     with self._connect(timeout=min(0.1, remaining)) as connection:
@@ -187,6 +190,7 @@ class OrderAlertStore:
                     code = getattr(error, "sqlite_errorcode", 0) & 0xff
                     if code not in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
                         raise
+                    last_busy = error
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise
