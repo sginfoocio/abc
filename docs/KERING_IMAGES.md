@@ -4,8 +4,134 @@
 
 Esta seccion sustituye el contrato anterior que aceptaba detalle como tercera
 vista. Los resultados historicos de las pruebas reales mas abajo NO prueban
-completitud V1/V2/V3 bajo el contrato nuevo. No se ha accedido al portal ni
-desplegado esta implementacion en produccion.
+completitud V1/V2/V3 bajo el contrato nuevo. La validacion local real posterior
+se describe a continuacion; no se ha desplegado esta implementacion en produccion.
+
+### Prueba funcional local REAL, 10/10/2026
+
+Se leyo de nuevo la issue #38 y se uso la configuracion cifrada local y su clave
+fuera de Git. Automatizacion desactivada y modo piloto activo; repositorios
+aislados bajo `%LOCALAPPDATA%\Diagonal\kering-functional-test`. No se inicio
+programador, no se escribio NAS, no se modifico Odoo ni se migro/desplego.
+Conexion Odoo verificada con `transaction_read_only=on`; las consultas de
+pedidos existentes usan transaccion READ ONLY y rollback.
+
+Se encontraron 20 candidatos con EAN dentro del corte persistido 01/09/2026.
+Se selecciono explicitamente uno con una linea y un EAN, autorizado en
+`test_order_ids`: alias **pedido-A**, **EAN-A**. Pedido del 03/09/2026, dentro
+del corte y antes del dia de la prueba Madrid. IDs/EAN reales y seleccion
+se conservan SOLO localmente en `selected-order.local.json` y configuracion
+cifrada; no se publican nombres de productos, pedido, proveedor ni cuenta.
+
+#### Inspeccion real antes del renombrado
+
+Tres originales en el visor, todos asociados a la referencia exacta de la ficha.
+Se inspeccionaron `src`, `alt`, todos los nombres de atributos y senales opcionales
+`title`, `aria-label`, `data-filename`, `data-view`, `data-angle`, `data-image-type`;
+atributos del contenedor, clase, `data-img`, caption de figura y metadatos PNG.
+No se capturo login, DOM completo, cookies, cabeceras de autenticacion ni secretos.
+La inspeccion detallada permanece local; lo siguiente es una lista anonimizada:
+
+| Imagen del EAN-A | Bytes | Formato / dimensiones | Senal real | Vista / regla |
+| --- | ---: | --- | --- | --- |
+| foto-A | 271516 | PNG, 2400x1286 | `alt` = referencia modelo-color; URL opaca sin extension | unknown / insufficient_evidence |
+| foto-B | 171956 | PNG, 2400x1286 | Igual contrato de senales, archivo distinto | unknown / insufficient_evidence |
+| foto-C | 215472 | PNG, 2400x1286 | Igual contrato de senales, archivo distinto | unknown / insufficient_evidence |
+
+Las URLs reales pertenecen a `picture.kecdn.net`, cuatro segmentos de ruta,
+sin query, nombre final opaco y sin extension. No contienen patrones Luxoptica.
+Los atributos presentes son `alt`, `class`, `data-img`, `loading`, `src`;
+`data-img` esta vacio, no hay caption ni senales semanticas en la clase.
+No hay `title`, `aria-label`, `data-filename` o atributo de vista util.
+Metadatos de bytes PNG: `icc_profile`, `transparency`, sin etiqueta de vista.
+La referencia identifica el producto, NO el angulo ni el tipo de sombra.
+La posicion del visor y el hecho de tener tres archivos NO se usan como evidencia.
+
+Se comprobo el mapeo TECNICO actual del renombrado compartido:
+`noshad__fr` -> V1/frontal, `noshad__qt` -> V2/perspectiva,
+`shad__lt` -> V3/lateral. **No se verifico el significado semantico de
+`noshad`/`shad`** en esta muestra ni hay una especificacion del proveedor
+que lo acredite. No se supone "sin/con sombra" por el texto abreviado y
+no se generan esos patrones para estas fotos. Se conservan los nombres
+de origen saneados SIN extension (los bytes son PNG); no se anade una extension,
+no se transforma el contenido ni se renombra para exportarlo.
+
+#### Adquisicion, repeticion, estado, historial y ZIP
+
+| Comprobacion real despues de corregir el estado | Primer intento | Segundo intento |
+| --- | ---: | ---: |
+| Archivos validos disponibles | 3 | 3 |
+| Solicitudes GET de imagen | 3 | 0 |
+| Archivos descargados / reutilizados | 3 / 0 | 0 / 3 |
+| Busquedas de ficha | 2 (reintento acotado) | 1 |
+| Vistas acreditadas V1/V2/V3 | 0 | 0 |
+| Vistas pendientes | frontal, perspectiva, lateral | las mismas |
+| Estado EAN y pedido | Parcial; clasificacion pendiente | Parcial; clasificacion pendiente |
+| Contenido ZIP | 3 archivos + manifest.json | igual |
+
+El primer ensayo reprodujo un defecto: tres fotos desconocidas adquiridas
+correctamente se etiquetaban como `Error` al no haber vistas acreditadas.
+Se corrigio el productor: los resultados separan `acquisition` (archivos
+validos, descargados/reutilizados) de `views` (cobertura). Estado `Parcial`
+sin declarar completitud; motivo `vistas_sin_identificar`, explicado en UI.
+La regresion falla antes de la correccion y pasa despues.
+Se repitio desde otro repositorio VACIO: tres descargas y luego cero, dejando
+dos intentos durables, ambos Parcial. El ensayo inicial se conserva por separado,
+sin reescribir sus intentos Error. No se renombraron archivos existentes.
+
+ZIP verificado por nombres exactos y bytes/checksums contra el repositorio,
+agrupado por EAN real (no proveedor/pedido), manifiesto con procedencia y
+tres vistas pendientes; parcial explicito. Las entradas conservan el nombre
+opaco y la ausencia de extension de origen. El nombre visible del pedido
+se sanea para el ZIP. El manifiesto completo no se publica porque contiene
+IDs/EAN/origen reales; no contiene credenciales.
+
+Streamlit AppTest ejecuto la UI REAL con consultas reales a Odoo limitadas al
+pedido seleccionado, imagenes reales y los dos intentos reales. No se sustituyo
+el backend Odoo por datos simulados; solo se instrumentaron llamadas y limites
+de alcance. Renderizo las nueve miniaturas (tres por superficie: detalle,
+busqueda e historial), sin excepciones, y genero un ZIP con el boton.
+Busqueda, galeria y exportacion provocaron **cero llamadas al portal**.
+
+| Accion UI con datos reales | Consultas acumuladas listado | Preparaciones ZIP |
+| --- | ---: | ---: |
+| Entrada inicial | 1 | 0 |
+| Rerender, seleccion de pedido, busqueda EAN | 1 | 0 |
+| Preparar ZIP y rerender posterior | 1 | 1 |
+| Cambiar filtro (aviso pendiente) | 1 | 1 |
+| Actualizar pedidos | 2 | 1 |
+| Salir y reentrar en la ruta (hook de navegacion en AppTest) | 3 | 1 |
+
+Separadamente: una consulta de seleccion inicial de candidatos, una consulta
+de alcance antes del piloto y DOS consultas Odoo de validacion del procesamiento,
+una por intento. No son refrescos periodicos del listado. Los valores anteriores
+son contadores reales, no los de las pruebas offline.
+
+Una inspeccion adicional sufrio `PortalTimeout` transitorio; el siguiente
+intento acotado obtuvo la ficha y verifico los atributos restantes con CERO
+descargas, conservando tres archivos. No se atribuye ese timeout a una causa
+no observada ni se aumenta el presupuesto de acceso.
+
+#### Limites y siguiente paso
+
+Esta muestra valida adquisicion, reutilizacion, galeria, historial, ZIP y
+consultas UI, **NO deteccion automatica de V1/V2/V3**. Falta un identificador
+semantico por recurso y una especificacion verificada del significado sombra/
+angulo. Siguiente paso: obtener del proveedor un contrato de etiquetas o
+equivalencia estable recurso-vista, con ejemplos etiquetados y criterio sobre
+sombra; despues validar contra esas muestras antes de renombrar.
+Alternativa: revision explicita por una persona que conozca el contrato,
+registrando motivo/evidencia, sin sobrescribir ni renombrar el original.
+
+No se entreno ni habilito un clasificador visual: un solo producto no permite
+evaluar precision o cobertura representativa; haria falta un conjunto etiquetado
+independiente por familia, sombra, angulo y ambiguos, incluyendo lateral ausente.
+No se declara precision ni se acredita lateral usando detalle.
+
+**Separacion de evidencia:** esta subseccion describe ejecuciones reales locales.
+Los tests de portal con patrones artificiales, multiproveedor/mercados/colisiones,
+limites grandes y capturas de abajo siguen siendo SIMULADOS. No se presentan como
+observaciones del proveedor ni como prueba de deteccion funcional real.
 
 ### Senales y limites de evidencia
 

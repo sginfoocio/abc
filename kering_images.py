@@ -4,6 +4,8 @@ from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 import json
+import hashlib
+import logging
 import os
 import tempfile
 import math
@@ -236,6 +238,18 @@ class ImageStore:
     def valid_views(self, ean: str) -> dict[str, Path]:
         return self.repository.valid_views(ean)
 
+    def available_image_count(self, ean: str) -> int:
+        checksums = set()
+        for record in self.repository.records(ean):
+            if record.checksum in checksums:
+                continue
+            try:
+                image_fingerprint(self.repository.verified_bytes(record))
+                checksums.add(record.checksum)
+            except (OSError, ValueError, Image.DecompressionBombError, SyntaxError):
+                logging.getLogger(__name__).warning("kering_image_not_reusable record_id=%s", record.id)
+        return len(checksums)
+
     def save_view(self, ean: str, view: str, content: bytes, identity: dict | None = None) -> bool:
         with self.repository.lock(ean):
             existing = self.valid_views(ean)
@@ -418,16 +432,23 @@ def process_ean(store: ImageStore, portal, ean: str) -> dict:
             results = {view: "Reutilizada" if view in valid else "Pendiente" for view in displayed_views(valid)}
             pending = tuple(view for view in displayed_views(valid) if view not in valid)
             if set(VIEWS) <= valid.keys():
-                return {"views": results, "reason": "", "tries": 0}
+                available = store.available_image_count(ean)
+                return {"views": results, "reason": "", "tries": 0,
+                        "acquisition": {"available_files": available, "downloaded_files": 0, "reused_files": available}}
             if hasattr(portal, "repository"):
                 portal.repository = store.repository
             images, reason, tries = fetch_pending(portal, ean, pending)
-            reason = save_pending(store, ean, pending, images, results, reason, portal)
+            reason, downloaded = save_pending(store, ean, pending, images, results, reason, portal)
+            available = store.available_image_count(ean)
+            if available and not valid and set(results.values()) == {"Pendiente"} and reason == "vistas_no_disponibles":
+                reason = "vistas_sin_identificar"
             return {
                 "views": results,
                 "reason": reason if "Pendiente" in results.values() else "",
                 "tries": tries,
                 "identity": getattr(portal, "identities", {}).get(ean, {}),
+                "acquisition": {"available_files": available, "downloaded_files": downloaded,
+                                "reused_files": max(0, available - downloaded)},
                 **({"access_failure": dict(portal.access_failure)}
                    if getattr(portal, "access_failure", None) else {}),
             }
@@ -457,6 +478,7 @@ def save_pending(store, ean, pending, images, results, reason, portal=None):
     identity = getattr(portal, "identities", {}).get(ean, {})
     media = getattr(portal, "media", {})
     downloaded = set()
+    downloaded_checksums = set()
     for view, content in images.items():
         try:
             if view in media:
@@ -466,11 +488,13 @@ def save_pending(store, ean, pending, images, results, reason, portal=None):
                     view=info["view"], metadata={"modelo": identity.get("model", ""),
                                                 "identity": identity, "view_detection": info["detection"]})
                 downloaded.add(record.view)
+                downloaded_checksums.add(record.checksum)
             elif store.save_view(ean, view, content, identity):
                 if view not in pending:
                     continue
                 results[view] = "Descargada"
                 downloaded.add(view)
+                downloaded_checksums.add(hashlib.sha256(content).hexdigest())
             else:
                 reason = "vista_duplicada"
         except (OSError, ValueError, Image.DecompressionBombError, SyntaxError):
@@ -478,7 +502,7 @@ def save_pending(store, ean, pending, images, results, reason, portal=None):
     valid = store.valid_views(ean)
     for view in pending:
         results[view] = ("Descargada" if view in downloaded else "Reutilizada") if view in valid else "Pendiente"
-    return reason
+    return reason, len(downloaded_checksums)
 
 
 def order_status(order: dict, results: dict) -> str:
@@ -490,7 +514,8 @@ def order_status(order: dict, results: dict) -> str:
         result = results.get(line["ean"], {})
         views = result.get("views", {})
         complete = complete and bool(line["ean"]) and all(views.get(view, "Pendiente") != "Pendiente" for view in VIEWS)
-        available = available or any(value != "Pendiente" for value in views.values())
+        available = available or any(value != "Pendiente" for value in views.values()) or bool(
+            result.get("acquisition", {}).get("available_files", 0))
     if complete:
         return "Completo"
     return "Parcial" if available or any(not line["ean"] for line in order["lines"]) else "Error"
@@ -511,9 +536,12 @@ def execute_order(store, attempt, loader, portal, cache):
         cached = cache.get(ean)
         cache_valid = cached and all(view in valid for view, outcome in cached["views"].items() if outcome != "Pendiente")
         if cache_valid:
+            available = store.available_image_count(ean)
             results[ean] = {"views": {view: "Reutilizada" if view in valid else "Pendiente" for view in displayed_views(valid)},
                             "reason": cache[ean]["reason"], "tries": 0,
-                            "identity": cache[ean].get("identity", {})}
+                            "identity": cache[ean].get("identity", {}),
+                            "acquisition": {"available_files": available,
+                                            "downloaded_files": 0, "reused_files": available}}
         else:
             results[ean] = process_ean(store, portal, ean)
             cache[ean] = results[ean]

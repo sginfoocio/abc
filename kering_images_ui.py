@@ -230,7 +230,10 @@ def _render_progress(run_id):
         results = json.loads(row["results"])
         if results:
             with st.expander(row["number"]):
-                st.dataframe([dict(EAN=ean, **result["views"], Motivo=result["reason"], Intentos=result["tries"])
+                st.dataframe([dict(EAN=ean, **result["views"], Motivo=result["reason"], Intentos=result["tries"],
+                                   Archivos=result.get("acquisition", {}).get("available_files", "-"),
+                                   Descargados=result.get("acquisition", {}).get("downloaded_files", "-"),
+                                   Reutilizados=result.get("acquisition", {}).get("reused_files", "-"))
                               for ean, result in results.items()], hide_index=True)
     if rows[0]["ended"] is not None and not st.session_state.get(f"kering_finished_{run_id}"):
         st.session_state[f"kering_finished_{run_id}"] = True
@@ -505,7 +508,13 @@ def render_attempt(engine, config, store, row):
         if not line["ean"]:
             st.warning(f"Linea {line['id']}: producto sin EAN")
     outcomes = [value for result in results.values() for value in result["views"].values()]
-    st.write(f"Descargadas: {outcomes.count('Descargada')} | Reutilizadas: {outcomes.count('Reutilizada')} | Pendientes: {outcomes.count('Pendiente')}")
+    st.write(f"Vistas requeridas descargadas: {outcomes.count('Descargada')} | "
+             f"Reutilizadas: {outcomes.count('Reutilizada')} | Pendientes: {outcomes.count('Pendiente')}")
+    acquisitions = [result["acquisition"] for result in results.values() if "acquisition" in result]
+    if acquisitions:
+        st.caption(f"Archivos validos: {sum(item['available_files'] for item in acquisitions)} | "
+                   f"Descargados: {sum(item['downloaded_files'] for item in acquisitions)} | "
+                   f"Reutilizados: {sum(item['reused_files'] for item in acquisitions)}")
     products = list(dict.fromkeys(line["ean"] for line in order["lines"] if line["ean"]))
     if products:
         ean = st.selectbox("Producto del intento", products, key=f"history-product-{row['run_id']}-{row['order_id']}")
@@ -523,7 +532,18 @@ def render_attempt(engine, config, store, row):
 def render_product(store, ean, result, prefix="product"):
     st.subheader(ean)
     valid = store.valid_views(ean)
-    st.write(result.get("reason", ""))
+    reason = result.get("reason", "")
+    if reason == "vistas_sin_identificar":
+        st.info("Fotos adquiridas; no hay senales suficientes para acreditar las vistas. Revision pendiente.")
+    elif reason:
+        st.warning("Quedan vistas pendientes. Consulte el diagnostico o revise las fotos.")
+    acquisition = result.get("acquisition")
+    if acquisition:
+        st.caption(f"Archivos validos: {acquisition['available_files']} | "
+                   f"Descargados: {acquisition['downloaded_files']} | Reutilizados: {acquisition['reused_files']}")
+    if reason:
+        with st.expander("Diagnostico tecnico"):
+            st.code(reason)
     identity = result.get("identity")
     if identity:
         st.write(identity)

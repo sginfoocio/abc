@@ -13,7 +13,7 @@ from streamlit.testing.v1 import AppTest
 from image_exports import order_export_plan, prepare_order_zip, repository_signature
 from image_naming import classified_view, kering_filename
 from image_repository import ImageRepository
-from kering_images import ConfigStore, ImageStore, VIEWS, process_ean
+from kering_images import ConfigStore, ImageStore, VIEWS, process_ean, order_status
 from kering_media import identify_media
 from kering_portal import KeringPortal
 import kering_images_ui as ui
@@ -112,6 +112,25 @@ def test_many_same_views_and_unknown_do_not_complete(monkeypatch, tmp_path):
     process_ean(store, portal, EAN)
     assert reader.call_count == 4
     assert len(store.valid_views(EAN)) == 1
+
+
+def test_successful_unknown_acquisition_is_partial_not_download_error(monkeypatch, tmp_path):
+    portal, reader = portal_with_images(monkeypatch, ["opaque-a", "opaque-b", "opaque-c"])
+    store = ImageStore(tmp_path / "kering")
+    first = process_ean(store, portal, EAN)
+    assert order_status(order(), {EAN: first}) == "Parcial"
+    assert first["acquisition"] == {"available_files": 3, "downloaded_files": 3, "reused_files": 0}
+    assert first["reason"] == "vistas_sin_identificar"
+    assert set(first["views"].values()) == {"Pendiente"}
+    second = process_ean(store, portal, EAN)
+    assert order_status(order(), {EAN: second}) == "Parcial"
+    assert second["acquisition"] == {"available_files": 3, "downloaded_files": 0, "reused_files": 3}
+    assert reader.call_count == 3
+    # Files cannot count as acquired once absent or corrupt.
+    for record in store.repository.records(EAN):
+        record.path.unlink()
+    portal._read_image = Mock(return_value=None)
+    assert order_status(order(), {EAN: process_ean(store, portal, EAN)}) == "Error"
 
 
 def test_identical_pixels_cannot_accredit_three_views(monkeypatch, tmp_path):
