@@ -156,10 +156,17 @@ def install_synthetic(root: Path, scenario: str):
 def exercise(root: Path, scenario: str) -> dict:
     root.mkdir()
     command = [sys.executable, str(Path(__file__).resolve()), "--worker", scenario, "--directory", str(root)]
+    environment = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1])}
     with (root / "worker.log").open("w") as log:
-        worker = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT)
+        worker = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, env=environment)
         try:
-            wait_file(root / "ready", timeout=20)
+            deadline = time.monotonic() + 20
+            while not (root / "ready").exists():
+                if worker.poll() is not None:
+                    raise AssertionError(f"Probe startup exit={worker.returncode}: {(root / 'worker.log').read_text()}")
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"Probe ready deadline: {(root / 'worker.log').read_text()}")
+                time.sleep(0.01)
             time.sleep(0.15)
             started = time.monotonic()
             worker.send_signal(signal.SIGTERM)
@@ -180,7 +187,7 @@ def exercise(root: Path, scenario: str) -> dict:
         assert connection.execute("SELECT COUNT(*) FROM process_runs WHERE ended IS NULL").fetchone()[0] == 0
     assert not list((root / "work").rglob("*.part"))
     (root / "restart").touch()
-    restarted = subprocess.run([*command, "--once"], capture_output=True, text=True, timeout=20)
+    restarted = subprocess.run([*command, "--once"], capture_output=True, text=True, timeout=20, env=environment)
     assert restarted.returncode == 0, restarted.stdout + restarted.stderr
     if scenario != "idle":
         from image_repository import ImageRepository

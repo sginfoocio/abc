@@ -112,7 +112,16 @@ jobs:
           "
           VOLUME="cloud-identity-smoke-${{ github.run_id }}-${{ github.run_attempt }}"
           docker volume create "$VOLUME" >/dev/null
-          trap 'docker volume rm "$VOLUME" >/dev/null' EXIT
+          MONITOR_CONTAINERS=()
+          cleanup_smoke() {
+            for NAME in "${MONITOR_CONTAINERS[@]}"; do
+              if docker inspect "$NAME" >/dev/null 2>&1; then
+                docker rm -f "$NAME" >/dev/null || echo "ERROR cleaning isolated container $NAME" >&2
+              fi
+            done
+            docker volume rm "$VOLUME" >/dev/null || echo "ERROR cleaning isolated smoke volume" >&2
+          }
+          trap cleanup_smoke EXIT
           docker run --rm --network none --read-only --user 0:0 --mount "type=volume,source=$VOLUME,target=/smoke" \
             "$IMAGE" sh -c 'mkdir /smoke/state; chown 1037:100 /smoke/state; chmod 0700 /smoke/state'
           docker run --rm --network none --read-only --user 1037:100 --tmpfs /tmp:size=536870912,mode=1777 \
@@ -123,6 +132,7 @@ jobs:
             "$IMAGE" python scripts/smoke_luxoptica_stop.py --directory /smoke/state/monitor-stop
           for SCENARIO in idle download sqlite nfs; do
             NAME="cloud-monitor-pid1-${{ github.run_id }}-$SCENARIO"
+            MONITOR_CONTAINERS+=("$NAME")
             DIRECTORY="/smoke/state/pid1-$SCENARIO"
             docker create --name "$NAME" --network none --read-only --user 1037:100 --cap-drop ALL \
               --no-healthcheck --tmpfs /tmp:size=536870912,mode=1777 \

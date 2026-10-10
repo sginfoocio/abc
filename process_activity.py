@@ -28,9 +28,10 @@ def record_process(process: str, *, enabled: bool | None = None, interval: int |
     """Called only by existing operations, never by the dashboard."""
     path = activity_path()
     path.parent.mkdir(parents=True, exist_ok=True)
+    busy_timeout = request_timeout(30)
     started = time.time()
     run_id = uuid.uuid4().hex
-    with closing(sqlite3.connect(path, timeout=request_timeout(30))) as connection, connection:
+    with closing(sqlite3.connect(path, timeout=busy_timeout)) as connection, connection:
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA synchronous=FULL")
         connection.execute("""CREATE TABLE IF NOT EXISTS process_runs (
@@ -46,7 +47,7 @@ def record_process(process: str, *, enabled: bool | None = None, interval: int |
     def heartbeat():
         while not stopped.wait(30):
             try:
-                with closing(sqlite3.connect(path, timeout=request_timeout(30))) as connection, connection:
+                with closing(sqlite3.connect(path, timeout=busy_timeout)) as connection, connection:
                     connection.execute("UPDATE process_runs SET heartbeat=? WHERE id=?", (time.time(), run_id))
             except (OSError, sqlite3.Error) as error:
                 heartbeat_errors.append(type(error).__name__)
@@ -78,7 +79,7 @@ def record_process(process: str, *, enabled: bool | None = None, interval: int |
                 not isinstance(value, int) or value < 0 for value in counts.values()):
             raise ValueError("Recibo de proceso invalido")
         due = ended + interval if enabled and interval else None
-        with closing(sqlite3.connect(path, timeout=30)) as connection, connection:
+        with closing(sqlite3.connect(path, timeout=busy_timeout)) as connection, connection:
             connection.execute("UPDATE process_runs SET ended=?,result=?,counts=?,error_code=?,next_run=? WHERE id=?",
                                (ended, receipt["result"], json.dumps(counts), error_code, due, run_id))
         if heartbeat_errors:
