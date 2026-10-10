@@ -259,9 +259,15 @@ rsync -av --partial `
 por lo que la sincronización no elimina contenido existente en el NAS.
 
 `staging/` se excluye en todos los niveles: nunca replicar fuente, backups,
-recuperacion ni temporales del ensayo. La tarea DSM externa debe incorporar
-esta misma exclusion antes de usar la raiz NAS; estos comandos documentados
-no cambian automaticamente una tarea configurada fuera del repositorio.
+recuperacion ni temporales del ensayo. Estos comandos son una receta, no
+prueba de una tarea automatica. La investigacion encontro dos comandos
+manuales historicos con origen relativo `repo/images/` y sin exclusion literal
+staging; no se localizo script/programacion de replica en el alcance accesible.
+No se presupone DSM ni se cambio o ejecuto la replica. La nueva replica Fotos
+se preparara tras validar migracion, con simulacion/conectividad previas,
+solo imagenes definitivas por EAN, sin staging/backups/temporales/SQLite,
+sin borrados, con lock e historial visible Cloud; no activar ahora.
+Evidencia y limites: [captura consistente](../../deployment/nfs/CAPTURE.md).
 
 ### Requisitos del Synology
 

@@ -12,6 +12,7 @@ from playwright.sync_api import sync_playwright
 import graph_mail_downloader as graph
 from image_repository import ImageRepository
 import migrate_image_repository as migration
+from scripts.snapshot_sqlite_copy import snapshot, digest
 
 
 def smoke():
@@ -57,6 +58,19 @@ def smoke():
             connection.execute("CREATE TABLE probe(value TEXT)")
             connection.execute("INSERT INTO probe VALUES('synthetic')")
             connection.commit()
+            original = root / "state" / "wal-probe.sqlite3"
+            wal = root / "state" / "wal-probe.sqlite3-wal"
+            before = (digest(original), digest(wal))
+            recovered = root / "state" / "restored.sqlite3"
+            assert snapshot(original, recovered)["tables"] == {"probe": 1}
+            assert (digest(original), digest(wal)) == before
+            assert recovered.stat().st_uid == 1037 and recovered.stat().st_gid == 100
+            assert recovered.stat().st_mode & 0o077 == 0
+            restored = sqlite3.connect(recovered)
+            try:
+                assert restored.execute("SELECT value FROM probe").fetchone()[0] == "synthetic"
+            finally:
+                restored.close()
             for suffix in ("", "-wal", "-shm"):
                 path = root / "state" / ("wal-probe.sqlite3" + suffix)
                 assert path.is_file()
@@ -77,7 +91,7 @@ def smoke():
             raise AssertionError("Missing NFS gate accepted")
         assert not absent.exists()
     print("Nonroot 1037:100 artifact storage smoke passed: isolated state, SQLite/WAL/SHM, backups, streamed archives, "
-          "migration/recovery and missing-mount gate; synthetic data only")
+          "migration/recovery, consistent WAL snapshot/local recovery and missing-mount gate; synthetic data only")
 
 
 if __name__ == "__main__":

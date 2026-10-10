@@ -112,14 +112,19 @@ retirada de `mnt-cloud\x2dimagenes.mount`, no elimina directorios/datos.
 
 ## Exclusiones obligatorias
 
+La investigacion y el procedimiento concreto de captura estan en
+[CAPTURE.md](CAPTURE.md). No se encontro tarea automatica rsync/DSM:
+solo comandos manuales historicos. Por decision del responsable no bloquea
+el ensayo; la nueva replica remota se preparara despues, sin activarla ahora.
+
 - Inventarios productivos podan cualquier directorio `staging` antes de
   recorrerlo: no contabilizar ni importar source/backups/recovery/work.
 - Busquedas, galeria y ZIP del repositorio no devuelven registros con rutas
   relativas bajo staging. Replica integrada tampoco copia sus backups.
-- Rsync remoto: `--exclude='staging/'` tanto dry-run como copia real, sin
-  `--delete`. La tarea externa DSM debe incorporar esa regla ANTES de replicar
-  la raiz NAS. No se ha cambiado una tarea DSM fuera del repositorio ni
-  contactado/escrito el NAS remoto: su confirmacion sigue pendiente.
+- Receta rsync remoto: `--exclude='staging/'`, sin `--delete`. No se encontro
+  tarea automatica ni se confirmo exclusion en ejecutor real. La nueva replica
+  se preparara tras validar migracion; no se contacto/escribio el NAS remoto.
+  La investigacion de comandos antiguos ya no bloquea staging.
 - El ensayo SOLO inventaria hijos de source congelada bajo modo staging.
   No inventariar la raiz NAS/productiva ni usarla como destino.
 
@@ -162,8 +167,8 @@ originales eliminados, cambio de repositorio activo, fusion ni despliegue.
   No son cinco cuotas independientes ni proteccion ante fallo del NAS.
 - Padre NAS conserva0:0/777 y montajeNFS4.1/rw/hard/SYS; estado local conserva
  1037:100/0700; app healthy. No imagen existente leida/escrita por los probes.
-- Sudo requiere autenticacion: retirada de la unidad fallida SOLO preparada,
-  no ejecutada. Las otras unidades inactivas no se eliminan.
+- El responsable retiro por sudo la unica unidad fallida; ausencia de fichero/
+  enlace verificada por SSH. Las otras unidades inactivas no se eliminan.
 - Un timeout SSH intermedio se resolvio al reintentar; no se interpreta como
   ensayo de perdida/reconexion del montaje NFS. Ese ensayo no se repitio
   sobre el montaje compartido.
