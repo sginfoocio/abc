@@ -110,7 +110,8 @@ def install_synthetic(root: Path, scenario: str):
                 def execute(self, sql, *args):
                     if sql == "BEGIN IMMEDIATE" and not restarting and not children:
                         child = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--sqlite-holder",
-                                                  str(repository.database), "--directory", str(root)])
+                                                  str(repository.database), "--directory", str(root)],
+                                                 env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1])})
                         children.append(child)
                         wait_file(root / "sqlite-locked")
                         (root / "ready").touch()
