@@ -166,9 +166,11 @@ def test_page_with_real_stored_offer_shows_gap_chart_and_competitor_requests(tmp
     assert values["Productos comparados"] == "1 / 1"
     assert values["Más caro"] == "100,0 %"
     assert values["Diferencia media vs. mejor"] == "+11,1 %"
-    labels = [expander.label for expander in app.expander]
-    assert any(label.startswith("Edel-Optics") and "Bloqueado" in label for label in labels)
-    assert any("**Necesitamos:**" in markdown.value for markdown in app.markdown)
+    app.selectbox(key="price_admin_section").set_value("Competidores").run(timeout=60)
+    states = next(frame.value for frame in app.dataframe if "Operatividad" in frame.value.columns)
+    edel = states[states["Competidor"] == "Edel-Optics"].iloc[0]
+    assert edel["Operatividad"] == "Pendiente de revisión de condiciones"
+    assert any("Necesitamos:" in markdown.value for markdown in app.markdown)
     assert EAN in app.selectbox(key="products_selected_ean").value
 
 

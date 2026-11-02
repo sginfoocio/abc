@@ -18,6 +18,8 @@ from price_references import EXACT, classify
 
 MAX_PRODUCTS = 20
 MAX_COMPETITORS = 6
+HTTP_BUDGET_EXHAUSTED = "Presupuesto HTTP del competidor agotado"
+RECOVERY_PREPARED = "Preparada por recuperación de presupuesto agotado; requiere ejecución supervisada"
 COMPETITOR_NAMES = ("Visio Factory", "Óptica Óptima", "Domanci", "Amevista", "Edel-Optics", "ConGafasDeSol")
 REQUIRED_EANS = ("8056597875349", "8056597877329", "8056597875226")
 SAMPLE_EANS = (*REQUIRED_EANS, "0889652637075", "0843023181451", "0889652543574",
@@ -171,6 +173,152 @@ class PricePilot:
                         finished_at=? WHERE status IN ('pending','running')""", (stamp(),))
         except Timeout as exc:
             raise PilotError("Hay una consulta en curso; espere antes de cambiar el alcance") from exc
+
+    def update_limits(self, settings: dict[str, dict]) -> None:
+        """Change only pilot request limits without disabling it or changing queued work."""
+        cleaned = _limits(settings)
+        try:
+            with self.lock(), ExitStack() as locks:
+                scope = pilot_scope(self.store)
+                if scope is None or set(cleaned) != set(scope["competitors"]):
+                    raise PilotError("Los límites deben corresponder a los seis competidores persistidos")
+                with self.store._connect() as connection:
+                    ids = [row[0] for row in connection.execute("SELECT id FROM competitors ORDER BY id")]
+                for cid in ids:
+                    locks.enter_context(FileLock(f"{self.store.database_path}.competitor-{cid}.lock", timeout=0))
+                with self.store._connect() as connection, connection:
+                    connection.execute("UPDATE price_pilot SET competitors=?,updated_at=? WHERE id=1",
+                                       (json.dumps(cleaned), stamp()))
+        except Timeout as exc:
+            raise PilotError("Hay una consulta en curso; espere antes de cambiar los límites") from exc
+
+    def budget_recovery_jobs(self) -> pd.DataFrame:
+        """List exact internal-budget discovery errors and their current recovery eligibility."""
+        scope = pilot_scope(self.store)
+        columns = ["job_id", "source_run_id", "competitor_id", "Competidor", "EAN", "Estado", "Motivo",
+                   "Última ejecución", "Fecha", "Recuperable", "prepared_run_id"]
+        if scope is None:
+            return pd.DataFrame(columns=columns)
+        with self.store._connect() as connection:
+            return self._budget_recovery_jobs(connection, scope)
+
+    def _budget_recovery_jobs(self, connection, scope: dict) -> pd.DataFrame:
+        rows = connection.execute("""SELECT j.id AS job_id,j.run_id AS source_run_id,j.competitor_id,
+                j.ean,j.status,j.outcome,j.detail,j.checked_at,r.started_at,r.status AS run_status,
+                b.blocked,a.prepared_run_id,c.name AS competitor_name
+            FROM pilot_jobs j
+            JOIN pilot_runs r ON r.id=j.run_id
+            JOIN pilot_budgets b ON b.run_id=j.run_id AND b.competitor_id=j.competitor_id
+            JOIN competitors c ON c.id=j.competitor_id
+            LEFT JOIN pilot_recovery_audit a ON a.source_job_id=j.id
+            WHERE r.operation='discovery' AND r.status='done' AND j.status='done'
+                AND j.outcome='error' AND j.detail=?
+            ORDER BY r.started_at DESC,j.competitor_id,j.ean""", (HTTP_BUDGET_EXHAUSTED,)).fetchall()
+        names = {row["id"]: row["name"] for row in connection.execute("SELECT id,name FROM competitors")}
+        configs = {row["competitor_id"]: dict(row) for row in connection.execute(
+            """SELECT competitor_id,terms_reviewed,terms_note,access_status
+               FROM competitor_web_config""")}
+        active = connection.execute("""SELECT id FROM pilot_runs
+            WHERE status IN ('running','interrupted') ORDER BY id DESC LIMIT 1""").fetchone()
+        current_pairs = {(cid, ean) for cid in scope["competitors"] for ean in scope["eans"]}
+        result = []
+        for row in rows:
+            item = dict(row)
+            pair = (item["competitor_id"], item["ean"])
+            config = configs.get(item["competitor_id"])
+            recorded = connection.execute("""SELECT state FROM pilot_discovery
+                WHERE competitor_id=? AND ean=?""", pair).fetchone()
+            candidate = connection.execute("""SELECT 1 FROM competitor_product_urls
+                WHERE competitor_id=? AND ean=? AND status IN ('verified','probable','pending_verification')
+                UNION ALL SELECT 1 FROM pilot_url_candidates WHERE competitor_id=? AND ean=?
+                    AND state IN ('candidate_found','pending_validation') LIMIT 1""",
+                                            (*pair, *pair)).fetchone()
+            reason = ""
+            if item["prepared_run_id"] is not None:
+                reason = f"Ya preparada para la ejecución supervisada #{item['prepared_run_id']}"
+            elif pair not in current_pairs:
+                reason = "Fuera del alcance actual del piloto"
+            elif item["blocked"]:
+                reason = "El competidor tiene un bloqueo registrado; requiere revisión manual"
+            elif config is None or not config["terms_reviewed"] or not config["terms_note"].strip() \
+                    or config["access_status"] != "robots_allowed":
+                reason = "Falta autorización vigente o comprobación de acceso; no se recupera"
+            elif candidate or (recorded and recorded["state"] in
+                               ("known", "confirmed", "candidate_found", "pending_validation")):
+                reason = "Ya existe una ficha o candidato; no se crea una búsqueda duplicada"
+            elif active:
+                reason = f"Hay una ejecución pendiente #{active['id']}; reanúdela o ciérrela primero"
+            result.append({
+                "job_id": item["job_id"], "source_run_id": item["source_run_id"],
+                "competitor_id": item["competitor_id"], "Competidor": names.get(
+                    item["competitor_id"], item["competitor_name"]),
+                "EAN": item["ean"], "Estado": item["outcome"], "Motivo": item["detail"],
+                "Última ejecución": item["started_at"], "Fecha": item["checked_at"] or item["started_at"],
+                "Recuperable": not reason, "prepared_run_id": item["prepared_run_id"], "recovery_note": reason,
+            })
+        return pd.DataFrame(result)
+
+    def recover_budget_errors(self, job_ids: list[int], *, operator: str, reason: str) -> dict:
+        """Stage a new supervised discovery run; never performs HTTP or edits source results."""
+        if not job_ids or any(isinstance(job_id, bool) or not isinstance(job_id, int) or job_id < 1
+                              for job_id in job_ids):
+            raise PilotError("Seleccione al menos un trabajo recuperable")
+        if len(set(job_ids)) != len(job_ids):
+            raise PilotError("La selección contiene trabajos duplicados")
+        operator, reason = operator.strip(), reason.strip()
+        if not operator or len(operator) > 120 or not reason or len(reason) > 500:
+            raise PilotError("Indique operador (máx. 120 caracteres) y motivo (máx. 500)")
+        try:
+            with self.lock(), self.store._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    scope = pilot_scope(self.store)
+                    if scope is None:
+                        raise PilotError("Piloto sin configurar")
+                    frame = self._budget_recovery_jobs(connection, scope)
+                    by_id = frame.set_index("job_id", drop=False) if not frame.empty else frame
+                    missing = set(job_ids) - set(frame["job_id"] if not frame.empty else [])
+                    if missing:
+                        raise PilotError("La selección contiene errores que no son de presupuesto interno")
+                    selected = by_id.loc[job_ids]
+                    if selected["prepared_run_id"].notna().all():
+                        connection.rollback()
+                        return {"prepared_jobs": 0, "references": 0, "run_id": None}
+                    blocked = selected[~selected["Recuperable"]]
+                    if not blocked.empty:
+                        details = "; ".join(blocked["recovery_note"].dropna().unique())
+                        raise PilotError("No se pueden recuperar todos los trabajos seleccionados: " + details)
+                    pairs = sorted(set(zip(selected["competitor_id"], selected["EAN"])),
+                                   key=lambda pair: (list(scope["competitors"]).index(pair[0]),
+                                                     scope["eans"].index(pair[1])))
+                    competitors = list(dict.fromkeys(cid for cid, _ in pairs))
+                    serialized = json.dumps([[cid, ean] for cid, ean in pairs])
+                    run_id = connection.execute("""INSERT INTO pilot_runs(
+                        started_at,status,scope,competitors,error,operation,selection,selection_request)
+                        VALUES(?,'interrupted',?,?,?,'discovery',?,?)""",
+                                                 (stamp(), json.dumps(scope["eans"]),
+                                                  json.dumps(scope["competitors"]), RECOVERY_PREPARED,
+                                                  serialized, serialized)).lastrowid
+                    for cid in competitors:
+                        connection.execute("INSERT INTO pilot_budgets(run_id,competitor_id) VALUES(?,?)",
+                                           (run_id, cid))
+                    for cid, ean in pairs:
+                        connection.execute("INSERT INTO pilot_jobs(run_id,competitor_id,ean) VALUES(?,?,?)",
+                                           (run_id, cid, ean))
+                    created_at = stamp()
+                    connection.executemany("""INSERT INTO pilot_recovery_audit(
+                        source_job_id,source_run_id,prepared_run_id,competitor_id,ean,operator,reason,created_at)
+                        VALUES(?,?,?,?,?,?,?,?)""", [
+                        (int(row.job_id), int(row.source_run_id), run_id, row.competitor_id, row.EAN,
+                         operator, reason, created_at) for row in selected.itertuples()])
+                    connection.commit()
+                    return {"prepared_jobs": len(pairs), "references": len({ean for _, ean in pairs}),
+                            "run_id": run_id}
+                except BaseException:
+                    connection.rollback()
+                    raise
+        except Timeout as exc:
+            raise PilotError("Hay una consulta en curso; espere antes de preparar la recuperación") from exc
 
     def enable(self) -> None:
         try:
