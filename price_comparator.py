@@ -422,6 +422,17 @@ class PriceComparatorStore:
                         result TEXT NOT NULL,
                         requested_at TEXT NOT NULL
                     );
+                    CREATE TABLE IF NOT EXISTS pilot_recovery_audit (
+                        id INTEGER PRIMARY KEY,
+                        source_job_id INTEGER NOT NULL UNIQUE REFERENCES pilot_jobs(id),
+                        source_run_id INTEGER NOT NULL REFERENCES pilot_runs(id),
+                        prepared_run_id INTEGER NOT NULL REFERENCES pilot_runs(id),
+                        competitor_id TEXT NOT NULL REFERENCES competitors(id),
+                        ean TEXT NOT NULL REFERENCES products(ean),
+                        operator TEXT NOT NULL,
+                        reason TEXT NOT NULL,
+                        created_at TEXT NOT NULL
+                    );
                     CREATE TABLE IF NOT EXISTS pilot_url_candidates (
                         id INTEGER PRIMARY KEY,
                         competitor_id TEXT NOT NULL REFERENCES competitors(id),
