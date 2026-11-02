@@ -38,11 +38,37 @@ Las señales de disponibilidad de las ofertas se conservan separadas del
 precio y de `deliveryTime`. Dos estados explicitos incompatibles requieren
 revision sin convertir una identidad exacta en un producto distinto.
 El selector de disponibilidad ya autorizado conserva su texto completo como
-evidencia. «En Stock» junto a «entrega/envio en N dias» positivos, o junto
-a «bajo pedido», no acredita stock inmediato coherente: se marca conflicto
-para revision, sin afirmar que no haya existencias. No se introduce un
-umbral arbitrario de dias, ni se deduce stock de un plazo. Un tiempo de
-transito estructurado por si solo no se interpreta como falta de stock.
+evidencia. Un plazo positivo normal (por ejemplo, entrega en 2 dias) se
+conserva como transporte y no contradice `InStock`. «Bajo pedido», «preventa»
+o «agotado» frente a `InStock` requiere revision; se conserva el precio y la
+identidad, pero la disponibilidad queda `unknown`. La combinacion exacta
+revisada «En Stock + entrega en 40 dias» sigue pendiente de revision. Este
+caso de 40 dias es una excepcion basada en esa evidencia comercial explicita,
+no un umbral general para clasificar plazos: otras duraciones positivas no
+crean ni contradicen stock por su duracion. Un plazo sin declaracion explicita
+de existencias tampoco crea stock. Un tiempo de transito estructurado por si
+solo se conserva, no se interpreta como falta de stock.
+
+### Revision de ofertas agrupadas y transporte (2 de noviembre de 2026)
+
+Antes de corregir, el `AggregateOffer` con `eligibleCustomerType=Members only`
+y una oferta interna `150 EUR / InStock` devolvia **150 EUR** sin notas: el
+aplanado descartaba la condicion del contenedor. Ahora las restricciones de
+`AggregateOffer` se propagan a sus ofertas internas y se combinan con las
+restricciones propias de cada `Offer`. Solo las ofertas sin restricciones
+participan en la seleccion/ambiguedad comercial; cada precio excluido y el
+nombre de sus restricciones quedan en las notas de evidencia existentes. Una
+oferta ordinaria no queda ambigua por coexistir con un precio solo para
+miembros/cantidad. Sin oferta ordinaria, el precio se mantiene desconocido.
+No se cambia el formato de base de datos ni el mecanismo general de extraccion.
+
+Antes de corregir disponibilidad, `InStock + «En stock. Entrega en 2 dias»`
+daba `unknown / stock_conflict=True`; «Preventa» no se reconocia y dejaba
+pasar `InStock`. Ahora transporte normal queda separado, se reconoce preventa
+y las contradicciones solicitadas permanecen pendientes. Las nuevas pruebas
+offline cubren restriccion de contenedor, restriccion interna, coexistencia
+de oferta normal y condicionada, 2/40 dias, bajo pedido, preventa, agotado
+contra `InStock` y plazo sin evidencia de stock.
 
 ### Limites de esta correccion
 
@@ -72,22 +98,29 @@ para hacer pasar casos comerciales pendientes.
 
 ### Validacion local de esta revision
 
-- Regresiones nuevas: 55 casos; focalizadas con identidad, referencias,
-  estructuras existentes y tarjetas Edel: **164 correctos**.
-- Suite final `tests/test_price*.py`: **515 correctos, 1 omitido**.
-- Suite general offline durante la implementacion: **1422 correctos,
-  16 omitidos y 10 subtests correctos**; esa pasada precede al ultimo caso
-  adicional de `model`, validado despues con las suites focalizada y del
-  comparador. La PR debe ejecutar tambien la suite general sobre su commit
-  final en Linux.
-- Flake8 fatal, compilacion Python, sintaxis Pylance y `git diff --check`:
-  correctos. No hay errores de tipos en los componentes comunes consultados.
+- Antes del cambio, las regresiones de esta revision reprodujeron ambos
+  defectos: el precio condicionado del `AggregateOffer` se aceptaba y
+  `InStock + «En stock. Entrega en 2 dias»` terminaba como `unknown` con
+  conflicto. Tambien se reprodujo el caso de «Preventa» no reconocido.
+- `tests/test_price_reviewed_variants.py`: **67 correctos**.
+- Focalizadas de extraccion, fallos, paginas de competidores, tarjetas Edel,
+  referencias e identidad: **213 correctos**.
+- Suite del comparador (`tests/test_price*.py`): **527 correctos, 1 omitido**.
+- Suite offline completa de `tests`: **1409 correctos, 15 omitidos**.
+  La CI de la PR ejecutara ademas los dos archivos independientes indicados
+  por su workflow en el commit actualizado.
+- Flake8 fatal, compilacion Python y `git diff --check`: correctos. La
+  revision de sintaxis/tipos anterior sigue vigente para los componentes
+  comunes; CI comprobara los cambios actuales sobre el nuevo commit.
+- Los checks verdes previamente visibles en esta PR corresponden al commit
+  anterior `2633e1a` y **no** validan esta revision.
 - El verificador local de locks devuelve 1 por finales CRLF del checkout
   Windows frente a LF regenerados. Los contenidos normalizados de ambos
   locks son identicos (53/62 CRLF frente a cero); no se han cambiado locks
-  ni dependencias. Linux CI debe verificar sus bytes exactos.
+  ni dependencias. La nueva CI Linux debe verificar sus bytes exactos.
 - Docker no esta instalado localmente. El workflow existente de una PR
-  puede construirlo en Linux: `push: false`, sin publicacion ni despliegue.
+  comprobara la imagen en Linux con red deshabilitada:
+  `push: false`, sin publicacion ni despliegue.
 
 ## Causa raiz demostrada
 

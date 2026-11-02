@@ -130,6 +130,125 @@ def test_stock_and_delivery_delay_preserve_both_signals_and_require_review():
     assert any("40" in note and "Stock" in note for note in page.notes)
 
 
+def test_aggregate_offer_inherits_customer_restriction_before_reading_nested_offer():
+    node = product()
+    node["offers"] = {
+        "@type": "AggregateOffer",
+        "eligibleCustomerType": {"@type": "BusinessEntity", "name": "Members only"},
+        "offers": [{"@type": "Offer", "price": "150", "priceCurrency": "EUR",
+                    "availability": "https://schema.org/InStock"}],
+    }
+
+    page = extract_product(html(node), BASE)
+
+    assert page.price is None and page.availability == "unknown"
+    assert any("eligibleCustomerType" in note and "150" in note for note in page.notes)
+
+
+@pytest.mark.parametrize("restriction", [
+    {"eligibleQuantity": {"minValue": 2}},
+    {"validForMemberTier": {"@type": "MemberProgramTier", "name": "Gold"}},
+])
+def test_aggregate_offer_inherits_other_parent_restrictions(restriction):
+    node = product()
+    node["offers"] = {"@type": "AggregateOffer", **restriction, "offers": [
+        {"@type": "Offer", "price": "150", "priceCurrency": "EUR",
+         "availability": "https://schema.org/InStock"},
+    ]}
+
+    page = extract_product(html(node), BASE)
+
+    assert page.price is None
+    assert any(field in note and "150" in note for field in restriction for note in page.notes)
+
+
+def test_aggregate_offer_keeps_restriction_on_internal_offer():
+    node = product()
+    node["offers"] = {"@type": "AggregateOffer", "offers": [
+        {"@type": "Offer", "price": "150", "priceCurrency": "EUR",
+         "availability": "https://schema.org/InStock",
+         "eligibleCustomerType": {"@type": "BusinessEntity", "name": "Members only"}},
+    ]}
+
+    page = extract_product(html(node), BASE)
+
+    assert page.price is None and page.availability == "unknown"
+    assert any("Offer.eligibleCustomerType" in note and "150" in note for note in page.notes)
+
+
+def test_restricted_inner_offer_is_excluded_beside_ordinary_offer():
+    node = product()
+    node["offers"] = [
+        {"@type": "Offer", "price": "180", "priceCurrency": "EUR",
+         "availability": "https://schema.org/InStock"},
+        {"@type": "AggregateOffer",
+         "eligibleCustomerType": {"@type": "BusinessEntity", "name": "Members only"},
+         "offers": [{"@type": "Offer", "price": "150", "priceCurrency": "EUR",
+                     "availability": "https://schema.org/InStock"}]},
+    ]
+
+    page = extract_product(html(node), BASE)
+
+    assert page.price == 180 and page.availability == "available" and not page.ambiguous
+    assert any("eligibleCustomerType" in note and "150" in note for note in page.notes)
+
+
+def test_unrestricted_ordinary_offer_is_not_ambiguous_with_excluded_member_price():
+    node = product()
+    node["offers"] = [
+        {"@type": "Offer", "price": "180", "priceCurrency": "EUR"},
+        {"@type": "Offer", "price": "150", "priceCurrency": "EUR",
+         "eligibleCustomerType": {"@type": "BusinessEntity", "name": "Members only"}},
+    ]
+
+    page = extract_product(html(node), BASE)
+
+    assert page.price == 180 and not page.ambiguous
+    assert any("eligibleCustomerType" in note for note in page.notes)
+
+
+def test_instock_with_two_day_delivery_keeps_stock_and_delivery_separate():
+    page = extract_product(html(product(), '<p class="stock">En stock. Entrega en 2 días</p>'),
+                           BASE, availability_selector="p.stock")
+
+    assert page.availability == "available" and not page.stock_conflict
+    assert page.delivery_evidence == ["En stock. Entrega en 2 días"]
+
+
+def test_reviewed_instock_with_forty_day_delivery_remains_pending():
+    page = extract_product(html(product(), '<p class="stock">En Stock + entrega en 40 días</p>'),
+                           BASE, availability_selector="p.stock")
+
+    assert page.availability == "unknown" and page.stock_conflict
+    assert page.delivery_evidence == ["En Stock + entrega en 40 días"]
+    assert any("revisión" in note for note in page.notes)
+
+
+@pytest.mark.parametrize("text", ["Bajo pedido. Entrega en 2 días", "Preventa. Entrega en 2 días"])
+def test_order_or_preorder_conflicts_with_immediate_jsonld_stock(text):
+    page = extract_product(html(product(), f'<p class="stock">{text}</p>'),
+                           BASE, availability_selector="p.stock")
+
+    assert page.availability == "unknown" and page.stock_conflict
+    assert page.delivery_evidence == [text]
+
+
+def test_sold_out_selector_conflicts_with_jsonld_instock():
+    page = extract_product(html(product(), '<p class="stock">Agotado</p>'),
+                           BASE, availability_selector="p.stock")
+
+    assert page.availability == "unknown" and page.stock_conflict
+
+
+def test_delivery_delay_without_stock_claim_does_not_create_stock_or_conflict():
+    node = product(availability="")
+    page = extract_product(html(node, '<p class="stock">Entrega en 2 días</p>'), BASE,
+                           availability_selector="p.stock")
+
+    assert page.availability == "unknown" and not page.stock_conflict
+    assert page.delivery_evidence == ["Entrega en 2 días"]
+
+
 @pytest.mark.parametrize("spec", [
     {"priceType": "https://schema.org/ListPrice", "price": 300},
     {"priceType": "https://schema.org/SalePrice", "price": 120,

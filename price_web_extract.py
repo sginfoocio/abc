@@ -165,34 +165,56 @@ def _matches_product_url(node: dict, url: str) -> bool:
     return any(_url_key(value) == _url_key(url) for value in _product_urls(node, url))
 
 
+def _price_restrictions(node: dict) -> list[str]:
+    fields = ("eligibleQuantity", "eligibleCustomerType", "validForMemberTier", "eligibleTransactionVolume")
+    restrictions = [field for field in fields if node.get(field) is not None]
+    if re.search(r"cup[oó]n|coupon|promo(?:tional)? code", _name(node.get("name")), re.I):
+        restrictions.append("nombre de oferta promocional")
+    return restrictions
+
+
 def _conditional_price(node: dict) -> bool:
-    return any(node.get(field) is not None for field in
-               ("eligibleQuantity", "eligibleCustomerType", "validForMemberTier", "eligibleTransactionVolume")) \
-        or bool(re.search(r"cup[oó]n|coupon|promo(?:tional)? code", _name(node.get("name")), re.I))
+    return bool(_price_restrictions(node))
 
 
 def _offer_facts(node: dict, url: str) -> dict[str, Any]:
     """price/currency/availability/VAT from the offers of one Product node; several different prices = ambiguous."""
-    offers: list[dict] = []
+    offers: list[tuple[dict, tuple[str, ...]]] = []
+
+    def collect(offer: dict, inherited: tuple[str, ...] = ()) -> None:
+        inner = [item for item in _as_list(offer.get("offers")) if isinstance(item, dict)]
+        owner = "AggregateOffer" if _is_type(offer, "AggregateOffer") else "Offer"
+        restrictions = (*inherited, *(f"{owner}.{field}" for field in _price_restrictions(offer)))
+        if inner:
+            for item in inner:
+                collect(item, restrictions)
+        else:
+            offers.append((offer, restrictions))
+
     for offer in _as_list(node.get("offers")):
         if isinstance(offer, dict):
-            inner = [o for o in _as_list(offer.get("offers")) if isinstance(o, dict)]
-            offers.extend(inner or [offer])
+            collect(offer)
     facts: dict[str, Any] = {"ambiguous": False, "notes": [], "stock_evidence": [], "delivery_evidence": []}
-    variant_offers = [o for o in offers if isinstance(o.get("url"), str)
+    variant_offers = [(o, restrictions) for o, restrictions in offers if isinstance(o.get("url"), str)
                       and urlparse(urljoin(url, o["url"])).path == urlparse(url).path
                       and urlparse(urljoin(url, o["url"])).query]
     if variant_offers and (len(variant_offers) > 1 or any(
-            key == "variant" for o in variant_offers for key, _ in parse_qsl(urlparse(o["url"]).query))):
-        offers = [o for o in variant_offers if _url_key(urljoin(url, o["url"])) == _url_key(url)]
+            key == "variant" for o, _ in variant_offers for key, _ in parse_qsl(urlparse(o["url"]).query))):
+        offers = [(o, restrictions) for o, restrictions in variant_offers
+                  if _url_key(urljoin(url, o["url"])) == _url_key(url)]
         if not offers:
             facts["ambiguous"] = True
             facts["notes"].append("Ninguna oferta corresponde a la URL de variante solicitada")
     markets: set[str] = set()
     seen = []
-    for offer in offers:
-        if _conditional_price(offer):
-            facts["notes"].append("Oferta condicionada: no se usa como precio de venta")
+    for offer, inherited_restrictions in offers:
+        if inherited_restrictions:
+            price = parse_price(offer.get("price"))
+            currency = str(offer.get("priceCurrency") or "").upper()
+            quoted_price = f" ({price:g} {currency})" if price is not None and currency else ""
+            facts["notes"].append(
+                f"Oferta condicionada excluida ({'; '.join(inherited_restrictions)}){quoted_price}: "
+                "no se usa como precio de venta")
             continue
         raw_stock = str(offer.get("availability") or "")
         if raw_stock:
@@ -218,7 +240,9 @@ def _offer_facts(node: dict, url: str) -> dict[str, Any]:
             if kind in {"listprice", "strikethroughprice", "srp", "msrp"}:
                 previous = previous or value
             elif _conditional_price(item):
-                facts["notes"].append("Precio condicionado: no se aplica cupón ni precio de miembro/cantidad")
+                facts["notes"].append(
+                    f"Precio condicionado excluido ({'; '.join(_price_restrictions(item))}): "
+                    "no se usa como precio de venta")
                 continue
             elif kind in {"", "saleprice"} and value is not None and price is None:
                 price = value
@@ -241,7 +265,8 @@ def _offer_facts(node: dict, url: str) -> dict[str, Any]:
         facts.update(price=chosen[0], currency=chosen[1], availability=chosen[2], includes_tax=chosen[3],
                      previous_price=chosen[4])
     stocks = {item[2] for item in seen if item[2] != "unknown"}
-    ordered = any(availability_of(value) == "unknown" and re.search(r"backorder|preorder", value, re.I)
+    ordered = any(availability_of(value) == "unknown" and re.search(
+        r"backorder|preorder|preventa|pedido\s+anticipado", value, re.I)
                   for value in facts["stock_evidence"])
     facts["stock_conflict"] = len(stocks) > 1 or ("available" in stocks and ordered)
     if facts["stock_conflict"]:
@@ -585,13 +610,15 @@ def _selector_stock(page: ProductPage, text: str) -> None:
     page.notes.append("Stock publicado: " + text)
     unavailable = bool(re.search(r"\bagotado\b|\bsin stock\b|\bno disponible\b|\bout of stock\b", text, re.I))
     available = bool(re.search(r"\ben stock\b|\bin stock\b", text, re.I))
-    ordered = bool(re.search(r"\bbajo pedido\b|\bbackorder\b|\bpreorder\b|\bpre-order\b", text, re.I))
-    delay = re.search(r"(?:entrega|env[ií]o|delivery)\s+en\s+[1-9]\d*(?:\s*[-–]\s*\d+)?\s*d[ií]as?", text, re.I)
+    ordered = bool(re.search(
+        r"\bbajo pedido\b|\bbackorder\b|\bpreorder\b|\bpre-order\b|\bpreventa\b|\bpedido\s+anticipado\b",
+        text, re.I))
+    reviewed_delay = bool(re.search(r"\b(?:entrega|env[ií]o|delivery)\s+en\s+40\s*d[ií]as?\b", text, re.I))
     if re.search(r"\bentrega\b|\benv[ií]o\b|\bdelivery\b|\bshipping\b", text, re.I):
         page.delivery_evidence.append(text)
         page.notes.append("Plazo publicado: " + text)
     state = "unavailable" if unavailable else "available" if available and not ordered else "unknown"
-    page.stock_conflict |= (available and (unavailable or ordered or bool(delay))) \
+    page.stock_conflict |= (available and (unavailable or ordered or reviewed_delay)) \
         or (page.availability in {"available", "unavailable"} and state in {"available", "unavailable"}
             and page.availability != state) or (page.availability == "available" and ordered)
     if page.stock_conflict:
