@@ -42,11 +42,13 @@ class WatchReport:
     reactivated: list[str] = field(default_factory=list)
     already: list[str] = field(default_factory=list)
     rejected: list[tuple[str, str]] = field(default_factory=list)
+    queued: int = 0
 
     @property
     def summary(self) -> str:
         return (f"{len(self.added)} añadidos · {len(self.reactivated)} reactivados · "
-                f"{len(self.already)} ya vigilados · {len(self.rejected)} rechazados")
+                f"{len(self.already)} ya vigilados · {len(self.rejected)} rechazados · "
+                f"{self.queued} búsquedas en cola")
 
 
 def parse_eans(text: str) -> tuple[list[str], list[tuple[str, str]]]:
@@ -155,6 +157,10 @@ class PriceWatch:
                     added_at=excluded.added_at,removed_by='',removed_at=NULL""",
                                    (ean, group, source, rule_id, actor.strip(), now))
                 (report.reactivated if current is not None else report.added).append(ean)
+        if report.added or report.reactivated:
+            # Phase 2: new watched products are queued for automatic location (no HTTP here).
+            from price_locator import PriceLocator
+            report.queued = PriceLocator(self.store, clock=self._now).enqueue()["created"]
         return report
 
     def remove(self, eans: Iterable[str], *, actor: str) -> int:
