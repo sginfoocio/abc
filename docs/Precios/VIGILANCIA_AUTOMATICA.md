@@ -289,6 +289,79 @@ Se reutilizan los componentes existentes; no se crea otro extractor, histórico 
 - Las alertas se crean al ejecutar un lote, preparar la cola o abrir «Alertas». Sin proceso periódico activo no hay detección de caducidad en segundo plano.
 - Los trabajos terminados y las transiciones quedan en `monitor_jobs`/`monitor_events`; no se borra el histórico.
 
+### Lectura de resultados y comprobación de observaciones sin repetir el lote
+
+`inventory()` interpreta los nulos de SQLite/pandas (`None`, `NaN`, `NA`, `NaT`) como
+ausencia de fecha, no como una fecha para `fromisoformat`. Admite texto ISO (incluidos
+`Z`, offsets y el separador de SQLite), `datetime`, `date`, `Timestamp` y `datetime64`.
+La comparación de vigencia se realiza en UTC; las fechas antiguas sin zona se
+interpretan como UTC, nunca como la zona local del servidor.
+Una observación sin vigencia o con fecha inválida se conserva, no se considera
+comparable y muestra un estado y aviso explícitos; una fecha inválida también
+genera un aviso en el log con EAN/competidor/tipo, sin volcar el contenido recibido.
+La visualización no corrige la base ni prepara trabajos ni consume HTTP.
+
+Los otros usos de `fromisoformat` del monitor leen directamente campos SQLite
+`TEXT` de la cola o la fecha del recibo JSON, escritos con `_iso()` (UTC con zona).
+No pasan por pandas. Se conserva su validación estricta y no se cambia el
+comportamiento de ejecución, recuperación ni planificación.
+
+Para comprobar un lote ya terminado **no pulsar Preparar ni Actualizar precios**:
+
+- **Comparador → Productos → detalle → Histórico completo de precios** reutiliza
+  `offer_history(ean)` y muestra precio, moneda, stock, mercado, identidad, fecha y URL
+  ya guardados. La tabla permite descargar sus filas desde el menú de Streamlit.
+  Su visibilidad depende de los filtros/ofertas recientes del detalle.
+- Tras aplicar la corrección, **Vigilancia automática → Precios y monitorización →
+  Trabajos de monitorización** muestra `jobs()` y la tabla comercial sin ejecutar
+  el motor; también se pueden descargar las tablas desde su menú.
+- El CSV de **ejecuciones del piloto** no acredita este lote del motor nuevo.
+  El resumen de correo solo contiene alertas, no todas las observaciones.
+- En la versión afectada el fallo de `inventory()` impide llegar a la tabla de
+  trabajos. Si el detalle de producto tampoco permite recuperar el lote completo,
+  ejecutar la siguiente consulta sobre una conexión SQLite **de solo lectura**
+  (por ejemplo, `sqlite3 -readonly <ruta-SQLite-del-comparador>`).
+  Solo selecciona los cinco trabajos terminados más recientes de Visio Factory,
+  no identifica inequívocamente un lote si ya hubo otros posteriores: comprobar
+  EAN/fechas contra el lote supervisado antes de considerarlos los cinco afectados.
+
+```sql
+WITH selected AS (
+    SELECT j.*
+    FROM monitor_jobs j
+    JOIN competitors c ON c.id = j.competitor_id
+    WHERE lower(c.name) LIKE '%visio%factory%' AND j.state = 'done'
+    ORDER BY julianday(j.last_ok_at) DESC, j.id DESC
+    LIMIT 5
+)
+SELECT j.id AS job_id, j.ean, c.name AS competitor,
+       p.brand, p.model, p.color, j.state, j.url AS verified_url,
+       j.sampled_at, j.last_ok_at, j.valid_until, j.eligible,
+       j.last_offer_id, o.id AS stored_offer_id,
+       o.price, o.promotional_price, o.currency, o.market,
+       o.availability, o.match_status, o.method, o.captured_at,
+       o.url AS observed_url, o.evidence,
+       k.last_ok_at AS last_offer_check_at, k.checks,
+       (SELECT COUNT(*) FROM monitor_events e
+        WHERE e.job_id = j.id AND e.state = 'done') AS completed_events,
+       j.sample AS saved_receipt
+FROM selected j
+JOIN competitors c ON c.id = j.competitor_id
+JOIN products p ON p.ean = j.ean
+LEFT JOIN offers o ON o.id = j.last_offer_id
+LEFT JOIN offer_checks k ON k.last_offer_id = o.id
+    AND k.ean = j.ean AND k.competitor_id = j.competitor_id AND k.market = o.market
+ORDER BY j.id;
+```
+
+Para exportar únicamente el resultado, en la consola SQLite usar `.headers on`,
+`.mode csv` y `.once visio-monitor.csv` antes del `SELECT`. El archivo se crea
+localmente; no se modifica SQLite. Deben aparecer cinco trabajos, sus recibos y
+sus ofertas asociadas (o una ausencia explícita, sin ocultarla con un `INNER JOIN`).
+Las comprobaciones de precio sin cambios pueden reutilizar `stored_offer_id`:
+`last_offer_check_at` y `saved_receipt` acreditan la nueva lectura sin exigir cinco
+ofertas nuevas. No ejecutar el monitor para verificar estos datos.
+
 ### Uso y prueba supervisada
 
 En **Comparador → Administración → Vigilancia automática**:

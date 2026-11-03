@@ -484,6 +484,10 @@ def _render_monitor(store: PriceComparatorStore, names: dict[str, str]) -> None:
     if frame.empty:
         st.info("Añada productos a vigilancia y localice sus fichas para comenzar.")
     else:
+        date_issues = int(frame["date_issue"].ne("").sum())
+        if date_issues:
+            st.warning(f"{date_issues} registros sin fecha de vigencia válida. Se conservan las observaciones, "
+                       "pero no se utilizan en la comparación. Revise sus estados; no es necesario repetir el lote.")
         cols = st.columns(4)
         for col, label in zip(cols, ["Actualizado", "Precio caducado", "Sin stock", "Sin localizar"]):
             col.metric(label, int((frame["status"] == label).sum()))

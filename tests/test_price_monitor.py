@@ -1,18 +1,45 @@
 """Phase 4: full self-hosted watch circuit, deterministic shops, never real HTTP."""
+from datetime import date, datetime, timedelta, timezone
+import json
 from filelock import FileLock
+import numpy as np
 import pandas as pd
 import pytest
 import sqlite3
 
 from price_comparator import PriceComparatorStore
 from price_locator import LEASE
-from price_monitor import PriceMonitor, SCHEDULE_ENV
+from price_monitor import PriceMonitor, SCHEDULE_ENV, _inventory_datetime
 from price_watch import PriceWatch
 from price_web import WebPriceSearch
 from tests.test_price_locator import BASE, Crash, Site, _catalogue_500, _env, _gtin, _watch
 from tests.web_fixtures import page
 
 EAN = _gtin("841000000001")
+
+
+@pytest.mark.parametrize("value", [
+    "2026-11-03T18:00:00+00:00", "2026-11-03T19:00:00+01:00",
+    "2026-11-03T18:00:00Z", "2026-11-03 18:00:00", "2026-11-03T18:00:00.000000",
+    datetime(2026, 11, 3, 18), datetime(2026, 11, 3, 19, tzinfo=timezone(timedelta(hours=1))),
+    pd.Timestamp("2026-11-03T19:00:00+01:00"), np.datetime64("2026-11-03T18:00:00"),
+])
+def test_inventory_datetime_normalizes_to_utc(value):
+    assert _inventory_datetime(value) == datetime(2026, 11, 3, 18, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize("value", ["2026-11-03", date(2026, 11, 3)])
+def test_inventory_date_only_is_midnight_utc(value):
+    assert _inventory_datetime(value) == datetime(2026, 11, 3, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize("value", [
+    None, "", " ", "not-a-date", "2026-02-30", "NaT", pd.NaT, pd.NA, float("nan"),
+    float("inf"), 1793730000, True, [], {"year": 2026},
+])
+def test_inventory_datetime_rejects_missing_or_invalid_values(value):
+    with pytest.raises(ValueError, match="Fecha de vigencia"):
+        _inventory_datetime(value)
 
 
 def _monitor_env(tmp_path, *, count=1):
@@ -402,6 +429,139 @@ def test_monitoring_ui_shows_prices_and_alerts_without_network(tmp_path, monkeyp
     app.button(key="monitor_enqueue").click().run(timeout=30)
     assert not app.exception
     assert any(SCHEDULE_ENV in str(item.value) for item in app.warning)
+
+
+def test_inventory_mixed_five_completed_and_unprocessed_jobs_is_read_only(tmp_path, monkeypatch):
+    store, _, _, monitor, _, cid, site = _monitor_env(tmp_path, count=6)
+    assert monitor.run([cid], max_jobs=5).states == {"done": 5}
+    assert len(site.calls) == 6  # robots + five simulated product pages
+    with store._connect() as con:
+        for job in con.execute("SELECT * FROM monitor_jobs WHERE state='done'"):
+            for key in ("lease_until", "last_ok_at", "sampled_at", "not_before", "valid_until"):
+                if job[key] is not None:
+                    assert isinstance(job[key], str)
+                    assert datetime.fromisoformat(job[key]).tzinfo is not None
+            assert isinstance(json.loads(job["sample"])["at"], str)
+        before = "\n".join(con.iterdump())
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Rendering results must not query competitors or enqueue jobs")
+
+    monkeypatch.setattr(monitor, "run", forbidden)
+    monkeypatch.setattr(monitor, "enqueue", forbidden)
+    monkeypatch.setattr("requests.sessions.Session.request", forbidden)
+    site.calls.clear()
+    for _ in range(2):
+        frame = monitor.inventory()
+        assert len(frame) == 6
+        assert len(frame.query("comparable")) == 5
+        assert list(frame["status"]).count("Pendiente") == 1
+        assert not frame["date_issue"].any()
+    assert not site.calls
+    with store._connect() as con:
+        assert "\n".join(con.iterdump()) == before
+        assert con.execute("SELECT COUNT(*) FROM offers WHERE method='web:monitor'").fetchone()[0] == 5
+        assert con.execute("SELECT COUNT(*) FROM monitor_jobs").fetchone()[0] == 6
+
+
+@pytest.mark.parametrize("value,expected", [
+    (None, "Sin fecha de vigencia"), ("", "Sin fecha de vigencia"), ("  ", "Sin fecha de vigencia"),
+    ("invalid", "Fecha de vigencia inválida"), (123, "Fecha de vigencia inválida"),
+])
+def test_inventory_missing_or_corrupt_validity_is_visible_and_not_comparable(tmp_path, value, expected, caplog):
+    store, _, _, monitor, _, cid, site = _monitor_env(tmp_path)
+    monitor.run([cid])
+    with store._connect() as con, con:
+        con.execute("UPDATE monitor_jobs SET valid_until=?", (value,))
+        before = "\n".join(con.iterdump())
+    site.calls.clear()
+    frame = monitor.inventory()
+    assert frame.iloc[0]["status"] == expected
+    assert frame.iloc[0]["date_issue"] == expected
+    assert not frame["comparable"].any()
+    assert len(store.offer_history(EAN)) == 1
+    if "inválida" in expected:
+        assert "Invalid monitor valid_until" in caplog.text
+    assert not site.calls
+    with store._connect() as con:
+        assert "\n".join(con.iterdump()) == before
+
+
+@pytest.mark.parametrize("offset,kind,expired", [
+    (-1, "naive", True), (0, "naive", False), (1, "naive", False),
+    (-1, "aware", True), (0, "aware", False), (1, "aware", False),
+    (-1, "timestamp", True), (1, "timestamp", False),
+    (-1, "numpy", True), (1, "numpy", False),
+])
+def test_inventory_validity_types_and_expiry_boundary(tmp_path, monkeypatch, offset, kind, expired):
+    store, _, _, monitor, clock, cid, _ = _monitor_env(tmp_path)
+    monitor.run([cid])
+    at = clock() + timedelta(seconds=offset)
+    value = (at.replace(tzinfo=None) if kind == "naive" else
+             at.astimezone(timezone(timedelta(hours=2))) if kind == "aware" else
+             pd.Timestamp(at) if kind == "timestamp" else np.datetime64(at.replace(tzinfo=None)))
+    read_sql = pd.read_sql_query
+
+    def typed_read(sql, *args, **kwargs):
+        frame = read_sql(sql, *args, **kwargs)
+        if "j.last_ok_at,j.valid_until,j.eligible" in sql:
+            frame["valid_until"] = pd.Series([value], dtype=object)
+        return frame
+
+    monkeypatch.setattr(pd, "read_sql_query", typed_read)
+    # Legacy naive clocks are interpreted as UTC, not the machine's local zone.
+    monkeypatch.setattr(monitor, "_now", lambda: clock().replace(tzinfo=None))
+    result = monitor.inventory().iloc[0]
+    assert bool(result["comparable"]) is not expired
+    assert result["status"] == ("Precio caducado" if expired else "Actualizado")
+
+
+@pytest.mark.parametrize("value", [None, float("nan"), pd.NA, pd.NaT, np.datetime64("NaT")])
+def test_inventory_nullable_pandas_scalars(tmp_path, monkeypatch, value):
+    _, _, _, monitor, _, cid, _ = _monitor_env(tmp_path)
+    monitor.run([cid])
+    read_sql = pd.read_sql_query
+
+    def nullable_read(sql, *args, **kwargs):
+        frame = read_sql(sql, *args, **kwargs)
+        if "j.last_ok_at,j.valid_until,j.eligible" in sql:
+            frame["valid_until"] = pd.Series([value], dtype=object)
+        return frame
+
+    monkeypatch.setattr(pd, "read_sql_query", nullable_read)
+    row = monitor.inventory().iloc[0]
+    assert row["status"] == row["date_issue"] == "Sin fecha de vigencia"
+    assert not row["comparable"]
+
+
+def test_monitoring_ui_mixed_dates_and_invalid_validity_without_writes(tmp_path, monkeypatch):
+    from streamlit.testing.v1 import AppTest
+
+    store, _, _, monitor, _, cid, site = _monitor_env(tmp_path, count=6)
+    monitor.run([cid], max_jobs=5)
+    with store._connect() as con, con:
+        con.execute("UPDATE monitor_jobs SET valid_until='invalid' WHERE id=(SELECT MIN(id) FROM monitor_jobs)")
+    monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Rendering must not send HTTP or prepare jobs")
+
+    monkeypatch.setattr("requests.sessions.Session.request", forbidden)
+    monkeypatch.setattr(PriceMonitor, "run", forbidden)
+    monkeypatch.setattr(PriceMonitor, "enqueue", forbidden)
+    site.calls.clear()
+    app = AppTest.from_string("from app_pages.price_watch import render_watch_admin\n"
+                             "from price_comparator import PriceComparatorStore\n"
+                             "render_watch_admin(PriceComparatorStore())").run(timeout=30)
+    # The existing admin entry point seeds default configuration on its first opening.
+    with store._connect() as con:
+        before = "\n".join(con.iterdump())
+    app.selectbox(key="price_watch_section").set_value("Precios y monitorización").run(timeout=30)
+    assert not app.exception
+    assert any("1 registros sin fecha de vigencia válida" in str(item.value) for item in app.warning)
+    assert not site.calls
+    with store._connect() as con:
+        assert "\n".join(con.iterdump()) == before
 
 
 def test_failed_job_can_be_reopened_explicitly_and_audited(tmp_path):
