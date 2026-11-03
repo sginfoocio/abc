@@ -1,4 +1,4 @@
-"""Self-hosted automatic locator of the scalable price watch (phase 2).
+"""Self-hosted automatic locator of the scalable price watch (phases 2-3).
 
 For every watched product and active competitor a persistent job (``locate_jobs``) looks for the competitor's
 product page without anyone typing URLs:
@@ -19,20 +19,29 @@ incidents). Nothing is bypassed: when no authorised method exists the job is rec
 disponible por restricciones de acceso», never as a missing product. Monitoring prices is a separate phase.
 
 Jobs are leased, so an interrupted run is recovered by the next one. The supervised pilot pairs are skipped.
+
+Phase 3 widens discovery without crawling whole shops: listing sources have a kind (brand → collection →
+category, broader tiers only when narrower ones gave no candidate), may follow internal sub-listings that match
+a configured pattern *and* name a watched brand (bounded depth and pages), use a listing adapter (generic or
+competitor-specific), and are not fetched again while valid; an unchanged listing stays valid longer. Retired
+pages trigger relocation through :meth:`PriceLocator.retire`. :meth:`PriceLocator.tick` runs the queue
+periodically per competitor, only when ``PRICE_LOCATOR_SCHEDULE_ENABLED`` is on (off by default).
 """
 from __future__ import annotations
 
 import argparse
-from collections import Counter
+from collections import Counter, deque
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
+import os
 import re
 import time
 from typing import Callable
-from urllib.parse import parse_qsl, unquote, urljoin, urlparse
+from urllib.parse import parse_qsl, unquote, urlencode, urljoin, urlparse
 
-from filelock import Timeout
+from filelock import FileLock, Timeout
 import pandas as pd
 
 from price_access import METHODS, AccessControl, AccessDenied, GovernedFetcher, external_search_enabled
@@ -60,6 +69,16 @@ CLAIMABLE = ("pending", "waiting", "not_found", "unavailable", "blocked")
 SETTLED = ("done", "review", "not_found", "unavailable", "pilot")
 DISCOVERY_ORDER = ("feed", "sitemap", "catalog", "site_search", "external")
 SOURCE_METHODS = ("catalog", "feed")
+# Listing kinds, cheapest/most targeted first: a brand page only lists that brand, a category lists everything.
+SOURCE_KINDS = {"brand": "Página de marca", "collection": "Colección", "category": "Categoría",
+                "feed": "Feed del competidor"}
+KIND_ORDER = ("brand", "collection", "category", "feed")
+MAX_DEPTH = 3
+MAX_CHILDREN = 30
+# A listing unchanged at its last refresh is refreshed less often (×2, ×4), back to normal as soon as it changes.
+MAX_REFRESH_FACTOR = 4
+_TRACKING = re.compile(r"^(utm_\w+|gclid|fbclid|srsltid|mc_cid|mc_eid|_ga)$", re.I)
+SCHEDULE_ENV = "PRICE_LOCATOR_SCHEDULE_ENABLED"
 UNAVAILABLE_TEXT = "Localización no disponible por restricciones de acceso"
 LEASE = timedelta(minutes=10)
 MAX_ATTEMPTS = 5
@@ -130,6 +149,108 @@ def _next_page(current: str, links: list[tuple[str, str]]) -> str:
             if query.get(name, "").isdigit() and int(query[name]) == number + 1:
                 return target._replace(fragment="").geturl()
     return ""
+
+
+def schedule_enabled() -> bool:
+    """Server switch for periodic location. Off by default: no periodic request until explicitly enabled."""
+    return os.environ.get(SCHEDULE_ENV, "").strip().lower() in {"1", "true", "yes"}
+
+
+def canonical(url: str) -> str:
+    """Same page, same key: no fragment and no tracking parameters (pagination and variants are kept)."""
+    parts = urlparse(url)
+    query = urlencode([(name, value) for name, value in parse_qsl(parts.query, keep_blank_values=True)
+                       if not _TRACKING.match(name)])
+    return parts._replace(query=query, fragment="").geturl()
+
+
+_REL_NEXT = re.compile(r"<(?:link|a)\b(?=[^>]*\brel=[\"']?next\b)[^>]*\bhref=[\"']([^\"']+)", re.I)
+_DATA_NEXT = re.compile(r"\bdata-next(?:-page)?(?:-url)?=[\"']([^\"']+)", re.I)
+_JSONLD = re.compile(r"<script[^>]*application/ld\+json[^>]*>(.*?)</script>", re.I | re.S)
+
+
+@dataclass
+class Listing:
+    items: list[tuple[str, str]]  # candidate product links (absolute URL, identity text)
+    next_url: str  # next page of the same listing
+    links: list[tuple[str, str]]  # every same-site link, for controlled following of sub-listings
+
+
+class ListingAdapter:
+    """Generic listing: anchors plus pagination (``?page=N``/``?p=N``, ``rel=next`` or ``data-next-url``).
+
+    Competitor-specific adapters subclass it only when the generic structure is not enough."""
+    name, label = "generic", "Genérico (enlaces y paginación)"
+
+    def parse(self, html: str, url: str, domain: str) -> Listing:
+        anchors = parse_html(html).links
+        here = urlparse(url).path
+        links = []
+        for href, text in anchors:
+            target = canonical(urljoin(url, href))
+            if _same_site(target, domain) and urlparse(target).path != here:
+                links.append((target, text))
+        following = _next_page(url, anchors)
+        if not following:
+            for pattern in (_REL_NEXT, _DATA_NEXT):
+                found = pattern.search(html)
+                if found and _same_site(urljoin(url, found.group(1)), domain):
+                    following = canonical(urljoin(url, found.group(1)))
+                    break
+        return Listing(self.items(html, url, domain, links), following if following != url else "", links)
+
+    def items(self, html: str, url: str, domain: str, links: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        return links
+
+
+class ItemListAdapter(ListingAdapter):
+    """Listings whose cards do not name the product (``/p/123``, «Ver») but publish a schema.org ItemList."""
+    name, label = "itemlist", "ItemList JSON-LD (tarjetas sin identidad en el enlace)"
+
+    def items(self, html: str, url: str, domain: str, links: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        found: dict[str, str] = {}
+        for block in _JSONLD.findall(html):
+            try:
+                data = json.loads(block)
+            except ValueError:
+                continue
+            for node in _walk(data):
+                if "itemlist" not in str(node.get("@type", "")).lower():
+                    continue
+                for element in node.get("itemListElement") or []:
+                    item = element.get("item") if isinstance(element.get("item"), dict) else element
+                    target = item.get("url") or element.get("url") or (
+                        element.get("item") if isinstance(element.get("item"), str) else "")
+                    if not target:
+                        continue
+                    brand = item.get("brand")
+                    brand = brand.get("name", "") if isinstance(brand, dict) else str(brand or "")
+                    label = " ".join(str(item.get(name) or "") for name in ("name", "model", "mpn", "color"))
+                    target = canonical(urljoin(url, str(target)))
+                    if _same_site(target, domain):
+                        found[target] = " ".join(f"{brand} {label}".split())
+        merged = dict(links)
+        for target, label in found.items():
+            merged[target] = label or merged.get(target, "")
+        return list(merged.items())
+
+
+def _walk(node):
+    if isinstance(node, dict):
+        yield node
+        for value in node.values():
+            yield from _walk(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _walk(value)
+
+
+ADAPTERS: dict[str, ListingAdapter] = {adapter.name: adapter for adapter in (ListingAdapter(), ItemListAdapter())}
+
+
+def register_adapter(adapter: ListingAdapter) -> None:
+    """Competitor-specific structure: add an adapter here and select it in the source configuration."""
+    ADAPTERS[adapter.name] = adapter
 
 
 @dataclass
@@ -379,13 +500,31 @@ class PriceLocator:
         return added
 
     def save_source(self, competitor_id: str, method: str, url_template: str, *, actor: str, note: str = "",
-                    refresh_hours: float = 168.0, max_pages: int = 10, active: bool = True) -> None:
+                    refresh_hours: float = 168.0, max_pages: int = 10, active: bool = True, kind: str = "",
+                    follow_pattern: str = "", max_depth: int = 0, adapter: str = "generic") -> None:
         if method not in SOURCE_METHODS:
             raise ValueError("Tipo de fuente no válido: catálogo/marca o feed")
+        kind = kind or ("feed" if method == "feed" else "brand")
+        if kind not in SOURCE_KINDS or (kind == "feed") != (method == "feed"):
+            raise ValueError("Clase de listado no válida: marca, colección o categoría (catálogo) o feed")
         if not actor.strip():
             raise ValueError("Indique quién registra la fuente")
         if not 1 <= refresh_hours <= 24 * 90 or not 1 <= max_pages <= 200:
             raise ValueError("Caducidad entre 1 h y 90 días; entre 1 y 200 páginas por fuente")
+        if not 0 <= int(max_depth) <= MAX_DEPTH:
+            raise ValueError(f"Profundidad de enlaces internos entre 0 y {MAX_DEPTH}")
+        if adapter not in ADAPTERS:
+            raise ValueError("Adaptador de listado desconocido")
+        follow_pattern = follow_pattern.strip()
+        if len(follow_pattern) > 200:
+            raise ValueError("Patrón de sublistados demasiado largo")
+        if follow_pattern:
+            try:
+                re.compile(follow_pattern)
+            except re.error as exc:
+                raise ValueError(f"Patrón de sublistados no válido: {exc}") from exc
+        if int(max_depth) and not follow_pattern:
+            raise ValueError("Para seguir enlaces internos indique qué sublistados (patrón de la ruta)")
         template = url_template.strip()
         if re.search(r"[{}]", template.replace("{brand}", "")):
             raise ValueError("La única variable permitida es {brand}")
@@ -396,11 +535,112 @@ class PriceLocator:
             raise ValueError(str(exc)) from exc
         with self.store._connect() as connection, connection:
             connection.execute("""INSERT INTO discovery_sources(competitor_id,method,url_template,refresh_hours,
-                max_pages,active,note,created_by,created_at) VALUES(?,?,?,?,?,?,?,?,?)
+                max_pages,active,note,created_by,created_at,kind,follow_pattern,max_depth,adapter)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(competitor_id,url_template) DO UPDATE SET method=excluded.method,
                 refresh_hours=excluded.refresh_hours,max_pages=excluded.max_pages,active=excluded.active,
-                note=excluded.note""", (competitor_id, method, template, float(refresh_hours), int(max_pages),
-                                        int(active), note.strip(), actor.strip(), _iso(self._now())))
+                note=excluded.note,kind=excluded.kind,follow_pattern=excluded.follow_pattern,
+                max_depth=excluded.max_depth,adapter=excluded.adapter""",
+                               (competitor_id, method, template, float(refresh_hours), int(max_pages), int(active),
+                                note.strip(), actor.strip(), _iso(self._now()), kind, follow_pattern,
+                                int(max_depth), adapter))
+
+    # retired pages (shared with monitoring) ----------------------------------------------------
+    def retire(self, competitor_id: str, url: str, reason: str) -> int:
+        """A page that no longer exists: its verified rows need relocation (the next ``enqueue`` reopens
+        their jobs as ``relocate``). Offer history is untouched. Same hook for the locator and monitoring."""
+        now = _iso(self._now())
+        with self.store._connect() as connection, connection:
+            connection.execute("""UPDATE discovery_index SET check_state='gone',checked_at=?,
+                gone_at=COALESCE(gone_at,?) WHERE competitor_id=? AND url=?""", (now, now, competitor_id, url))
+            return connection.execute("""UPDATE competitor_product_urls SET status='needs_relocation',
+                note=substr(? || ' · ' || note,1,1000) WHERE competitor_id=? AND url=? AND status='verified'""",
+                                      (f"{reason} ({now})", competitor_id, url)).rowcount
+
+    # periodic location ----------------------------------------------------------------------------
+    def configure_schedule(self, competitor_id: str, *, enabled: bool, interval_hours: float = 24.0,
+                           max_jobs: int = 200, deadline_minutes: float = 15.0, actor: str) -> None:
+        if not actor.strip():
+            raise ValueError("Indique quién cambia la planificación")
+        if not 1 <= interval_hours <= 24 * 30 or not 1 <= max_jobs <= 5000 or not 1 <= deadline_minutes <= 240:
+            raise ValueError("Intervalo entre 1 h y 30 días, 1-5000 trabajos y 1-240 minutos por ejecución")
+        now = _iso(self._now())
+        with self.store._connect() as connection, connection:
+            if connection.execute("SELECT 1 FROM competitors WHERE id=?", (competitor_id,)).fetchone() is None:
+                raise ValueError("Competidor desconocido")
+            previous = connection.execute("SELECT enabled FROM locate_schedule WHERE competitor_id=?",
+                                          (competitor_id,)).fetchone()
+            connection.execute("""INSERT INTO locate_schedule(competitor_id,enabled,interval_hours,max_jobs,
+                deadline_minutes,next_run_at,updated_by,updated_at) VALUES(?,?,?,?,?,?,?,?)
+                ON CONFLICT(competitor_id) DO UPDATE SET enabled=excluded.enabled,
+                interval_hours=excluded.interval_hours,max_jobs=excluded.max_jobs,
+                deadline_minutes=excluded.deadline_minutes,updated_by=excluded.updated_by,
+                updated_at=excluded.updated_at,
+                next_run_at=CASE WHEN excluded.enabled=1 AND locate_schedule.enabled=0 THEN excluded.next_run_at
+                                 ELSE locate_schedule.next_run_at END""",
+                               (competitor_id, int(enabled), float(interval_hours), int(max_jobs),
+                                float(deadline_minutes), now, actor.strip(), now))
+            AccessControl._audit(connection, "competitor", competitor_id, "locate_schedule",
+                                 str(previous["enabled"] if previous else ""), str(int(enabled)), actor.strip(),
+                                 f"cada {interval_hours:g} h, {max_jobs} trabajos, {deadline_minutes:g} min", now)
+
+    def schedule(self):
+        with self.store._connect() as connection:
+            return pd.read_sql_query("""SELECT c.id AS competitor_id,c.name AS competitor,
+                COALESCE(s.enabled,0) AS enabled,COALESCE(s.interval_hours,24) AS interval_hours,
+                COALESCE(s.max_jobs,200) AS max_jobs,COALESCE(s.deadline_minutes,15) AS deadline_minutes,
+                s.next_run_at,s.last_run_at,COALESCE(s.last_summary,'') AS last_summary
+                FROM competitors c LEFT JOIN locate_schedule s ON s.competitor_id=c.id
+                WHERE c.active=1 ORDER BY c.name""", connection)
+
+    def runs(self, limit: int = 50):
+        with self.store._connect() as connection:
+            return pd.read_sql_query("""SELECT r.*,c.name AS competitor FROM locate_runs r
+                JOIN competitors c ON c.id=r.competitor_id ORDER BY r.id DESC LIMIT ?""", connection, params=(limit,))
+
+    def tick(self, *, monotonic: Callable[[], float] = time.monotonic) -> dict:
+        """One scheduler pass: run every enabled competitor whose interval elapsed. Does nothing unless the
+        server switch ``PRICE_LOCATOR_SCHEDULE_ENABLED`` is on. Safe to call often and from several processes."""
+        if not schedule_enabled():
+            return {"skipped": f"Planificación desactivada ({SCHEDULE_ENV} no activo)", "runs": []}
+        try:
+            with FileLock(f"{self.store.database_path}.locator-tick.lock", timeout=0):
+                return self._tick(monotonic)
+        except Timeout:
+            return {"skipped": "Otra pasada de planificación está en curso", "runs": []}
+
+    def _tick(self, monotonic) -> dict:
+        now = self._now()
+        with self.store._connect() as connection, connection:
+            # Holding the tick lock, a run still 'running' was interrupted (crash, restart, deploy).
+            interrupted = connection.execute("""UPDATE locate_runs SET status='interrupted',finished_at=?,
+                summary='Interrumpida: sus trabajos se recuperan al vencer la reserva' WHERE status='running'""",
+                                             (_iso(now),)).rowcount
+            due = [dict(row) for row in connection.execute("""SELECT s.* FROM locate_schedule s
+                JOIN competitors c ON c.id=s.competitor_id WHERE s.enabled=1 AND c.active=1
+                AND (s.next_run_at IS NULL OR s.next_run_at<=?) ORDER BY s.next_run_at""", (_iso(now),))]
+        queued = self.enqueue() if due else {}
+        runs = []
+        for plan in due:
+            started = self._now()
+            with self.store._connect() as connection, connection:
+                run_id = connection.execute("""INSERT INTO locate_runs(competitor_id,trigger,started_at,status)
+                    VALUES(?,'schedule',?,'running')""", (plan["competitor_id"], _iso(started))).lastrowid
+            report = self.run([plan["competitor_id"]], max_jobs=int(plan["max_jobs"]),
+                              deadline_seconds=float(plan["deadline_minutes"]) * 60, monotonic=monotonic)
+            stopped = report.stopped.get(plan["competitor_id"], "")
+            summary = report.summary + (f". Detenido: {stopped}" if stopped else "")
+            finished = self._now()
+            with self.store._connect() as connection, connection:
+                connection.execute("""UPDATE locate_runs SET finished_at=?,status=?,processed=?,requests=?,summary=?
+                    WHERE id=?""", (_iso(finished), "stopped" if stopped else "ok", report.processed,
+                                    report.requests, summary[:1000], run_id))
+                connection.execute("""UPDATE locate_schedule SET last_run_at=?,last_summary=?,next_run_at=?
+                    WHERE competitor_id=?""", (_iso(finished), summary[:1000],
+                                               _iso(started + timedelta(hours=float(plan["interval_hours"]))),
+                                               plan["competitor_id"]))
+            runs.append({"competitor_id": plan["competitor_id"], "summary": summary})
+        return {"skipped": "", "interrupted": interrupted, "queued": queued, "runs": runs}
 
     # reporting (no HTTP) ----------------------------------------------------------------------
     def status(self):
@@ -453,6 +693,7 @@ class _Session:
         self._robots_state: dict = {}
         self._blocked: dict = {}
         self._visited: set[str] = set()
+        self._brands: list[set[str]] | None = None
         self._sitemaps_done = False
         with self.store._connect() as connection:
             self._first_request = connection.execute("SELECT COALESCE(MAX(id),0) FROM access_requests").fetchone()[0]
@@ -525,7 +766,7 @@ class _Session:
                 if method != "external":
                     restrictions.append(f"{METHODS[method]}: sin autorizar")
                 continue
-            outcome = self._discover(method, product)
+            outcome = self._discover(method, product, excluded)
             if outcome == "ran":
                 executed.append(METHODS[method])
                 result = self._match(product, excluded)
@@ -606,13 +847,20 @@ class _Session:
         except RobotsDenied:
             state = "robots"
         with self.store._connect() as connection, connection:
-            connection.execute("""UPDATE discovery_index SET checked_at=?,check_state=?,facts=?
-                WHERE competitor_id=? AND url=?""", (_iso(self._now()), state, facts, self.competitor_id, row["url"]))
+            connection.execute("""UPDATE discovery_index SET checked_at=?,check_state=?,facts=?,
+                gone_at=CASE WHEN ?='gone' THEN COALESCE(gone_at,?) ELSE NULL END
+                WHERE competitor_id=? AND url=?""", (_iso(self._now()), state, facts, state, _iso(self._now()),
+                                                     self.competitor_id, row["url"]))
+        if state == "gone":
+            self._retire(row["url"], "La ficha ya no existe en el sitio (retirada)")
         return page, 1
 
     # discovery --------------------------------------------------------------------------------
-    def _discover(self, method: str, product: dict) -> str:
-        """Refresh one authorised source if its copy expired. Returns 'ran' or why it could not be used."""
+    def _discover(self, method: str, product: dict, excluded: set[str] = frozenset()) -> str:
+        """Refresh the authorised sources whose copy expired. Returns 'ran' or why they could not be used.
+
+        Listings go from the most targeted to the broadest (brand → collection → category): a broader tier is
+        only read when the narrower ones left no candidate for this product."""
         if method == "sitemap":
             return self._sitemaps()
         if method == "site_search":
@@ -620,39 +868,85 @@ class _Session:
         if method == "external":
             return self._external(product)
         with self.store._connect() as connection:
-            sources = connection.execute("""SELECT * FROM discovery_sources WHERE competitor_id=? AND method=?
-                AND active=1 ORDER BY id""", (self.competitor_id, method)).fetchall()
+            sources = [dict(row) for row in connection.execute("""SELECT * FROM discovery_sources
+                WHERE competitor_id=? AND method=? AND active=1 ORDER BY id""", (self.competitor_id, method))]
         if not sources:
             return "sin fuentes configuradas"
         brand_slug = "-".join(tokens(product["brand"])).lower()
-        outcomes = [self._crawl(method, source["url_template"].replace("{brand}", brand_slug),
-                                source["refresh_hours"], source["max_pages"]) for source in sources]
+        brand_words = set(tokens(product["brand"]))
+        outcomes = []
+        for kind in KIND_ORDER:
+            tier = [source for source in sources if (source.get("kind") or "brand") == kind]
+            for source in tier:
+                template = source["url_template"]
+                start = template.replace("{brand}", brand_slug)
+                # A fixed brand page only concerns its own brand: never read for another brand's products.
+                if kind == "brand" and "{brand}" not in template and not brand_words <= set(signature(start).split()):
+                    continue
+                outcomes.append(self._crawl(method, start, source))
+            if "ran" in outcomes and self._has_candidate(product, excluded):
+                break
+        if not outcomes:
+            return "ninguna fuente aplicable a la marca"
         return "ran" if "ran" in outcomes else outcomes[0]
 
+    def _has_candidate(self, product: dict, excluded: set[str]) -> bool:
+        wanted_model, wanted_color = model_key(product["model"]), key(product["color"])
+        with self.store._connect() as connection:
+            rows = connection.execute("""SELECT url,signature FROM discovery_index WHERE competitor_id=?
+                AND check_state NOT IN ('gone','no_product','robots')
+                AND instr(replace(signature,' ',''),?)>0 AND instr(replace(signature,' ',''),?)>0""",
+                                      (self.competitor_id, wanted_model, wanted_color)).fetchall()
+        return any(row["url"] not in excluded and link_matches(row["signature"], product["model"], product["color"])
+                   for row in rows)
+
+    def _watched_brands(self) -> list[set[str]]:
+        if self._brands is None:
+            with self.store._connect() as connection:
+                names = [row[0] for row in connection.execute("""SELECT DISTINCT p.brand FROM watch_products w
+                    JOIN products p ON p.ean=w.ean WHERE w.active=1""")]
+            self._brands = [set(tokens(name)) for name in names if tokens(name)]
+        return self._brands
+
     def _page(self, url: str, hours: float):
+        """Stored copy of a listing if still valid. An unchanged listing stays valid longer (×2, ×4)."""
         with self.store._connect() as connection:
             row = connection.execute("SELECT * FROM discovery_pages WHERE competitor_id=? AND url=?",
                                      (self.competitor_id, url)).fetchone()
-        if row is None or datetime.fromisoformat(row["fetched_at"]) <= self._now() - timedelta(hours=hours):
+        if row is None:
+            return None
+        factor = min(2 ** int(row["unchanged_runs"] or 0), MAX_REFRESH_FACTOR) if row["status"] == "ok" else 1
+        if datetime.fromisoformat(row["fetched_at"]) <= self._now() - timedelta(hours=hours * factor):
             return None
         return row
 
     def _record_page(self, url: str, method: str, status: str, links: int = 0, next_url: str = "",
-                     detail: str = "") -> None:
+                     detail: str = "", content_hash: str = "", children: list[str] | None = None) -> None:
+        now = _iso(self._now())
         with self.store._connect() as connection, connection:
             connection.execute("""INSERT INTO discovery_pages(competitor_id,url,method,fetched_at,status,links,
-                next_url,detail) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(competitor_id,url) DO UPDATE SET
+                next_url,detail,content_hash,changed_at,unchanged_runs,children) VALUES(?,?,?,?,?,?,?,?,?,?,0,?)
+                ON CONFLICT(competitor_id,url) DO UPDATE SET
+                unchanged_runs=CASE WHEN excluded.content_hash<>''
+                    AND discovery_pages.content_hash=excluded.content_hash
+                    THEN discovery_pages.unchanged_runs+1 ELSE 0 END,
+                changed_at=CASE WHEN excluded.content_hash<>'' AND discovery_pages.content_hash=excluded.content_hash
+                    THEN discovery_pages.changed_at ELSE excluded.changed_at END,
                 method=excluded.method,fetched_at=excluded.fetched_at,status=excluded.status,links=excluded.links,
-                next_url=excluded.next_url,detail=excluded.detail""",
-                               (self.competitor_id, url, method, _iso(self._now()), status, links, next_url,
-                                detail[:300]))
+                next_url=excluded.next_url,detail=excluded.detail,content_hash=excluded.content_hash,
+                children=excluded.children""",
+                               (self.competitor_id, url, method, now, status, links, next_url, detail[:300],
+                                content_hash, now, json.dumps(children or [])))
+
+    def _retire(self, url: str, reason: str) -> int:
+        return self.locator.retire(self.competitor_id, url, reason)
 
     def _index(self, items: list[tuple[str, str]], method: str, source_url: str) -> int:
         now = _iso(self._now())
         rows, seen = [], set()
         for raw, label in items:
             try:
-                url = validate_competitor_url(raw, self.config["domain"])
+                url = canonical(validate_competitor_url(raw, self.config["domain"]))
             except WebSearchError:
                 continue
             sig = signature(url, label)
@@ -669,41 +963,68 @@ class _Session:
                                    rows)
         return len(rows)
 
-    def _crawl(self, method: str, start: str, refresh_hours: float, max_pages: int) -> str:
-        """Listing pages (brand, category, feed) with pagination; pages still fresh are not fetched again."""
+    def _crawl(self, method: str, start: str, source: dict) -> str:
+        """One listing source: its pagination plus, up to ``max_depth``, the sub-listings matching
+        ``follow_pattern`` that name a watched brand. Pages still valid are not fetched again; at most
+        ``max_pages`` pages are read (or reused) per source and run."""
         try:
-            url = validate_competitor_url(start, self.config["domain"])
+            first = canonical(validate_competitor_url(start, self.config["domain"]))
         except WebSearchError as exc:
             return f"fuente no válida ({exc})"
-        pages, outcome = 0, "ran"
-        while url and pages < max_pages and url not in self._visited:
+        adapter = ADAPTERS.get(source.get("adapter") or "generic", ADAPTERS["generic"])
+        depth_limit = min(int(source.get("max_depth") or 0), MAX_DEPTH)
+        pattern = re.compile(source["follow_pattern"]) if source.get("follow_pattern") else None
+        refresh = float(source["refresh_hours"])
+        queue, pages, outcome = deque([(first, 0)]), 0, "ran"
+        while queue and pages < int(source["max_pages"]):
+            url, depth = queue.popleft()
+            if url in self._visited:
+                continue
             self._visited.add(url)
             pages += 1
-            cached = self._page(url, refresh_hours)
+            cached = self._page(url, refresh)
             if cached is not None:
-                url = cached["next_url"] if cached["status"] == "ok" else ""
-                continue
-            try:
-                fetched = self._get(method, url)
-            except RobotsDenied:
-                self._record_page(url, method, "robots", detail="robots.txt no permite esta página")
-                return "robots.txt no lo permite" if pages == 1 else outcome
-            except PageGone as exc:
-                self._record_page(url, method, "gone", detail=str(exc))
-                return outcome
-            if method == "feed":
-                items, following = _feed_items(fetched.text), ""
+                following = cached["next_url"] if cached["status"] == "ok" else ""
+                children = json.loads(cached["children"] or "[]") if cached["status"] == "ok" else []
             else:
-                links = parse_html(fetched.text).links
-                here = urlparse(fetched.url).path
-                items = [(urljoin(fetched.url, href), text) for href, text in links
-                         if urlparse(urljoin(fetched.url, href)).path != here
-                         and _same_site(urljoin(fetched.url, href), self.config["domain"])]
-                following = _next_page(fetched.url, links)
-            count = self._index(items, method, url)
-            self._record_page(url, method, "ok", count, following)
-            url = following
+                try:
+                    fetched = self._get(method, url)
+                except RobotsDenied:
+                    self._record_page(url, method, "robots", detail="robots.txt no permite esta página")
+                    if url == first:
+                        return "robots.txt no lo permite"
+                    continue
+                except PageGone as exc:
+                    self._record_page(url, method, "gone", detail=str(exc))
+                    continue
+                if method == "feed":
+                    listing = Listing(_feed_items(fetched.text), "", [])
+                else:
+                    listing = adapter.parse(fetched.text, canonical(fetched.url), self.config["domain"])
+                following = listing.next_url
+                children = self._children(listing.links, pattern) if pattern else []
+                count = self._index(listing.items, method, url)
+                digest = hashlib.sha256(json.dumps([sorted(listing.items), following, children],
+                                                   ensure_ascii=False).encode()).hexdigest()
+                self._record_page(url, method, "ok", count, following, content_hash=digest, children=children)
+            if following:
+                queue.appendleft((following, depth))
+            if depth < depth_limit:
+                queue.extend((child, depth + 1) for child in children)
         return outcome
+
+    def _children(self, links: list[tuple[str, str]], pattern: re.Pattern) -> list[str]:
+        """Sub-listings worth following: they match the source pattern and name a watched brand."""
+        brands = self._watched_brands()
+        found = []
+        for url, label in links:
+            parts = urlparse(url)
+            if not pattern.search(parts.path + ("?" + parts.query if parts.query else "")):
+                continue
+            words = set(signature(url, label).split())
+            if any(brand <= words for brand in brands) and url not in found:
+                found.append(url)
+        return found[:MAX_CHILDREN]
 
     def _sitemaps(self) -> str:
         if self._sitemaps_done:
@@ -794,15 +1115,20 @@ def _feed_items(body: str) -> list[tuple[str, str]]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Manual commands. Nothing here schedules or loops: periodic execution is a deployment decision."""
+    """Manual commands. ``tick``/``loop`` only act when PRICE_LOCATOR_SCHEDULE_ENABLED is on and the competitor's
+    schedule is enabled: deploying this code starts no periodic request by itself."""
     parser = argparse.ArgumentParser(description="Localización automática de fichas de productos en vigilancia.")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("enqueue", help="Crea los trabajos pendientes (no hace peticiones)")
     sub.add_parser("status", help="Estado de la cola (no hace peticiones)")
+    sub.add_parser("schedule", help="Planificación por competidor (no hace peticiones)")
     run = sub.add_parser("run", help="Procesa un lote acotado con los métodos autorizados")
     run.add_argument("--competitor", action="append", default=[], help="Nombre; repetible. Por defecto, todos")
     run.add_argument("--max-jobs", type=int, default=100)
     run.add_argument("--deadline", type=float, default=600.0, help="Segundos máximos de la ejecución")
+    sub.add_parser("tick", help="Una pasada de la planificación periódica")
+    loop = sub.add_parser("loop", help="Pasadas periódicas de la planificación (servicio)")
+    loop.add_argument("--every", type=float, default=300.0, help="Segundos entre pasadas")
     args = parser.parse_args(argv)
     store = PriceComparatorStore()
     store.seed_defaults()
@@ -814,6 +1140,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "status":
         print(locator.status().to_string(index=False))
         return 0
+    if args.command == "schedule":
+        print(locator.schedule().to_string(index=False))
+        return 0
+    if args.command in ("tick", "loop"):
+        while True:
+            result = locator.tick()
+            print(result["skipped"] or "; ".join(run["summary"] for run in result["runs"]) or "Nada vencido",
+                  flush=True)
+            if args.command == "tick":
+                return 0
+            time.sleep(max(args.every, 30.0))
     ids = None
     if args.competitor:
         names = {name.lower(): cid for cid, name in store.competitors()[["id", "name"]].itertuples(index=False)}
