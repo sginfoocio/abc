@@ -251,6 +251,36 @@ def positioning_counts(summary: pd.DataFrame) -> pd.DataFrame:
     ])
 
 
+def comparison_coverage(summary: pd.DataFrame) -> dict[str, int | float | None]:
+    """Coverage counts and percentage, using all filtered products as denominator."""
+    total = len(summary)
+    compared = int(summary["difference_eur"].notna().sum()) if total else 0
+    return {
+        "total": total,
+        "compared": compared,
+        "not_compared": total - compared,
+        "coverage_pct": compared / total * 100 if total else None,
+    }
+
+
+def competitive_position_counts(summary: pd.DataFrame) -> pd.DataFrame:
+    """Current position counts, with percentages based only on valid comparisons."""
+    differences = summary["difference_eur"].dropna()
+    compared = len(differences)
+    cheaper = int((differences < 0).sum())
+    tied = int((differences == 0).sum())
+    more_expensive = int((differences > 0).sum())
+
+    def share(count: int) -> float:
+        return count / compared * 100 if compared else 0.0
+
+    return pd.DataFrame([
+        {"position": "Vytria con mejor precio", "count": cheaper, "share_pct": share(cheaper)},
+        {"position": "Empatado con el mejor precio", "count": tied, "share_pct": share(tied)},
+        {"position": "Vytria más caro", "count": more_expensive, "share_pct": share(more_expensive)},
+    ])
+
+
 def _offer_frame(store: PriceComparatorStore, ean: str | None = None) -> pd.DataFrame:
     query = """
         SELECT o.id,o.ean,o.competitor_id,c.name AS competitor_name,o.market,o.price,o.promotional_price,
@@ -486,4 +516,92 @@ def positioning_distribution_figure(summary: pd.DataFrame):
     figure.update_layout(xaxis_title="Productos del catálogo filtrado", yaxis_title="",
                          margin={"l": 10, "r": 10, "t": 10, "b": 10}, height=200)
     figure.update_xaxes(dtick=1, rangemode="tozero")
+    return figure
+
+
+def comparison_coverage_figure(summary: pd.DataFrame):
+    """100% stacked coverage bar, with the denominator equal to filtered catalog size."""
+    import plotly.graph_objects as go
+
+    data = comparison_coverage(summary)
+    total = data["total"]
+    compared = data["compared"]
+    not_compared = data["not_compared"]
+    compared_pct = data["coverage_pct"] or 0.0
+    not_compared_pct = 100 - compared_pct if total else 0.0
+    figure = go.Figure()
+    for label, count, share, colour in (
+        ("Con comparación válida", compared, compared_pct, BRAND_GREEN),
+        ("Sin comparación válida", not_compared, not_compared_pct, "#64748B"),
+    ):
+        figure.add_trace(go.Bar(
+            name=f"{label} · {count} ({share:.1f} %)".replace(".", ","),
+            x=[share],
+            y=["Catálogo filtrado"],
+            orientation="h",
+            marker={"color": colour},
+            text=[f"{count} ({share:.1f} %)".replace(".", ",")],
+            textposition="inside",
+            insidetextanchor="middle",
+            insidetextfont={"color": "#FFFFFF"},
+            hovertemplate=f"{label}: {count} productos ({share:.1f} %)<extra></extra>",
+        ))
+    figure.update_layout(
+        barmode="stack",
+        showlegend=True,
+        legend={
+            "orientation": "h",
+            "traceorder": "normal",
+            "x": 0,
+            "y": -0.3,
+            "xanchor": "left",
+            "yanchor": "top",
+        },
+        margin={"l": 8, "r": 8, "t": 12, "b": 54},
+        height=145,
+        uniformtext={"minsize": 10, "mode": "hide"},
+    )
+    figure.update_xaxes(range=[0, 100], visible=False, fixedrange=True)
+    figure.update_yaxes(visible=False, fixedrange=True)
+    return figure
+
+
+def competitive_position_figure(summary: pd.DataFrame):
+    """100% stacked current-price position, denominated only by valid comparisons."""
+    import plotly.graph_objects as go
+
+    counts = competitive_position_counts(summary)
+    compared = int(counts["count"].sum())
+    figure = go.Figure()
+    colours = (BRAND_GREEN, "#0072B2", "#C2410C")
+    for row, colour in zip(counts.itertuples(), colours):
+        figure.add_trace(go.Bar(
+            name=f"{row.position} · {row.count} ({row.share_pct:.1f} %)".replace(".", ","),
+            x=[row.share_pct if compared else 0.0],
+            y=["Productos comparables"],
+            orientation="h",
+            marker={"color": colour},
+            text=[f"{row.count} ({row.share_pct:.1f} %)".replace(".", ",")],
+            textposition="inside",
+            insidetextanchor="middle",
+            insidetextfont={"color": "#FFFFFF"},
+            hovertemplate=f"{row.position}: {row.count} productos ({row.share_pct:.1f} %)<extra></extra>",
+        ))
+    figure.update_layout(
+        barmode="stack",
+        showlegend=True,
+        legend={
+            "orientation": "h",
+            "traceorder": "normal",
+            "x": 0,
+            "y": -0.3,
+            "xanchor": "left",
+            "yanchor": "top",
+        },
+        margin={"l": 8, "r": 8, "t": 12, "b": 54},
+        height=145,
+        uniformtext={"minsize": 10, "mode": "hide"},
+    )
+    figure.update_xaxes(range=[0, 100], visible=False, fixedrange=True)
+    figure.update_yaxes(visible=False, fixedrange=True)
     return figure
