@@ -57,6 +57,12 @@ _ADDED_COLUMNS = {
     "search_results": {"ean_published": "TEXT NOT NULL DEFAULT ''", "model_code": "TEXT NOT NULL DEFAULT ''",
                        "color_code": "TEXT NOT NULL DEFAULT ''", "caliber": "TEXT NOT NULL DEFAULT ''",
                        "match_basis": "TEXT NOT NULL DEFAULT ''"},
+    # Locator phase 3: listing kinds, controlled link following, adapters, change detection, retired pages.
+    "discovery_sources": {"kind": "TEXT NOT NULL DEFAULT 'brand'", "follow_pattern": "TEXT NOT NULL DEFAULT ''",
+                          "max_depth": "INTEGER NOT NULL DEFAULT 0", "adapter": "TEXT NOT NULL DEFAULT 'generic'"},
+    "discovery_pages": {"content_hash": "TEXT NOT NULL DEFAULT ''", "changed_at": "TEXT",
+                        "unchanged_runs": "INTEGER NOT NULL DEFAULT 0", "children": "TEXT NOT NULL DEFAULT ''"},
+    "discovery_index": {"gone_at": "TEXT"},
 }
 AVAILABILITY_STATES = {"available", "unavailable", "unknown"}
 DEFAULT_DB_PATH = Path(__file__).parent / "masterdata_data" / "price_comparator.sqlite3"
@@ -678,6 +684,30 @@ class PriceComparatorStore:
                         check_state TEXT NOT NULL DEFAULT '',
                         facts TEXT NOT NULL DEFAULT '',
                         PRIMARY KEY (competitor_id, url)
+                    );
+                    -- Periodic location (phase 3): per competitor, disabled by default.
+                    CREATE TABLE IF NOT EXISTS locate_schedule (
+                        competitor_id TEXT PRIMARY KEY REFERENCES competitors(id),
+                        enabled INTEGER NOT NULL DEFAULT 0,
+                        interval_hours REAL NOT NULL DEFAULT 24,
+                        max_jobs INTEGER NOT NULL DEFAULT 200,
+                        deadline_minutes REAL NOT NULL DEFAULT 15,
+                        next_run_at TEXT,
+                        last_run_at TEXT,
+                        last_summary TEXT NOT NULL DEFAULT '',
+                        updated_by TEXT NOT NULL DEFAULT '',
+                        updated_at TEXT
+                    );
+                    CREATE TABLE IF NOT EXISTS locate_runs (
+                        id INTEGER PRIMARY KEY,
+                        competitor_id TEXT NOT NULL REFERENCES competitors(id),
+                        trigger TEXT NOT NULL,
+                        started_at TEXT NOT NULL,
+                        finished_at TEXT,
+                        status TEXT NOT NULL,
+                        processed INTEGER NOT NULL DEFAULT 0,
+                        requests INTEGER NOT NULL DEFAULT 0,
+                        summary TEXT NOT NULL DEFAULT ''
                     );
                 """)
                 for table, columns in _ADDED_COLUMNS.items():

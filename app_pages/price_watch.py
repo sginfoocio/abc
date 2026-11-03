@@ -10,7 +10,8 @@ import streamlit as st
 from price_access import (DEFAULT_BUDGETS, INCIDENT_KINDS, METHOD_STATES, METHODS, AccessControl,
                           external_search_enabled)
 from price_comparator import PriceComparatorStore
-from price_locator import JOB_STATES, SOURCE_METHODS, PriceLocator
+from price_locator import (ADAPTERS, JOB_STATES, MAX_DEPTH, SCHEDULE_ENV, SOURCE_KINDS, PriceLocator,
+                           schedule_enabled)
 from price_watch import DEFAULT_GROUP, SOURCES, PriceWatch, WatchReport, eans_from_frame, parse_eans
 
 SECTIONS = ["Productos vigilados", "Añadir productos", "Reglas de vigilancia", "Grupos y frecuencia",
@@ -344,21 +345,31 @@ def _render_locator(store: PriceComparatorStore, names: dict[str, str]) -> None:
             "competitor": "Competidor", "indexed": "Enlaces indexados", "checked": "Fichas comprobadas",
             "pages": "Páginas de listado", "last_refresh": "Última actualización", "sources": "Fuentes activas"}),
             hide_index=True, width="stretch")
-    with st.expander("Fuentes de descubrimiento (catálogo / feed)"):
-        st.caption("Plantillas de páginas de marca o catálogo del propio competidor. Solo se usan si el método "
-                   "correspondiente está autorizado y robots.txt lo permite. Variable admitida: {brand}.")
+    with st.expander("Fuentes de descubrimiento (marca, colección, categoría, feed)"):
+        st.caption("Listados del propio competidor. Solo se usan si el método correspondiente (catálogo o feed) "
+                   "está autorizado y robots.txt lo permite. Variable admitida: {brand}. Se leen de lo más "
+                   "concreto a lo más amplio (marca → colección → categoría) y solo se pasa al nivel siguiente si "
+                   "el anterior no dio candidatos. Los sublistados se siguen únicamente si cumplen el patrón y "
+                   "nombran una marca vigilada, hasta la profundidad indicada.")
         sources = locator.sources()
         if not sources.empty:
-            st.dataframe(sources[["competitor", "method", "url_template", "refresh_hours", "max_pages", "active",
-                                  "note", "created_by"]], hide_index=True, width="stretch")
+            st.dataframe(sources.assign(kind=sources["kind"].map(lambda k: SOURCE_KINDS.get(k, k)))[
+                ["competitor", "kind", "url_template", "follow_pattern", "max_depth", "adapter", "refresh_hours",
+                 "max_pages", "active", "note", "created_by"]], hide_index=True, width="stretch")
         with st.form("locate_source_form"):
             s1, s2 = st.columns([1, 1])
             cid = s1.selectbox("Competidor", sorted(names, key=names.get), format_func=names.get,
                                key="locate_source_competitor")
-            method = s2.selectbox("Tipo", SOURCE_METHODS, key="locate_source_method",
-                                  format_func={"catalog": "Catálogo / marca", "feed": "Feed del competidor"}.get)
+            kind = s2.selectbox("Clase de listado", list(SOURCE_KINDS), key="locate_source_kind",
+                                format_func=SOURCE_KINDS.get)
             template = st.text_input("URL", placeholder="https://tienda.example/marca/{brand}",
                                      key="locate_source_url")
+            f1, f2, f3 = st.columns([2, 1, 1])
+            follow = f1.text_input("Sublistados a seguir (patrón de ruta)", placeholder=r"^/gafas-de-sol/[a-z-]+$",
+                                   key="locate_source_follow")
+            depth = f2.number_input("Profundidad", 0, MAX_DEPTH, 0, key="locate_source_depth")
+            adapter = f3.selectbox("Adaptador", list(ADAPTERS), key="locate_source_adapter",
+                                   format_func=lambda name: ADAPTERS[name].label)
             s3, s4, s5 = st.columns(3)
             refresh = s3.number_input("Caducidad (h)", 1, 24 * 90, 168, key="locate_source_refresh")
             pages = s4.number_input("Máx. páginas", 1, 200, 10, key="locate_source_pages")
@@ -366,17 +377,53 @@ def _render_locator(store: PriceComparatorStore, names: dict[str, str]) -> None:
             note = st.text_input("Nota", key="locate_source_note")
             if st.form_submit_button("Guardar fuente"):
                 try:
-                    locator.save_source(cid, method, template, actor=_actor(), note=note,
-                                        refresh_hours=float(refresh), max_pages=int(pages), active=active)
+                    locator.save_source(cid, "feed" if kind == "feed" else "catalog", template, actor=_actor(),
+                                        note=note, refresh_hours=float(refresh), max_pages=int(pages), active=active,
+                                        kind=kind, follow_pattern=follow, max_depth=int(depth), adapter=adapter)
                     st.success("Fuente guardada.")
                 except ValueError as exc:
                     st.error(str(exc))
+    _render_locate_schedule(locator, names)
+
+
+def _render_locate_schedule(locator: PriceLocator, names: dict[str, str]) -> None:
+    with st.expander("Planificación periódica de la localización"):
+        if schedule_enabled():
+            st.info("Planificación activa en este servidor: se ejecutan los competidores habilitados.")
+        else:
+            st.warning(f"Planificación desactivada en este servidor ({SCHEDULE_ENV} no activo): aunque se "
+                       "habilite un competidor, no se hará ninguna consulta periódica.")
+        plan = locator.schedule()
+        st.dataframe(plan.drop(columns=["competitor_id"]).rename(columns={
+            "competitor": "Competidor", "enabled": "Activa", "interval_hours": "Cada (h)", "max_jobs": "Máx. productos",
+            "deadline_minutes": "Plazo (min)", "next_run_at": "Próxima", "last_run_at": "Última",
+            "last_summary": "Resultado"}), hide_index=True, width="stretch")
+        with st.form("locate_schedule_form"):
+            p1, p2, p3, p4, p5 = st.columns([2, 1, 1, 1, 1])
+            cid = p1.selectbox("Competidor", sorted(names, key=names.get), format_func=names.get,
+                               key="locate_schedule_competitor")
+            interval = p2.number_input("Cada (h)", 1, 24 * 30, 24, key="locate_schedule_interval")
+            jobs = p3.number_input("Máx. productos", 1, 5000, 200, key="locate_schedule_jobs")
+            deadline = p4.number_input("Plazo (min)", 1, 240, 15, key="locate_schedule_deadline")
+            enabled = p5.checkbox("Activa", value=False, key="locate_schedule_enabled")
+            if st.form_submit_button("Guardar planificación"):
+                try:
+                    locator.configure_schedule(cid, enabled=enabled, interval_hours=float(interval),
+                                               max_jobs=int(jobs), deadline_minutes=float(deadline), actor=_actor())
+                    st.success("Planificación guardada y auditada.")
+                except ValueError as exc:
+                    st.error(str(exc))
+        runs = locator.runs(20)
+        if not runs.empty:
+            st.dataframe(runs[["competitor", "trigger", "status", "started_at", "finished_at", "processed",
+                               "requests", "summary"]], hide_index=True, width="stretch")
 
 
 def render_watch_admin(store: PriceComparatorStore) -> None:
     st.subheader("Vigilancia automática")
     st.caption("Motor escalable propio (fase 1: qué se vigila, permisos y límites; fase 2: localización automática "
-               "de fichas). El piloto de 20 EAN sigue funcionando por separado y no usa esta configuración.")
+                   "de fichas; fase 3: catálogos, colecciones y planificación). "
+               "El piloto de 20 EAN sigue funcionando por separado y no usa esta configuración.")
     watch, access = PriceWatch(store), AccessControl(store)
     watch.ensure_defaults()
     access.ensure_defaults()

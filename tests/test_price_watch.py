@@ -187,3 +187,43 @@ def test_locator_ui_counts_queue_and_runs_without_requests_when_nothing_is_autho
     assert {metric.label: metric.value for metric in app.metric}["Sin acceso / bloqueadas"] == str(total)
     from price_locator import PriceLocator
     assert set(PriceLocator(store).jobs()["state"]) == {"unavailable"}
+
+
+def test_locator_ui_sources_and_schedule_without_requests(tmp_path, monkeypatch):
+    import requests
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("La pantalla no debe hacer peticiones HTTP")
+
+    monkeypatch.setattr(requests, "get", forbidden)
+    monkeypatch.delenv("PRICE_LOCATOR_SCHEDULE_ENABLED", raising=False)
+    store = _store(tmp_path)
+    store.seed_defaults()
+    monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
+    app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
+                              "render_price_comparator_page()").run(timeout=30)
+    app.selectbox(key="price_admin_section").set_value("Vigilancia automática").run(timeout=30)
+    app.selectbox(key="price_watch_section").set_value("Localización automática").run(timeout=30)
+    assert not app.exception
+    assert any("PRICE_LOCATOR_SCHEDULE_ENABLED" in str(item.value) for item in app.warning)
+    domanci = store.competitors().set_index("name").loc["Domanci", "id"]
+    app.selectbox(key="locate_source_competitor").set_value(domanci)
+    app.selectbox(key="locate_source_kind").set_value("category")
+    app.text_input(key="locate_source_url").set_value("https://domanci.com/es/gafas-de-sol")
+    app.text_input(key="locate_source_follow").set_value(r"^/es/marca/[a-z-]+$")
+    app.number_input(key="locate_source_depth").set_value(1)
+    app.selectbox(key="locate_source_adapter").set_value("itemlist")
+    app.button[[b.label for b in app.button].index("Guardar fuente")].click().run(timeout=30)
+    assert not app.exception and any("Fuente guardada" in str(item.value) for item in app.success)
+    app.selectbox(key="locate_schedule_competitor").set_value(domanci)
+    app.number_input(key="locate_schedule_interval").set_value(48)
+    app.checkbox(key="locate_schedule_enabled").check()
+    app.button[[b.label for b in app.button].index("Guardar planificación")].click().run(timeout=30)
+    assert not app.exception and any("Planificación guardada" in str(item.value) for item in app.success)
+    from price_locator import PriceLocator
+    locator = PriceLocator(store)
+    source = locator.sources().set_index("url_template").loc["https://domanci.com/es/gafas-de-sol"]
+    assert (source["kind"], source["max_depth"], source["adapter"]) == ("category", 1, "itemlist")
+    plan = locator.schedule().set_index("competitor_id").loc[domanci]
+    assert (plan["enabled"], plan["interval_hours"]) == (1, 48)
+    assert locator.tick()["runs"] == []  # server switch off: nothing runs
