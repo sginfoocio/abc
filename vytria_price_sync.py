@@ -1,7 +1,8 @@
 """Read-only synchronization of the Vytria España selling price from Odoo.
 
-Source of truth: ``prestashop_pricelist_item_pricelist`` for pricelist 59 (TARIFA_ESPAÑA),
-which already holds the final price with VAT included. The price is stored as received: it is
+Operational source: ``prestashop_pricelist_item_pricelist`` for pricelist 59 (TARIFA_ESPAÑA),
+which holds the integration price with VAT included; a storefront/checkout cross-check is pending.
+The price is stored as received: it is
 never recalculated, discounted again or increased with VAT. The pricelist rules are only used
 to cross-check the value and any discrepancy is recorded without altering the source price.
 
@@ -25,7 +26,7 @@ from sqlalchemy import bindparam, create_engine, text
 from sqlalchemy.engine import URL, Engine
 from sqlalchemy.exc import InterfaceError, OperationalError
 
-from price_comparator import PriceComparatorStore, normalize_gtin
+from price_comparator import PriceComparatorStore, normalize_gtin, vytria_price_states
 
 
 VYTRIA_PRICELIST_ID = 59
@@ -33,7 +34,7 @@ MARKET = "ES"
 SOURCE = "Odoo tarifa 59"
 EXPECTED_CATALOG_NAME = "TARIFA_ESPANA"
 PRICE_TOLERANCE = Decimal("0.01")
-SCHEDULE_INTERVAL = timedelta(hours=23)
+SCHEDULE_INTERVAL = timedelta(hours=24)
 FETCH_ATTEMPTS = 3
 CHUNK_SIZE = 500
 
@@ -130,10 +131,6 @@ class SyncResult:
 
 class PriceReader(Protocol):
     def fetch(self, eans: list[str]) -> list[OdooProduct]: ...
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def _dec(value: Any) -> Decimal | None:
@@ -364,12 +361,17 @@ def _fingerprint(*values: Any) -> str:
 
 class VytriaPriceSync:
     def __init__(self, store: PriceComparatorStore, reader: PriceReader | None = None, *,
-                 sleep: Callable[[float], None] = time.sleep, retry_delay: float = 2.0) -> None:
+                 sleep: Callable[[float], None] = time.sleep, retry_delay: float = 2.0,
+                 clock: Callable[[], datetime] | None = None) -> None:
         self.store = store
         self.reader = reader or SqlOdooPriceReader()
         self._sleep = sleep
         self._retry_delay = retry_delay
         self._lock_path = str(store.database_path) + ".vytria-sync.lock"
+        self._now = clock or (lambda: datetime.now(timezone.utc))
+
+    def _at(self) -> str:
+        return self._now().astimezone(timezone.utc).isoformat(timespec="microseconds")
 
     # settings ---------------------------------------------------------------------------------
     def get_setting(self, key: str, default: str = "") -> str:
@@ -394,7 +396,7 @@ class VytriaPriceSync:
         """Daily entry point: does nothing while disabled or when a recent sync succeeded."""
         if not self.auto_enabled:
             return None
-        now = now or datetime.now(timezone.utc)
+        now = now or self._now()
         last = self.last_successful_run()
         if last and now - datetime.fromisoformat(last["finished_at"]) < self.interval:
             return None
@@ -402,7 +404,7 @@ class VytriaPriceSync:
 
     @property
     def interval(self) -> timedelta:
-        """Configurable frequency of the Odoo sync, independent from the competitors' (default 23 h)."""
+        """Configurable frequency of the Odoo sync, independent from the competitors' (default 24 h)."""
         try:
             hours = float(self.get_setting("interval_hours", ""))
         except ValueError:
@@ -414,14 +416,14 @@ class VytriaPriceSync:
             raise ValueError("La frecuencia de Odoo debe estar entre 1 hora y 30 días")
         self.set_setting("interval_hours", str(hours))
 
-    def run(self, trigger: str = "manual") -> SyncResult:
+    def run(self, trigger: str = "manual", *, watched_only: bool = False) -> SyncResult:
         lock = FileLock(self._lock_path, timeout=0)
         try:
             lock.acquire()
         except Timeout as exc:
             raise SyncInProgress("Ya hay una sincronización de precios en curso") from exc
         try:
-            return self._run_locked(trigger)
+            return self._run_locked(trigger, watched_only=watched_only)
         finally:
             lock.release()
 
@@ -434,15 +436,44 @@ class VytriaPriceSync:
         lock.release()
         return False
 
-    def _run_locked(self, trigger: str) -> SyncResult:
+    def run_watched_scheduled(self) -> SyncResult | None:
+        """Sync watched EAN before monitoring; persisted freshness and a 30-minute retry cooldown."""
+        if not self.auto_enabled:
+            return None
+        try:
+            with FileLock(self._lock_path, timeout=0):
+                with self.store._connect() as con:
+                    rows = con.execute("""SELECT w.ean,v.synced_at,v.stale_since,v.validation_status FROM watch_products w
+                        LEFT JOIN vytria_prices v ON v.ean=w.ean WHERE w.active=1""").fetchall()
+                    last = con.execute("""SELECT * FROM vytria_sync_runs WHERE trigger='watch:scheduled'
+                        ORDER BY id DESC LIMIT 1""").fetchone()
+                if not rows:
+                    return None
+                now = self._now()
+                if last and last["status"] in ("error", "partial") and (
+                        now - datetime.fromisoformat(last["finished_at"]) < timedelta(minutes=30)):
+                    return None
+                # Bound validity to one day even if a legacy sync has a longer configured interval.
+                interval = min(self.interval, timedelta(hours=24))
+                if (not last or last["status"] != "running") and all(
+                       r["synced_at"] and not r["stale_since"] and r["validation_status"] == VALIDATED and
+                       timedelta(0) <= now - datetime.fromisoformat(r["synced_at"]) < interval for r in rows):
+                    return None
+                return self._run_locked("watch:scheduled", watched_only=True)
+        except Timeout as exc:
+            raise SyncInProgress("Ya hay una sincronización de precios en curso") from exc
+
+    def _run_locked(self, trigger: str, *, watched_only: bool = False) -> SyncResult:
         with self.store._connect() as connection, connection:
             # Holding the lock means any run still marked as running died without closing.
             connection.execute("""UPDATE vytria_sync_runs SET status='error',finished_at=?,
-                error='Interrumpida antes de terminar' WHERE status='running'""", (_now(),))
+                error='Interrumpida antes de terminar' WHERE status='running'""", (self._at(),))
             run_id = connection.execute(
                 "INSERT INTO vytria_sync_runs(trigger,started_at,status) VALUES(?,?,'running')",
-                (trigger, _now())).lastrowid
-            eans = [row["ean"] for row in connection.execute("SELECT ean FROM products ORDER BY ean")]
+                (trigger, self._at())).lastrowid
+            eans = [row["ean"] for row in connection.execute(
+                "SELECT ean FROM watch_products WHERE active=1 ORDER BY ean" if watched_only else
+                "SELECT ean FROM products ORDER BY ean")]
         result = SyncResult(run_id, "running", monitored=len(eans))
         try:
             products = self._fetch_with_retries(eans) if eans else []
@@ -452,6 +483,13 @@ class VytriaPriceSync:
             result.status, result.error = "error", str(exc)
         except Exception as exc:  # noqa: BLE001 - the run must always be closed, details stay out of the log
             result.status, result.error = "error", f"Error interno: {type(exc).__name__}"
+        if result.status == "error" and eans:
+            with self.store._connect() as connection, connection:
+                # Do not rejuvenate or replace the last valid value after a failed read.
+                connection.executemany("""UPDATE vytria_prices SET stale_reason='sync_error',
+                    stale_since=COALESCE(stale_since,?) WHERE ean=? AND ean IN (
+                        SELECT ean FROM watch_products WHERE active=1)""",
+                                       [(self._at(), ean) for ean in eans])
         self._finish(result)
         return result
 
@@ -473,7 +511,7 @@ class VytriaPriceSync:
         for product in products:
             by_ean.setdefault(product.ean, []).append(product)
         issues: list[tuple[str, str, str]] = []
-        now = _now()
+        now = self._at()
         with self.store._connect() as connection, connection:
             for ean in eans:
                 chosen, issue = self._choose(by_ean.get(ean, []))
@@ -485,6 +523,17 @@ class VytriaPriceSync:
                     continue
                 product, row = chosen
                 validation = validate_product(product, row)
+                watched = connection.execute(
+                    "SELECT 1 FROM watch_products WHERE ean=? AND active=1", (ean,)).fetchone()
+                current = connection.execute(
+                    "SELECT validation_status FROM vytria_prices WHERE ean=?", (ean,)).fetchone()
+                if watched and current and current["validation_status"] == VALIDATED and not validation.comparable:
+                    issues.append((ean, validation.status, f"Precio recibido: {row.price}; {validation.detail}"))
+                    connection.execute("""UPDATE vytria_prices SET stale_reason=?,
+                        stale_since=COALESCE(stale_since,?) WHERE ean=?""", (validation.status, now, ean))
+                    continue
+                if not validation.comparable:
+                    issues.append((ean, validation.status, validation.detail))
                 included, rate, _ = _tax_treatment(product.taxes)
                 self._upsert(connection, result, ean, product, row, validation, included, rate, now)
             for ean, code, detail in issues:
@@ -503,7 +552,7 @@ class VytriaPriceSync:
             return None, ("ambiguous_product", "productos " + ", ".join(str(p.product_id) for p in pool))
         product = pool[0]
         rows = [r for r in product.prices if r.price_active and r.catalog_active
-                and r.price is not None and r.price > 0]
+                and r.price is not None and r.price.is_finite() and r.price > 0]
         if not rows:
             return None, ("no_price", f"producto {product.product_id}")
         foreign = [r for r in rows if _ascii_upper(r.catalog_name) != EXPECTED_CATALOG_NAME]
@@ -516,7 +565,7 @@ class VytriaPriceSync:
     def _upsert(self, connection, result, ean, product, row, validation, included, rate, now) -> None:
         fingerprint = _fingerprint(str(row.price), row.currency, included, str(rate), validation.status,
                                    validation.detail, row.price_id, product.product_id)
-        current = connection.execute("SELECT fingerprint, first_seen_at, changed_at FROM vytria_prices WHERE ean=?",
+        current = connection.execute("SELECT * FROM vytria_prices WHERE ean=?",
                                      (ean,)).fetchone()
         values = (MARKET, float(row.price), row.currency, int(bool(included)),
                   float(rate) if rate is not None else None, SOURCE, VYTRIA_PRICELIST_ID,
@@ -524,8 +573,8 @@ class VytriaPriceSync:
                   float(validation.expected) if validation.expected is not None else None,
                   validation.status, validation.detail, int(validation.comparable), fingerprint)
         if current and current["fingerprint"] == fingerprint:
-            connection.execute("""UPDATE vytria_prices SET synced_at=?,stale_since=NULL,stale_reason=''
-                                  WHERE ean=?""", (now, ean))
+            connection.execute("""UPDATE vytria_prices SET synced_at=?,source_updated_at=?,
+                stale_since=NULL,stale_reason='' WHERE ean=?""", (now, row.write_date, ean))
             result.unchanged += 1
             return
         connection.execute("""
@@ -545,13 +594,22 @@ class VytriaPriceSync:
                 changed_at=excluded.changed_at,synced_at=excluded.synced_at,
                 stale_since=NULL,stale_reason=''
         """, (*values, ean, current["first_seen_at"] if current else now, now, now))
-        connection.execute("""
+        history_id = connection.execute("""
             INSERT INTO vytria_price_history(ean,market,price,currency,price_includes_tax,vat_rate,source,
                 pricelist_id,source_product_id,source_price_id,validation_status,recorded_at,sync_run_id)
             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (ean, MARKET, float(row.price), row.currency, int(bool(included)),
               float(rate) if rate is not None else None, SOURCE, VYTRIA_PRICELIST_ID,
-              product.product_id, row.price_id, validation.status, now, result.run_id))
+              product.product_id, row.price_id, validation.status, now, result.run_id)).lastrowid
+        watched = connection.execute("SELECT 1 FROM watch_products WHERE ean=? AND active=1", (ean,)).fetchone()
+        if watched and current and current["validation_status"] == VALIDATED and validation.comparable:
+            before, after = Decimal(str(current["price"])), row.price
+            threshold = Decimal(self.store.get_setting("alert_threshold_pct"))
+            if before > 0 and abs(after - before) / before * 100 >= threshold:
+                connection.execute("""INSERT OR IGNORE INTO vytria_price_alerts(
+                    history_id,ean,kind,at,old_value,new_value,detail) VALUES(?,?,?,?,?,?,?)""",
+                                   (history_id, ean, "price_up" if after > before else "price_down", now,
+                                    str(before), str(after), SOURCE))
         if current:
             result.changed += 1
         else:
@@ -561,7 +619,7 @@ class VytriaPriceSync:
         with self.store._connect() as connection, connection:
             connection.execute("""UPDATE vytria_sync_runs SET finished_at=?,status=?,monitored=?,inserted=?,
                 changed=?,unchanged=?,issues=?,error=? WHERE id=?""",
-                               (_now(), result.status, result.monitored, result.inserted, result.changed,
+                               (self._at(), result.status, result.monitored, result.inserted, result.changed,
                                 result.unchanged, result.issues, result.error, result.run_id))
 
     # queries ----------------------------------------------------------------------------------
@@ -593,13 +651,8 @@ class VytriaPriceSync:
                        v.source_updated_at,v.synced_at,v.stale_since,v.stale_reason
                 FROM products p LEFT JOIN vytria_prices v ON v.ean=p.ean ORDER BY p.brand,p.commercial_name
             """, connection)
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=self.store.price_expiry_days())).isoformat()
-        stale = frame["stale_since"].notna()
-        expired = frame["synced_at"].notna() & (frame["synced_at"] < cutoff)
-        frame["current_status"] = frame["validation_status"].where(~expired, "expired").where(~stale, "stale")
-        # Same rule as the comparator dashboard: only fresh, validated prices are commercially usable.
-        frame["usable"] = (frame["validation_status"] == VALIDATED) & (frame["comparable"] == 1) & ~stale & ~expired
-        return frame
+            watched = {r[0] for r in connection.execute("SELECT ean FROM watch_products WHERE active=1")}
+        return vytria_price_states(frame, self.store.price_expiry_days(), watched, now=self._now())
 
     def price_history(self, ean: str):
         import pandas as pd
@@ -614,10 +667,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Sincroniza el PVP Vytria España desde Odoo (solo lectura).")
     parser.add_argument("--scheduled", action="store_true",
                         help="ejecuta sólo si la sincronización diaria está activada y toca")
+    parser.add_argument("--watched", action="store_true", help="solo productos en vigilancia activa")
     args = parser.parse_args(argv)
     sync = VytriaPriceSync(PriceComparatorStore())
     try:
-        result = sync.run_scheduled() if args.scheduled else sync.run(trigger="cli")
+        result = (sync.run_watched_scheduled() if args.scheduled and args.watched else
+                  sync.run_scheduled() if args.scheduled else sync.run(trigger="cli", watched_only=args.watched))
     except SyncInProgress as exc:
         print(exc)
         return 0

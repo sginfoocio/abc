@@ -15,6 +15,7 @@ from price_locator import (ADAPTERS, JOB_STATES, MAX_DEPTH, SCHEDULE_ENV, SOURCE
 from price_monitor import (ALERTS, STATES, SCHEDULE_ENV as MONITOR_ENV, PriceMonitor,
                            schedule_enabled as monitor_enabled)
 from price_watch import DEFAULT_GROUP, SOURCES, PriceWatch, WatchReport, eans_from_frame, parse_eans
+from vytria_price_sync import STATUS_LABELS, SyncInProgress, VytriaPriceSync
 
 SECTIONS = ["Productos vigilados", "Añadir productos", "Reglas de vigilancia", "Grupos y frecuencia",
             "Localización automática", "Precios y monitorización", "Alertas", "Autorizaciones por método",
@@ -459,9 +460,35 @@ def _render_monitor(store: PriceComparatorStore, names: dict[str, str]) -> None:
     import price_analytics as analytics
 
     monitor = PriceMonitor(store)
+    sync = VytriaPriceSync(store)
+    with st.expander("Precio Vytria y ciclo diario"):
+        st.caption("Fuente operativa: Odoo tarifa 59, ES/EUR con IVA. Contraste con el precio publicado en "
+                   "PrestaShop pendiente. Vigencia máxima de los precios Vytria vigilados: 24 h.")
+        daily = st.toggle("Sincronizar Vytria antes de la vigilancia diaria", value=sync.auto_enabled,
+                          key="watch_vytria_daily")
+        if daily != sync.auto_enabled:
+            sync.set_auto_enabled(daily)
+        st.caption("El ciclo requiere también PRICE_MONITOR_SCHEDULE_ENABLED y cada competidor habilitado. "
+                   "La localización conserva su planificación independiente. No se activa ningún servicio aquí.")
+        approved_sync = st.checkbox("Autorizo la lectura supervisada de Odoo para los EAN vigilados",
+                                    key="watch_vytria_approved")
+        if st.button("Sincronizar solo Vytria vigilados", disabled=not approved_sync or sync.is_running(),
+                     key="watch_vytria_sync"):
+            try:
+                with st.spinner("Leyendo tarifa 59 de los productos vigilados…"):
+                    result = sync.run(trigger="watch:manual", watched_only=True)
+                if result.status == "error":
+                    st.error(result.error)
+                else:
+                    st.success(f"Vytria: {result.status} · {result.monitored} EAN · {result.issues} incidencias")
+            except SyncInProgress as exc:
+                st.warning(str(exc))
+        st.caption("Objetivo inicial: 50 EAN frente a Visio Factory, Edel-Optics, Amevista, Óptica Óptima, "
+                   "Domanci y Óptica Bassol. Seleccione los EAN en Productos vigilados y habilite únicamente "
+                   "los métodos y competidores con autorización documentada. No hay un límite de 50.")
     st.caption("Solo fichas verificadas de productos vigilados. No repite búsquedas. Identidad: marca + modelo + "
                "color; calibre no vinculante. Solo se comparan ofertas disponibles con mercado ES, EUR e IVA "
-               "incluido confirmados. Caducidad: dos veces el intervalo del grupo o competidor.")
+               "incluido confirmados. Caducidad: un intervalo del grupo o competidor (24 h por defecto).")
     if not monitor_enabled():
         st.warning(f"Monitorización periódica desactivada ({MONITOR_ENV}). Los lotes supervisados son explícitos.")
     cid = st.selectbox("Competidor de la prueba supervisada", sorted(names, key=names.get), format_func=names.get,
@@ -502,10 +529,15 @@ def _render_monitor(store: PriceComparatorStore, names: dict[str, str]) -> None:
         if query:
             matched = shown[["ean", "brand", "model", "color"]].astype(str).agg(" ".join, axis=1)
             shown = shown[matched.str.contains(query, case=False, regex=False)]
+        shown = shown.assign(own_price_status=shown["own_price_status"].map(
+            lambda value: STATUS_LABELS.get(value, value) if value else "Sin precio sincronizado"))
         st.dataframe(shown[["ean", "brand", "model", "color", "competitor", "own_price_eur", "price", "best_price",
                             "difference_eur", "difference_pct", "availability", "currency", "includes_tax",
+                            "own_price_source", "own_price_checked_at", "own_price_status",
                             "last_ok_at", "status", "url"]].rename(columns={
             "ean": "EAN interno", "brand": "Marca", "model": "Modelo", "color": "Color",
+            "own_price_source": "Origen Vytria", "own_price_checked_at": "Última lectura Vytria",
+            "own_price_status": "Estado Vytria",
             "competitor": "Competidor", "own_price_eur": "Vytria €", "price": "Precio observado",
             "best_price": "Mejor competidor €", "difference_eur": "Vytria − competidor €",
             "difference_pct": "Diferencia % sobre Vytria", "availability": "Stock", "currency": "Moneda",

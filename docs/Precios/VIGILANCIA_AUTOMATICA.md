@@ -272,7 +272,7 @@ Se reutilizan los componentes existentes; no se crea otro extractor, histórico 
 6. **Fichas desaparecidas:**
    - Un 404 o 410 llama a `PriceLocator.retire` y prepara la relocalización sin realizarla desde el monitor.
    - Los errores temporales conservan el trabajo y se reintentan tras 30 minutos, hasta cinco intentos. Los límites y bloqueos no consumen esos intentos.
-7. **Caducidad de precios:** se mostrará como caducado un precio con `last_ok_at` anterior a 2× el intervalo del producto.
+7. **Caducidad de precios:** se mostrará como caducado un precio con `last_ok_at` anterior al intervalo del producto (24 h por defecto). El ciclo diario elimina la tolerancia anterior de 2×: un intento fallido no prolonga la vigencia.
 8. **Alertas:**
    - `recent_changes` de `price_analytics.py` ya calcula las variaciones respecto a `alert_threshold_pct` (5 % configurable).
    - `price_alerts` persiste subidas/bajadas (umbral inicial 5 %, configurable), paso a más barato que Vytria, cambios de disponibilidad, fichas desaparecidas y precios caducados.
@@ -288,6 +288,78 @@ Se reutilizan los componentes existentes; no se crea otro extractor, histórico 
 - Existe una ventana inevitable entre recibir HTTP y guardar la muestra: si el proceso muere justo ahí, esa petición puede repetirse. Su presupuesto ya queda consumido. No se promete entrega exactamente una vez por HTTP.
 - Las alertas se crean al ejecutar un lote, preparar la cola o abrir «Alertas». Sin proceso periódico activo no hay detección de caducidad en segundo plano.
 - Los trabajos terminados y las transiciones quedan en `monitor_jobs`/`monitor_events`; no se borra el histórico.
+
+### Ciclo diario inicial: 50 EAN y seis competidores
+
+Fuente propia: **Odoo tarifa 59**, aprobada como fuente operativa; contraste con
+PrestaShop pendiente. Véase [fuente, validación y vigencia](VYTRIA_PRICE_SYNC.md#operativa-diaria-de-productos-vigilados).
+No se añaden lectores de tiendas ni se duplican integraciones.
+
+Preparación supervisada, **sin activación desde esta PR**:
+
+1. Seleccionar/importar los 50 EAN comerciales reales en Productos vigilados.
+   No se eligen 50 productos arbitrarios ni se limita el catálogo a esa cifra.
+   La lista y sus tres modalidades ya existen; el alta prepara automáticamente
+   los pares pendientes del localizador. Los pares verificados se reutilizan.
+2. Los seis competidores ya figuran en la configuración base: **Visio Factory,
+   Edel-Optics, Amevista, Óptica Óptima, Domanci y Óptica Bassol**. No se cambia
+   el piloto de 20 EAN/seis competidores ni se sustituye ConGafasDeSol en él.
+3. Configurar un grupo de 24 h (o dejar el grupo General, que toma la frecuencia
+   del competidor) y, para cada competidor aprobado, 24 h y un lote de al menos
+   50 en la planificación de monitorización existente. No habilitar otros
+   competidores por el mero hecho de estar registrados.
+4. Revisar autorizaciones independientes, fuentes de localización, presupuesto
+   diario, límite por minuto y pausa en sus pantallas actuales. Presupuestar al
+   menos las 50 fichas más robots y la localización necesaria; **no** se elevan
+   automáticamente los límites ni se conceden permisos. Con un presupuesto
+   inferior, la cola conserva lo pendiente y reanuda cuando está permitido.
+5. Sincronizar primero Vytria de forma manual supervisada y revisar incidencias.
+   Autorizar después el ciclo: `auto_enabled` de Vytria, competidores aprobados
+   y `PRICE_MONITOR_SCHEDULE_ENABLED`. El comando existente
+   `python price_monitor.py --db <SQLite-persistente> tick` sincroniza primero
+   Vytria y monitoriza después. `loop --every 300` invoca esa misma pasada,
+   pero las lecturas solo vencen cada 24 h (salvo frecuencia configurada/reintento).
+   No se instala un servicio, cron o workflow nuevo, ni se cambian permisos.
+6. La localización sigue en su cola y planificador independientes. Su
+   interruptor `PRICE_LOCATOR_SCHEDULE_ENABLED`, sus planes y métodos requieren
+   aprobación por separado. El ciclo de precios no lanza búsquedas ni vuelve a
+   descubrir una ficha verificada; una retirada prepara relocalización.
+7. Mantener el correo desactivado: solo hay resumen descargable. La pantalla
+   muestra origen/fecha/estado de Vytria, los de las fichas observadas,
+   diferencias exclusivamente con precios vigentes, históricos y alertas.
+
+La vigencia diaria también se limita **al leer** trabajos anteriores que aún
+guarden una fecha de caducidad de dos intervalos. No se reescriben sus muestras
+ni se fuerza una petición para aplicar el límite. Por tanto, tras actualizar,
+pueden aparecer precios antes considerados vigentes como caducados, hasta su
+siguiente lectura autorizada. Esto no borra el precio ni su histórico.
+
+#### Pendientes por competidor (no equivalen a permisos actuales de producción)
+
+No se ha leído ni alterado la configuración productiva en esta tarea.
+Los antecedentes del repositorio no acreditan permisos vigentes:
+
+| Competidor | Preparación/limitación pendiente |
+|---|---|
+| Visio Factory | Reutilizar fichas verificadas e histórico; confirmar permiso de monitorización diaria y fuente autorizada para nuevos EAN. Búsqueda interna restringida. |
+| Edel-Optics | Confirmar métodos autorizados y estado de bloqueos; antecedentes de 403. No reintentar ni eludir una suspensión. |
+| Amevista | Confirmar autorización de fichas y de cada fuente de localización; no deducirla de la accesibilidad pública. |
+| Óptica Óptima | Confirmar fichas y método de catálogo/feed/sitemap permitido; respetar restricciones del buscador. |
+| Domanci | `/es/busqueda` sigue prohibido. Catálogo de marca preparado no implica autorización: sin permiso documentado de catálogo y ficha, mantener restringido. No se presupone sitemap. |
+| Óptica Bassol | Ya está registrada; revisar métodos/fuentes autorizados, mercado/IVA y antecedentes de 429. No copiar los permisos de otra tienda ni los del piloto. |
+
+#### Validación simulada del ciclo diario
+
+`tests/test_price_daily.py` utiliza los seis nombres sobre dominios `.example`,
+una SQLite de Odoo simulada y la SQLite del comparador: no accede a tiendas ni a
+Odoo real. Cubre 50 EAN × 6, alta sin URLs, localización/identidad por modelo y
+color con distinto calibre, orden Vytria→competencia, segunda pasada sin HTTP,
+caducidad diaria, cambios e históricos, recuperación de recibos, recuperación de
+sincronización interrumpida, deduplicación, pausa de reintentos, valores
+vacíos/no finitos/inconsistentes, presupuesto, 403/429/CAPTCHA, retirada, permiso
+denegado y migración sobre copia. Se mantiene la regresión existente de 500 EAN
+y el piloto. La simulación autoriza explícitamente sus tiendas ficticias:
+**no autoriza consultas reales a los seis competidores**.
 
 ### Lectura de resultados y comprobación de observaciones sin repetir el lote
 

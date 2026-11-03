@@ -81,7 +81,30 @@ _MONITOR_OFFER_GUARD = """AND (NOT EXISTS(
         ON u.competitor_id=m.competitor_id AND u.ean=m.ean AND u.url=m.url AND u.status='verified'
         WHERE m.ean=o.ean AND m.competitor_id=o.competitor_id AND m.last_offer_id=o.id AND m.eligible=1
           AND m.state NOT IN ('gone','review','blocked','unavailable','inactive')
-          AND julianday(m.valid_until)>=julianday('now')))"""
+          AND julianday(m.valid_until)>=julianday('now')
+          AND julianday(m.last_ok_at) + COALESCE(
+              (SELECT g.interval_hours FROM watch_products w JOIN watch_groups g ON g.name=w.group_name
+               WHERE w.ean=m.ean),
+              (SELECT s.interval_hours FROM competitor_schedule s WHERE s.competitor_id=m.competitor_id),
+              24)/24.0 >= julianday('now')))"""
+
+
+def vytria_price_states(frame: pd.DataFrame, expiry_days: int, watched_eans: set[str], *,
+                        now: datetime | None = None) -> pd.DataFrame:
+    """One freshness rule for the dashboard, monitoring and the sync diagnostics."""
+    result = frame.copy()
+    at = pd.Timestamp(now or datetime.now(timezone.utc))
+    at = at.tz_localize("UTC") if at.tzinfo is None else at.tz_convert("UTC")
+    synced = pd.to_datetime(result["synced_at"], utc=True, errors="coerce", format="mixed")
+    hours = pd.Series(float(expiry_days * 24), index=result.index)
+    hours.loc[result["ean"].isin(watched_eans)] = min(24, expiry_days * 24)
+    valid_until = synced + pd.to_timedelta(hours, unit="h")
+    expired = synced.isna() | (synced > at) | (valid_until <= at)
+    stale = result["stale_since"].notna()
+    result["current_status"] = result["validation_status"].where(~expired, "expired").where(~stale, "stale")
+    result["usable"] = (result["validation_status"] == "validated") & (result["comparable"] == 1) & ~stale & ~expired
+    result["valid_until"] = valid_until
+    return result
 
 
 class PriceComparatorStorageError(RuntimeError):
@@ -319,6 +342,16 @@ class PriceComparatorStore:
                     CREATE TABLE IF NOT EXISTS vytria_sync_settings (
                         key TEXT PRIMARY KEY,
                         value TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS vytria_price_alerts (
+                        id INTEGER PRIMARY KEY,
+                        history_id INTEGER NOT NULL UNIQUE REFERENCES vytria_price_history(id),
+                        ean TEXT NOT NULL REFERENCES products(ean),
+                        kind TEXT NOT NULL,
+                        at TEXT NOT NULL,
+                        old_value TEXT NOT NULL,
+                        new_value TEXT NOT NULL,
+                        detail TEXT NOT NULL DEFAULT ''
                     );
                     CREATE TABLE IF NOT EXISTS comparator_settings (
                         key TEXT PRIMARY KEY,
@@ -1354,10 +1387,12 @@ class PriceComparatorStore:
                 ORDER BY s.captured_at DESC,s.id DESC
             """, connection, params=(cutoff,))
 
-    def dashboard(self, max_age_days: int = 30) -> tuple[pd.DataFrame, dict[str, int]]:
+    def dashboard(self, max_age_days: int = 30, *, now: datetime | None = None) -> tuple[pd.DataFrame, dict[str, int]]:
         if max_age_days < 1:
             raise ValueError("La antigüedad debe ser al menos un día")
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
+        now = now or datetime.now(timezone.utc)
+        now = now.replace(tzinfo=timezone.utc) if now.tzinfo is None else now.astimezone(timezone.utc)
+        cutoff = (now - timedelta(days=max_age_days)).isoformat()
         with self._connect() as connection:
             products = pd.read_sql_query("SELECT * FROM products ORDER BY brand,commercial_name", connection)
             offers = pd.read_sql_query("""
@@ -1381,29 +1416,25 @@ class PriceComparatorStore:
             """, connection, params=(cutoff,))
             competitor_count = connection.execute("SELECT COUNT(*) FROM competitors WHERE active=1").fetchone()[0]
             synced = pd.read_sql_query("SELECT * FROM vytria_prices", connection)
+            watched = {r[0] for r in connection.execute("SELECT ean FROM watch_products WHERE active=1")}
 
         # A synchronized Odoo price supersedes the manual contingency import for its EAN. It takes part
         # in comparisons only when validated, not flagged stale by a later incident and recently synced.
-        synced_cutoff = (datetime.now(timezone.utc) - timedelta(days=self.price_expiry_days())).isoformat()
+        synced = vytria_price_states(synced, self.price_expiry_days(), watched, now=now)
+        # Manual contingency prices of watched products have the same maximum daily validity.
+        own_dates = pd.to_datetime(own["captured_at"], utc=True, errors="coerce", format="mixed")
+        daily_now = pd.Timestamp(now)
+        own = own[~own["ean"].isin(watched) | (
+            own_dates.gt(daily_now - timedelta(hours=24)) & own_dates.le(daily_now))]
         if not synced.empty:
             own = own[~own["ean"].isin(synced["ean"])]
-            confirmed = synced[
-                (synced["validation_status"] == "validated") & (synced["comparable"] == 1)
-                & synced["stale_since"].isna() & (synced["synced_at"] >= synced_cutoff)
-            ]
+            confirmed = synced[synced["usable"]]
             own = pd.concat([own, pd.DataFrame({
                 "ean": confirmed["ean"], "market": confirmed["market"], "price": confirmed["price"],
                 "promotional_price": None, "currency": confirmed["currency"], "fx_to_eur": 1.0,
                 "captured_at": confirmed["synced_at"], "source": confirmed["source"],
             })], ignore_index=True)
         synced_by_ean = {row["ean"]: row for row in synced.to_dict("records")}
-
-        def synced_status(row: dict[str, Any]) -> str:
-            if row["stale_since"] is not None and not pd.isna(row["stale_since"]):
-                return "stale"
-            if row["synced_at"] < synced_cutoff:
-                return "expired"
-            return row["validation_status"]
 
         rows: list[dict[str, Any]] = []
         for product in products.to_dict("records"):
@@ -1458,8 +1489,10 @@ class PriceComparatorStore:
                 "position": position,
                 "market": own_record["market"] if own_record else "",
                 "own_price_source": (own_record["source"] if own_record else
-                                     ("Odoo (sin precio confirmado)" if product["ean"] in synced_by_ean else "")),
-                "own_price_status": (synced_status(synced_by_ean[product["ean"]])
+                                     synced_by_ean.get(product["ean"], {}).get("source", "")),
+                "own_price_checked_at": (own_record["captured_at"] if own_record else
+                                         synced_by_ean.get(product["ean"], {}).get("synced_at")),
+                "own_price_status": (synced_by_ean[product["ean"]]["current_status"]
                                      if product["ean"] in synced_by_ean else ""),
             })
         result = pd.DataFrame(rows)
