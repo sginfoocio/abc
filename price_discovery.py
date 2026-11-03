@@ -8,6 +8,8 @@ from collections.abc import Iterable
 import pandas as pd
 from filelock import Timeout
 
+from price_auto_confirm import (AUTO_ORIGIN, AUTO_RULE, AUTO_SOURCE, MANUAL_ORIGIN, AutoDecision, evaluate,
+                                page_from_evidence)
 from price_comparator import PriceComparatorStore, normalize_gtin
 from price_connectors import ConnectorBlocked, ConnectorError
 from price_pilot import PilotError, PricePilot, _execution, pilot_scope, require_pilot_access, stamp
@@ -206,6 +208,7 @@ class PilotDiscovery:
                 totals[key] = totals.get(key, 0) + item["count"]
             result["results"] = {
                 "Trabajos ejecutados": sum(item["count"] for item in jobs if item["status"] == "done"),
+                "Fichas confirmadas automáticamente": totals.get("confirmed", 0),
                 "Candidatos encontrados": totals.get("candidate_found", 0) + totals.get("pending_validation", 0),
                 "Productos no encontrados": totals.get("not_found", 0),
                 "Errores": totals.get("error", 0),
@@ -276,6 +279,7 @@ class PilotDiscovery:
                                                             ("colors", "color")))
                 candidate_state = "rejected" if outcome.state == "rejected" or contradiction else (
                     "candidate_found" if exact else "pending_validation")
+                config_now = search.config(cid) if candidate_state == "candidate_found" else None
                 with self.store._connect() as connection, connection:
                     connection.execute("""INSERT INTO pilot_url_candidates(
                         competitor_id,ean,url,run_id,state,method,evidence,identity,checked_at)
@@ -283,9 +287,18 @@ class PilotDiscovery:
                                        (cid, ean, outcome.url, run_id, candidate_state, method,
                                         json.dumps(data, ensure_ascii=False),
                                         json.dumps(match.normalized, ensure_ascii=False), stamp()))
-                if candidate_state != "rejected":
-                    best_state = "candidate_found" if exact else (
-                        best_state if best_state == "candidate_found" else "pending_validation")
+                    if config_now is not None:
+                        row = connection.execute("""SELECT * FROM pilot_url_candidates
+                            WHERE run_id=? AND competitor_id=? AND ean=? AND url=?""",
+                                                 (run_id, cid, ean, outcome.url)).fetchone()
+                        decision = self._auto_decision(connection, row, product, config_now)
+                        if row["state"] == "candidate_found" and decision.confirm:
+                            self._confirm_automatically(connection, row, product, config_now, decision,
+                                                        "Confirmación automática durante la localización supervisada")
+                            candidate_state = "confirmed"
+                rank = {"not_found": 0, "pending_validation": 1, "candidate_found": 2, "confirmed": 3}
+                if candidate_state != "rejected" and rank[candidate_state] > rank[best_state]:
+                    best_state = candidate_state
 
             for method in dict.fromkeys(methods):
                 if not method:
@@ -311,7 +324,7 @@ class PilotDiscovery:
                             for outcome in cards:
                                 self._guard(ean, cid, run_id)
                                 save_candidate(outcome, method)
-                            if best_state == "candidate_found":
+                            if best_state in ("candidate_found", "confirmed"):
                                 break
                             continue
                         if source_url:
@@ -341,7 +354,9 @@ class PilotDiscovery:
                         raise PilotError("Autorización del método de localización retirada")
                     outcome = search._visit(product, current, fetcher, url, method, False)
                     save_candidate(outcome, method)
-                if best_state == "candidate_found" or len(seen) >= MAX_CANDIDATES:
+                    if best_state == "confirmed":
+                        break
+                if best_state in ("candidate_found", "confirmed") or len(seen) >= MAX_CANDIDATES:
                     break
         except ConnectorBlocked as exc:
             search._note_failure(cid, str(exc), blocked=True)
@@ -394,30 +409,162 @@ class PilotDiscovery:
                                 verified_at=excluded.verified_at,note=excluded.note""",
                                                (cid, ean, url, product["model"], product["color"], page.caliber,
                                                 page.ean_published, stamp(), note.strip()))
-                            self._review_row(connection, row, "confirmed", note)
+                            self._review_row(connection, row, "confirmed", note, origin=MANUAL_ORIGIN)
                     else:
                         with self.store._connect() as connection, connection:
-                            self._review_row(connection, row, "discarded", note)
+                            self._review_row(connection, row, "discarded", note, origin=MANUAL_ORIGIN)
         except Timeout as exc:
             raise PilotError("Hay una ejecución incompatible; espere antes de revisar candidatos") from exc
 
     @staticmethod
-    def _review_row(connection, row, state: str, note: str) -> None:
-        connection.execute("UPDATE pilot_url_candidates SET state=?,reviewed_at=?,review_note=? WHERE id=?",
-                           (state, stamp(), note.strip(), row["id"]))
+    def _auto_flags(connection, row) -> tuple[bool, bool, bool]:
+        """Stored facts only: was the page fetched with 2xx in its run, and was the URL discarded/rejected before."""
+        try:
+            evidence = json.loads(row["evidence"] or "{}")
+        except ValueError:
+            evidence = {}
+        page = evidence.get("page") if isinstance(evidence.get("page"), dict) else {}
+        urls = tuple(dict.fromkeys(str(u) for u in (row["url"], evidence.get("url"), page.get("url")) if u))
+        marks = ",".join("?" for _ in urls)
+        pair = (row["competitor_id"], row["ean"], *urls)
+        fetched = connection.execute(f"""SELECT 1 FROM pilot_http_log WHERE run_id=? AND competitor_id=? AND ean=?
+            AND url IN ({marks}) AND result LIKE 'HTTP 2%' LIMIT 1""", (row["run_id"], *pair)).fetchone() is not None
+        discarded = connection.execute(f"""SELECT 1 FROM pilot_url_candidates WHERE competitor_id=? AND ean=?
+            AND url IN ({marks}) AND state='discarded' LIMIT 1""", pair).fetchone() is not None
+        rejected = connection.execute(f"""SELECT 1 FROM pilot_url_candidates WHERE competitor_id=? AND ean=?
+            AND url IN ({marks}) AND state='rejected' AND id<>? LIMIT 1""", (*pair, row["id"])).fetchone() is not None \
+            or connection.execute(f"""SELECT 1 FROM competitor_product_urls WHERE competitor_id=? AND ean=?
+            AND url IN ({marks}) AND status='rejected' LIMIT 1""", pair).fetchone() is not None
+        return fetched, discarded, rejected
+
+    def _auto_decision(self, connection, row, product: dict, config: dict) -> AutoDecision:
+        try:
+            evidence = json.loads(row["evidence"] or "{}")
+        except ValueError:
+            evidence = {}
+        fetched, discarded, rejected = self._auto_flags(connection, row)
+        return evaluate(product, config, method=row["method"], evidence=evidence, fetched_ok=fetched,
+                        previously_discarded=discarded, previously_rejected=rejected)
+
+    def _confirm_automatically(self, connection, row, product: dict, config: dict, decision: AutoDecision,
+                               note: str) -> None:
+        page = page_from_evidence(json.loads(row["evidence"]))
+        url = validate_competitor_url(row["url"], config["domain"])
+        # Same record a manual approval creates; a URL already confirmed by a person keeps its user source.
+        connection.execute("""INSERT INTO competitor_product_urls(
+            competitor_id,ean,url,model_code,color_code,caliber,ean_published,match_status,status,
+            verified_at,source,note) VALUES(?,?,?,?,?,?,?,'exact_match','verified',?,?,?)
+            ON CONFLICT(competitor_id,ean,url) DO UPDATE SET status='verified',match_status='exact_match',
+            ean_published=excluded.ean_published,verified_at=excluded.verified_at,note=excluded.note,
+            source=CASE WHEN competitor_product_urls.source='user' THEN 'user' ELSE excluded.source END""",
+                           (row["competitor_id"], row["ean"], url, product["model"], product["color"],
+                            page.caliber if page else "", page.ean_published if page else "", stamp(), AUTO_SOURCE,
+                            f"{note.strip()} · regla {AUTO_RULE}"))
+        self._review_row(connection, row, "confirmed", note, origin=AUTO_ORIGIN, rule=AUTO_RULE,
+                         evidence={**decision.audit, "confirmed_at": stamp()})
+
+    def explain(self, candidate_id: int) -> AutoDecision:
+        """Read-only: the automatic-rule decision for one stored candidate, from saved evidence only."""
+        search = WebPriceSearch(self.store)
+        with self.store._connect() as connection:
+            row = connection.execute("SELECT * FROM pilot_url_candidates WHERE id=?", (candidate_id,)).fetchone()
+            if row is None:
+                raise PilotError("Candidato inexistente")
+            product, config = search._product(row["ean"]), search.config(row["competitor_id"])
+            return self._auto_decision(connection, row, product, config)
+
+    def reevaluate(self, *, note: str = "", apply: bool = False) -> pd.DataFrame:
+        """Re-apply the automatic rule to stored, still unreviewed candidates using their saved evidence.
+
+        Never performs HTTP. The default dry run writes nothing; ``apply`` confirms eligible candidates and records
+        an audit row for every evaluated candidate. Discarded, rejected or already reviewed candidates are never
+        selected."""
+        if apply and not note.strip():
+            raise PilotError("Indique quién solicita la reevaluación y el motivo")
+        pilot, search = PricePilot(self.store), WebPriceSearch(self.store)
+
+        def assess() -> list[tuple[dict, dict, dict, AutoDecision]]:
+            scope = pilot_scope(self.store)
+            if scope is None:
+                return []
+            with self.store._connect() as connection:
+                rows = connection.execute("""SELECT * FROM pilot_url_candidates
+                    WHERE state IN ('candidate_found','pending_validation') ORDER BY id""").fetchall()
+            configs: dict[str, dict] = {}
+            products: dict[str, dict] = {}
+            assessed = []
+            for row in rows:
+                cid, ean = row["competitor_id"], row["ean"]
+                if ean not in scope["eans"] or cid not in scope["competitors"]:
+                    continue
+                config = configs.setdefault(cid, search.config(cid))
+                product = products.setdefault(ean, search._product(ean))
+                with self.store._connect() as connection:
+                    decision = self._auto_decision(connection, row, product, config)
+                assessed.append((dict(row), product, config, decision))
+            return assessed
+
+        def frame(assessed, applied: bool) -> pd.DataFrame:
+            return pd.DataFrame([{
+                "candidate_id": row["id"], "ean": row["ean"], "competitor_id": row["competitor_id"],
+                "url": row["url"], "method": row["method"], "previous_state": row["state"],
+                "result": ("confirmed" if applied else "would_confirm") if decision.confirm else "manual_review",
+                "reasons": "; ".join(decision.reasons), "rule": AUTO_RULE,
+            } for row, _, _, decision in assessed], columns=[
+                "candidate_id", "ean", "competitor_id", "url", "method", "previous_state", "result", "reasons", "rule"])
+
+        if not apply:
+            return frame(assess(), False)
+        batch = stamp()
+        try:
+            with pilot.lock():
+                assessed = assess()
+                for row, product, config, decision in assessed:
+                    result = "manual_review"
+                    if decision.confirm:
+                        with search._lock(row["competitor_id"]):
+                            with self.store._connect() as connection, connection:
+                                current = connection.execute("SELECT * FROM pilot_url_candidates WHERE id=?",
+                                                             (row["id"],)).fetchone()
+                                if current["state"] == row["state"]:
+                                    self._confirm_automatically(connection, current, product, config, decision,
+                                                                f"Reevaluación explícita: {note.strip()}")
+                                    result = "confirmed"
+                                else:
+                                    result = "skipped_changed"
+                    with self.store._connect() as connection, connection:
+                        connection.execute("""INSERT INTO pilot_candidate_reevaluations(
+                            batch,candidate_id,evaluated_at,rule,previous_state,result,reasons,note)
+                            VALUES(?,?,?,?,?,?,?,?)""",
+                                           (batch, row["id"], stamp(), AUTO_RULE, row["state"], result,
+                                            json.dumps({"reasons": decision.reasons, "checks": decision.checks},
+                                                       ensure_ascii=False), note.strip()))
+        except Timeout as exc:
+            raise PilotError("Hay una ejecución incompatible; espere antes de reevaluar candidatos") from exc
+        return frame(assessed, True)
+
+    @staticmethod
+    def _review_row(connection, row, state: str, note: str, *, origin: str = "", rule: str = "",
+                    evidence: dict | None = None) -> None:
+        connection.execute("""UPDATE pilot_url_candidates SET state=?,reviewed_at=?,review_note=?,review_origin=?,
+            review_rule=?,review_evidence=? WHERE id=?""",
+                           (state, stamp(), note.strip(), origin, rule,
+                            json.dumps(evidence, ensure_ascii=False) if evidence else "", row["id"]))
         cid, ean = row["competitor_id"], row["ean"]
         current = connection.execute(
             "SELECT state FROM pilot_discovery WHERE competitor_id=? AND ean=?", (cid, ean),
         ).fetchone()
-        confirmed_url = connection.execute("""SELECT 1 FROM competitor_product_urls
-            WHERE competitor_id=? AND ean=? AND status='verified' AND source='user' LIMIT 1""",
+        confirmed_url = connection.execute(f"""SELECT 1 FROM competitor_product_urls
+            WHERE competitor_id=? AND ean=? AND status='verified' AND source IN ('user','{AUTO_SOURCE}') LIMIT 1""",
                                            (cid, ean)).fetchone()
         pending = connection.execute("""SELECT state FROM pilot_url_candidates
             WHERE competitor_id=? AND ean=? AND state IN ('candidate_found','pending_validation')""",
                                      (cid, ean)).fetchall()
         if state == "confirmed" or confirmed_url or (current and current["state"] == "confirmed"):
             aggregate_state = "confirmed"
-            detail = "Ficha confirmada; se ha registrado la revisión de otro candidato."
+            automatic = state == "confirmed" and origin == AUTO_ORIGIN
+            detail = (f"Ficha confirmada automáticamente (regla {rule})." if automatic
+                      else "Ficha confirmada; se ha registrado la revisión de otro candidato.")
         elif pending:
             aggregate_state = ("candidate_found" if any(item["state"] == "candidate_found" for item in pending)
                                else "pending_validation")

@@ -8,6 +8,9 @@ import secrets
 import sqlite3
 import time
 
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Connection
+
 
 @dataclass(frozen=True)
 class AuthTokenClaims:
@@ -160,3 +163,187 @@ class AuthStateStore:
                 "DELETE FROM login_attempts WHERE bucket_key = ?",
                 ((bucket_key,) for bucket_key in bucket_keys),
             )
+
+
+class PostgresAuthStateStore:
+    """Shared session revocation and login throttling for multiple app replicas."""
+
+    def __init__(self, database_url: str) -> None:
+        if not database_url.startswith(("postgresql://", "postgresql+")):
+            raise ValueError("AUTH_STATE_DATABASE_URL debe ser una URL PostgreSQL.")
+        self._engine = create_engine(database_url, pool_pre_ping=True)
+        with self._engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS cloud_auth_revoked_sessions (
+                        session_id TEXT PRIMARY KEY,
+                        expires_at BIGINT NOT NULL
+                    )
+                    """
+                )
+            )
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS cloud_auth_login_attempts (
+                        bucket_key TEXT PRIMARY KEY,
+                        window_started BIGINT NOT NULL,
+                        attempts INTEGER NOT NULL
+                    )
+                    """
+                )
+            )
+
+    @staticmethod
+    def _lock_buckets(
+        connection: Connection,
+        bucket_keys: tuple[str, ...],
+    ) -> None:
+        for bucket_key in sorted(set(bucket_keys)):
+            lock_key = int.from_bytes(
+                hashlib.sha256(bucket_key.encode()).digest()[:8],
+                "big",
+                signed=True,
+            )
+            connection.execute(
+                text("SELECT pg_advisory_xact_lock(:lock_key)"),
+                {"lock_key": lock_key},
+            )
+
+    def is_revoked(self, session_id: str, now: int | None = None) -> bool:
+        current_time = int(time.time()) if now is None else int(now)
+        with self._engine.connect() as connection:
+            result = connection.execute(
+                text(
+                    """
+                    SELECT 1 FROM cloud_auth_revoked_sessions
+                    WHERE session_id = :session_id AND expires_at >= :now
+                    """
+                ),
+                {"session_id": session_id, "now": current_time},
+            )
+            return result.first() is not None
+
+    def revoke_session(
+        self,
+        session_id: str,
+        expires_at: int,
+        now: int | None = None,
+    ) -> None:
+        current_time = int(time.time()) if now is None else int(now)
+        with self._engine.begin() as connection:
+            connection.execute(
+                text(
+                    "DELETE FROM cloud_auth_revoked_sessions WHERE expires_at < :now"
+                ),
+                {"now": current_time},
+            )
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO cloud_auth_revoked_sessions (session_id, expires_at)
+                    VALUES (:session_id, :expires_at)
+                    ON CONFLICT (session_id) DO UPDATE
+                    SET expires_at = EXCLUDED.expires_at
+                    """
+                ),
+                {"session_id": session_id, "expires_at": int(expires_at)},
+            )
+
+    def allow_login_attempt(
+        self,
+        bucket_keys: tuple[str, ...],
+        maximum_attempts: int,
+        window_seconds: int,
+        now: int | None = None,
+    ) -> bool:
+        current_time = int(time.time()) if now is None else int(now)
+        cutoff = current_time - window_seconds
+        with self._engine.begin() as connection:
+            self._lock_buckets(connection, bucket_keys)
+            connection.execute(
+                text(
+                    """
+                    WITH expired AS (
+                        SELECT bucket_key
+                        FROM cloud_auth_login_attempts
+                        WHERE window_started <= :cutoff
+                        ORDER BY window_started
+                        LIMIT 1000
+                        FOR UPDATE SKIP LOCKED
+                    )
+                    DELETE FROM cloud_auth_login_attempts AS attempts
+                    USING expired
+                    WHERE attempts.bucket_key = expired.bucket_key
+                    """
+                ),
+                {"cutoff": cutoff},
+            )
+            existing: dict[str, int] = {}
+            for bucket_key in bucket_keys:
+                row = connection.execute(
+                    text(
+                        """
+                        SELECT window_started, attempts FROM cloud_auth_login_attempts
+                        WHERE bucket_key = :bucket_key FOR UPDATE
+                        """
+                    ),
+                    {"bucket_key": bucket_key},
+                ).first()
+                if row is not None:
+                    if int(row[0]) <= cutoff:
+                        connection.execute(
+                            text(
+                                """
+                                DELETE FROM cloud_auth_login_attempts
+                                WHERE bucket_key = :bucket_key
+                                """
+                            ),
+                            {"bucket_key": bucket_key},
+                        )
+                    else:
+                        existing[bucket_key] = int(row[1])
+
+            if any(attempts >= maximum_attempts for attempts in existing.values()):
+                return False
+
+            for bucket_key in bucket_keys:
+                previous_attempts = existing.get(bucket_key)
+                if previous_attempts is None:
+                    connection.execute(
+                        text(
+                            """
+                            INSERT INTO cloud_auth_login_attempts
+                                (bucket_key, window_started, attempts)
+                            VALUES (:bucket_key, :window_started, 1)
+                            """
+                        ),
+                        {"bucket_key": bucket_key, "window_started": current_time},
+                    )
+                else:
+                    connection.execute(
+                        text(
+                            """
+                            UPDATE cloud_auth_login_attempts
+                            SET attempts = :attempts
+                            WHERE bucket_key = :bucket_key
+                            """
+                        ),
+                        {
+                            "bucket_key": bucket_key,
+                            "attempts": previous_attempts + 1,
+                        },
+                    )
+            return True
+
+    def reset_login_attempts(self, bucket_keys: tuple[str, ...]) -> None:
+        with self._engine.begin() as connection:
+            self._lock_buckets(connection, bucket_keys)
+            for bucket_key in bucket_keys:
+                connection.execute(
+                    text(
+                        "DELETE FROM cloud_auth_login_attempts WHERE bucket_key = :bucket_key"
+                    ),
+                    {"bucket_key": bucket_key},
+                )

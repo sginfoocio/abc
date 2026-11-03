@@ -1,6 +1,7 @@
 import ast
 from concurrent.futures import ThreadPoolExecutor
 import hmac
+import os
 from pathlib import Path
 import time
 
@@ -8,6 +9,7 @@ import pytest
 
 from auth_session import (
     AuthStateStore,
+    PostgresAuthStateStore,
     create_auth_token,
     derive_session_signing_key,
     login_bucket_keys,
@@ -202,13 +204,16 @@ def test_remembered_tokens_from_password_fallback_are_rejected() -> None:
         now=now,
     )
     namespace = {
+        "AUTH_COOKIE_SECRET_MIN_LENGTH": 32,
         "derive_session_signing_key": derive_session_signing_key,
         "verify_auth_token": verify_auth_token,
         "_get_auth_state_store": lambda: None,
     }
     _load_app_function("_verify_auth_token", namespace)
 
-    assert not namespace["_verify_auth_token"](
+    verify = namespace["_verify_auth_token"]
+    assert not verify(token, "admin", legacy_secret, legacy_secret)
+    assert not verify(
         token,
         "admin",
         legacy_secret,
@@ -232,6 +237,7 @@ def test_revocation_store_unavailable_fails_closed() -> None:
             raise sqlite3.OperationalError("database is unavailable")
 
     namespace = {
+        "AUTH_COOKIE_SECRET_MIN_LENGTH": 32,
         "derive_session_signing_key": derive_session_signing_key,
         "verify_auth_token": verify_auth_token,
         "_get_auth_state_store": BrokenStore,
@@ -265,6 +271,202 @@ def test_masterdata_role_cannot_access_admin_guarded_routes() -> None:
     with pytest.raises(AccessDenied):
         namespace["require_admin_access"]()
     assert streamlit.errors == ["Este apartado requiere un usuario administrador."]
+
+
+def test_direct_price_comparator_route_requires_admin() -> None:
+    class AccessDenied(Exception):
+        pass
+
+    def deny_admin_access() -> None:
+        raise AccessDenied
+
+    calls = []
+    namespace = {
+        "require_admin_access": deny_admin_access,
+        "render_price_comparator_page": lambda: calls.append("rendered"),
+    }
+    _load_app_function("render_price_comparator_route", namespace)
+
+    with pytest.raises(AccessDenied):
+        namespace["render_price_comparator_route"]()
+    assert calls == []
+
+
+def test_price_comparator_route_renders_after_admin_authorization() -> None:
+    calls = []
+    namespace = {
+        "require_admin_access": lambda: calls.append("authorized"),
+        "render_price_comparator_page": lambda: calls.append("rendered"),
+    }
+    _load_app_function("render_price_comparator_route", namespace)
+
+    namespace["render_price_comparator_route"]()
+
+    assert calls == ["authorized", "rendered"]
+
+
+def test_revoked_remembered_token_is_rejected_by_authentication(tmp_path) -> None:
+    store = AuthStateStore(tmp_path / "auth-state.sqlite3")
+    signing_key = derive_session_signing_key("s" * 40, "admin", "password")
+    token = create_auth_token("admin", signing_key, days=1)
+    claims = verify_auth_token(token, "admin", signing_key)
+    assert claims is not None
+    store.revoke_session(claims.session_id, claims.expires_at)
+
+    namespace = {
+        "AUTH_COOKIE_SECRET_MIN_LENGTH": 32,
+        "derive_session_signing_key": derive_session_signing_key,
+        "verify_auth_token": verify_auth_token,
+        "_get_auth_state_store": lambda: store,
+    }
+    _load_app_function("_verify_auth_token", namespace)
+
+    assert not namespace["_verify_auth_token"](
+        token, "admin", "password", "s" * 40
+    )
+
+
+def test_remembered_session_restores_after_app_recreation(tmp_path) -> None:
+    secret = "persistent-independent-cookie-secret-" + "x" * 16
+    state_path = tmp_path / "persistent-auth-state.sqlite3"
+    credential = "synthetic-admin-credential"
+    token_namespace = {
+        "AUTH_COOKIE_SECRET_ENV": "AUTH_COOKIE_SECRET",
+        "AUTH_COOKIE_SECRET_MIN_LENGTH": 32,
+        "derive_session_signing_key": derive_session_signing_key,
+        "create_auth_token": create_auth_token,
+    }
+    _load_app_function("_make_auth_token", token_namespace)
+    cookie = token_namespace["_make_auth_token"](
+        "admin", secret, credential, 30
+    )
+    initial_store = AuthStateStore(state_path)
+
+    class CookieControllerStub:
+        def get(self, name):
+            assert name == "abc_auth_session"
+            return cookie
+
+    class StreamlitStub:
+        session_state = {}
+
+    recreated_store = AuthStateStore(state_path)
+    streamlit = StreamlitStub()
+    namespace = {
+        "st": streamlit,
+        "AUTH_COOKIE_NAME": "abc_auth_session",
+        "AUTH_COOKIE_SECRET_MIN_LENGTH": 32,
+        "derive_session_signing_key": derive_session_signing_key,
+        "verify_auth_token": verify_auth_token,
+        "time": time,
+        "_get_auth_users": lambda: {
+            "admin": {"password": credential, "role": "admin"}
+        },
+        "_get_auth_cookie_secret": lambda: secret,
+        "_get_auth_state_store": lambda: recreated_store,
+        "_get_cookie_controller": lambda: CookieControllerStub(),
+        "_render_login": lambda: pytest.fail(
+            "A valid persistent cookie should restore the session"
+        ),
+    }
+    _load_app_function("_verify_auth_token", namespace)
+    _load_app_function("require_authentication", namespace)
+
+    namespace["require_authentication"]()
+
+    assert initial_store.database_path == recreated_store.database_path
+    assert streamlit.session_state["authenticated"] is True
+    assert streamlit.session_state["auth_user"] == "admin"
+    assert streamlit.session_state["auth_role"] == "admin"
+    assert streamlit.session_state["auth_session_id"]
+
+
+def test_logout_revokes_persistent_remembered_session(tmp_path) -> None:
+    store = AuthStateStore(tmp_path / "auth-state.sqlite3")
+    session_id = "session-to-revoke"
+    expires_at = int(time.time()) + 3600
+
+    class StreamlitStub:
+        session_state = {
+            "auth_session_id": session_id,
+            "auth_session_expires_at": expires_at,
+        }
+
+    namespace = {
+        "st": StreamlitStub(),
+        "_get_auth_state_store": lambda: store,
+    }
+    _load_app_function("_revoke_auth_session", namespace)
+
+    namespace["_revoke_auth_session"]()
+
+    assert store.is_revoked(session_id)
+
+
+def test_auth_state_store_uses_postgres_when_configured(monkeypatch) -> None:
+    database_url = "postgresql+psycopg2://db.example.test/cloud_auth"
+    monkeypatch.setenv("AUTH_STATE_DATABASE_URL", database_url)
+
+    class StreamlitStub:
+        session_state = {}
+
+    class StoreStub:
+        def __init__(self, value):
+            self.value = value
+
+    namespace = {
+        "AUTH_STATE_DATABASE_URL_ENV": "AUTH_STATE_DATABASE_URL",
+        "AUTH_STATE_PATH_ENV": "AUTH_STATE_PATH",
+        "AuthStateStore": StoreStub,
+        "PostgresAuthStateStore": StoreStub,
+        "_create_postgres_auth_state_store": StoreStub,
+        "__file__": str(Path(__file__).resolve().parents[1] / "app_enhanced.py"),
+        "Path": Path,
+        "os": os,
+        "st": StreamlitStub(),
+    }
+    _load_app_function("_get_auth_state_store", namespace)
+
+    store = namespace["_get_auth_state_store"]()
+
+    assert store.value == database_url
+
+
+def test_auth_state_store_keeps_persistent_sqlite_fallback(
+    monkeypatch, tmp_path
+) -> None:
+    state_path = tmp_path / "auth-state.sqlite3"
+    monkeypatch.delenv("AUTH_STATE_DATABASE_URL", raising=False)
+    monkeypatch.setenv("AUTH_STATE_PATH", str(state_path))
+
+    class StreamlitStub:
+        session_state = {}
+
+    class StoreStub:
+        def __init__(self, value):
+            self.value = value
+
+    namespace = {
+        "AUTH_STATE_DATABASE_URL_ENV": "AUTH_STATE_DATABASE_URL",
+        "AUTH_STATE_PATH_ENV": "AUTH_STATE_PATH",
+        "AuthStateStore": StoreStub,
+        "PostgresAuthStateStore": StoreStub,
+        "_create_postgres_auth_state_store": StoreStub,
+        "__file__": str(Path(__file__).resolve().parents[1] / "app_enhanced.py"),
+        "Path": Path,
+        "os": os,
+        "st": StreamlitStub(),
+    }
+    _load_app_function("_get_auth_state_store", namespace)
+
+    store = namespace["_get_auth_state_store"]()
+
+    assert store.value == state_path
+
+
+def test_postgres_auth_store_rejects_non_postgres_urls() -> None:
+    with pytest.raises(ValueError, match="URL PostgreSQL"):
+        PostgresAuthStateStore("sqlite:///not-a-shared-database.sqlite3")
 
 
 def test_revocation_is_persistent_across_store_instances(tmp_path) -> None:
