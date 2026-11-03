@@ -5,7 +5,9 @@ import pandas as pd
 import pytest
 
 from price_comparator import PriceComparatorStore, normalize_gtin
-from price_pilot import COMPETITOR_NAMES, REQUIRED_EANS, SAMPLE_EANS, PilotError, PricePilot, pilot_scope
+from price_pilot import (
+    COMPETITOR_NAMES, HTTP_BUDGET_EXHAUSTED, REQUIRED_EANS, SAMPLE_EANS, PilotError, PricePilot, pilot_scope,
+)
 from price_scheduler import CompetitorScheduler, SchedulerConfigError
 from price_web import WebPriceSearch, WebSearchError
 from tests.test_price_review_fixes import _freeze, _vytria
@@ -56,6 +58,28 @@ def known(pilot, ean=REQUIRED_EANS[0], *, verified=True, **overrides):
     return url
 
 
+def _insert_budget_error(service, store, cid, ean, *, blocked=0):
+    scope = pilot_scope(store)
+    with store._connect() as connection, connection:
+        run_id = connection.execute("""INSERT INTO pilot_runs(
+            started_at,status,scope,competitors,operation,selection,selection_request)
+            VALUES('2026-11-02T10:00:00+00:00','done',?,?,'discovery',?,?)""",
+                                    (json.dumps(scope["eans"]), json.dumps(scope["competitors"]),
+                                     json.dumps([[cid, ean]]), json.dumps([[cid, ean]]))).lastrowid
+        connection.execute("INSERT INTO pilot_budgets(run_id,competitor_id,requests,blocked) VALUES(?,?,10,?)",
+                           (run_id, cid, blocked))
+        job_id = connection.execute("""INSERT INTO pilot_jobs(
+            run_id,competitor_id,ean,status,outcome,detail,checked_at)
+            VALUES(?,?,?,'done','error',?,'2026-11-02T10:05:00+00:00')""",
+                                    (run_id, cid, ean, HTTP_BUDGET_EXHAUSTED)).lastrowid
+        connection.execute("""INSERT INTO pilot_discovery(competitor_id,ean,run_id,state,detail,updated_at)
+            VALUES(?,?,?,'error',?,'2026-11-02T10:05:00+00:00')
+            ON CONFLICT(competitor_id,ean) DO UPDATE SET run_id=excluded.run_id,state=excluded.state,
+                detail=excluded.detail,updated_at=excluded.updated_at""",
+                           (cid, ean, run_id, HTTP_BUDGET_EXHAUSTED))
+    return int(job_id), int(run_id)
+
+
 def test_scope_persisted_exact_and_initially_disabled(pilot):
     service, store, search, site, cid, extras = pilot
     scope = pilot_scope(PriceComparatorStore(store.database_path))
@@ -73,6 +97,125 @@ def test_scope_persisted_exact_and_initially_disabled(pilot):
         assert c.execute("SELECT SUM(enabled) FROM competitor_schedule").fetchone()[0] == 0
         assert c.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert not c.execute("PRAGMA foreign_key_check").fetchall()
+
+
+def test_pilot_limit_update_preserves_enabled_scope_and_pending_history(pilot):
+        service, store, search, site, cid, _ = pilot
+        service.enable()
+        scope = pilot_scope(store)
+        with store._connect() as connection, connection:
+            run_id = connection.execute("""INSERT INTO pilot_runs(
+                started_at,status,scope,competitors,operation,selection,selection_request)
+                VALUES('2026-11-02T10:00:00+00:00','interrupted',?,?,'discovery','[]','[]')""",
+                                        (json.dumps(scope["eans"]), json.dumps(scope["competitors"]))).lastrowid
+            connection.execute("INSERT INTO pilot_budgets(run_id,competitor_id) VALUES(?,?)", (run_id, cid))
+            connection.execute("INSERT INTO pilot_jobs(run_id,competitor_id,ean) VALUES(?,?,?)",
+                               (run_id, cid, REQUIRED_EANS[0]))
+        before_jobs = service.plan().copy()
+        limits = scope["competitors"]
+        limits[cid]["max_http_requests"] = 100
+        limits[cid]["pause_seconds"] = 3
+
+        service.update_limits(limits)
+
+        updated = pilot_scope(store)
+        assert updated["enabled"] == 1 and updated["eans"] == scope["eans"]
+        assert updated["competitors"] == limits
+        with store._connect() as connection:
+            assert connection.execute("SELECT status FROM pilot_runs WHERE id=?", (run_id,)).fetchone()[0] == "interrupted"
+            assert connection.execute("SELECT status FROM pilot_jobs WHERE run_id=?", (run_id,)).fetchone()[0] == "pending"
+        assert service.plan().equals(before_jobs.assign(
+            max_http_requests=before_jobs["max_http_requests"].where(
+                before_jobs["competitor_id"] != cid, 100),
+            pause_seconds=before_jobs["pause_seconds"].where(
+                before_jobs["competitor_id"] != cid, 3)))
+        assert site.calls == []
+
+
+def test_budget_recovery_prepares_exact_selection_once_without_http(pilot):
+        service, store, search, site, cid, _ = pilot
+        service.enable()
+        first, source_run = _insert_budget_error(service, store, cid, REQUIRED_EANS[0])
+        second, _ = _insert_budget_error(service, store, cid, REQUIRED_EANS[1])
+
+        visible = service.budget_recovery_jobs()
+        assert set(visible.loc[visible["Recuperable"], "job_id"]) == {first, second}
+        before_source = visible.set_index("job_id").loc[[first, second], ["source_run_id", "Estado", "Motivo"]].copy()
+        result = service.recover_budget_errors([first, second], operator="Operadora offline",
+                                               reason="Presupuesto aumentado y autorización revisada")
+
+        assert result == {"prepared_jobs": 2, "references": 2, "run_id": result["run_id"]}
+        with store._connect() as connection:
+            staged = connection.execute("SELECT * FROM pilot_runs WHERE id=?", (result["run_id"],)).fetchone()
+            staged_jobs = connection.execute("""SELECT competitor_id,ean,status FROM pilot_jobs
+                WHERE run_id=? ORDER BY ean""", (result["run_id"],)).fetchall()
+            budget = connection.execute("SELECT requests,blocked FROM pilot_budgets WHERE run_id=?",
+                                        (result["run_id"],)).fetchone()
+            audits = connection.execute("""SELECT source_job_id,operator,reason,prepared_run_id
+                FROM pilot_recovery_audit ORDER BY source_job_id""").fetchall()
+            sources = connection.execute("SELECT id,run_id,status,outcome,detail FROM pilot_jobs WHERE id IN (?,?)",
+                                         (first, second)).fetchall()
+        assert staged["status"] == "interrupted" and staged["operation"] == "discovery"
+        assert "requiere ejecución supervisada" in staged["error"]
+        assert [tuple(row) for row in staged_jobs] == [
+            (cid, REQUIRED_EANS[0], "pending"), (cid, REQUIRED_EANS[1], "pending")]
+        assert tuple(budget) == (0, 0)
+        assert [row["source_job_id"] for row in audits] == [first, second]
+        assert all(row["operator"] == "Operadora offline" and row["prepared_run_id"] == result["run_id"]
+                   for row in audits)
+        assert all(row["reason"] == "Presupuesto aumentado y autorización revisada" for row in audits)
+        assert [(row["id"], row["run_id"], row["status"], row["outcome"], row["detail"])
+                for row in sources] == [(first, source_run, "done", "error", HTTP_BUDGET_EXHAUSTED),
+                                        (second, sources[1]["run_id"], "done", "error", HTTP_BUDGET_EXHAUSTED)]
+        assert service.budget_recovery_jobs()["prepared_run_id"].notna().all()
+        second_attempt = service.recover_budget_errors([first, second], operator="Operadora offline",
+                                                       reason="Repetición idempotente")
+        assert second_attempt == {"prepared_jobs": 0, "references": 0, "run_id": None}
+        with store._connect() as connection:
+            assert connection.execute("SELECT COUNT(*) FROM pilot_runs").fetchone()[0] == 3
+            assert connection.execute("SELECT COUNT(*) FROM pilot_recovery_audit").fetchone()[0] == 2
+        assert not site.calls
+        pd.testing.assert_frame_equal(
+            service.budget_recovery_jobs().set_index("job_id").loc[[first, second],
+                                                                   ["source_run_id", "Estado", "Motivo"]],
+            before_source)
+
+
+def test_budget_recovery_excludes_blocked_unauthorized_and_candidate_jobs(pilot):
+        service, store, _, site, cid, _ = pilot
+        service.enable()
+        eligible, _ = _insert_budget_error(service, store, cid, REQUIRED_EANS[0])
+        blocked, _ = _insert_budget_error(service, store, cid, REQUIRED_EANS[1], blocked=1)
+        other_cid = next(value for value in pilot_scope(store)["competitors"] if value != cid)
+        unauthorized, _ = _insert_budget_error(service, store, other_cid, REQUIRED_EANS[2])
+        candidate, run_id = _insert_budget_error(service, store, cid, SAMPLE_EANS[3])
+        with store._connect() as connection, connection:
+            connection.execute("""INSERT INTO pilot_url_candidates(
+                competitor_id,ean,url,run_id,method,evidence,identity,checked_at,state)
+                VALUES(?,?,?,?,'site_search','candidate evidence','candidate identity','2026-11-02','candidate_found')""",
+                               (cid, SAMPLE_EANS[3], BASE + "/candidate", run_id))
+        jobs = service.budget_recovery_jobs().set_index("job_id")
+        assert jobs.loc[eligible, "Recuperable"]
+        assert "bloqueo" in jobs.loc[blocked, "recovery_note"]
+        assert "autorización" in jobs.loc[unauthorized, "recovery_note"]
+        assert "candidato" in jobs.loc[candidate, "recovery_note"]
+        with pytest.raises(PilotError, match="No se pueden recuperar"):
+            service.recover_budget_errors([blocked, unauthorized, candidate], operator="Ruben", reason="Revisado")
+        with store._connect() as connection:
+            assert connection.execute("SELECT COUNT(*) FROM pilot_recovery_audit").fetchone()[0] == 0
+        assert site.calls == []
+
+
+def test_budget_recovery_requires_operator_reason_and_pilot_lock(pilot):
+        service, store, _, site, cid, _ = pilot
+        job_id, _ = _insert_budget_error(service, store, cid, REQUIRED_EANS[0])
+        with pytest.raises(PilotError, match="operador"):
+            service.recover_budget_errors([job_id], operator=" ", reason="Revisado")
+        with service.lock(), pytest.raises(PilotError, match="consulta en curso"):
+            service.recover_budget_errors([job_id], operator="Ruben", reason="Revisado")
+        with store._connect() as connection:
+            assert connection.execute("SELECT COUNT(*) FROM pilot_recovery_audit").fetchone()[0] == 0
+        assert site.calls == []
 
 
 def test_direct_manual_forced_and_scheduler_boundaries(pilot):
@@ -321,17 +464,16 @@ def test_ui_scope_plan_and_manual_confirmation(pilot, monkeypatch):
     monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
     app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
                               "render_price_comparator_page()").run(timeout=30)
+    app.selectbox(key="price_admin_section").set_value("Piloto y consultas").run(timeout=30)
     assert not app.exception
+    assert app.selectbox(key="price_pilot_section").value == "Configuración del piloto"
     assert len(app.multiselect(key="pilot_eans").value) == 20
     assert len(app.multiselect(key="pilot_competitors").value) == 6
-    assert app.button(key="pilot_run").disabled
-    assert app.button(key="update_competitors").disabled
-    app.checkbox(key="pilot_confirm").check().run(timeout=30)
+    assert app.button(key="pilot_save_limits") is not None
+    scope_before = pilot_scope(store)
+    app.button(key="pilot_save_limits").click().run(timeout=30)
     assert not app.exception
-    assert not app.button(key="pilot_run").disabled
-    app.button(key="pilot_disable").click().run(timeout=30)
-    assert not app.exception
-    assert not pilot_scope(store)["enabled"]
+    assert pilot_scope(store)["enabled"] == scope_before["enabled"]
     assert site.calls == []
 
 
@@ -452,21 +594,84 @@ def test_pilot_worker_errors_are_visible_not_swallowed(pilot, monkeypatch):
     assert site.calls == []
 
 
-def test_ui_launches_only_confirmed_pilot_in_background(pilot, monkeypatch):
+def test_ui_launches_only_approved_discovery_in_background(pilot, monkeypatch):
     import app_pages.price_comparator as page
     from streamlit.testing.v1 import AppTest
     service, store, search, site, cid, extras = pilot
+    with store._connect() as connection, connection:
+        connection.execute("UPDATE competitor_web_config SET search_mode='site_search',search_verified=1 "
+                           "WHERE competitor_id=?", (cid,))
     monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
     calls = []
     monkeypatch.setattr(page, "_launch", lambda target, *args: calls.append((target, args)))
     app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
                               "render_price_comparator_page()").run(timeout=30)
-    app.checkbox(key="pilot_confirm").check().run(timeout=30)
-    app.button(key="pilot_run").click().run(timeout=30)
+    app.selectbox(key="price_admin_section").set_value("Piloto y consultas").run(timeout=30)
+    app.selectbox(key="price_pilot_section").set_value("Localización supervisada").run(timeout=30)
+    app.selectbox(key="discovery_execution_competitor").set_value(cid).run(timeout=30)
+    selected_ean = app.selectbox(key="discovery_execution_ean").value
+    start = app.button(key="discovery_start")
+    assert start.disabled
+    approval = next(item for item in app.checkbox
+                    if item.label == "He revisado el alcance seleccionado, los métodos y las autorizaciones")
+    approval.check().run(timeout=30)
+    assert not app.button(key="discovery_start").disabled, (
+        f"warnings={[item.value for item in app.warning]}, "
+        f"info={[item.value for item in app.info]}, "
+        f"markdown={[item.value for item in app.markdown]}"
+    )
+    app.button(key="discovery_start").click().run(timeout=30)
     assert not app.exception
-    assert len(calls) == 1 and calls[0][0] == page._run_pilot
-    assert calls[0][1][1] is False
+    assert len(calls) == 1 and calls[0][0] == page._run_discovery
+    assert calls[0][1][0].store.database_path == store.database_path
+    assert calls[0][1][1:] == (False, [(cid, selected_ean)])
     assert pilot_scope(store)["enabled"]
+    assert site.calls == []
+
+
+def test_ui_shows_unauthorized_competitor_reasons_without_http(pilot, monkeypatch):
+    from streamlit.testing.v1 import AppTest
+    service, store, search, site, cid, _ = pilot
+    monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
+    with store._connect() as connection, connection:
+        connection.execute("UPDATE competitor_web_config SET access_status='pending_review',terms_reviewed=0 "
+                           "WHERE competitor_id=?", (cid,))
+    name = next(row["name"] for row in service.competitors() if row["id"] == cid)
+    app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
+                              "render_price_comparator_page()").run(timeout=30)
+    app.selectbox(key="price_admin_section").set_value("Piloto y consultas").run(timeout=30)
+    app.selectbox(key="price_pilot_section").set_value("Localización supervisada").run(timeout=30)
+    app.selectbox(key="discovery_execution_competitor").set_value(cid).run(timeout=30)
+    assert not app.exception
+    assert any(name in warning.value and "autoriz" in warning.value.lower() for warning in app.warning)
+    assert app.button(key="discovery_start").disabled
+    assert site.calls == []
+
+
+def test_ui_prepares_budget_recovery_with_audit_and_no_http(pilot, monkeypatch):
+    from streamlit.testing.v1 import AppTest
+    service, store, search, site, cid, _ = pilot
+    service.enable()
+    job_id, _ = _insert_budget_error(service, store, cid, REQUIRED_EANS[0])
+    monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
+    app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
+                              "render_price_comparator_page()").run(timeout=30)
+    app.selectbox(key="price_admin_section").set_value("Recuperación de búsquedas").run(timeout=30)
+    assert not app.exception
+    assert any("no hace consultas HTTP" in item.value for item in app.caption)
+    app.multiselect(key="price_recovery_job_ids").set_value([job_id]).run(timeout=30)
+    app.text_input(key="price_recovery_operator").set_value("Revisión offline").run(timeout=30)
+    app.text_input(key="price_recovery_reason").set_value("Autorización confirmada y presupuesto revisado").run(
+        timeout=30)
+    app.checkbox(key="price_recovery_confirmation").check().run(timeout=30)
+    assert not app.button(key="price_recovery_prepare").disabled
+    app.button(key="price_recovery_prepare").click().run(timeout=30)
+    assert not app.exception
+    assert any("Se han preparado 1 referencias" in item.value for item in app.success)
+    with store._connect() as connection:
+        audit = connection.execute(
+            "SELECT operator,reason FROM pilot_recovery_audit WHERE source_job_id=?", (job_id,)).fetchone()
+    assert tuple(audit) == ("Revisión offline", "Autorización confirmada y presupuesto revisado")
     assert site.calls == []
 
 

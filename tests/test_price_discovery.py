@@ -956,10 +956,15 @@ def test_ui_coverage_settings_and_approval_are_offline(pilot, monkeypatch):
     app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
                              "render_price_comparator_page()").run(timeout=60)
     assert not app.exception
+    app.selectbox(key="price_admin_section").set_value("Piloto y consultas").run(timeout=60)
+    app.selectbox(key="price_pilot_section").set_value("Localización supervisada").run(timeout=60)
+    assert not app.exception
     assert any(item.value == "Localización de fichas del piloto" for item in app.subheader)
     assert app.button(key="discovery_start").disabled
     assert any(warning.value.startswith("No consultable: ") and " · EAN " in warning.value
                for warning in app.warning)
+    app.selectbox(key="price_admin_section").set_value("Competidores").run(timeout=60)
+    app.selectbox(key="admin_competitor_id").set_value(cid).run(timeout=60)
     assert app.selectbox(key=f"web_{cid}_market").value == ""
     assert app.selectbox(key=f"web_{cid}_search_mode").value == "auto"
     assert not site.calls

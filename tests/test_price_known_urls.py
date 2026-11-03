@@ -10,7 +10,7 @@ import price_known_urls as known
 import price_web_fetch
 from price_comparator import PriceComparatorStore
 from price_known_urls import KNOWN_URLS, KnownUrl
-from price_web import LOCATION_TEXT, WebPriceSearch
+from price_web import WebPriceSearch
 from tests.test_price_observations import PRODUCTS
 from tests.test_price_review_fixes import _freeze
 
@@ -213,12 +213,14 @@ def ui(store, monkeypatch, no_requests):
 
 def _run():
     app = AppTest.from_string(SCRIPT).run(timeout=90)
+    app.selectbox(key="price_admin_section").set_value("Competidores").run(timeout=90)
     assert not app.exception
     return app
 
 
 def _search(app, text):
-    app.selectbox(key="price_admin_section").set_value("Búsqueda manual").run(timeout=90)
+    app.selectbox(key="price_admin_section").set_value("Piloto y consultas").run(timeout=90)
+    app.selectbox(key="price_pilot_section").set_value("Búsqueda manual").run(timeout=90)
     app.text_input(key="web_text").set_value(text).run(timeout=90)
     app.radio(key="web_mode").set_value("Almacenados")
     app.button(key="web_search_button").click()
@@ -244,11 +246,14 @@ def test_stored_search_shows_candidate_pages_not_a_bare_no_results(ui):
 
 def test_competitor_panels_have_separate_web_and_scheduler_sections_with_the_scheduler_off(ui):
     app = _run()
-    headings = [m.value for m in app.markdown]
-    assert headings.count("#### Configuración web") == 14 and headings.count("#### Actualización automática") == 14
-    labels = [e.label for e in app.expander if LOCATION_TEXT["candidate"] in e.label]
-    assert len(labels) == 14 and all("Pendiente de revisión de condiciones" in label for label in labels)
-    assert any("URLs conocidas:** 1" in m for m in headings)
+    cid = app.selectbox(key="admin_competitor_id").value
+    button_keys = {button.key for button in app.button}
+    assert f"web_{cid}_save" in button_keys and f"sched_{cid}_save" in button_keys
+    states = next(frame.value for frame in app.dataframe if "Operatividad" in frame.value.columns)
+    markdown = [item.value for item in app.markdown]
+    assert len(states) == 14
+    assert any("Estado del planificador" in item.value for item in app.caption)
+    assert any("URLs conocidas:** 1" in item for item in markdown)
     assert not _rows(ui, "SELECT 1 FROM competitor_schedule WHERE enabled=1")
     assert {metric.label: metric.value for metric in app.metric}["Más caro"] == "Sin datos"
     # Registered URLs remain configuration only; they do not create comparable price observations.
@@ -258,5 +263,6 @@ def test_competitor_panels_have_separate_web_and_scheduler_sections_with_the_sch
 def test_web_section_adds_replaces_and_verifies_without_a_feed(ui):
     app = _run()
     cid = next(r["competitor_id"] for r in _rows(ui, "SELECT competitor_id FROM competitor_product_urls LIMIT 1"))
+    app.selectbox(key="admin_competitor_id").set_value(cid).run(timeout=90)
     assert app.text_input(key=f"web_{cid}_verify_url") is not None and app.text_input(key=f"web_{cid}_url_value")
     assert [b for b in app.button if b.label == "Verificar y guardar"]

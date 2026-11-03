@@ -583,10 +583,10 @@ def test_page_shows_odoo_price_section_with_manual_import_as_contingency(tmp_pat
     app = _page(tmp_path, monkeypatch).run()
 
     assert not app.exception
-    app.selectbox(key="price_admin_section").set_value("Importar datos").run()
+    app.selectbox(key="price_admin_section").set_value("Datos e importaciones").run()
     assert "Precio de venta Vytria" in [item.value for item in app.subheader]
     assert any("pendiente (no validado)" in caption.value for caption in app.caption)
     assert [toggle.value for toggle in app.toggle] == [False]
     assert [expander.label for expander in app.expander if "Contingencia" in expander.label]
-    app.selectbox(key="price_admin_section").set_value("Competidores y ejecuciones").run()
+    app.selectbox(key="price_admin_section").set_value("Historial y diagnósticos").run()
     assert [button.label for button in app.button if button.label == "Sincronizar precios Vytria desde Odoo"]

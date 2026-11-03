@@ -337,7 +337,8 @@ def test_page_shows_insufficient_data_message_and_renders_with_data(tmp_path, mo
     }.issubset(rendered_headers)
     assert app.metric[0].value == "0 / 1"
     assert app.metric[1].value == "Sin datos" and app.metric[2].value == "Sin datos"
-    assert app.button(key="update_competitors").disabled  # nothing enabled yet: Pendiente de configurar
+    app.selectbox(key="price_admin_section").set_value("Historial y diagnósticos").run(timeout=30)
+    assert app.button(key="update_competitors").disabled # nothing enabled yet: Pendiente de configurar
     now = datetime.now(timezone.utc)
     store.set_setting("price_expiry_days", 30)
     with store._connect() as c, c:
@@ -374,3 +375,24 @@ def test_page_shows_insufficient_data_message_and_renders_with_data(tmp_path, mo
     assert app.selectbox(key="products_selected_ean").value == EAN
     comparison = next(frame.value for frame in app.dataframe if "Uso en comparación" in frame.value.columns)
     assert comparison.iloc[0]["Uso en comparación"] == "Comparable"
+
+
+def test_shared_filters_remain_visible_across_admin_and_reset(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
+    app = AppTest.from_string(
+        "from app_pages.price_comparator import render_price_comparator_page\n"
+        "render_price_comparator_page()").run(timeout=30)
+    assert not app.exception
+    app.selectbox(key="price_admin_section").set_value("Configuración general").run(timeout=30)
+    assert app.multiselect(key="dashboard_brand") is not None
+    assert app.multiselect(key="dashboard_competitor") is not None
+    assert app.selectbox(key="dashboard_state") is not None
+    app.selectbox(key="dashboard_period").set_value("7 días").run(timeout=30)
+    app.text_input(key="dashboard_search").set_value("referencia temporal").run(timeout=30)
+    app.button(key="dashboard_reset_filters").click().run(timeout=30)
+    assert app.selectbox(key="dashboard_period").value == "30 días"
+    assert app.text_input(key="dashboard_search").value == ""
+    assert app.multiselect(key="dashboard_brand").value == []
+    assert app.multiselect(key="dashboard_competitor").value == []
+    assert not app.exception

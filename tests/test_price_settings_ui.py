@@ -1,6 +1,5 @@
 import sqlite3
 
-import pandas as pd
 import pytest
 from streamlit.testing.v1 import AppTest
 
@@ -27,13 +26,15 @@ def test_migration_keeps_existing_data_and_adds_new_tables(tmp_path):
     store = _store(tmp_path)
     store.database_path.rename(path)
     with sqlite3.connect(path) as connection:
-        for table in ("comparator_settings", "offer_checks", "competitor_schedule", "scheduler_runs", "scheduler_jobs"):
+        for table in ("comparator_settings", "offer_checks", "competitor_schedule", "scheduler_runs",
+                      "scheduler_jobs", "pilot_recovery_audit"):
             connection.execute(f"DROP TABLE {table}")
     migrated = PriceComparatorStore(path)
     assert len(migrated.products()) == len(PRODUCTS) and len(migrated.competitors()) == 2
     with migrated._connect() as connection:
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    assert {"comparator_settings", "offer_checks", "competitor_schedule", "scheduler_runs", "scheduler_jobs"} <= tables
+    assert {"comparator_settings", "offer_checks", "competitor_schedule", "scheduler_runs", "scheduler_jobs",
+            "pilot_recovery_audit"} <= tables
     PriceComparatorStore(path)  # idempotent
 
 
@@ -43,9 +44,15 @@ def test_admin_sections_list_competitors_and_save_general_config(tmp_path, monke
     app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
                               "render_price_comparator_page()").run(timeout=30)
     assert not app.exception
-    labels = [e.label for e in app.expander]
-    assert sum("Pendiente de configurar" in label for label in labels) == 16  # 14 reference + 2 test competitors
-    app.selectbox(key="price_admin_section").set_value("Configuración").run(timeout=30)
+    assert app.selectbox(key="price_admin_section").options == [
+        "Estado general", "Competidores", "Piloto y consultas", "Recuperación de búsquedas",
+        "Datos e importaciones", "Configuración general", "Historial y diagnósticos",
+    ]
+    app.selectbox(key="price_admin_section").set_value("Competidores").run(timeout=30)
+    competitors = next(frame.value for frame in app.dataframe if "Operatividad" in frame.value.columns)
+    assert len(competitors) == 16
+    assert competitors["Estado"].notna().all()
+    app.selectbox(key="price_admin_section").set_value("Configuración general").run(timeout=30)
     app.selectbox(key="cfg_retention").set_value(6)
     app.number_input(key="cfg_expiry").set_value(10)
     app.number_input(key="cfg_odoo_hours").set_value(6.0)
@@ -63,6 +70,7 @@ def test_manual_competitor_update_runs_in_background_thread(tmp_path, monkeypatc
     monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
     app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
                               "render_price_comparator_page()").run(timeout=30)
+    app.selectbox(key="price_admin_section").set_value("Historial y diagnósticos").run(timeout=30)
     assert not app.button(key="update_competitors").disabled
     app.button(key="update_competitors").click().run(timeout=30)
     assert [call[0] for call in calls] == [page._run_competitors]  # never executed inside the script thread

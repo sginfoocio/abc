@@ -45,6 +45,7 @@ def test_page_button_runs_sync_in_background_without_blocking(tmp_path, monkeypa
     monkeypatch.setattr(page, "_make_sync", lambda s: VytriaPriceSync(
         s, SlowReader(odoo.engine_factory), sleep=lambda _: None))
     app = AppTest.from_string(APP, default_timeout=30).run()
+    app.selectbox(key="price_admin_section").set_value("Historial y diagnósticos").run()
 
     started = time.monotonic()
     app.button(key="sync_vytria_prices").click().run()
@@ -61,7 +62,7 @@ def test_page_button_runs_sync_in_background_without_blocking(tmp_path, monkeypa
     _wait_until(lambda: not VytriaPriceSync(PriceComparatorStore()).is_running())
     app.run()
     assert not app.button(key="sync_vytria_prices").disabled
-    app.selectbox(key="price_admin_section").set_value("Importar datos").run()
+    app.selectbox(key="price_admin_section").set_value("Datos e importaciones").run()
     assert any(metric.label == "Con precio confirmado" and metric.value == "1/1" for metric in app.metric)
 
 

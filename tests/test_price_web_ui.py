@@ -24,9 +24,12 @@ def ui(tmp_path, monkeypatch):
     return site, store, search, cid
 
 
-def _run(admin_section="Competidores y ejecuciones"):
+def _run(admin_section="Competidores"):
     app = AppTest.from_string(SCRIPT).run(timeout=90)
-    if admin_section != "Competidores y ejecuciones":
+    if admin_section == "Búsqueda manual":
+        app.selectbox(key="price_admin_section").set_value("Piloto y consultas").run(timeout=90)
+        app.selectbox(key="price_pilot_section").set_value(admin_section).run(timeout=90)
+    else:
         app.selectbox(key="price_admin_section").set_value(admin_section).run(timeout=90)
     assert not app.exception
     return app
@@ -122,11 +125,13 @@ def test_web_mode_stops_after_a_block_and_reports_it(ui):
 
 
 def test_competitors_tab_lists_fourteen_web_configs_none_operational(ui):
+    _, _, _, cid = ui
     app = _run()
-    labels = [e.label for e in app.expander if OPERABILITY_TEXT["pending_review"] in e.label]
-    assert len(labels) == 14
-    assert not [e for e in app.expander if OPERABILITY_TEXT["authorized"] in e.label]
-    assert all(WEB_STATUS_TEXT["operational"] not in label for label in labels)
+    frame = next(frame.value for frame in app.dataframe if "Operatividad" in frame.value.columns)
+    assert len(frame) == 14
+    assert not frame["Operatividad"].str.contains(OPERABILITY_TEXT["authorized"]).any()
+    assert not frame["Estado"].str.contains(WEB_STATUS_TEXT["operational"]).any()
+    assert app.selectbox(key="admin_competitor_id").value == cid
 
 
 def test_web_config_is_persisted_and_validated(ui):
@@ -163,8 +168,7 @@ def test_known_url_form_rejects_other_domains(ui):
     key = f"web_{cid}"
     app.text_input(key=f"{key}_url_ean").set_value("8056597875349")
     app.text_input(key=f"{key}_url_value").set_value("https://otra-tienda.example/ficha.html")
-    position = list(search.configs()["competitor_id"]).index(cid)
-    submit = [b for b in app.button if b.label == "Añadir ficha conocida"][position]
+    submit = next(b for b in app.button if b.label == "Añadir ficha conocida")
     submit.click()
     app = app.run(timeout=90)
     assert any("dominio" in e.value for e in app.error)
