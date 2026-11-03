@@ -1968,7 +1968,7 @@ def render_price_comparator_page() -> None:
     with admin_tab:
         section = st.selectbox("Administración", [
             "Estado general", "Competidores", "Piloto y consultas", "Recuperación de búsquedas",
-            "Datos e importaciones", "Configuración general", "Historial y diagnósticos",
+            "Vigilancia automática", "Datos e importaciones", "Configuración general", "Historial y diagnósticos",
         ], key="price_admin_section")
         if section == "Estado general":
             _render_admin_overview(store)
@@ -1989,6 +1989,10 @@ def render_price_comparator_page() -> None:
                 _render_web_finder(store)
         elif section == "Recuperación de búsquedas":
             _render_budget_recovery(store)
+        elif section == "Vigilancia automática":
+            from app_pages.price_watch import render_watch_admin
+
+            render_watch_admin(store)
         elif section == "Datos e importaciones":
             _render_data_sources(store)
         elif section == "Configuración general":
