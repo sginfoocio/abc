@@ -46,7 +46,7 @@ def test_admin_sections_list_competitors_and_save_general_config(tmp_path, monke
     assert not app.exception
     assert app.selectbox(key="price_admin_section").options == [
         "Estado general", "Competidores", "Piloto y consultas", "Recuperación de búsquedas",
-        "Datos e importaciones", "Configuración general", "Historial y diagnósticos",
+        "Vigilancia automática", "Datos e importaciones", "Configuración general", "Historial y diagnósticos",
     ]
     app.selectbox(key="price_admin_section").set_value("Competidores").run(timeout=30)
     competitors = next(frame.value for frame in app.dataframe if "Operatividad" in frame.value.columns)

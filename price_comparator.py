@@ -505,6 +505,99 @@ class PriceComparatorStore:
                         failures INTEGER NOT NULL DEFAULT 0,
                         PRIMARY KEY (competitor_id, ean, url)
                     );
+                    -- Scalable watch engine (price_watch / price_access). Independent from the pilot tables.
+                    CREATE TABLE IF NOT EXISTS watch_groups (
+                        name TEXT PRIMARY KEY,
+                        interval_hours REAL,
+                        note TEXT NOT NULL DEFAULT '',
+                        created_at TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS watch_rules (
+                        id INTEGER PRIMARY KEY,
+                        name TEXT NOT NULL UNIQUE,
+                        brand TEXT NOT NULL DEFAULT '',
+                        category TEXT NOT NULL DEFAULT '',
+                        model_prefix TEXT NOT NULL DEFAULT '',
+                        text_contains TEXT NOT NULL DEFAULT '',
+                        group_name TEXT NOT NULL REFERENCES watch_groups(name),
+                        active INTEGER NOT NULL DEFAULT 1,
+                        created_by TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        last_applied_at TEXT,
+                        last_matched INTEGER NOT NULL DEFAULT 0
+                    );
+                    CREATE TABLE IF NOT EXISTS watch_products (
+                        ean TEXT PRIMARY KEY REFERENCES products(ean),
+                        group_name TEXT NOT NULL REFERENCES watch_groups(name),
+                        source TEXT NOT NULL,
+                        rule_id INTEGER REFERENCES watch_rules(id),
+                        active INTEGER NOT NULL DEFAULT 1,
+                        added_by TEXT NOT NULL,
+                        added_at TEXT NOT NULL,
+                        removed_by TEXT NOT NULL DEFAULT '',
+                        removed_at TEXT
+                    );
+                    CREATE TABLE IF NOT EXISTS access_methods (
+                        competitor_id TEXT NOT NULL REFERENCES competitors(id),
+                        method TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        note TEXT NOT NULL DEFAULT '',
+                        evidence TEXT NOT NULL DEFAULT '',
+                        decided_by TEXT NOT NULL DEFAULT '',
+                        decided_at TEXT,
+                        PRIMARY KEY (competitor_id, method)
+                    );
+                    CREATE TABLE IF NOT EXISTS access_budgets (
+                        scope TEXT NOT NULL,
+                        scope_id TEXT NOT NULL,
+                        daily_limit INTEGER NOT NULL,
+                        per_minute_limit INTEGER NOT NULL,
+                        pause_seconds REAL,
+                        updated_by TEXT NOT NULL DEFAULT '',
+                        updated_at TEXT,
+                        PRIMARY KEY (scope, scope_id)
+                    );
+                    CREATE TABLE IF NOT EXISTS access_requests (
+                        id INTEGER PRIMARY KEY,
+                        scope TEXT NOT NULL,
+                        scope_id TEXT NOT NULL,
+                        competitor_id TEXT NOT NULL DEFAULT '',
+                        method TEXT NOT NULL,
+                        purpose TEXT NOT NULL,
+                        ean TEXT NOT NULL DEFAULT '',
+                        url TEXT NOT NULL DEFAULT '',
+                        reserved_at TEXT NOT NULL,
+                        result TEXT NOT NULL DEFAULT 'reserved'
+                    );
+                    CREATE INDEX IF NOT EXISTS access_requests_scope_idx
+                        ON access_requests(scope, scope_id, reserved_at);
+                    CREATE TABLE IF NOT EXISTS access_incidents (
+                        id INTEGER PRIMARY KEY,
+                        scope TEXT NOT NULL,
+                        scope_id TEXT NOT NULL,
+                        method TEXT NOT NULL DEFAULT '',
+                        kind TEXT NOT NULL,
+                        url TEXT NOT NULL DEFAULT '',
+                        detail TEXT NOT NULL DEFAULT '',
+                        detected_at TEXT NOT NULL,
+                        retry_after TEXT,
+                        status TEXT NOT NULL DEFAULT 'open',
+                        resolved_by TEXT NOT NULL DEFAULT '',
+                        resolved_at TEXT,
+                        resolution_note TEXT NOT NULL DEFAULT ''
+                    );
+                    CREATE INDEX IF NOT EXISTS access_incidents_open_idx ON access_incidents(scope, scope_id, status);
+                    CREATE TABLE IF NOT EXISTS access_audit (
+                        id INTEGER PRIMARY KEY,
+                        scope TEXT NOT NULL,
+                        scope_id TEXT NOT NULL,
+                        action TEXT NOT NULL,
+                        previous TEXT NOT NULL DEFAULT '',
+                        current TEXT NOT NULL DEFAULT '',
+                        actor TEXT NOT NULL,
+                        note TEXT NOT NULL DEFAULT '',
+                        at TEXT NOT NULL
+                    );
                 """)
                 for table, columns in _ADDED_COLUMNS.items():
                     existing = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
