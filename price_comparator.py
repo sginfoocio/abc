@@ -73,6 +73,15 @@ SYNCED_PRICE_MAX_AGE_DAYS = 7
 RETENTION_MONTHS_OPTIONS = (3, 6, 12, 24)
 SETTING_DEFAULTS = {"retention_months": "12", "price_expiry_days": str(SYNCED_PRICE_MAX_AGE_DAYS),
                     "alert_threshold_pct": "5"}
+# Only monitored pairs are gated; the existing supervised pilot and manual imports keep their behaviour.
+_MONITOR_OFFER_GUARD = """AND (NOT EXISTS(
+    SELECT 1 FROM monitor_jobs m JOIN watch_products w ON w.ean=m.ean AND w.active=1
+    WHERE m.ean=o.ean AND m.competitor_id=o.competitor_id)
+    OR EXISTS(SELECT 1 FROM monitor_jobs m JOIN competitor_product_urls u
+        ON u.competitor_id=m.competitor_id AND u.ean=m.ean AND u.url=m.url AND u.status='verified'
+        WHERE m.ean=o.ean AND m.competitor_id=o.competitor_id AND m.last_offer_id=o.id AND m.eligible=1
+          AND m.state NOT IN ('gone','review','blocked','unavailable','inactive')
+          AND julianday(m.valid_until)>=julianday('now')))"""
 
 
 class PriceComparatorStorageError(RuntimeError):
@@ -709,6 +718,52 @@ class PriceComparatorStore:
                         requests INTEGER NOT NULL DEFAULT 0,
                         summary TEXT NOT NULL DEFAULT ''
                     );
+                    CREATE TABLE IF NOT EXISTS monitor_jobs (
+                        id INTEGER PRIMARY KEY,
+                        ean TEXT NOT NULL REFERENCES products(ean),
+                        competitor_id TEXT NOT NULL REFERENCES competitors(id),
+                        url TEXT NOT NULL,
+                        state TEXT NOT NULL DEFAULT 'pending',
+                        not_before TEXT,
+                        lease_until TEXT,
+                        attempts INTEGER NOT NULL DEFAULT 0,
+                        detail TEXT NOT NULL DEFAULT '',
+                        sample TEXT NOT NULL DEFAULT '',
+                        previous_sample TEXT NOT NULL DEFAULT '',
+                        sampled_at TEXT,
+                        last_ok_at TEXT,
+                        valid_until TEXT,
+                        last_offer_id INTEGER REFERENCES offers(id),
+                        eligible INTEGER NOT NULL DEFAULT 0,
+                        updated_at TEXT NOT NULL,
+                        UNIQUE(competitor_id,ean)
+                    );
+                    CREATE INDEX IF NOT EXISTS monitor_queue_idx ON monitor_jobs(competitor_id,state,not_before);
+                    CREATE TABLE IF NOT EXISTS monitor_events (
+                        id INTEGER PRIMARY KEY,
+                        job_id INTEGER NOT NULL REFERENCES monitor_jobs(id),
+                        at TEXT NOT NULL,
+                        state TEXT NOT NULL,
+                        detail TEXT NOT NULL DEFAULT ''
+                    );
+                    CREATE TABLE IF NOT EXISTS monitor_schedule (
+                        competitor_id TEXT PRIMARY KEY REFERENCES competitors(id),
+                        enabled INTEGER NOT NULL DEFAULT 0,
+                        max_jobs INTEGER NOT NULL DEFAULT 200,
+                        updated_by TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS price_alerts (
+                        id INTEGER PRIMARY KEY,
+                        event_key TEXT NOT NULL UNIQUE,
+                        ean TEXT NOT NULL REFERENCES products(ean),
+                        competitor_id TEXT NOT NULL REFERENCES competitors(id),
+                        kind TEXT NOT NULL,
+                        at TEXT NOT NULL,
+                        old_value TEXT,
+                        new_value TEXT,
+                        detail TEXT NOT NULL DEFAULT ''
+                    );
                 """)
                 for table, columns in _ADDED_COLUMNS.items():
                     existing = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
@@ -1282,6 +1337,7 @@ class PriceComparatorStore:
                 JOIN products p ON p.ean=o.ean
                 LEFT JOIN offer_checks k ON k.last_offer_id=o.id
                 WHERE COALESCE(k.last_ok_at,o.captured_at)>=? AND c.active=1
+                """ + _MONITOR_OFFER_GUARD + """
                 ORDER BY o.captured_at DESC,o.id DESC
             """, connection, params=(cutoff,))
 
@@ -1309,6 +1365,7 @@ class PriceComparatorStore:
                 FROM offers o JOIN competitors c ON c.id=o.competitor_id
                 LEFT JOIN offer_checks k ON k.last_offer_id=o.id
                 WHERE COALESCE(k.last_ok_at,o.captured_at)>=? AND c.active=1
+                """ + _MONITOR_OFFER_GUARD + """
                 ORDER BY o.captured_at DESC,o.id DESC
             """, connection, params=(cutoff,))
             search_results = pd.read_sql_query("""

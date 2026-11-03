@@ -1,4 +1,4 @@
-# Vigilancia automática de precios — Fases 1 a 3
+# Vigilancia automática de precios — Fases 1 a 4
 
 Cloud tiene su propio motor de localización y vigilancia de precios. Se ejecuta en nuestra infraestructura (`s2026`), lo mantenemos nosotros y **no depende de ninguna API externa de búsqueda**. Reutiliza `price_web.py`, `price_discovery.py`, `price_pilot.py`, `price_scheduler.py` y los extractores actuales.
 
@@ -247,32 +247,82 @@ Sin crawler masivo ni APIs externas. Todo sigue pasando por `GovernedFetcher`: r
   - Recuperación de una ejecución interrumpida sin duplicados.
   - Domanci inerte sin autorización documentada.
 
-## Fase 4 (diseño): monitorización de las fichas localizadas
+## Fase 4: beta de monitorización de las fichas localizadas
 
 Se reutilizan los componentes existentes; no se crea otro extractor, histórico ni comparativa.
 
 1. **Qué se monitoriza:** las filas `competitor_product_urls` con `status='verified'` de productos vigilados activos (`watch_products.active=1`). Es exactamente lo que deja la localización (`source='auto_watch'` o `user`), más las URLs del piloto.
 2. **Cuándo:**
-   - La frecuencia de cada producto y competidor se obtiene con `PriceWatch.monitor_interval_hours` (grupos, por defecto 24 h), comparada con `last_ok_at` de la fila.
-   - Un planificador gemelo de `locate_schedule` (o una ampliación de `competitor_schedule` en `price_scheduler.py`) decide qué competidores toca procesar.
+   - La frecuencia se obtiene con `PriceWatch.monitor_interval_hours`: la del grupo si está definida, o la del competidor en `competitor_schedule` (24 h por defecto).
+   - `monitor_jobs` es una cola independiente, con una fila única por producto/competidor. Se prepara únicamente para productos vigilados activos y fichas verificadas.
+   - `not_before` y `sampled_at` separan el siguiente intento de la última lectura correcta de precio (`last_ok_at`). Una página sin precio no rejuvenece el precio anterior.
+   - `monitor_schedule` habilita los competidores por separado. `PRICE_MONITOR_SCHEDULE_ENABLED` está apagado por defecto; `tick` no hace nada sin ese interruptor. No se modifica la habilitación del planificador legacy del piloto.
 3. **Cómo se consulta:**
    - Con `GovernedFetcher(method='ficha', purpose='monitor')`, compartiendo presupuestos, pausas, robots.txt y bloqueos con la localización.
    - Un bloqueo suspende el competidor exactamente igual que en la localización.
 4. **Extracción y registro:**
    - `extract_product` para leer precio, disponibilidad e IVA, con la configuración de `competitor_web_config`.
-   - `Outcome` y `WebPriceSearch.record` para el registro: `import_offers` en `offers` y `observations`.
-   - `last_price`, `last_availability` y `last_ok_at` se actualizan como hoy en `_upsert_index`.
-   - Las comparativas, la evolución y los KPIs del dashboard ya leen de `offers` y `observations`.
+   - `Outcome` y `WebPriceSearch.record` usan `import_offers`: `offers`, `search_results` cuando no hay precio y `offer_checks` para las comprobaciones sin cambios. No se crea otro histórico.
+   - La URL conserva `last_price`, `last_availability` y `last_ok_at`, sin cambiar el origen ni la auditoría de su confirmación.
+   - Las comparativas y KPIs existentes excluyen, para pares monitorizados, una oferta antigua si su URL deja de estar verificada, falta precio comparable, cambia el stock o caduca el precio. Las ofertas del piloto no incluidas en vigilancia conservan su comportamiento.
+   - Se exige identidad exacta, stock disponible, mercado ES, EUR e IVA incluido confirmado. Un precio observado no comparable se conserva con su estado y sin diferencias comerciales.
 5. **Identidad en cada lectura:**
    - La página leída se vuelve a clasificar con `classify`.
-   - Si deja de coincidir (otro modelo o color), la ficha pasa a revisión y no se registra el precio.
+   - Si deja de coincidir (otro modelo/color, EAN contradictorio, ambigüedad), la ficha y su trabajo de localización pasan a revisión; no se registra ese precio. La revisión usa la pantalla ya existente.
 6. **Fichas desaparecidas:**
-   - Un 404 o 410 llama a `PriceLocator.retire`, y el siguiente `enqueue()` crea la relocalización.
-   - Los errores temporales solo incrementan `failures`, como hoy en `_mark_relocation`.
+   - Un 404 o 410 llama a `PriceLocator.retire` y prepara la relocalización sin realizarla desde el monitor.
+   - Los errores temporales conservan el trabajo y se reintentan tras 30 minutos, hasta cinco intentos. Los límites y bloqueos no consumen esos intentos.
 7. **Caducidad de precios:** se mostrará como caducado un precio con `last_ok_at` anterior a 2× el intervalo del producto.
 8. **Alertas:**
    - `recent_changes` de `price_analytics.py` ya calcula las variaciones respecto a `alert_threshold_pct` (5 % configurable).
-   - La fase 4 añade los cambios de disponibilidad y una tabla de alertas emitidas con clave única (EAN, competidor, observación), para no notificar dos veces la misma variación.
+   - `price_alerts` persiste subidas/bajadas (umbral inicial 5 %, configurable), paso a más barato que Vytria, cambios de disponibilidad, fichas desaparecidas y precios caducados.
+   - Una clave única por trabajo, tipo y episodio evita duplicados tras reintentos o reinicios; conserva fecha, producto, competidor y valores anterior/nuevo.
+   - `email_summary` prepara un resumen descargable. No hay envío automático ni llamadas a Graph/SMTP.
+
+### Recuperación y límites de la beta
+
+- Se reutiliza el bloqueo por competidor del piloto/localizador; dos procesos no consultan al mismo tiempo al mismo competidor.
+- Cada trabajo se reserva durante diez minutos. Una caída se recupera al vencer esa reserva.
+- La muestra extraída y su fecha se guardan antes del importador. Si la ejecución cae después, se reutiliza sin HTTP ni búsquedas; el importador y las alertas son idempotentes.
+- Una URL compartida por varios EAN/calibres reutiliza una muestra todavía vigente y vuelve a comprobar la identidad de cada EAN.
+- Existe una ventana inevitable entre recibir HTTP y guardar la muestra: si el proceso muere justo ahí, esa petición puede repetirse. Su presupuesto ya queda consumido. No se promete entrega exactamente una vez por HTTP.
+- Las alertas se crean al ejecutar un lote, preparar la cola o abrir «Alertas». Sin proceso periódico activo no hay detección de caducidad en segundo plano.
+- Los trabajos terminados y las transiciones quedan en `monitor_jobs`/`monitor_events`; no se borra el histórico.
+
+### Uso y prueba supervisada
+
+En **Comparador → Administración → Vigilancia automática**:
+
+1. Añadir productos de Vytria (selección, importación de EAN o reglas), con marca/modelo/color completos.
+2. Revisar «Autorizaciones por método» y «Presupuestos». Las autorizaciones del piloto no se transfieren implícitamente al motor escalable.
+3. En «Localización automática», ejecutar un lote dirigido al competidor autorizado.
+4. En «Precios y monitorización», elegir **un competidor**, revisar el presupuesto y marcar la confirmación del lote. El botón procesa como máximo diez fichas por defecto y solo trabajos vencidos.
+5. Consultar precio Vytria/competidor, mejor competidor, diferencias (Vytria menos competidor, porcentaje sobre Vytria), stock, moneda, IVA, fecha y estado. Hay filtros de marca/estado/búsqueda y evolución histórica reutilizada.
+6. «Alertas» permite cambiar el umbral y descargar el resumen de correo, sin enviar nada.
+7. El dashboard general recibe las ofertas del mismo histórico; no hace falta volver a importarlas.
+
+CLI (desde el directorio de la aplicación; no ejecutar en producción sin aprobación):
+
+```text
+python price_monitor.py --db <ruta-SQLite> enqueue --competitor <id>
+python price_monitor.py --db <ruta-SQLite> run --competitor <id> --max-jobs 10
+python price_monitor.py --db <ruta-SQLite> status
+python price_monitor.py --db <ruta-SQLite> email-summary
+python price_monitor.py --db <ruta-SQLite> tick
+```
+
+`loop --every 300` está preparado, pero **no se instala ni se activa en la beta**.
+
+Prueba real preparada para **Visio Factory, Edel-Optics, Amevista y Óptica Óptima**:
+
+- Validar por escrito cada método y las rutas concretas; comprobar configuración de mercado/moneda/IVA y selectores del piloto.
+- Empezar con 2-5 EAN por competidor y fuentes de descubrimiento ya comprobadas. No es necesario introducir URLs de producto si hay método de localización autorizado.
+- Guardar el consumo inicial/final; ejecutar primero localización, después precios. Verificar manualmente identidad, precio, stock, IVA y mercado en la ficha.
+- Repetir el lote antes de su vencimiento: cero consultas. Repetir tras el intervalo configurado para comprobar actualización sin búsquedas.
+- Ante CAPTCHA/403/429, detenerse y revisar la incidencia; no reautorizar ni resolver automáticamente.
+- **ConGafasDeSol y Domanci siguen restringidos** hasta contar con autorización documentada de los métodos y rutas. No se han realizado consultas reales desde esta entrega.
+
+Pruebas automatizadas: `tests/test_price_monitor.py` incluye **500 EAN × dos competidores simulados** (1.000 combinaciones), localización/confirmación, precios, cambios, alertas, caída y recuperación, ausencia de nuevas búsquedas, presupuestos y protecciones. Incluye además migración desde esquema de fase 3, recibos tras caída entre importación/cierre, URL compartida por calibres, caducidad, umbral exacto e interfaz sin HTTP.
 
 ## Orden de integración de las PR
 
@@ -283,11 +333,12 @@ Estado comprobado el 3-11-2026 con `git merge-tree` sobre `origin`:
 | #106 | `fix/session-security-issue-18` | `main` | Sesión persistente, dashboard y autoconfirmación de fichas. |
 | #107 | `feat/price-watch-phase1` | `main` | Fase 1: vigilancia, autorizaciones y presupuestos. |
 | #108 | `feat/price-watch-phase2` | `feat/price-watch-phase1` | Fase 2: localizador, cola e índice. |
-| (fase 3) | `feat/price-watch-phase3` | `feat/price-watch-phase2` | Fase 3: descubrimiento ampliado y planificación. |
+| #109 | `feat/price-watch-phase3` | `feat/price-watch-phase2` | Fase 3: descubrimiento ampliado y planificación. |
+| (fase 4) | `feat/price-watch-phase4` | `feat/price-watch-phase3` | Beta: monitorización, comparativas y alertas. |
 
 - #106 y #107 parten del mismo commit de `main` (`9e9b625`). `main` no ha avanzado desde entonces.
 - **Único conflicto:** `Dockerfile`, en la línea `COPY price_pilot.py price_discovery.py …`. #106 añade `price_auto_confirm.py` y #107/#108 añaden `price_access.py price_watch.py price_locator.py`. La resolución consiste en conservar todos los módulos:
-  `COPY price_pilot.py price_discovery.py price_auto_confirm.py price_access.py price_watch.py price_locator.py .`
+  `COPY price_pilot.py price_discovery.py price_auto_confirm.py price_access.py price_watch.py price_locator.py price_monitor.py .`
 - `price_comparator.py` y `app_pages/price_comparator.py` se combinan automáticamente: los cambios de esquema de #106 y de las fases son independientes.
 
 **Orden:**
@@ -300,27 +351,32 @@ Estado comprobado el 3-11-2026 con `git merge-tree` sobre `origin`:
    - Cambiar su base a `main` (GitHub lo hace al fusionar #107 si se borra la rama), actualizarla y volver a resolver la misma línea del `Dockerfile`.
    - Esperar el CI y fusionarla.
 4. **Fase 3:** igual que #108, con base `main` tras fusionar #108.
+5. **Fase 4:** actualizar base a `main` después de #109, conservar también `price_monitor.py` en el Dockerfile y repetir CI y validación integrada.
 
 - **No fusionar una fase sin la anterior:** cada una depende de las tablas y clases de la previa.
-- **El despliegue solo ocurre con un push a `main`.** Ninguna fase activa por sí misma consultas reales:
+- **No confundir integración con despliegue:** un push a `main` publica imagen; el despliegue productivo depende del workflow `deploy-cloud-production.yml` (manual o `CLOUD_AUTO_DEPLOY=true`). Antes de integrar, verificar que esta variable no activa despliegues no autorizados. No se modifica aquí.
+- Ninguna fase activa por sí misma consultas reales:
   - Las autorizaciones nacen pendientes.
-  - La planificación necesita `PRICE_LOCATOR_SCHEDULE_ENABLED=1` y habilitar cada competidor.
-- Se puede desplegar tras cualquier paso del orden anterior sin dejar una fase a medias.
+  - Localización y monitorización necesitan sus interruptores independientes y habilitar cada competidor.
+- Para esta beta, revisar e integrar la pila completa antes de autorizar un único despliegue.
 
 ## Próximas fases
 
-### Fase 4: monitorización
+### Despliegue de la beta en `s2026` (preparado, NO ejecutado)
 
-Implementar el diseño anterior: monitorización periódica de las fichas verificadas, caducidad de precios y alertas de precio y disponibilidad sin duplicados.
+Requiere autorización humana; no se ha accedido al servidor ni validado sus montajes desde este entorno.
 
-### Activación en `s2026`
+1. **Inventario y parada de escrituras:** registrar digest/commit actual y configuración Compose efectiva sin imprimir secretos. Verificar el controlador de despliegue y pausar escritores del comparador durante la ventana autorizada. No detener servicios desconocidos ni el puerto 8508.
+2. **Backup:** en almacenamiento privado fuera de Git, guardar la configuración/secretos con permisos restringidos y generar snapshots coherentes de `price_comparator.sqlite3` y `auth_state.sqlite3`. Reutilizar [snapshot_sqlite_copy.py](../../scripts/snapshot_sqlite_copy.py) con `--source` y un `--target` nuevo si el almacenamiento es local y todos los escritores están parados: conserva DB+WAL, usa `Connection.backup` en una copia y verifica integridad/recuentos sin abrir el original. Si la ruta no es local, no eludir su guarda; revisar el procedimiento de almacenamiento aprobado. No copiar solo el `.sqlite3` con WAL activo. Verificar existencia/fecha de las copias. No rotar `AUTH_COOKIE_SECRET`.
+3. **Ensayo de migración:** duplicar el backup del comparador; abrir esa copia con `PriceComparatorStore` de la imagen candidata. Comprobar `integrity_check`, `foreign_key_check`, recuentos intactos de productos/ofertas/URLs/vigilancia/piloto y creación de `monitor_jobs`, `monitor_events`, `monitor_schedule`, `price_alerts`. Repetir el arranque en la misma copia para verificar idempotencia. No ensayar sobre la base productiva.
+4. **Persistencia:** confirmar en la definición efectiva de producción que `/app/data` está montado en el volumen persistente con permisos para el usuario del contenedor. `PRICE_COMPARATOR_DB_PATH=/app/data/price_comparator.sqlite3`, `AUTH_STATE_PATH=/app/data/auth_state.sqlite3` y el mismo `AUTH_COOKIE_SECRET` deben sobrevivir al cambio de imagen. El despliegue usa su snapshot aprobado, no necesariamente el Compose del repositorio. SQLite con una única instancia sigue siendo suficiente; no se añade PostgreSQL ni otro servicio.
+5. **Interruptores:** mantener `PRICE_LOCATOR_SCHEDULE_ENABLED` y `PRICE_MONITOR_SCHEDULE_ENABLED` ausentes o a `0`, sin instalar `loop`. Verificar también los planificadores legacy/piloto y la ausencia de nuevos servicios/tareas del host. El correo no tiene envío automático.
+6. **Imagen y arranque:** desplegar únicamente el digest aprobado del commit integrado con CI verde; no `latest` mutable. Usar el procedimiento existente del controlador para sustituir la imagen, sin recrear los volúmenes. Verificar salud de Streamlit, imports de todos los módulos y logs sin credenciales/tokens.
+7. **Autenticación:** probar login y acceso según permisos, cookie recordada antes/después de recrear la aplicación con el mismo secreto y almacén. Mantener el backup de autenticación; no invalidar sesiones por rotación accidental.
+8. **Comparador:** abrir dashboard, piloto y vigilancia sin que se reserve ninguna petición HTTP. Verificar datos Vytria ya sincronizados, contadores y alertas. Ejecutar solo el lote real acotado descrito arriba tras autorización. Anotar resultados y peticiones consumidas.
+9. **Rollback:** apagar cualquier tarea de la beta; volver al digest anterior y su Compose/configuración aprobados. Las tablas nuevas son aditivas y la versión anterior las ignora. Si la migración/datos no superan validación, restaurar el backup coherente con todos los escritores detenidos, sin mezclar archivos WAL de distintas versiones; volver a comprobar integridad, login y piloto. Restaurar el almacén de autenticación solo si es necesario y manteniendo el mismo secreto; nunca publicar backups.
 
-Para activarlo en `s2026`:
-
-1. Documentar las autorizaciones de cada competidor y método.
-2. Configurar las fuentes de listado.
-3. Activar `PRICE_LOCATOR_SCHEDULE_ENABLED` y el servicio `price_locator.py loop`.
-4. Habilitar los competidores uno a uno, empezando por los de bajo volumen.
+La habilitación periódica y el envío de correo quedan fuera de esta autorización de beta.
 
 ### Integración externa futura
 

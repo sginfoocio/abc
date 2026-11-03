@@ -112,7 +112,7 @@ jobs:
           import app_exports, app_navigation, app_pages.alerts, app_pages.luxoptica
           import provider_images, provider_images_ui, provider_odoo_orders, repository_catalog_readonly, marcolin_images, safilo_images, nuorder_images
           import cloud_dashboard, kering_images_ui, kering_portal, kering_jobs, graph_mail_downloader, abcd_snapshots, image_exports, luxoptica_auto_upload, repository_storage, market_publication
-          import price_pilot, price_scheduler, price_web, app_pages.price_comparator
+          import price_pilot, price_scheduler, price_web, price_monitor, app_pages.price_comparator
           from build_info import load_build_info
           info = load_build_info()
           assert info['commit'] == os.environ['EXPECTED_COMMIT']
@@ -272,6 +272,7 @@ jobs:
           flake8 image_naming.py image_exports.py image_repository.py migrate_image_repository.py kering_media.py tests/test_kering_image_sections.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 market_publication.py tests/test_market_publication.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 price_discovery.py price_pilot.py price_web.py price_web_extract.py tests/test_price_discovery.py --count --select=E9,F63,F7,F82,F401,F841 --show-source --statistics
+          flake8 price_monitor.py tests/test_price_monitor.py --count --select=E9,F63,F7,F82,F401,F841 --show-source --statistics
           flake8 market_publication.py tests/test_market_publication.py --count --max-complexity=10 --max-line-length=127 --statistics
           flake8 image_library.py cloud_design.py app_pages/image_library_page.py tests/test_image_library.py --count --select=E9,F63,F7,F82,F401,F841 --show-source --statistics
           flake8 kering_images.py kering_images_ui.py kering_portal.py kering_jobs.py scripts/dependency_locks.py scripts/validate_kering_portal.py tests/test_kering_images.py --count --select=E9,F63,F7,F82 --show-source --statistics

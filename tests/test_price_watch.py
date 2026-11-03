@@ -151,7 +151,8 @@ def test_watch_admin_ui_adds_products_and_shows_authorizations(tmp_path, monkeyp
     assert PriceWatch(store).counts()["import"] == 1
     assert any("1 añadidos" in str(item.value) for item in app.warning)
     for section in ("Productos vigilados", "Reglas de vigilancia", "Grupos y frecuencia", "Localización automática",
-                    "Autorizaciones por método", "Presupuestos", "Bloqueos e incidencias"):
+                    "Precios y monitorización", "Alertas", "Autorizaciones por método",
+                    "Presupuestos", "Bloqueos e incidencias"):
         app.selectbox(key="price_watch_section").set_value(section).run(timeout=30)
         assert not app.exception, section
     app.selectbox(key="price_watch_section").set_value("Autorizaciones por método").run(timeout=30)
