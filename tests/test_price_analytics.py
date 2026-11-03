@@ -209,7 +209,7 @@ def test_dashboard_filters_recompute_the_selected_competitor_minimum_and_dedupli
 
     all_competitors = pa.dashboard_scope(summary, offers)
     one_competitor = pa.dashboard_scope(summary, offers, competitors=["Tienda USD"], query="A1",
-                                        states=[pa.POSITION_HIGHER])
+                                        brands=["Marca A"], states=[pa.POSITION_HIGHER])
     pairs = pa.comparable_pairs(summary, offers)
 
     assert all_competitors.iloc[0]["competitor_min_eur"] == 80
@@ -217,6 +217,91 @@ def test_dashboard_filters_recompute_the_selected_competitor_minimum_and_dedupli
     assert one_competitor.iloc[0]["competitor_count"] == 1
     assert len(pairs[pairs["competitor"] == "Tienda USD"]) == 1
     assert pairs[pairs["competitor"] == "Tienda USD"].iloc[0]["competitor_eur"] == 95
+    coverage = pa.comparison_coverage(one_competitor)
+    position = pa.competitive_position_counts(one_competitor)
+    indicators = pa.kpis(one_competitor, 0)
+    assert coverage == {"total": 1, "compared": 1, "not_compared": 0, "coverage_pct": 100.0}
+    assert position["count"].tolist() == [0, 0, 1]
+    assert position["share_pct"].sum() == pytest.approx(100)
+    assert position.iloc[2]["count"] == indicators["vytria_more_expensive"]
+    assert position.iloc[0]["count"] + position.iloc[1]["count"] == indicators["vytria_cheaper"] + (
+        int((one_competitor["difference_eur"] == 0).sum())
+    )
+
+
+def test_coverage_and_competitive_position_use_distinct_denominators():
+    summary = pd.DataFrame([
+        {"own_price_eur": 95.0, "difference_eur": -5.0, "difference_vs_competitor_pct": -5.0},
+        {"own_price_eur": 100.0, "difference_eur": 0.0, "difference_vs_competitor_pct": 0.0},
+        {"own_price_eur": 110.0, "difference_eur": 10.0, "difference_vs_competitor_pct": 10.0},
+        {"own_price_eur": 80.0, "difference_eur": float("nan"), "difference_vs_competitor_pct": float("nan")},
+    ])
+
+    coverage = pa.comparison_coverage(summary)
+    positions = pa.competitive_position_counts(summary)
+    indicators = pa.kpis(summary, 0)
+
+    assert coverage == {"total": 4, "compared": 3, "not_compared": 1, "coverage_pct": 75.0}
+    assert positions["count"].tolist() == [1, 1, 1]
+    assert positions["share_pct"].tolist() == pytest.approx([100 / 3] * 3)
+    assert positions.iloc[0]["count"] + positions.iloc[1]["count"] == int(
+        (summary["difference_eur"] <= 0).sum()
+    )
+    assert positions.iloc[0]["count"] + positions.iloc[1]["count"] == 2
+    assert positions.iloc[2]["count"] == indicators["vytria_more_expensive"]
+    assert positions.iloc[0]["count"] + positions.iloc[1]["count"] == pytest.approx(
+        indicators["compared"] * (indicators["best_price_pct"] / 100)
+    )
+
+
+@pytest.mark.parametrize(
+    ("differences", "coverage_counts", "position_counts"),
+    [
+        ([float("nan"), float("nan")], (2, 0, 2), (0, 0, 0)),
+        ([-1.0, 0.0], (2, 2, 0), (1, 1, 0)),
+        ([-1.0, 0.0, 3.0, float("nan")], (4, 3, 1), (1, 1, 1)),
+    ],
+)
+def test_coverage_and_position_figures_expose_counts_and_percentages(
+    differences, coverage_counts, position_counts
+):
+    summary = pd.DataFrame({
+        "own_price_eur": [100.0] * len(differences),
+        "difference_eur": differences,
+        "difference_vs_competitor_pct": [0.0 if pd.isna(value) else value for value in differences],
+    })
+    coverage = pa.comparison_coverage(summary)
+    positions = pa.competitive_position_counts(summary)
+    coverage_figure = pa.comparison_coverage_figure(summary)
+    position_figure = pa.competitive_position_figure(summary)
+
+    assert (coverage["total"], coverage["compared"], coverage["not_compared"]) == coverage_counts
+    assert positions["count"].tolist() == list(position_counts)
+    assert sum(positions["share_pct"]) == pytest.approx(100 if coverage["compared"] else 0)
+    assert len(coverage_figure.data) == 2
+    assert len(position_figure.data) == 3
+    assert [trace.name.split(" · ")[1].split(" (")[0] for trace in coverage_figure.data] == [
+        f"{count}" for count in coverage_counts[1:]
+    ]
+    assert [trace.x[0] for trace in coverage_figure.data] == pytest.approx([
+        coverage["coverage_pct"] or 0,
+        100 - coverage["coverage_pct"] if coverage["total"] else 0,
+    ])
+    assert [trace.x[0] for trace in position_figure.data] == pytest.approx(
+        positions["share_pct"].tolist()
+    )
+    assert all(trace.text[0] for trace in coverage_figure.data + position_figure.data)
+    assert not coverage_figure.layout.xaxis.visible and not position_figure.layout.xaxis.visible
+
+
+def test_empty_catalog_has_no_fabricated_coverage_or_competitive_observations():
+    summary = pd.DataFrame(columns=["own_price_eur", "difference_eur", "difference_vs_competitor_pct"])
+
+    assert pa.comparison_coverage(summary) == {
+        "total": 0, "compared": 0, "not_compared": 0, "coverage_pct": None,
+    }
+    assert pa.competitive_position_counts(summary)["count"].tolist() == [0, 0, 0]
+    assert pa.kpis(summary, 0)["best_price_pct"] is None
 
 
 def test_distribution_and_competitiveness_figures_match_their_data():
@@ -245,6 +330,11 @@ def test_page_shows_insufficient_data_message_and_renders_with_data(tmp_path, mo
     assert any("Datos insuficientes para medir competitividad" in item.value for item in app.info)
     assert [m.label for m in app.metric[:4]] == [
         "Productos comparados", "Igual o más barato", "Más caro", "Diferencia media vs. mejor"]
+    rendered_headers = {item.value for item in app.header}
+    assert {
+        "Cobertura de comparación", "Posición competitiva",
+        "Evolución de la competitividad", "Dónde debemos actuar",
+    }.issubset(rendered_headers)
     assert app.metric[0].value == "0 / 1"
     assert app.metric[1].value == "Sin datos" and app.metric[2].value == "Sin datos"
     assert app.button(key="update_competitors").disabled  # nothing enabled yet: Pendiente de configurar

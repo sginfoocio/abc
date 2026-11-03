@@ -351,9 +351,35 @@ def _render_summary(store: PriceComparatorStore, data: dict) -> None:
         st.caption(f"{indicators['no_information']} productos quedan fuera del porcentaje: "
                    f"{no_own} sin precio Vytria y {no_competitor} sin competencia comparable.")
 
-    st.header("Cómo evolucionamos")
-    st.plotly_chart(analytics.positioning_distribution_figure(scoped), width="stretch",
-                    key="dashboard_positioning_chart")
+    coverage = analytics.comparison_coverage(scoped)
+    st.header("Cobertura de comparación")
+    st.caption(
+        f"Catálogo filtrado: {coverage['total']} productos. "
+        "La cobertura es el porcentaje con comparación válida sobre ese total."
+    )
+    st.plotly_chart(
+        analytics.comparison_coverage_figure(scoped),
+        width="stretch",
+        key="dashboard_coverage_chart",
+        config={"displayModeBar": False, "responsive": True},
+    )
+
+    st.header("Posición competitiva")
+    if indicators["compared"]:
+        st.caption(
+            f"Solo productos con comparación válida ({indicators['compared']}); "
+            "los porcentajes usan esos productos como denominador. El empate cuenta como competitivo."
+        )
+        st.plotly_chart(
+            analytics.competitive_position_figure(scoped),
+            width="stretch",
+            key="dashboard_positioning_chart",
+            config={"displayModeBar": False, "responsive": True},
+        )
+    else:
+        st.info("No hay productos con comparación válida en el catálogo filtrado.")
+
+    st.header("Evolución de la competitividad")
     history = analytics.competitiveness_series(
         store, DASHBOARD_WINDOWS[window], expiry_days=data["expiry"], eans=scoped["ean"].tolist(),
         competitors=selected_competitors or None)
