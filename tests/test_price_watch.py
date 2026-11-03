@@ -150,8 +150,8 @@ def test_watch_admin_ui_adds_products_and_shows_authorizations(tmp_path, monkeyp
     assert not app.exception
     assert PriceWatch(store).counts()["import"] == 1
     assert any("1 añadidos" in str(item.value) for item in app.warning)
-    for section in ("Productos vigilados", "Reglas de vigilancia", "Grupos y frecuencia", "Autorizaciones por método",
-                    "Presupuestos", "Bloqueos e incidencias"):
+    for section in ("Productos vigilados", "Reglas de vigilancia", "Grupos y frecuencia", "Localización automática",
+                    "Autorizaciones por método", "Presupuestos", "Bloqueos e incidencias"):
         app.selectbox(key="price_watch_section").set_value(section).run(timeout=30)
         assert not app.exception, section
     app.selectbox(key="price_watch_section").set_value("Autorizaciones por método").run(timeout=30)
@@ -159,3 +159,31 @@ def test_watch_admin_ui_adds_products_and_shows_authorizations(tmp_path, monkeyp
     matrix = matrix.set_index("Competidor")
     assert "Prohibido" in matrix.loc["Domanci"].tolist()
     assert "Autorizado" not in matrix.values.ravel().tolist()
+
+
+def test_locator_ui_counts_queue_and_runs_without_requests_when_nothing_is_authorised(tmp_path, monkeypatch):
+    import requests
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("La pantalla no debe hacer peticiones HTTP")
+
+    monkeypatch.setattr(requests, "get", forbidden)
+    store = _store(tmp_path)
+    store.seed_defaults()
+    monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
+    report = PriceWatch(store).add([EAN], actor="ana")
+    total = len(store.competitors())
+    assert report.queued == total and f"{total} búsquedas en cola" in report.summary
+    app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
+                              "render_price_comparator_page()").run(timeout=30)
+    app.selectbox(key="price_admin_section").set_value("Vigilancia automática").run(timeout=30)
+    app.selectbox(key="price_watch_section").set_value("Localización automática").run(timeout=30)
+    assert not app.exception
+    assert {metric.label: metric.value for metric in app.metric}["Pendientes"] == str(total)
+    app.button(key="locate_enqueue").click().run(timeout=30)
+    assert any("0 búsquedas nuevas" in str(item.value) for item in app.success)
+    app.button(key="locate_run").click().run(timeout=30)
+    assert not app.exception
+    assert {metric.label: metric.value for metric in app.metric}["Sin acceso / bloqueadas"] == str(total)
+    from price_locator import PriceLocator
+    assert set(PriceLocator(store).jobs()["state"]) == {"unavailable"}

@@ -598,6 +598,73 @@ class PriceComparatorStore:
                         note TEXT NOT NULL DEFAULT '',
                         at TEXT NOT NULL
                     );
+                    -- Automatic locator (price_locator): one job per watched product and competitor.
+                    CREATE TABLE IF NOT EXISTS locate_jobs (
+                        id INTEGER PRIMARY KEY,
+                        ean TEXT NOT NULL REFERENCES products(ean),
+                        competitor_id TEXT NOT NULL REFERENCES competitors(id),
+                        kind TEXT NOT NULL DEFAULT 'locate',
+                        state TEXT NOT NULL DEFAULT 'pending',
+                        priority INTEGER NOT NULL DEFAULT 100,
+                        attempts INTEGER NOT NULL DEFAULT 0,
+                        not_before TEXT,
+                        lease_until TEXT,
+                        url TEXT NOT NULL DEFAULT '',
+                        method TEXT NOT NULL DEFAULT '',
+                        detail TEXT NOT NULL DEFAULT '',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        UNIQUE(competitor_id, ean)
+                    );
+                    CREATE INDEX IF NOT EXISTS locate_jobs_queue_idx ON locate_jobs(competitor_id, state, priority);
+                    CREATE TABLE IF NOT EXISTS locate_events (
+                        id INTEGER PRIMARY KEY,
+                        job_id INTEGER NOT NULL REFERENCES locate_jobs(id),
+                        at TEXT NOT NULL,
+                        state TEXT NOT NULL,
+                        method TEXT NOT NULL DEFAULT '',
+                        url TEXT NOT NULL DEFAULT '',
+                        detail TEXT NOT NULL DEFAULT '',
+                        requests INTEGER NOT NULL DEFAULT 0
+                    );
+                    CREATE TABLE IF NOT EXISTS discovery_sources (
+                        id INTEGER PRIMARY KEY,
+                        competitor_id TEXT NOT NULL REFERENCES competitors(id),
+                        method TEXT NOT NULL,
+                        url_template TEXT NOT NULL,
+                        refresh_hours REAL NOT NULL DEFAULT 168,
+                        max_pages INTEGER NOT NULL DEFAULT 10,
+                        active INTEGER NOT NULL DEFAULT 1,
+                        note TEXT NOT NULL DEFAULT '',
+                        created_by TEXT NOT NULL DEFAULT '',
+                        created_at TEXT NOT NULL,
+                        UNIQUE(competitor_id, url_template)
+                    );
+                    CREATE TABLE IF NOT EXISTS discovery_pages (
+                        competitor_id TEXT NOT NULL REFERENCES competitors(id),
+                        url TEXT NOT NULL,
+                        method TEXT NOT NULL,
+                        fetched_at TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        links INTEGER NOT NULL DEFAULT 0,
+                        next_url TEXT NOT NULL DEFAULT '',
+                        detail TEXT NOT NULL DEFAULT '',
+                        PRIMARY KEY (competitor_id, url)
+                    );
+                    CREATE TABLE IF NOT EXISTS discovery_index (
+                        competitor_id TEXT NOT NULL REFERENCES competitors(id),
+                        url TEXT NOT NULL,
+                        label TEXT NOT NULL DEFAULT '',
+                        signature TEXT NOT NULL,
+                        method TEXT NOT NULL,
+                        source_url TEXT NOT NULL DEFAULT '',
+                        first_seen TEXT NOT NULL,
+                        last_seen TEXT NOT NULL,
+                        checked_at TEXT,
+                        check_state TEXT NOT NULL DEFAULT '',
+                        facts TEXT NOT NULL DEFAULT '',
+                        PRIMARY KEY (competitor_id, url)
+                    );
                 """)
                 for table, columns in _ADDED_COLUMNS.items():
                     existing = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}

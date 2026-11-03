@@ -10,10 +10,11 @@ import streamlit as st
 from price_access import (DEFAULT_BUDGETS, INCIDENT_KINDS, METHOD_STATES, METHODS, AccessControl,
                           external_search_enabled)
 from price_comparator import PriceComparatorStore
+from price_locator import JOB_STATES, SOURCE_METHODS, PriceLocator
 from price_watch import DEFAULT_GROUP, SOURCES, PriceWatch, WatchReport, eans_from_frame, parse_eans
 
 SECTIONS = ["Productos vigilados", "Añadir productos", "Reglas de vigilancia", "Grupos y frecuencia",
-            "Autorizaciones por método", "Presupuestos", "Bloqueos e incidencias"]
+            "Localización automática", "Autorizaciones por método", "Presupuestos", "Bloqueos e incidencias"]
 
 
 def _actor() -> str:
@@ -33,8 +34,9 @@ def _render_watchlist(watch: PriceWatch) -> None:
     cols[1].metric("Selección individual", counts["manual"])
     cols[2].metric("Importación masiva", counts["import"])
     cols[3].metric("Por reglas", counts["rule"])
-    st.caption(f"Catálogo del comparador: {counts['catalog']} productos. La vigilancia no lanza consultas por sí "
-               "sola: la localización y la monitorización automáticas llegan en las siguientes fases.")
+    st.caption(f"Catálogo del comparador: {counts['catalog']} productos. Al añadir productos se preparan sus "
+               "búsquedas en todos los competidores; la localización se ejecuta por lotes en «Localización "
+               "automática». La monitorización periódica de precios llega en una fase posterior.")
     frame = watch.watchlist()
     if frame.empty:
         st.info("Todavía no hay productos en vigilancia.")
@@ -262,13 +264,123 @@ def _render_incidents(access: AccessControl, names: dict[str, str]) -> None:
                 st.error(str(exc))
 
 
+def _render_locator(store: PriceComparatorStore, names: dict[str, str]) -> None:
+    st.caption("Motor propio: busca cada producto vigilado por marca + modelo + código de color en las fuentes "
+               "autorizadas (URL ya verificada, feed, sitemap, páginas de marca/catálogo, buscador interno), guarda "
+               "un índice local reutilizable y confirma solo coincidencias exactas. Sin servicios externos. Un "
+               "bloqueo o un límite suspende el competidor; la falta de autorización nunca se registra como "
+               "«producto inexistente».")
+    locator = PriceLocator(store)
+    c1, c2, c3, c4 = st.columns([1.2, 1.5, 1, 1])
+    if c1.button("Preparar cola", key="locate_enqueue", width="stretch",
+                 help="Crea las búsquedas pendientes de los productos vigilados (sin consultas HTTP)."):
+        result = locator.enqueue()
+        st.success(f"{result['created']} búsquedas nuevas · {result['relocate']} relocalizaciones · "
+                   f"{result['reopened']} reabiertas tras cambios de autorización.")
+    target = c2.selectbox("Competidor", ["Todos", *sorted(names, key=names.get)], key="locate_competitor",
+                          format_func=lambda value: names.get(value, value))
+    max_jobs = c3.number_input("Máx. productos", 1, 2000, 50, key="locate_max_jobs")
+    deadline = c4.number_input("Plazo (min)", 1, 120, 10, key="locate_deadline")
+    if st.button("Procesar lote", key="locate_run", type="primary",
+                 help="Consulta solo métodos autorizados, dentro de presupuestos, pausas y robots.txt."):
+        with st.spinner("Localizando fichas…"):
+            report = locator.run(None if target == "Todos" else [target], max_jobs=int(max_jobs),
+                                 deadline_seconds=float(deadline) * 60)
+        st.success(report.summary)
+        for cid, reason in report.stopped.items():
+            st.warning(f"{names.get(cid, cid)}: {reason}")
+
+    status = locator.status()
+    totals = status.groupby("state")["jobs"].sum() if not status.empty else pd.Series(dtype=int)
+    cols = st.columns(5)
+    for col, (label, keys) in zip(cols, [("Verificadas", ("done",)), ("Pendientes", ("pending", "running", "waiting")),
+                                         ("Revisión manual", ("review",)),
+                                         ("Sin acceso / bloqueadas", ("unavailable", "blocked")),
+                                         ("Sin ficha / fallidas", ("not_found", "failed"))]):
+        col.metric(label, int(sum(totals.get(key, 0) for key in keys)))
+    if not status.empty:
+        pivot = status.assign(state=status["state"].map(lambda s: JOB_STATES.get(s, s))).pivot_table(
+            index="competitor", columns="state", values="jobs", aggfunc="sum", fill_value=0)
+        st.dataframe(pivot, width="stretch")
+
+    review = locator.jobs(states=("review",))
+    st.markdown(f"**Revisión manual** ({len(review)})")
+    if review.empty:
+        st.caption("No hay coincidencias dudosas pendientes.")
+    else:
+        st.dataframe(review[["ean", "brand", "model", "color", "competitor", "url", "detail", "updated_at"]].rename(
+            columns={"ean": "EAN", "brand": "Marca", "model": "Modelo", "color": "Color", "competitor": "Competidor",
+                     "url": "Ficha", "detail": "Evidencia", "updated_at": "Fecha"}),
+            hide_index=True, width="stretch", column_config={"Ficha": st.column_config.LinkColumn("Ficha")})
+        labels = {row.id: f"{row.ean} · {row.brand} {row.model} {row.color} · {row.competitor}"
+                  for row in review.itertuples()}
+        with st.form("locate_review_form"):
+            job_id = st.selectbox("Candidato", list(labels), format_func=labels.get, key="locate_review_job")
+            note = st.text_input("Motivo de la decisión", key="locate_review_note")
+            accept, reject = st.columns(2)
+            decision = ("accept" if accept.form_submit_button("Confirmar ficha") else
+                        "reject" if reject.form_submit_button("Descartar ficha") else "")
+            if decision:
+                row = review.set_index("id").loc[job_id]
+                try:
+                    locator.review(row["ean"], row["competitor_id"], row["url"], accept=decision == "accept",
+                                   actor=_actor(), note=note)
+                    st.success("Decisión registrada y auditada.")
+                except ValueError as exc:
+                    st.error(str(exc))
+
+    with st.expander("Últimas búsquedas"):
+        recent = locator.jobs(limit=200)
+        if recent.empty:
+            st.caption("Sin búsquedas todavía.")
+        else:
+            st.dataframe(recent.assign(state=recent["state"].map(lambda s: JOB_STATES.get(s, s)))[
+                ["ean", "brand", "model", "color", "competitor", "kind", "state", "method", "url", "detail",
+                 "updated_at"]], hide_index=True, width="stretch")
+    with st.expander("Índice local de fichas"):
+        st.caption("Fichas y enlaces ya descubiertos: se reutilizan entre productos y ejecuciones. Las páginas de "
+                   "marca/catálogo solo se vuelven a consultar cuando caducan.")
+        st.dataframe(locator.index_summary().rename(columns={
+            "competitor": "Competidor", "indexed": "Enlaces indexados", "checked": "Fichas comprobadas",
+            "pages": "Páginas de listado", "last_refresh": "Última actualización", "sources": "Fuentes activas"}),
+            hide_index=True, width="stretch")
+    with st.expander("Fuentes de descubrimiento (catálogo / feed)"):
+        st.caption("Plantillas de páginas de marca o catálogo del propio competidor. Solo se usan si el método "
+                   "correspondiente está autorizado y robots.txt lo permite. Variable admitida: {brand}.")
+        sources = locator.sources()
+        if not sources.empty:
+            st.dataframe(sources[["competitor", "method", "url_template", "refresh_hours", "max_pages", "active",
+                                  "note", "created_by"]], hide_index=True, width="stretch")
+        with st.form("locate_source_form"):
+            s1, s2 = st.columns([1, 1])
+            cid = s1.selectbox("Competidor", sorted(names, key=names.get), format_func=names.get,
+                               key="locate_source_competitor")
+            method = s2.selectbox("Tipo", SOURCE_METHODS, key="locate_source_method",
+                                  format_func={"catalog": "Catálogo / marca", "feed": "Feed del competidor"}.get)
+            template = st.text_input("URL", placeholder="https://tienda.example/marca/{brand}",
+                                     key="locate_source_url")
+            s3, s4, s5 = st.columns(3)
+            refresh = s3.number_input("Caducidad (h)", 1, 24 * 90, 168, key="locate_source_refresh")
+            pages = s4.number_input("Máx. páginas", 1, 200, 10, key="locate_source_pages")
+            active = s5.checkbox("Activa", value=True, key="locate_source_active")
+            note = st.text_input("Nota", key="locate_source_note")
+            if st.form_submit_button("Guardar fuente"):
+                try:
+                    locator.save_source(cid, method, template, actor=_actor(), note=note,
+                                        refresh_hours=float(refresh), max_pages=int(pages), active=active)
+                    st.success("Fuente guardada.")
+                except ValueError as exc:
+                    st.error(str(exc))
+
+
 def render_watch_admin(store: PriceComparatorStore) -> None:
     st.subheader("Vigilancia automática")
-    st.caption("Motor escalable en preparación (fase 1: qué se vigila y con qué permisos y límites). El piloto de "
-               "20 EAN sigue funcionando por separado y no usa esta configuración.")
+    st.caption("Motor escalable propio (fase 1: qué se vigila, permisos y límites; fase 2: localización automática "
+               "de fichas). El piloto de 20 EAN sigue funcionando por separado y no usa esta configuración.")
     watch, access = PriceWatch(store), AccessControl(store)
     watch.ensure_defaults()
     access.ensure_defaults()
+    PriceLocator(store).seed_sources()
     names = dict(store.competitors()[["id", "name"]].itertuples(index=False, name=None))
     section = st.selectbox("Apartado", SECTIONS, key="price_watch_section")
     if section == "Productos vigilados":
@@ -279,6 +391,8 @@ def render_watch_admin(store: PriceComparatorStore) -> None:
         _render_rules(watch)
     elif section == "Grupos y frecuencia":
         _render_groups(watch)
+    elif section == "Localización automática":
+        _render_locator(store, names)
     elif section == "Autorizaciones por método":
         _render_methods(access)
     elif section == "Presupuestos":
