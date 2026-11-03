@@ -30,6 +30,9 @@ _ADDED_COLUMNS = {
     "pilot_runs": {"operation": "TEXT NOT NULL DEFAULT 'prices'",
                    "selection": "TEXT NOT NULL DEFAULT '[]'",
                    "selection_request": "TEXT NOT NULL DEFAULT '[]'"},
+    "pilot_url_candidates": {"review_origin": "TEXT NOT NULL DEFAULT ''",
+                             "review_rule": "TEXT NOT NULL DEFAULT ''",
+                             "review_evidence": "TEXT NOT NULL DEFAULT ''"},
     "competitor_web_config": {
         "sales_market": "TEXT NOT NULL DEFAULT ''",
         "market_verified": "INTEGER NOT NULL DEFAULT 0",
@@ -453,6 +456,17 @@ class PriceComparatorStore:
                         reviewed_at TEXT,
                         review_note TEXT NOT NULL DEFAULT '',
                         UNIQUE(run_id,competitor_id,ean,url)
+                    );
+                    CREATE TABLE IF NOT EXISTS pilot_candidate_reevaluations (
+                        id INTEGER PRIMARY KEY,
+                        batch TEXT NOT NULL,
+                        candidate_id INTEGER NOT NULL REFERENCES pilot_url_candidates(id),
+                        evaluated_at TEXT NOT NULL,
+                        rule TEXT NOT NULL,
+                        previous_state TEXT NOT NULL,
+                        result TEXT NOT NULL,
+                        reasons TEXT NOT NULL,
+                        note TEXT NOT NULL
                     );
                     CREATE UNIQUE INDEX IF NOT EXISTS scheduler_jobs_open_idx
                         ON scheduler_jobs(competitor_id, ean) WHERE status IN ('pending', 'running');

@@ -58,6 +58,7 @@ from order_alerts import (
 )
 from auth_session import (
     AuthStateStore,
+    PostgresAuthStateStore,
     create_auth_token,
     derive_session_signing_key,
     login_bucket_keys,
@@ -104,6 +105,7 @@ AUTH_REMEMBER_DAYS_DEFAULT = 30
 AUTH_COOKIE_NAME = "abc_auth_session"
 AUTH_PASSWORD_ENV = "APP_PASSWORD"
 AUTH_STATE_PATH_ENV = "AUTH_STATE_PATH"
+AUTH_STATE_DATABASE_URL_ENV = "AUTH_STATE_DATABASE_URL"
 AUTH_LOGIN_MAX_ATTEMPTS_ENV = "AUTH_LOGIN_MAX_ATTEMPTS"
 AUTH_LOGIN_WINDOW_SECONDS_ENV = "AUTH_LOGIN_WINDOW_SECONDS"
 AUTH_COOKIE_SECRET_MIN_LENGTH = 32
@@ -476,11 +478,22 @@ def _get_auth_cookie_secret() -> str:
     return os.getenv(AUTH_COOKIE_SECRET_ENV, "").strip()
 
 
-def _get_auth_state_store() -> AuthStateStore:
+@st.cache_resource
+def _create_postgres_auth_state_store(database_url: str) -> PostgresAuthStateStore:
+    return PostgresAuthStateStore(database_url)
+
+
+def _get_auth_state_store() -> AuthStateStore | PostgresAuthStateStore:
     if "_auth_state_store" not in st.session_state:
-        default_path = Path(__file__).resolve().parent / "masterdata_data" / "auth_state.sqlite3"
-        state_path = Path(os.getenv(AUTH_STATE_PATH_ENV, str(default_path)))
-        st.session_state["_auth_state_store"] = AuthStateStore(state_path)
+        database_url = os.getenv(AUTH_STATE_DATABASE_URL_ENV, "").strip()
+        if database_url:
+            st.session_state["_auth_state_store"] = _create_postgres_auth_state_store(
+                database_url
+            )
+        else:
+            default_path = Path(__file__).resolve().parent / "masterdata_data" / "auth_state.sqlite3"
+            state_path = Path(os.getenv(AUTH_STATE_PATH_ENV, str(default_path)))
+            st.session_state["_auth_state_store"] = AuthStateStore(state_path)
     return st.session_state["_auth_state_store"]
 
 
@@ -516,6 +529,8 @@ def _verify_auth_token(
     secret: str,
 ) -> bool:
     """Valida firma, usuario y expiración de un token de sesión recordada."""
+    if len(secret) < AUTH_COOKIE_SECRET_MIN_LENGTH:
+        return False
     signing_key = derive_session_signing_key(secret, expected_user, password)
     claims = verify_auth_token(token, expected_user, signing_key)
     return bool(claims and not _get_auth_state_store().is_revoked(claims.session_id))
@@ -644,7 +659,7 @@ def require_authentication() -> None:
         )
         session_id = st.session_state.get("auth_session_id")
         expires_at = st.session_state.get("auth_session_expires_at")
-        session_expired = expires_at is not None and int(expires_at) < int(time.time())
+        session_expired = expires_at is not None and int(expires_at) <= int(time.time())
         credentials_changed = (
             not user_config
             or st.session_state.get("auth_role") != user_config["role"]
@@ -696,6 +711,14 @@ def require_admin_access() -> None:
     if st.session_state.get("auth_role") != "admin":
         st.error("Este apartado requiere un usuario administrador.")
         st.stop()
+
+
+def _revoke_auth_session() -> None:
+    session_id = st.session_state.get("auth_session_id")
+    expires_at = st.session_state.get("auth_session_expires_at")
+    if session_id and expires_at:
+        _get_auth_state_store().revoke_session(session_id, int(expires_at))
+
 
 def get_product_stockout_periods(product_id: int, engine) -> list:
     """Obtiene períodos de agotamiento de un producto"""
@@ -765,10 +788,7 @@ def render_sidebar_shell(section_name: str) -> None:
         st.caption(f"Sesión: {st.session_state.get('auth_user', 'usuario')}")
         st.caption(f"Área: {section_name}")
         if st.button("Cerrar sesión"):
-            session_id = st.session_state.get("auth_session_id")
-            expires_at = st.session_state.get("auth_session_expires_at")
-            if session_id and expires_at:
-                _get_auth_state_store().revoke_session(session_id, int(expires_at))
+            _revoke_auth_session()
             st.session_state["authenticated"] = False
             st.session_state.pop("auth_user", None)
             st.session_state.pop("auth_role", None)
@@ -1804,6 +1824,11 @@ def render_abc_detail_page() -> None:
     render_abc_page("📉 Análisis Detallado")
 
 
+def render_price_comparator_route() -> None:
+    require_admin_access()
+    render_price_comparator_page()
+
+
 def render_master_import_page() -> None:
     render_master_page("📥 Importador Masterdata")
 
@@ -2096,7 +2121,7 @@ ALERTA_PEDIDOS_PAGE = st.Page(
 SETTINGS_PAGE = st.Page(render_settings_page, title="Configuración", icon=NAV_ICONS["settings"], url_path="config")
 ODOO_RECONCILIATION_PAGE = st.Page(render_odoo_reconciliation_page, title="Conciliación Odoo", icon=NAV_ICONS["reconciliation"], url_path="conciliacion-odoo")
 PRICE_COMPARATOR_PAGE = st.Page(
-    render_price_comparator_page,
+    render_price_comparator_route,
     title="Comparador de precios",
     icon=NAV_ICONS["price_comparator"],
     url_path="comparador-precios",

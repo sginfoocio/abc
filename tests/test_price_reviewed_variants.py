@@ -490,15 +490,14 @@ def test_discovery_rejects_52s_then_evaluates_93e_and_keeps_both_evidences(pilot
     discovery = PilotDiscovery(store)
     run = discovery.run(selection=[(cid, FORD["ean"])], search=search)
     rows = discovery.candidates().set_index("url")
-    assert rows.loc[wrong, "state"] == "rejected" and rows.loc[right, "state"] == "candidate_found"
+    # FT1044 93E: brand, model and colour code match exactly, so it is confirmed without a published EAN.
+    assert rows.loc[wrong, "state"] == "rejected" and rows.loc[right, "state"] == "confirmed"
+    assert rows.loc[right, "review_origin"] == "automatic" and rows.loc[wrong, "review_origin"] == ""
     assert "52S" in rows.loc[wrong, "identity"] and "93E" in rows.loc[right, "identity"]
     assert site.calls == [SITE + "/robots.txt", SITE + "/search?q=" + FORD["ean"], wrong, right]
-    assert commerce(store) == before and search._indexed(cid, FORD["ean"]) == []
+    assert commerce(store) == before
+    assert [(r["url"], r["source"]) for r in search._indexed(cid, FORD["ean"])] == [(right, "auto_confirmed")]
     with store._connect() as connection:
         assert connection.execute("SELECT requests FROM pilot_budgets WHERE run_id=?", (run,)).fetchone()[0] == 4
-    preview = discovery.preview([(cid, FORD["ean"])])
-    assert preview["effective"] == [] and preview["candidate_excluded"] == [[cid, FORD["ean"]]]
-    discovery.review(int(rows.loc[right, "id"]), accept=True, note="Offline exact identity review")
-    assert search._indexed(cid, FORD["ean"])[0]["url"] == right
     assert discovery.preview([(cid, FORD["ean"])])["known_excluded"] == [[cid, FORD["ean"]]]
     assert len(site.calls) == 4 and commerce(store) == before

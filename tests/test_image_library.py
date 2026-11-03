@@ -230,14 +230,20 @@ def test_dockerfile_ships_every_local_module_imported_by_app_pages():
     from pathlib import Path
     root = Path(__file__).parents[1]
     dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
-    for page in (root / "app_pages").glob("*.py"):
-        for node in ast.walk(ast.parse(page.read_text(encoding="utf-8"))):
+    # Follow local imports transitively: a module imported only by another shipped module must ship too.
+    pending = [(page, page.name) for page in (root / "app_pages").glob("*.py")]
+    seen = set()
+    while pending:
+        source, origin = pending.pop()
+        for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
             names = [a.name for a in node.names] if isinstance(node, ast.Import) else (
                 [node.module] if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module else [])
             for name in names:
                 module = name.split(".")[0]
-                if (root / f"{module}.py").is_file():
-                    assert f"{module}.py" in dockerfile, f"{module}.py no se copia en el Dockerfile ({page.name})"
+                if (root / f"{module}.py").is_file() and module not in seen:
+                    assert f"{module}.py" in dockerfile, f"{module}.py no se copia en el Dockerfile ({origin})"
+                    seen.add(module)
+                    pending.append((root / f"{module}.py", f"{origin} → {module}.py"))
 
 
 def meta_record(ean, view, metadata, *, id=1, provider="Luxoptica", name=None):

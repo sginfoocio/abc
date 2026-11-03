@@ -878,6 +878,25 @@ def test_only_app_image_changes_without_mutating_other_config(config, policy):
     assert result == original
 
 
+def test_compose_keeps_remembered_auth_and_revocation_state_persistent():
+    base = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    production = (ROOT / "docker-compose.prod.yml").read_text(encoding="utf-8")
+
+    assert re.search(r"^\s+AUTH_COOKIE_SECRET:\s*\$\{AUTH_COOKIE_SECRET\}\s*$", base, re.M)
+    assert re.search(
+        r"^\s+AUTH_STATE_PATH:\s*\$\{AUTH_STATE_PATH:-/app/data/auth_state\.sqlite3\}\s*$",
+        base,
+        re.M,
+    )
+    assert "- ./masterdata_data:/app/data" in base
+    assert "- ./masterdata_data:/app/data" in production
+    assert "atomic_json(CONFIG, with_image(config, policy[\"image\"]))" in (
+        (ROOT / "deployment/cloud/cloud_production_deploy.py").read_text(
+            encoding="utf-8"
+        )
+    )
+
+
 @pytest.mark.parametrize("extra", [{"include": ["untrusted.yml"]}, {"configs": {"external": {}}}])
 def test_external_compose_resources_are_rejected(config, extra):
     config.update(extra)
