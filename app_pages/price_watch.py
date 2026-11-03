@@ -12,10 +12,13 @@ from price_access import (DEFAULT_BUDGETS, INCIDENT_KINDS, METHOD_STATES, METHOD
 from price_comparator import PriceComparatorStore
 from price_locator import (ADAPTERS, JOB_STATES, MAX_DEPTH, SCHEDULE_ENV, SOURCE_KINDS, PriceLocator,
                            schedule_enabled)
+from price_monitor import (ALERTS, STATES, SCHEDULE_ENV as MONITOR_ENV, PriceMonitor,
+                           schedule_enabled as monitor_enabled)
 from price_watch import DEFAULT_GROUP, SOURCES, PriceWatch, WatchReport, eans_from_frame, parse_eans
 
 SECTIONS = ["Productos vigilados", "Añadir productos", "Reglas de vigilancia", "Grupos y frecuencia",
-            "Localización automática", "Autorizaciones por método", "Presupuestos", "Bloqueos e incidencias"]
+            "Localización automática", "Precios y monitorización", "Alertas", "Autorizaciones por método",
+            "Presupuestos", "Bloqueos e incidencias"]
 
 
 def _actor() -> str:
@@ -37,7 +40,7 @@ def _render_watchlist(watch: PriceWatch) -> None:
     cols[3].metric("Por reglas", counts["rule"])
     st.caption(f"Catálogo del comparador: {counts['catalog']} productos. Al añadir productos se preparan sus "
                "búsquedas en todos los competidores; la localización se ejecuta por lotes en «Localización "
-               "automática». La monitorización periódica de precios llega en una fase posterior.")
+               "automática». Después actualice sus precios en «Precios y monitorización».")
     frame = watch.watchlist()
     if frame.empty:
         st.info("Todavía no hay productos en vigilancia.")
@@ -422,7 +425,7 @@ def _render_locate_schedule(locator: PriceLocator, names: dict[str, str]) -> Non
 def render_watch_admin(store: PriceComparatorStore) -> None:
     st.subheader("Vigilancia automática")
     st.caption("Motor escalable propio (fase 1: qué se vigila, permisos y límites; fase 2: localización automática "
-                   "de fichas; fase 3: catálogos, colecciones y planificación). "
+               "de fichas; fases 3-4: descubrimiento, monitorización y alertas). "
                "El piloto de 20 EAN sigue funcionando por separado y no usa esta configuración.")
     watch, access = PriceWatch(store), AccessControl(store)
     watch.ensure_defaults()
@@ -440,9 +443,132 @@ def render_watch_admin(store: PriceComparatorStore) -> None:
         _render_groups(watch)
     elif section == "Localización automática":
         _render_locator(store, names)
+    elif section == "Precios y monitorización":
+        _render_monitor(store, names)
+    elif section == "Alertas":
+        _render_alerts(store)
     elif section == "Autorizaciones por método":
         _render_methods(access)
     elif section == "Presupuestos":
         _render_budgets(access, names)
     else:
         _render_incidents(access, names)
+
+
+def _render_monitor(store: PriceComparatorStore, names: dict[str, str]) -> None:
+    import price_analytics as analytics
+
+    monitor = PriceMonitor(store)
+    st.caption("Solo fichas verificadas de productos vigilados. No repite búsquedas. Identidad: marca + modelo + "
+               "color; calibre no vinculante. Solo se comparan ofertas disponibles con mercado ES, EUR e IVA "
+               "incluido confirmados. Caducidad: dos veces el intervalo del grupo o competidor.")
+    if not monitor_enabled():
+        st.warning(f"Monitorización periódica desactivada ({MONITOR_ENV}). Los lotes supervisados son explícitos.")
+    cid = st.selectbox("Competidor de la prueba supervisada", sorted(names, key=names.get), format_func=names.get,
+                       key="monitor_competitor")
+    c1, c2 = st.columns(2)
+    maximum = c1.number_input("Máx. fichas del lote", 1, 5000, 10, key="monitor_max_jobs")
+    deadline = c2.number_input("Plazo del lote (min)", 1, 120, 5, key="monitor_deadline")
+    approved = st.checkbox("He revisado autorización, fuentes y presupuesto para este lote",
+                           key="monitor_approved")
+    if st.button("Preparar monitorización (sin HTTP)", key="monitor_enqueue"):
+        st.success(f"{monitor.enqueue([cid])} fichas añadidas a la cola.")
+    if st.button("Actualizar precios: lote supervisado", key="monitor_run", disabled=not approved):
+        with st.spinner("Actualizando fichas verificadas…"):
+            report = monitor.run([cid], max_jobs=int(maximum), deadline_seconds=float(deadline) * 60)
+        st.success(report.summary)
+        for target, reason in report.stopped.items():
+            st.warning(f"{names.get(target, target)}: {reason}")
+
+    frame = monitor.inventory()
+    if frame.empty:
+        st.info("Añada productos a vigilancia y localice sus fichas para comenzar.")
+    else:
+        cols = st.columns(4)
+        for col, label in zip(cols, ["Actualizado", "Precio caducado", "Sin stock", "Sin localizar"]):
+            col.metric(label, int((frame["status"] == label).sum()))
+        brands = st.multiselect("Marcas", sorted(frame["brand"].unique()), key="monitor_brands")
+        status = st.multiselect("Estados", sorted(frame["status"].unique()), key="monitor_status")
+        query = st.text_input("Buscar EAN, modelo o color", key="monitor_query").strip()
+        shown = frame[frame["competitor_id"] == cid]
+        if brands:
+            shown = shown[shown["brand"].isin(brands)]
+        if status:
+            shown = shown[shown["status"].isin(status)]
+        if query:
+            matched = shown[["ean", "brand", "model", "color"]].astype(str).agg(" ".join, axis=1)
+            shown = shown[matched.str.contains(query, case=False, regex=False)]
+        st.dataframe(shown[["ean", "brand", "model", "color", "competitor", "own_price_eur", "price", "best_price",
+                            "difference_eur", "difference_pct", "availability", "currency", "includes_tax",
+                            "last_ok_at", "status", "url"]].rename(columns={
+            "ean": "EAN interno", "brand": "Marca", "model": "Modelo", "color": "Color",
+            "competitor": "Competidor", "own_price_eur": "Vytria €", "price": "Precio observado",
+            "best_price": "Mejor competidor €", "difference_eur": "Vytria − competidor €",
+            "difference_pct": "Diferencia % sobre Vytria", "availability": "Stock", "currency": "Moneda",
+            "includes_tax": "IVA incluido", "last_ok_at": "Última lectura", "status": "Estado", "url": "Ficha"}),
+            hide_index=True, width="stretch", column_config={"Ficha": st.column_config.LinkColumn("Ficha")})
+        st.caption("La tabla conserva precios observados no comparables, pero deja sus diferencias en blanco. "
+                   "La comparativa general y los KPIs usan el mismo histórico, excluyendo precios no vigentes.")
+        with st.expander("Evolución histórica del producto"):
+            ean = st.selectbox("EAN", frame["ean"].unique().tolist(), key="monitor_history_ean")
+            series = analytics.price_series(store, ean, 30)
+            if series.empty:
+                st.info("Todavía no hay observaciones históricas.")
+            else:
+                st.plotly_chart(analytics.price_figure(series), width="stretch", key="monitor_history")
+        latest = frame.groupby("competitor", as_index=False)["last_ok_at"].max()
+        st.dataframe(latest.rename(columns={"competitor": "Competidor", "last_ok_at": "Última lectura correcta"}),
+                     hide_index=True, width="stretch")
+    with st.expander("Trabajos de monitorización"):
+        jobs = monitor.jobs()
+        if jobs.empty:
+            st.caption("Sin trabajos.")
+        else:
+            st.dataframe(jobs.assign(state=jobs["state"].map(STATES))[
+                ["ean", "competitor", "state", "attempts", "not_before", "last_ok_at", "detail"]],
+                hide_index=True, width="stretch")
+        if st.button("Reintentar trabajos fallidos de este competidor", key="monitor_retry"):
+            st.success(f"{monitor.retry_failed(cid, actor=_actor())} trabajos reabiertos, sin consultas todavía.")
+    with st.expander("Frecuencia y planificación de monitorización"):
+        with store._connect() as con:
+            config = con.execute("SELECT * FROM monitor_schedule WHERE competitor_id=?", (cid,)).fetchone()
+            hours = con.execute("SELECT interval_hours FROM competitor_schedule WHERE competitor_id=?",
+                                (cid,)).fetchone()
+        with st.form("monitor_schedule_form"):
+            interval = st.number_input("Cada (horas), salvo frecuencia del grupo", 1.0, 720.0,
+                                       float(hours[0] if hours else 24), key=f"monitor_hours_{cid}")
+            enabled = st.checkbox("Habilitar este competidor para planificación",
+                                  value=bool(config and config["enabled"]), key=f"monitor_enabled_{cid}")
+            if st.form_submit_button("Guardar monitorización"):
+                try:
+                    monitor.configure(cid, enabled=enabled, interval_hours=interval, max_jobs=int(maximum),
+                                      actor=_actor())
+                    st.success("Configuración guardada. No se activa sin el interruptor del servidor.")
+                except ValueError as exc:
+                    st.error(str(exc))
+    st.caption("Bloqueos, autorizaciones y consumo HTTP se consultan y gestionan en los apartados existentes "
+               "«Autorizaciones por método», «Presupuestos» y «Bloqueos e incidencias».")
+
+
+def _render_alerts(store: PriceComparatorStore) -> None:
+    monitor = PriceMonitor(store)
+    monitor.check_stale()
+    st.info("Resumen por correo preparado; envío automático desactivado. No se envía ningún mensaje.")
+    with st.form("monitor_alert_threshold"):
+        threshold = st.number_input("Umbral de cambio de precio (%)", 0.1, 100.0,
+                                    float(store.get_setting("alert_threshold_pct")), key="monitor_threshold")
+        if st.form_submit_button("Guardar umbral"):
+            try:
+                store.set_setting("alert_threshold_pct", str(threshold))
+                st.success("Umbral guardado.")
+            except ValueError as exc:
+                st.error(str(exc))
+    alerts = monitor.alerts()
+    if alerts.empty:
+        st.caption("Sin alertas registradas.")
+    else:
+        st.dataframe(alerts.assign(kind=alerts["kind"].map(ALERTS))[
+            ["at", "ean", "brand", "model", "color", "competitor", "kind", "old_value", "new_value", "detail"]],
+            hide_index=True, width="stretch")
+    st.download_button("Descargar resumen para correo", monitor.email_summary(), file_name="resumen-vigilancia.txt",
+                       mime="text/plain", key="monitor_email")
