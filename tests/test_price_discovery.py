@@ -19,6 +19,8 @@ from tests.web_fixtures import BASE, ROBOTS_OK, prada_page
 
 pytest_plugins = ["tests.test_price_pilot"]
 EAN = "8056597875349"
+# Exact by verified EAN, but without a published colour code: always left for manual review.
+NO_COLOR_NAME = "Prada PR 27ZS 54-21"
 
 
 def commerce(store):
@@ -399,7 +401,7 @@ def test_selection_rejects_products_and_competitors_outside_pilot(pilot):
 
 
 @pytest.mark.parametrize("mode,query", [("ean", EAN), ("model_color", "PRADA PR 27ZS 16K08Z")])
-def test_supervised_search_exact_candidate_requires_approval_and_reuses_confirmed_url(pilot, mode, query):
+def test_supervised_search_exact_candidate_is_confirmed_automatically_and_reused(pilot, mode, query):
     service, store, search, site, cid, _ = pilot
     configure(search, cid)
     search.update_config(cid, search_mode=mode)
@@ -412,23 +414,26 @@ def test_supervised_search_exact_candidate_requires_approval_and_reuses_confirme
     run_id = run_all_pending(discovery, search)
     assert commerce(store) == before
     candidates = discovery.candidates()
-    assert len(candidates) == 1 and candidates.iloc[0].state == "candidate_found"
+    assert len(candidates) == 1 and candidates.iloc[0].state == "confirmed"
+    assert candidates.iloc[0].review_origin == "automatic"
+    assert candidates.iloc[0].review_rule == "identidad_comercial_v1"
+    audit = json.loads(candidates.iloc[0].review_evidence)
+    assert all(audit["checks"].values()) and audit["method"] == mode and audit["confirmed_at"]
     preview = discovery.preview([(cid, EAN)])
-    assert preview["effective"] == [] and preview["candidate_excluded"] == [[cid, EAN]]
-    assert search._indexed(cid, EAN) == []  # No automatic approval.
+    assert preview["effective"] == [] and preview["known_excluded"] == [[cid, EAN]]
+    indexed = search._indexed(cid, EAN)
+    assert [(r["url"], r["status"], r["source"]) for r in indexed] == [(url, "verified", "auto_confirmed")]
     assert site.calls == [BASE + "/robots.txt", BASE + "/search?q=" + quote(query, safe=""), url]
     with store._connect() as connection:
         assert connection.execute("SELECT requests FROM pilot_budgets WHERE run_id=? AND competitor_id=?",
                                   (run_id, cid)).fetchone()[0] == 3
         assert connection.execute("SELECT COUNT(*) FROM pilot_http_log").fetchone()[0] == 3
-    discovery.review(int(candidates.iloc[0].id), accept=True, note="Ana, identidad publicada revisada offline")
-    assert search._indexed(cid, EAN)[0]["status"] == "verified"
-    assert commerce(store) == before
+    assert discovery.latest_run()["results"]["Fichas confirmadas automáticamente"] == 1
     site.calls.clear()
     assert discovery.coverage().query("ean == @EAN and competitor_id == @cid").iloc[0].state == "confirmed"
-    assert site.calls == []
-    assert site.calls == []
     assert (discovery.coverage().state == "confirmed").sum() == 1
+    assert site.calls == []
+    # The automatically verified URL feeds the supervised price run like a manually confirmed one.
     service.run(search=search)
     assert site.calls == [BASE + "/robots.txt", url]
     assert store.dashboard()[1]["confirmed"] == 1
@@ -461,20 +466,22 @@ def test_wrong_or_doubtful_identity_is_never_approved(pilot, overrides, state):
         assert discovery.candidates().iloc[0].state == "discarded"
 
 
-def test_reference_match_without_ean_can_be_approved_without_creating_an_offer(pilot):
+def test_brand_model_color_without_published_ean_is_confirmed_without_creating_an_offer(pilot):
     service, store, search, site, cid, _ = pilot
     configure(search, cid)
     only_pending(store, cid, [EAN])
-    route(site, EAN, gtin=None)
+    url = route(site, EAN, gtin=None)
     service.enable()
     discovery = PilotDiscovery(store)
     run_all_pending(discovery, search)
     candidate = discovery.candidates().iloc[0]
-    assert candidate.state == "candidate_found"
+    assert (candidate.state, candidate.review_origin) == ("confirmed", "automatic")
+    audit = json.loads(candidate.review_evidence)
+    assert audit["listing"]["ean"] == "" and audit["match_basis"] != "ean"
 
-    discovery.review(int(candidate.id), accept=True, note="Modelo y código de color verificados")
-
-    assert search._indexed(cid, EAN)[0]["status"] == "verified"
+    indexed = search._indexed(cid, EAN)
+    assert [(r["url"], r["status"], r["source"], r["ean_published"]) for r in indexed] == [
+        (url, "verified", "auto_confirmed", "")]
     with store._connect() as connection:
         assert connection.execute("SELECT COUNT(*) FROM offers").fetchone()[0] == 0
 
@@ -618,8 +625,8 @@ def test_product_discovery_mixed_selection_preserves_authorized_edel(pilot, monk
     discovery.run(selection=pairs, search=search)
     assert site.calls == [base + "/robots.txt", base + "/search?q=" + EAN, url]
     candidate = discovery.candidates().iloc[0]
-    assert (candidate.competitor_id, candidate.ean, candidate.state) == (edel, EAN, "candidate_found")
-    assert search._indexed(edel, EAN) == []
+    assert (candidate.competitor_id, candidate.ean, candidate.state) == (edel, EAN, "confirmed")
+    assert [(r["url"], r["source"]) for r in search._indexed(edel, EAN)] == [(url, "auto_confirmed")]
     assert commerce(store) == before
 
 
@@ -691,7 +698,7 @@ def test_http_budget_is_reserved_before_io_and_never_refunded_on_resume(pilot, m
     reopened.run(search=search, resume=True)
     assert site.calls == calls  # persistent budget exhausted, known candidate not re-fetched
     assert commerce(store) == before
-    assert reopened.candidates().iloc[0].state == "candidate_found"
+    assert reopened.candidates().iloc[0].state == "confirmed"
     assert _pending_job_count(store) == 0
     latest = reopened.latest_run()
     assert latest["selection"] == [[cid, EAN], [cid, SAMPLE_EANS[1]]]
@@ -738,7 +745,7 @@ def test_sitemap_is_an_explicit_auto_alternative_not_external_search(pilot):
     assert site.calls == [BASE + "/robots.txt", BASE + "/sitemap.xml", url]
 
 
-@pytest.mark.parametrize("published,state", [("8056597875226", "candidate_found"), (None, "candidate_found"),
+@pytest.mark.parametrize("published,state", [("8056597875226", "confirmed"), (None, "confirmed"),
                                             (EAN, "pending_validation")])
 def test_edel_optics_ean_strategy_suggestion_never_proves_published_gtin(pilot, published, state):
     service, store, search, site, _, _ = pilot
@@ -757,7 +764,9 @@ def test_edel_optics_ean_strategy_suggestion_never_proves_published_gtin(pilot, 
     run_all_pending(discovery, search)
     assert discovery.candidates().iloc[0].state == state
     assert site.calls == [base + "/robots.txt", base + "/search?q=8056597875226", base + "/pr26zs-16k08z.html"]
-    assert search._indexed(cid, "8056597875226") == []
+    # The searched EAN is never stored as published: only brand + model + colour from the fetched page decide.
+    indexed = search._indexed(cid, "8056597875226")
+    assert [r["ean_published"] for r in indexed] == ([published or ""] if state == "confirmed" else [])
 
 
 def test_ajax_search_is_reported_without_calling_endpoints(pilot):
@@ -830,13 +839,14 @@ def test_review_revalidates_catalogue_and_conflicts_are_never_overridden(pilot):
     service, store, search, site, cid, _ = pilot
     configure(search, cid)
     only_pending(store, cid, [EAN])
-    route(site, EAN)
+    route(site, EAN, name=NO_COLOR_NAME)
     service.enable()
     discovery = PilotDiscovery(store)
     run_all_pending(discovery, search)
     candidate = discovery.candidates().iloc[0]
+    assert candidate.state == "candidate_found"
     with store._connect() as connection, connection:
-        connection.execute("UPDATE products SET color='ZVN09T' WHERE ean=?", (EAN,))
+        connection.execute("UPDATE products SET model='PR 26ZS' WHERE ean=?", (EAN,))
     with pytest.raises(PilotError, match="identidad exacta"):
         discovery.review(int(candidate.id), accept=True, note="Revisor")
     assert search._indexed(cid, EAN) == []
@@ -846,7 +856,7 @@ def test_discard_retry_same_url_keeps_prior_evidence_without_reopening_candidate
     service, store, search, site, cid, _ = pilot
     configure(search, cid)
     only_pending(store, cid, [EAN])
-    route(site, EAN)
+    route(site, EAN, name=NO_COLOR_NAME)
     service.enable()
     discovery = PilotDiscovery(store)
     run_all_pending(discovery, search)

@@ -101,7 +101,8 @@ disponibilidad explicita dentro de la tarjeta (por ejemplo, Schema.org
 `InStock`/`OutOfStock`); no hereda indicadores de la pagina ni de otras
 tarjetas. Para el HTML recibido conserva `unknown`, que no permite una oferta
 comparable. El descubrimiento solo guarda el candidato y su evidencia; no crea
-ofertas. Una URL solo se confirma tras aprobacion humana. Con EAN publicado
+ofertas. Una URL de tarjeta solo se confirma tras aprobacion humana: la ficha
+no se ha consultado, por lo que nunca cumple la confirmacion automatica. Con EAN publicado
 contradictorio, la tarjeta queda pendiente de revision y no puede aprobarse
 como coincidencia exacta.
 
@@ -137,10 +138,12 @@ Estados:
 
 - Ficha conocida: indice ya guardado (incluye URLs aportadas pendientes).
 - Pendiente de localizar: no hay URL ni intento terminado.
-- Candidato encontrado: EAN exacto o marca/modelo/codigo de color exactos;
-  aun SIN aprobacion humana.
+- Candidato encontrado: EAN exacto o marca/modelo/codigo de color exactos que
+  no cumple todas las condiciones de confirmacion automatica; requiere
+  revision humana.
 - Pendiente de validar: datos incompletos/ambiguos; no puede confirmarse.
-- Ficha confirmada: aprobada por una persona.
+- Ficha confirmada: aprobada por una persona o confirmada automaticamente por
+  la regla `identidad_comercial_v1`.
 - Producto no encontrado: solo cuando la consulta no devuelve candidatos y no
   existe una ficha confirmada ni candidatos abiertos.
 - Consulta no autorizada: metodo/acceso/condiciones no preparados.
@@ -173,7 +176,55 @@ Al iniciar:
    presupuesto antes de I/O. Sin reintentos ni destinos/redirecciones ajenos.
 5. Obtiene como maximo tres candidatos por combinacion, verifica con
    `classify` y conserva evidencia, contradicciones y consultas.
-6. Guarda candidatos, nunca ofertas ni URLs definitivas automaticamente.
+6. Guarda candidatos, nunca ofertas. Solo registra la URL definitiva sin
+   intervencion humana cuando se cumple la confirmacion automatica descrita
+   a continuacion.
+
+### Confirmacion automatica de fichas
+
+La identidad comercial es marca + modelo + codigo de color. Un candidato se
+confirma automaticamente (regla `identidad_comercial_v1`, modulo
+`price_auto_confirm.py`) solo si se cumplen todas las condiciones:
+
+1. El metodo de localizacion esta autorizado en la configuracion actual
+   (condiciones revisadas con nota, robots permitido, metodo permitido).
+2. La URL y la ficha analizada pertenecen al dominio del competidor.
+3. La ficha se consulto y analizo realmente: hay evidencia extraida y una
+   respuesta HTTP 2xx registrada en `pilot_http_log` para esa ejecucion. Las
+   tarjetas de resultados de Edel-Optics no cumplen esta condicion.
+4. La ficha publica marca, modelo y codigo de color, y los tres coinciden
+   exactamente con el catalogo (`classify` exacto, sin ambiguedad ni variantes).
+5. El EAN publicado esta vacio o coincide; uno contradictorio deja el
+   candidato en revision. El EAN del catalogo se conserva para Vytria.
+6. La URL no fue descartada ni rechazada anteriormente.
+
+El calibre, el precio y el stock nunca intervienen; se guardan solo como dato
+informativo. La confirmacion crea la misma fila `verified`/`exact_match` en
+`competitor_product_urls` que la aprobacion manual, con `source='auto_confirmed'`
+(una URL ya confirmada por una persona conserva `source='user'`), por lo que la
+actualizacion supervisada de precios la usa igual. El candidato registra
+`review_origin='automatic'`, la regla, la fecha, el metodo y la evidencia. No
+se realiza ninguna peticion HTTP adicional ni se modifican presupuestos o
+autorizaciones. Los casos ambiguos, sin color publicado o contradictorios
+siguen en «Pendientes», que muestra los motivos de la revision manual.
+
+Candidatos historicos: «Pendientes > Reevaluar candidatos historicos» aplica
+la regla con las evidencias ya guardadas, sin HTTP. Primero muestra una vista
+previa (no escribe) y despues exige responsable y motivo para aplicar. Solo
+considera candidatos `candidate_found`/`pending_validation`; nunca descartados,
+rechazados ni ya revisados. Cada candidato evaluado deja una fila en
+`pilot_candidate_reevaluations`. Para conocer el impacto sin tocar la base:
+
+```
+python scripts/reevaluate_discovery_candidates.py --database /ruta/price_comparator.sqlite3
+```
+
+El script copia la base y su WAL a un directorio temporal (verificando hashes),
+evalua la copia y la elimina; nunca abre el original con SQLite.
+
+«Pendientes» separa con contadores: confirmadas automaticamente, confirmadas
+manualmente (incluidas las aprobaciones anteriores a esta regla), pendientes
+de revision y ambiguas/rechazadas/descartadas, con consulta de evidencias.
 
 La aprobacion exige nota/revisor, vuelve a contrastar la identidad con el
 catalogo actual y requiere ausencia de ambiguedad. Puede aprobarse por EAN
@@ -240,7 +291,12 @@ Migracion idempotente en el constructor, bajo el bloqueo SQLite existente:
 - `pilot_runs.selection` y `pilot_runs.selection_request`, con JSON de la cola
   efectiva y de la seleccion original; defaults vacios para ejecuciones antiguas.
 - `pilot_discovery`: estado por combinacion, ultima operacion/metodo/motivo.
-- `pilot_url_candidates`: evidencia y revision por intento/URL.
+- `pilot_url_candidates`: evidencia y revision por intento/URL. Columnas
+  aditivas `review_origin` (`manual`/`automatic`; vacio en candidatos sin
+  revisar y en revisiones anteriores), `review_rule` y `review_evidence`
+  (JSON con comprobaciones, motivos, metodo y fecha de la regla automatica).
+- `pilot_candidate_reevaluations`: auditoria de cada reevaluacion explicita
+  (lote, candidato, regla, estado previo, resultado, motivos y nota).
 - `pilot_http_log`: URL, EAN, tienda, fecha, HTTP/error por peticion.
 
 No hay conversion/borrado de ofertas ni productos ni precios Vytria, ni

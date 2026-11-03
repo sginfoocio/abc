@@ -1234,6 +1234,114 @@ def _render_discovery(pilot: PricePilot, busy: bool) -> None:
             st.dataframe(audit, hide_index=True, width="stretch")
 
 
+REVIEW_GROUPS = {
+    "pending": ("Pendientes de revisión", "Coincidencias exactas que no cumplen todas las condiciones automáticas."),
+    "automatic": ("Confirmadas automáticamente", "Marca, modelo y código de color publicados e idénticos al catálogo."),
+    "manual": ("Confirmadas manualmente", "Confirmadas por una persona en la revisión."),
+    "doubtful": ("Ambiguas o rechazadas", "Identidad dudosa, contradictoria o descartada; nunca se confirman solas."),
+}
+CANDIDATE_STATE_TEXT = {
+    "candidate_found": "Coincidencia exacta pendiente", "pending_validation": "Ambigua: solo se puede descartar",
+    "confirmed": "Confirmada", "discarded": "Descartada", "rejected": "Rechazada por identidad",
+}
+
+
+def _review_group(row: pd.Series) -> str:
+    if row["state"] == "confirmed":
+        return "automatic" if row.get("review_origin") == "automatic" else "manual"
+    return "pending" if row["state"] == "candidate_found" else "doubtful"
+
+
+def _candidate_rows(frame: pd.DataFrame, products: pd.DataFrame, competitor_names: dict) -> pd.DataFrame:
+    def describe(ean: str) -> str:
+        if ean not in products.index:
+            return ean
+        product = products.loc[ean]
+        return f"{product['brand']} {product['model']} · {product['color']}"
+
+    return pd.DataFrame({
+        "Producto": [describe(ean) for ean in frame["ean"]],
+        "EAN": frame["ean"].tolist(),
+        "Competidor": [competitor_names.get(cid, cid) for cid in frame["competitor_id"]],
+        "Estado": [CANDIDATE_STATE_TEXT.get(state, state) for state in frame["state"]],
+        "Método": frame["method"].tolist(),
+        "Regla": frame["review_rule"].tolist(),
+        "Fecha": [reviewed or checked for reviewed, checked in zip(frame["reviewed_at"], frame["checked_at"])],
+        "Nota": frame["review_note"].tolist(),
+        "URL": frame["url"].tolist(),
+    })
+
+
+def _render_candidate_group(frame: pd.DataFrame, products: pd.DataFrame, competitor_names: dict, group: str) -> None:
+    st.caption(REVIEW_GROUPS[group][1])
+    if frame.empty:
+        st.info("No hay fichas en este grupo.")
+        return
+    st.dataframe(_candidate_rows(frame, products, competitor_names), hide_index=True, width="stretch",
+                 column_config={"URL": st.column_config.LinkColumn("URL")})
+    labels = dict(zip(frame["id"].astype(int), _candidate_rows(frame, products, competitor_names).apply(
+        lambda row: f"{row['Producto']} · {row['Competidor']}", axis=1)))
+    selected = st.selectbox("Consultar evidencias", list(labels), format_func=labels.get,
+                            key=f"discovery_evidence_{group}")
+    row = frame.set_index("id").loc[selected]
+    with st.expander("Evidencias de la ficha"):
+        if row["review_evidence"]:
+            st.markdown("**Regla aplicada y comprobaciones**")
+            try:
+                st.json(json.loads(row["review_evidence"]))
+            except ValueError as exc:
+                st.error(f"No se pudo leer la auditoría: {exc}")
+        st.markdown("**Datos extraídos de la ficha**")
+        try:
+            st.json(json.loads(row["evidence"]))
+        except (TypeError, ValueError) as exc:
+            st.error(f"No se pudo leer la evidencia técnica: {exc}")
+
+
+REEVALUATION_RESULT_TEXT = {"would_confirm": "Se confirmaría automáticamente",
+                            "manual_review": "Seguiría en revisión manual"}
+
+
+def _render_reevaluation(pilot: PricePilot, discovery: PilotDiscovery, products: pd.DataFrame,
+                         competitor_names: dict) -> None:
+    with st.expander("Reevaluar candidatos históricos con la regla automática"):
+        st.caption("Usa solo las evidencias ya guardadas: no consulta ninguna web ni consume presupuesto HTTP. "
+                   "Los candidatos descartados o rechazados nunca se reevalúan.")
+        if st.button("Previsualizar reevaluación", key="discovery_reevaluate_preview"):
+            st.session_state["discovery_reevaluation_preview"] = discovery.reevaluate()
+        preview = st.session_state.get("discovery_reevaluation_preview")
+        if preview is None:
+            return
+        eligible = int((preview["result"] == "would_confirm").sum()) if not preview.empty else 0
+        c1, c2 = st.columns(2)
+        c1.metric("Se confirmarían automáticamente", eligible)
+        c2.metric("Seguirían en revisión manual", len(preview) - eligible)
+        if not preview.empty:
+            rows = _candidate_rows(preview.assign(state=preview["previous_state"], review_rule="",
+                                                  reviewed_at="", checked_at="", review_note=""),
+                                   products, competitor_names)
+            st.dataframe(pd.DataFrame({
+                "Producto": rows["Producto"], "Competidor": rows["Competidor"],
+                "Resultado": [REEVALUATION_RESULT_TEXT.get(item, item) for item in preview["result"]],
+                "Motivos": preview["reasons"].tolist(), "URL": rows["URL"]}),
+                hide_index=True, width="stretch", column_config={"URL": st.column_config.LinkColumn("URL")})
+        with st.form("discovery_reevaluate"):
+            note = st.text_input("Responsable y motivo de la reevaluación", key="discovery_reevaluate_note")
+            apply = st.form_submit_button("Aplicar reevaluación", disabled=pilot.is_running() or not eligible,
+                                          key="discovery_reevaluate_apply")
+            if apply:
+                try:
+                    applied = discovery.reevaluate(note=note, apply=True)
+                except (PilotError, ValueError, sqlite3.Error) as exc:
+                    st.error(f"No se pudo aplicar la reevaluación: {exc}")
+                else:
+                    st.session_state.pop("discovery_reevaluation_preview", None)
+                    st.session_state["discovery_review_flash"] = (
+                        f"Reevaluación registrada: {int((applied['result'] == 'confirmed').sum())} fichas "
+                        "confirmadas automáticamente.")
+                    st.rerun()
+
+
 def _render_pending_reviews(pilot: PricePilot) -> None:
     discovery = PilotDiscovery(pilot.store)
     if flash := st.session_state.pop("discovery_review_flash", ""):
@@ -1241,13 +1349,30 @@ def _render_pending_reviews(pilot: PricePilot) -> None:
     candidates = discovery.candidates()
     pending = candidates[candidates["state"].isin(["candidate_found", "pending_validation"])] \
         if not candidates.empty else candidates
-    st.header("Fichas pendientes de revisión")
+    products = pilot.candidates().set_index("ean") if not candidates.empty else pd.DataFrame()
+    competitor_names = {row["id"]: row["name"] for row in pilot.competitors()}
+    groups = candidates.apply(_review_group, axis=1) if not candidates.empty else pd.Series(dtype=str)
+    st.header("Fichas de competidores")
+    counters = st.columns(4)
+    for column, group in zip(counters, REVIEW_GROUPS):
+        column.metric(REVIEW_GROUPS[group][0], int((groups == group).sum()))
+    _render_reevaluation(pilot, discovery, products, competitor_names)
+    group = st.radio("Grupo de fichas", list(REVIEW_GROUPS), horizontal=True, key="discovery_review_group",
+                     format_func=lambda item: f"{REVIEW_GROUPS[item][0]} ({int((groups == item).sum())})")
+    if group == "pending":
+        _render_pending_form(pilot, discovery, pending, products, competitor_names)
+    else:
+        _render_candidate_group(candidates[groups == group] if not candidates.empty else candidates,
+                                products, competitor_names, group)
+    _render_review_issues(pilot, discovery)
+
+
+def _render_pending_form(pilot: PricePilot, discovery: PilotDiscovery, pending: pd.DataFrame,
+                         products: pd.DataFrame, competitor_names: dict) -> None:
+    st.subheader("Revisar o descartar candidatos")
     if pending.empty:
         st.info("No hay candidatos pendientes de revisión.")
     else:
-        products = pilot.candidates().set_index("ean")
-        competitor_names = {row["id"]: row["name"] for row in pilot.competitors()}
-
         def candidate_label(candidate_id: int) -> str:
             candidate = pending.set_index("id").loc[candidate_id]
             product = products.loc[candidate["ean"]]
@@ -1266,6 +1391,12 @@ def _render_pending_reviews(pilot: PricePilot) -> None:
             st.markdown(f"**Competidor:** {competitor_names.get(row['competitor_id'], row['competitor_id'])}")
             st.write("URL encontrada:", row["url"])
             st.caption(f"Estado: pendiente de revisión. {state_text}")
+            try:
+                reasons = discovery.explain(int(selected_id)).reasons
+            except (PilotError, WebSearchError, ValueError, sqlite3.Error):
+                reasons = []
+            if reasons:
+                st.markdown("**Motivos para no confirmar automáticamente:** " + "; ".join(reasons))
             try:
                 config = WebPriceSearch(pilot.store).config(row["competitor_id"])
                 candidate_url = validate_competitor_url(row["url"], config["domain"])
@@ -1299,6 +1430,8 @@ def _render_pending_reviews(pilot: PricePilot) -> None:
                             "Las fichas confirmadas de este producto se conservan.")
                         st.rerun()
 
+
+def _render_review_issues(pilot: PricePilot, discovery: PilotDiscovery) -> None:
     coverage = discovery.coverage()
     issues = coverage[coverage["state"].isin(["not_allowed", "error", "blocked", "rejected"])] \
         if not coverage.empty else coverage
