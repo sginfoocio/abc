@@ -12,6 +12,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import logging
+from numbers import Number
 import os
 import time
 from typing import Callable
@@ -45,6 +47,20 @@ def _utc() -> datetime:
 
 def _iso(at: datetime) -> str:
     return at.astimezone(timezone.utc).isoformat(timespec="microseconds")
+
+
+def _inventory_datetime(value: object) -> datetime:
+    """Read SQLite/pandas date scalars; legacy naive dates represent UTC."""
+    if not pd.api.types.is_scalar(value) or isinstance(value, Number) or pd.isna(value):
+        raise ValueError("Fecha de vigencia no válida")
+    try:
+        parsed = pd.Timestamp(value)
+        if pd.isna(parsed):
+            raise ValueError("Fecha vacía")
+        parsed = parsed.tz_localize("UTC") if parsed.tzinfo is None else parsed.tz_convert("UTC")
+        return parsed.to_pydatetime(warn=False)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("Fecha de vigencia no válida") from exc
 
 
 def schedule_enabled() -> bool:
@@ -428,15 +444,31 @@ class PriceMonitor:
                 WHERE w.active=1 AND c.active=1 ORDER BY p.brand,p.model,p.color,c.name""", con)
         if rows.empty:
             return rows
-        now = self._now()
+        now = _inventory_datetime(self._now())
         gates = {cid: self.access.check(cid, "ficha") for cid in rows["competitor_id"].unique()}
         data = []
-        for row in rows.to_dict("records"):
+        # pandas 3 string columns turn SQL NULL into NaN, which is truthy.
+        for row in rows.astype(object).where(rows.notna(), None).to_dict("records"):
             raw = row["sample"] or row["previous_sample"]
             sample = json.loads(raw) if isinstance(raw, str) and raw else {}
             page = sample.get("page", {})
-            stale = bool(row["valid_until"] and datetime.fromisoformat(row["valid_until"]) < now)
-            comparable = row["eligible"] == 1 and not stale and row["state"] not in (
+            validity = row["valid_until"]
+            missing = validity is None or (isinstance(validity, str) and not validity.strip())
+            valid_until = None
+            date_issue = ""
+            if missing:
+                if row["last_ok_at"] or row["eligible"] == 1:
+                    date_issue = "Sin fecha de vigencia"
+            else:
+                try:
+                    valid_until = _inventory_datetime(validity)
+                except ValueError:
+                    date_issue = "Fecha de vigencia inválida"
+                    logging.getLogger(__name__).warning(
+                        "Invalid monitor valid_until for ean=%s competitor=%s (type=%s)",
+                        row["ean"], row["competitor_id"], type(validity).__name__)
+            stale = valid_until is not None and valid_until < now
+            comparable = row["eligible"] == 1 and valid_until is not None and not stale and row["state"] not in (
                 "gone", "review", "blocked", "unavailable")
             gate = gates[row["competitor_id"]]
             restricted = gate.code in ("blocked_manual", "blocked_wait", "not_authorized", "prohibited")
@@ -447,6 +479,7 @@ class PriceMonitor:
                      "Sin localizar" if not row["state"] else
                      "Ficha retirada" if row["state"] == "gone" else
                      "Bloqueado" if row["state"] in ("blocked", "unavailable") else
+                     date_issue if date_issue else
                      "Precio caducado" if stale else
                      "Sin stock" if page.get("availability") == "unavailable" else
                      "Actualizado" if comparable else
@@ -454,7 +487,7 @@ class PriceMonitor:
                      "No comparable" if row["state"] == "done" else STATES.get(row["state"], row["state"]))
             price, vytria = page.get("price"), own.get(row["ean"])
             diff = vytria - price if comparable and vytria is not None and pd.notna(vytria) else None
-            data.append({**row, "status": state, "own_price_eur": vytria, "price": price,
+            data.append({**row, "status": state, "date_issue": date_issue, "own_price_eur": vytria, "price": price,
                          "currency": page.get("currency", ""), "includes_tax": page.get("includes_tax"),
                          "availability": page.get("availability", "unknown"), "comparable": comparable,
                          "difference_eur": diff, "difference_pct": diff / vytria * 100 if diff is not None
