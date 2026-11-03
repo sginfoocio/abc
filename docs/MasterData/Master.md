@@ -36,11 +36,32 @@ criptográficamente seguro (por ejemplo, 32 bytes aleatorios codificados como
 hexadecimal) y guárdalo únicamente en el gestor de secretos o `.env` protegido
 del host. Si falta o no alcanza la longitud mínima, el inicio de sesión normal
 sigue disponible, pero no se emiten cookies de sesión recordada; no se usa
-`APP_PASSWORD` como alternativa. La revocación y el límite de intentos se
-guardan en el SQLite persistente configurado por `AUTH_STATE_PATH`. Al desplegar
-esta política, las cookies antiguas firmadas con `APP_PASSWORD` o con un secreto
-inferior a 32 caracteres dejan de ser válidas y el usuario debe iniciar sesión
-de nuevo; no se conserva una sesión recordada insegura.
+`APP_PASSWORD` como alternativa. Al desplegar esta política, las cookies antiguas
+firmadas con `APP_PASSWORD` o con un secreto inferior a 32 caracteres dejan de
+ser válidas y el usuario debe iniciar sesión de nuevo; no se conserva una sesión
+recordada insegura. Una actualización recrea el proceso y pierde el estado de
+sesión en memoria de Streamlit; solo se restaura automáticamente una sesión si
+el usuario activó «Recordarme», el navegador conserva la cookie y el secreto de
+firma sigue siendo el mismo.
+
+El estado de revocación y de intentos fallidos debe sobrevivir a los reinicios.
+En Docker de una sola instancia, `AUTH_STATE_PATH` apunta al volumen persistente
+`/app/data/auth_state.sqlite3`. Para ejecutar varias réplicas, configura
+`AUTH_STATE_DATABASE_URL` con una base PostgreSQL compartida y persistente para
+que logout, revocaciones y límites de intentos sean comunes a todas ellas;
+no compartas el archivo SQLite entre hosts. La URL debe apuntar a una base
+dedicada o a un esquema controlado por la aplicación y permitir crear y
+modificar sus dos tablas de estado. Usa una conexión privada o TLS y guarda la
+URL en el gestor de secretos, no en el repositorio. Mantén estable
+`AUTH_COOKIE_SECRET` y la base de estado durante despliegues:
+rotar el secreto invalida las cookies recordadas existentes. Si se configura
+`AUTH_STATE_DATABASE_URL`, el backend PostgreSQL prevalece sobre `AUTH_STATE_PATH`.
+
+El límite de acceso por defecto es de 8 intentos por cada combinación de IP e
+identidad durante 900 segundos (`AUTH_LOGIN_MAX_ATTEMPTS` y
+`AUTH_LOGIN_WINDOW_SECONDS`). Una autenticación correcta reinicia ambos
+contadores. Al alcanzar el límite se muestra un aviso genérico, sin indicar si
+el usuario existe.
 
 En la biblioteca Kering, Master Data puede buscar fotografías y pedidos
 almacenados localmente por EAN, modelo o pedido y descargar las fotografías
