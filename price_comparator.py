@@ -63,7 +63,7 @@ _ADDED_COLUMNS = {
                           "max_depth": "INTEGER NOT NULL DEFAULT 0", "adapter": "TEXT NOT NULL DEFAULT 'generic'"},
     "discovery_pages": {"content_hash": "TEXT NOT NULL DEFAULT ''", "changed_at": "TEXT",
                         "unchanged_runs": "INTEGER NOT NULL DEFAULT 0", "children": "TEXT NOT NULL DEFAULT ''"},
-    "discovery_index": {"gone_at": "TEXT"},
+    "discovery_index": {"gone_at": "TEXT", "candidate_evidence": "TEXT NOT NULL DEFAULT '{}'"},
 }
 AVAILABILITY_STATES = {"available", "unavailable", "unknown"}
 DEFAULT_DB_PATH = Path(__file__).parent / "masterdata_data" / "price_comparator.sqlite3"
@@ -757,6 +757,7 @@ class PriceComparatorStore:
                         checked_at TEXT,
                         check_state TEXT NOT NULL DEFAULT '',
                         facts TEXT NOT NULL DEFAULT '',
+                        candidate_evidence TEXT NOT NULL DEFAULT '{}',
                         PRIMARY KEY (competitor_id, url)
                     );
                     -- Periodic location (phase 3): per competitor, disabled by default.
