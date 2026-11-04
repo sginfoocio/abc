@@ -90,6 +90,68 @@ para una observación antigua.
 Abrir alertas ya no genera alertas nuevas: la detección de caducidad sigue en las
 operaciones del monitor. Leer vistas/exportaciones no lanza peticiones.
 
+### Fechas históricas y comprobación de sincronización (solo lectura)
+
+La analítica convierte las fechas ISO 8601 a UTC antes de filtrar, ordenar o calcular
+vigencia. Admite precisión variable, offsets y fechas antiguas sin zona (UTC).
+Las observaciones sin fecha válida quedan fuera del cálculo; las fechas no vacías
+inválidas generan un aviso con campo y cantidad, sin volcar datos. Una comprobación
+nula/inválida no renueva un precio: se conserva su fecha de captura válida.
+No se reescriben los históricos ni se generan observaciones para rellenar gráficos.
+Las lecturas comerciales actuales también filtran y eligen el último precio por
+instante UTC (incluida la importación manual), no por `MAX` ni ordenación de textos.
+Una fecha futura de captura no entra en los KPIs, y una comprobación anterior,
+inválida o futura no sustituye la fecha de captura válida.
+
+Para verificar si Vytria guardó precios antes de una excepción de visualización,
+consultar **Actualizaciones → Precios y observaciones → Precio Vytria y ciclo diario**
+y **Configuración y diagnóstico → Auditoría, históricos y exportaciones** sin pulsar
+sincronización ni ejecución. Las lecturas
+existentes `VytriaPriceSync.last_run()`, `prices()` y `price_history(ean)` no consultan
+Odoo ni escriben datos. La escritura de precios/histórico se confirma en la
+transacción de sincronización, no en el render del gráfico.
+
+Si la excepción impide acceder a Cloud, ejecutar únicamente estas consultas sobre
+una conexión SQLite abierta en modo de solo lectura (no hace falta una copia completa
+ni un acceso nuevo). El primer resultado identifica la ejecución del incidente:
+
+```sql
+SELECT id, trigger, started_at, finished_at, status, monitored,
+       inserted, changed, unchanged, issues
+FROM vytria_sync_runs ORDER BY id DESC LIMIT 10;
+
+SELECT h.sync_run_id, COUNT(*) AS observaciones_guardadas,
+       COUNT(DISTINCT h.ean) AS productos
+FROM vytria_price_history h
+WHERE h.sync_run_id IN (SELECT id FROM vytria_sync_runs ORDER BY id DESC LIMIT 10)
+GROUP BY h.sync_run_id ORDER BY h.sync_run_id DESC;
+
+SELECT v.ean, v.price, v.currency, v.source, v.validation_status,
+       v.synced_at, v.changed_at, v.stale_since
+FROM vytria_prices v
+ORDER BY julianday(v.synced_at) DESC, v.ean LIMIT 50;
+```
+
+`unchanged` también acredita precios reconfirmados: no crea una fila histórica nueva.
+Un resultado `ok`/`partial` debe contrastarse con sus contadores, precios y fechas;
+una excepción de render por sí sola no acredita el resultado de producción.
+No repetir una sincronización para diagnosticarlo.
+
+### Orden de las opciones
+
+Las listas de datos del comparador y sus seis apartados comparten orden natural,
+sin distinguir mayúsculas ni acentos: `Óptica 2` precede a `Optica 10`.
+Competidores se ordenan por nombre visible; marcas, categorías y grupos por nombre.
+El mismo criterio admite colecciones cuando se ofrezcan como lista (actualmente se
+configuran como fuentes, no hay un selector de nombres de colección).
+Los productos se ordenan por marca, modelo y código de color, con EAN como desempate
+e identificador. Los nombres repetidos se desempatan por identificador estable.
+No se sustituyen claves de widgets ni valores guardados por índices ordenados.
+
+Se conservan los órdenes funcionales de navegación, pasos, métodos, estados,
+intervalos, decisiones y acciones, y los encabezados «Todos» o vacíos.
+Reordenar una lista no prepara colas, autoriza accesos ni realiza consultas.
+
 ## Dependencia e integración
 
 Esta rama se apila sobre **PR #112**, con autorización del solicitante. No modifica

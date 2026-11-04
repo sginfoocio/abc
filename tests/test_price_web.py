@@ -115,7 +115,7 @@ def test_price_and_availability_changes_create_history_points(pilot):
     history = store.offer_history(ean).sort_values("captured_at")
     assert list(history["price"]) == [239.0, 229.0, 229.0]
     assert list(history["availability"]) == ["available", "available", "unavailable"]
-    summary, _ = store.dashboard(30)
+    summary, _ = store.dashboard(30, now=NOW + timedelta(hours=2))
     assert pd.isna(summary.set_index("ean").loc[ean, "competitor_min_eur"])  # no fallback to the older price
 
 

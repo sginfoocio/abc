@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 
 from cloud_design import BRAND_GREEN
-from price_comparator import PriceComparatorStore, comparable_offers
+from price_comparator import PriceComparatorStore, comparable_offers, iso_datetimes
 
 WINDOWS = {"7 días": 7, "30 días": 30, "90 días": 90, "12 meses": 365}
 POSITION_BEST = "Vytria con el mejor precio"
@@ -28,11 +28,25 @@ def _utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _at_utc(value: datetime) -> pd.Timestamp:
+    at = pd.Timestamp(value)
+    return at.tz_localize("UTC") if at.tzinfo is None else at.tz_convert("UTC")
+
+
+def _dated(frame: pd.DataFrame, column: str) -> pd.DataFrame:
+    result = frame.copy()
+    result[column] = iso_datetimes(result[column], column)
+    return result.dropna(subset=[column]).sort_values([column, "id"])
+
+
 def price_state(checked_at: str | None, expiry_days: int, now: datetime | None = None) -> str:
     """Current: checked within the expiry. Last known: older, still the latest stored. Expired: much older."""
-    if not checked_at:
+    checked = iso_datetimes(pd.Series([checked_at]), "checked_at").iloc[0]
+    if pd.isna(checked):
         return STATE_EXPIRED
-    age = (now or _utc()) - datetime.fromisoformat(checked_at)
+    age = _at_utc(now or _utc()) - checked
+    if age < timedelta(0):
+        return STATE_EXPIRED
     if age <= timedelta(days=expiry_days):
         return STATE_CURRENT
     return STATE_LAST_KNOWN if age <= timedelta(days=expiry_days * LAST_KNOWN_FACTOR) else STATE_EXPIRED
@@ -127,7 +141,7 @@ def comparable_pairs(summary: pd.DataFrame, offers: pd.DataFrame) -> pd.DataFram
         return pd.DataFrame(columns=columns)
     price = joined["promotional_price"].where(joined["promotional_price"].notna(), joined["price"])
     joined = joined.assign(competitor_eur=price * joined["fx_to_eur"])
-    latest = joined.sort_values(["captured_at", "id"]).groupby(["ean", "competitor_id"]).tail(1)
+    latest = _dated(joined, "captured_at").groupby(["ean", "competitor_id"]).tail(1)
     result = pd.DataFrame({
         "ean": latest["ean"], "competitor_id": latest["competitor_id"], "competitor": latest["competitor_name"],
         "url": latest.get("url", pd.Series("", index=latest.index)), "own_eur": latest["own_price_eur"],
@@ -145,13 +159,14 @@ def competitor_positioning(summary: pd.DataFrame, offers: pd.DataFrame, threshol
     rows = []
     for name, group in pairs.groupby("competitor"):
         gap = float(group["difference_pct"].mean())
+        checked = iso_datetimes(group["checked_at"], "checked_at").max()
         rows.append({
             "competitor": name, "references": int(group["ean"].nunique()),
             "vytria_mean_eur": float(group["own_eur"].mean()),
             "competitor_mean_eur": float(group["competitor_eur"].mean()),
             "difference_pct": gap,
             "cheaper_pct": float((group["difference_pct"] < 0).mean() * 100),
-            "last_update": group["checked_at"].max(),
+            "last_update": checked.isoformat() if pd.notna(checked) else None,
             "signal": SIGNAL_BELOW if gap <= -threshold_pct else SIGNAL_ABOVE if gap >= threshold_pct
             else SIGNAL_INLINE,
         })
@@ -312,9 +327,11 @@ def _vytria_frame(store: PriceComparatorStore, ean: str | None = None) -> pd.Dat
 def recent_changes(store: PriceComparatorStore, days: int = 7, threshold_pct: float | None = None) -> pd.DataFrame:
     """Price moves at or above the threshold between consecutive stored observations (competitors and Vytria)."""
     threshold = threshold_pct if threshold_pct is not None else float(store.get_setting("alert_threshold_pct"))
-    since = (_utc() - timedelta(days=days)).isoformat()
+    end = _at_utc(_utc())
+    since = end - timedelta(days=days)
     rows = []
-    offers = _offer_frame(store)
+    offers = _dated(_offer_frame(store), "captured_at")
+    offers = offers[offers["captured_at"] <= end]
     for (ean, competitor), group in offers.groupby(["ean", "competitor_name"]):
         values = list(group.sort_values(["captured_at", "id"]).itertuples())
         for previous, current in zip(values[:-1], values[1:]):
@@ -322,8 +339,9 @@ def recent_changes(store: PriceComparatorStore, days: int = 7, threshold_pct: fl
                 change = (current.eur - previous.eur) / previous.eur * 100
                 if abs(change) >= threshold:
                     rows.append({"ean": ean, "source": competitor, "before": previous.eur, "after": current.eur,
-                                 "change_pct": change, "detected_at": current.captured_at})
-    vytria = _vytria_frame(store)
+                                 "change_pct": change, "detected_at": current.captured_at.isoformat()})
+    vytria = _dated(_vytria_frame(store), "recorded_at")
+    vytria = vytria[vytria["recorded_at"] <= end]
     for ean, group in vytria.groupby("ean"):
         values = list(group.itertuples())
         for previous, current in zip(values[:-1], values[1:]):
@@ -331,7 +349,7 @@ def recent_changes(store: PriceComparatorStore, days: int = 7, threshold_pct: fl
                 change = (current.price - previous.price) / previous.price * 100
                 if abs(change) >= threshold:
                     rows.append({"ean": ean, "source": "Vytria", "before": previous.price, "after": current.price,
-                                 "change_pct": change, "detected_at": current.recorded_at})
+                                 "change_pct": change, "detected_at": current.recorded_at.isoformat()})
     columns = ["ean", "source", "before", "after", "change_pct", "detected_at"]
     return pd.DataFrame(rows, columns=columns).sort_values("detected_at", ascending=False, ignore_index=True)
 
@@ -339,17 +357,20 @@ def recent_changes(store: PriceComparatorStore, days: int = 7, threshold_pct: fl
 def price_series(store: PriceComparatorStore, ean: str, days: int, competitors=None,
                  now: datetime | None = None, market: str | None = None) -> pd.DataFrame:
     """Stored observations only. `kind` is 'change' (a new price was recorded) or 'check' (same price re-confirmed)."""
-    end = now or _utc()
-    since = (end - timedelta(days=days)).isoformat()
+    end = _at_utc(now or _utc())
+    since = end - timedelta(days=days)
     rows = []
-    own = _vytria_frame(store, ean)
+    own = _dated(_vytria_frame(store, ean), "recorded_at")
+    own = own[own["recorded_at"] <= end]
     if market is None and not own.empty:
         market = own.sort_values(["recorded_at", "id"]).iloc[-1]["market"]
     if market:
         own = own[own["market"] == market]
     for item in own.itertuples():
         rows.append({"series": "Vytria", "at": item.recorded_at, "eur": item.price, "kind": "change"})
-    offers = _offer_frame(store, ean)
+    offers = _dated(_offer_frame(store, ean), "captured_at")
+    offers = offers[offers["captured_at"] <= end].copy()
+    offers["last_ok_at"] = iso_datetimes(offers["last_ok_at"], "last_ok_at")
     if market:
         offers = offers[offers["market"] == market]
     if competitors is not None:
@@ -359,7 +380,8 @@ def price_series(store: PriceComparatorStore, ean: str, days: int, competitors=N
         rows.append({"series": item.competitor_name, "at": item.captured_at,
                      "eur": item.eur if available else float("nan"),
                      "kind": "change" if available else "unavailable"})
-        if available and item.last_offer_id == item.id and item.last_ok_at and item.last_ok_at > item.captured_at:
+        if (available and item.last_offer_id == item.id and pd.notna(item.last_ok_at)
+                and item.captured_at < item.last_ok_at <= end):
             rows.append({"series": item.competitor_name, "at": item.last_ok_at, "eur": item.eur, "kind": "check"})
     frame = pd.DataFrame(rows, columns=["series", "at", "eur", "kind"]).sort_values(["series", "at"], ignore_index=True)
     if frame.empty:
@@ -370,16 +392,19 @@ def price_series(store: PriceComparatorStore, ean: str, days: int, competitors=N
         inside = group[group["at"] >= since]
         before = group[group["at"] < since].tail(1)
         keep.append(pd.concat([before, inside]))
-    return pd.concat(keep, ignore_index=True)
+    result = pd.concat(keep, ignore_index=True)
+    result["at"] = result["at"].map(lambda at: at.isoformat())
+    return result
 
 
 def competitiveness_series(store: PriceComparatorStore, days: int, now: datetime | None = None, *,
                            expiry_days: int | None = None, eans=None, competitors=None) -> pd.DataFrame:
     """Daily share of fresh, same-market compared references where Vytria matched or beat the competition."""
-    end = now or _utc()
+    end = _at_utc(now or _utc())
     expiry = expiry_days or store.price_expiry_days()
-    vytria = _vytria_frame(store)
-    offers = _offer_frame(store)
+    vytria = _dated(_vytria_frame(store), "recorded_at")
+    offers = _dated(_offer_frame(store), "captured_at")
+    offers["last_ok_at"] = iso_datetimes(offers["last_ok_at"], "last_ok_at")
     if eans is not None:
         selected = set(eans)
         vytria = vytria[vytria["ean"].isin(selected)]
@@ -391,20 +416,18 @@ def competitiveness_series(store: PriceComparatorStore, days: int, now: datetime
     rows = []
     for offset in range(days, -1, -1):
         day = (end - timedelta(days=offset)).date()
-        day_end = datetime(day.year, day.month, day.day, 23, 59, 59, tzinfo=timezone.utc)
+        day_end = pd.Timestamp(day, tz="UTC") + pd.Timedelta(days=1) - pd.Timedelta(nanoseconds=1)
         cutoff_dt = min(day_end, end)
-        cutoff = cutoff_dt.isoformat()
-        own = vytria[vytria["recorded_at"] <= cutoff].sort_values(["recorded_at", "id"]) \
+        own = vytria[vytria["recorded_at"] <= cutoff_dt].sort_values(["recorded_at", "id"]) \
             .groupby(["ean", "market"]).tail(1).copy()
-        own["recorded_dt"] = pd.to_datetime(own["recorded_at"], utc=True)
-        own = own[(cutoff_dt - own["recorded_dt"]) <= timedelta(days=expiry)]
-        latest = offers[offers["captured_at"] <= cutoff].sort_values(["captured_at", "id"]) \
+        own = own[(cutoff_dt - own["recorded_at"]) <= timedelta(days=expiry)]
+        latest = offers[offers["captured_at"] <= cutoff_dt].sort_values(["captured_at", "id"]) \
             .groupby(["ean", "competitor_id", "market"]).tail(1)
         # A later recheck extends freshness only from its actual date; future checks never leak backwards.
         latest = latest.copy()
-        latest["captured_dt"] = pd.to_datetime(latest["captured_at"], utc=True)
-        last_ok = pd.to_datetime(latest["last_ok_at"], utc=True, errors="coerce")
-        latest["checked_dt"] = last_ok.where(last_ok.notna() & (last_ok <= cutoff_dt), latest["captured_dt"])
+        last_ok = latest["last_ok_at"]
+        latest["checked_dt"] = last_ok.where(
+            last_ok.notna() & (last_ok >= latest["captured_at"]) & (last_ok <= cutoff_dt), latest["captured_at"])
         latest = latest[(cutoff_dt - latest["checked_dt"]) <= timedelta(days=expiry)]
         latest = latest[latest["availability"] == "available"]
         minimum = latest.groupby(["ean", "market"])["eur"].min()

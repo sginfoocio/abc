@@ -26,7 +26,7 @@ from sqlalchemy import bindparam, create_engine, text
 from sqlalchemy.engine import URL, Engine
 from sqlalchemy.exc import InterfaceError, OperationalError
 
-from price_comparator import PriceComparatorStore, normalize_gtin, vytria_price_states
+from price_comparator import PriceComparatorStore, iso_datetimes, normalize_gtin, vytria_price_states
 
 
 VYTRIA_PRICELIST_ID = 59
@@ -658,9 +658,12 @@ class VytriaPriceSync:
         import pandas as pd
 
         with self.store._connect() as connection:
-            return pd.read_sql_query("""SELECT * FROM vytria_price_history WHERE ean=?
+            frame = pd.read_sql_query("""SELECT * FROM vytria_price_history WHERE ean=?
                                         ORDER BY recorded_at DESC,id DESC""", connection,
                                      params=(normalize_gtin(ean),))
+        dates = iso_datetimes(frame["recorded_at"], "recorded_at")
+        return frame.assign(_at=dates).sort_values(["_at", "id"], ascending=False, na_position="last") \
+            .drop(columns="_at").reset_index(drop=True)
 
 
 def main(argv: list[str] | None = None) -> int:

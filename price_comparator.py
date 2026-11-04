@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import logging
 from io import BytesIO
 import math
 import os
@@ -89,13 +90,44 @@ _MONITOR_OFFER_GUARD = """AND (NOT EXISTS(
               24)/24.0 >= julianday('now')))"""
 
 
+def iso_datetimes(values: pd.Series, field: str) -> pd.Series:
+    """Stored ISO dates in UTC; legacy naive dates mean UTC, never local time."""
+    parsed = pd.to_datetime(values, format="ISO8601", utc=True, errors="coerce")
+    invalid = values.notna() & values.astype("string").str.strip().ne("") & parsed.isna()
+    if invalid.any():
+        logging.getLogger(__name__).warning(
+            "%s: %d fecha(s) ISO8601 inválida(s); excluidas del cálculo temporal", field, int(invalid.sum()))
+    return parsed
+
+
+def _chronological(frame: pd.DataFrame, column: str, *, since: datetime | None = None,
+                   until: datetime | None = None) -> pd.DataFrame:
+    rows = frame.assign(_date=iso_datetimes(frame[column], column)).dropna(subset=["_date"])
+    for boundary, lower in ((since, True), (until, False)):
+        if boundary is not None:
+            at = pd.Timestamp(boundary)
+            at = at.tz_localize("UTC") if at.tzinfo is None else at.tz_convert("UTC")
+            rows = rows[rows["_date"].ge(at) if lower else rows["_date"].le(at)]
+    return rows.sort_values(["_date", "id"]).drop(columns="_date")
+
+
+def _fresh_offers(frame: pd.DataFrame, now: datetime, days: int) -> pd.DataFrame:
+    captured = iso_datetimes(frame["captured_at"], "captured_at")
+    checked = iso_datetimes(frame["checked_at"], "checked_at")
+    valid_check = checked.notna() & checked.ge(captured) & checked.le(now)
+    effective = checked.where(valid_check, captured)
+    valid = captured.notna() & captured.le(now) & effective.ge(now - timedelta(days=days))
+    rows = frame.assign(_date=captured, checked_at=frame["checked_at"].where(valid_check, frame["captured_at"]))
+    return rows[valid].sort_values(["_date", "id"]).drop(columns="_date")
+
+
 def vytria_price_states(frame: pd.DataFrame, expiry_days: int, watched_eans: set[str], *,
                         now: datetime | None = None) -> pd.DataFrame:
     """One freshness rule for the dashboard, monitoring and the sync diagnostics."""
     result = frame.copy()
     at = pd.Timestamp(now or datetime.now(timezone.utc))
     at = at.tz_localize("UTC") if at.tzinfo is None else at.tz_convert("UTC")
-    synced = pd.to_datetime(result["synced_at"], utc=True, errors="coerce", format="mixed")
+    synced = iso_datetimes(result["synced_at"], "synced_at")
     hours = pd.Series(float(expiry_days * 24), index=result.index)
     hours.loc[result["ean"].isin(watched_eans)] = min(24, expiry_days * 24)
     valid_until = synced + pd.to_timedelta(hours, unit="h")
@@ -1340,16 +1372,8 @@ class PriceComparatorStore:
             """, connection, params=(normalized,))
 
     def search_result_summary(self, max_age_days: int = 30) -> dict[str, int]:
-        if max_age_days < 1:
-            raise ValueError("La antigüedad debe ser al menos un día")
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
-        with self._connect() as connection:
-            rows = connection.execute("""
-                SELECT s.match_status,COUNT(DISTINCT s.ean) AS products
-                FROM search_results s JOIN competitors c ON c.id=s.competitor_id
-                WHERE s.captured_at>=? AND c.active=1 GROUP BY s.match_status
-            """, (cutoff,)).fetchall()
-        return {row["match_status"]: row["products"] for row in rows}
+        rows = self.current_search_results(max_age_days)
+        return rows.groupby("match_status")["ean"].nunique().to_dict()
 
     def own_price_history(self, ean: str) -> pd.DataFrame:
         normalized = normalize_gtin(ean)
@@ -1361,68 +1385,69 @@ class PriceComparatorStore:
     def current_offers(self, max_age_days: int = 30) -> pd.DataFrame:
         if max_age_days < 1:
             raise ValueError("La antigüedad debe ser al menos un día")
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
+        now = datetime.now(timezone.utc)
         with self._connect() as connection:
-            return pd.read_sql_query("""
+            frame = pd.read_sql_query("""
                 SELECT o.*,c.name AS competitor_name,p.brand,p.commercial_name,
                        COALESCE(k.last_ok_at,o.captured_at) AS checked_at
                 FROM offers o JOIN competitors c ON c.id=o.competitor_id
                 JOIN products p ON p.ean=o.ean
                 LEFT JOIN offer_checks k ON k.last_offer_id=o.id
-                WHERE COALESCE(k.last_ok_at,o.captured_at)>=? AND c.active=1
+                WHERE c.active=1
                 """ + _MONITOR_OFFER_GUARD + """
                 ORDER BY o.captured_at DESC,o.id DESC
-            """, connection, params=(cutoff,))
+            """, connection)
+        return _fresh_offers(frame, now, max_age_days).iloc[::-1].reset_index(drop=True)
 
     def current_search_results(self, max_age_days: int = 30) -> pd.DataFrame:
         if max_age_days < 1:
             raise ValueError("La antigüedad debe ser al menos un día")
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
+        now = datetime.now(timezone.utc)
         with self._connect() as connection:
-            return pd.read_sql_query("""
+            frame = pd.read_sql_query("""
                 SELECT s.*,c.name AS competitor_name,p.brand,p.commercial_name
                 FROM search_results s JOIN competitors c ON c.id=s.competitor_id
                 JOIN products p ON p.ean=s.ean
-                WHERE s.captured_at>=? AND c.active=1
+                WHERE c.active=1
                 ORDER BY s.captured_at DESC,s.id DESC
-            """, connection, params=(cutoff,))
+            """, connection)
+        return _chronological(frame, "captured_at", since=now - timedelta(days=max_age_days),
+                              until=now).iloc[::-1].reset_index(drop=True)
 
     def dashboard(self, max_age_days: int = 30, *, now: datetime | None = None) -> tuple[pd.DataFrame, dict[str, int]]:
         if max_age_days < 1:
             raise ValueError("La antigüedad debe ser al menos un día")
         now = now or datetime.now(timezone.utc)
         now = now.replace(tzinfo=timezone.utc) if now.tzinfo is None else now.astimezone(timezone.utc)
-        cutoff = (now - timedelta(days=max_age_days)).isoformat()
+        cutoff = now - timedelta(days=max_age_days)
         with self._connect() as connection:
             products = pd.read_sql_query("SELECT * FROM products ORDER BY brand,commercial_name", connection)
             offers = pd.read_sql_query("""
                 SELECT o.*,c.name AS competitor_name,COALESCE(k.last_ok_at,o.captured_at) AS checked_at
                 FROM offers o JOIN competitors c ON c.id=o.competitor_id
                 LEFT JOIN offer_checks k ON k.last_offer_id=o.id
-                WHERE COALESCE(k.last_ok_at,o.captured_at)>=? AND c.active=1
+                WHERE c.active=1
                 """ + _MONITOR_OFFER_GUARD + """
                 ORDER BY o.captured_at DESC,o.id DESC
-            """, connection, params=(cutoff,))
+            """, connection)
             search_results = pd.read_sql_query("""
                 SELECT s.* FROM search_results s
                 JOIN competitors c ON c.id=s.competitor_id
-                WHERE s.captured_at>=? AND c.active=1
-            """, connection, params=(cutoff,))
-            own = pd.read_sql_query("""
-                SELECT p.* FROM own_prices p JOIN (
-                    SELECT ean,market,MAX(captured_at) AS captured_at FROM own_prices
-                    WHERE captured_at>=? GROUP BY ean,market
-                ) latest ON latest.ean=p.ean AND latest.market=p.market AND latest.captured_at=p.captured_at
-            """, connection, params=(cutoff,))
+                WHERE c.active=1
+            """, connection)
+            own = pd.read_sql_query("SELECT * FROM own_prices", connection)
             competitor_count = connection.execute("SELECT COUNT(*) FROM competitors WHERE active=1").fetchone()[0]
             synced = pd.read_sql_query("SELECT * FROM vytria_prices", connection)
             watched = {r[0] for r in connection.execute("SELECT ean FROM watch_products WHERE active=1")}
 
+        offers = _fresh_offers(offers, now, max_age_days)
+        search_results = _chronological(search_results, "captured_at", since=cutoff, until=now)
+        own = _chronological(own, "captured_at", since=cutoff, until=now).groupby(["ean", "market"]).tail(1)
         # A synchronized Odoo price supersedes the manual contingency import for its EAN. It takes part
         # in comparisons only when validated, not flagged stale by a later incident and recently synced.
         synced = vytria_price_states(synced, self.price_expiry_days(), watched, now=now)
         # Manual contingency prices of watched products have the same maximum daily validity.
-        own_dates = pd.to_datetime(own["captured_at"], utc=True, errors="coerce", format="mixed")
+        own_dates = iso_datetimes(own["captured_at"], "captured_at")
         daily_now = pd.Timestamp(now)
         own = own[~own["ean"].isin(watched) | (
             own_dates.gt(daily_now - timedelta(hours=24)) & own_dates.le(daily_now))]
@@ -1439,7 +1464,7 @@ class PriceComparatorStore:
         rows: list[dict[str, Any]] = []
         for product in products.to_dict("records"):
             own_rows = own[own["ean"] == product["ean"]]
-            own_record = own_rows.sort_values("captured_at").iloc[-1].to_dict() if not own_rows.empty else None
+            own_record = _chronological(own_rows, "captured_at").iloc[-1].to_dict() if not own_rows.empty else None
             valid_product_offers = product_offers = comparable_offers(
                 offers[offers["ean"] == product["ean"]])
             comparable = []
@@ -1528,9 +1553,9 @@ def comparable_offers(offers: pd.DataFrame) -> pd.DataFrame:
     if offers.empty:
         return offers
     exact = offers[offers["match_status"] == "exact_match"]
-    latest = exact.sort_values(["captured_at", "id"]).groupby(["ean", "competitor_id", "market"]).tail(1)
+    latest = _chronological(exact, "captured_at").groupby(["ean", "competitor_id", "market"]).tail(1)
     return latest[(latest["availability"] == "available") & (latest["price_includes_tax"] == 1)
-                  & latest["fx_to_eur"].notna()].sort_values(["captured_at", "id"])
+                  & latest["fx_to_eur"].notna()]
 
 
 def exclusion_reason(offer: dict[str, Any], latest: bool = True) -> str:
