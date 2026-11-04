@@ -218,14 +218,15 @@ def test_ui_robot_check_does_not_show_commercial_guard_error(pilot, monkeypatch)
     app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
                               "render_price_comparator_page()").run(timeout=30)
     assert not app.exception
-    app.selectbox(key="price_admin_section").set_value("Competidores").run(timeout=30)
+    from tests.admin_navigation import navigate
+    navigate(app, "Competidores", timeout=30)
     app.selectbox(key="admin_competitor_id").set_value(domanci).run(timeout=30)
     app.button(key=f"web_{domanci}_robots").click().run(timeout=30)
     assert not app.exception and not app.error
     assert any("Comprobación de acceso realizada. Resultado: permitido" in item.value for item in app.info)
     assert any("Falta registrar la revisión" in item.value for item in app.info)
     assert search.config(domanci)["access_status"] == "robots_allowed"
-    app.selectbox(key="price_admin_section").set_value("Historial y diagnósticos").run(timeout=30)
+    navigate(app, "Historial y diagnósticos", timeout=30)
     assert app.button(key="update_competitors").disabled
     assert site.calls == [origin(search, domanci) + "/robots.txt"]
 

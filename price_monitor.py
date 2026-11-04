@@ -91,16 +91,21 @@ class PriceMonitor:
         self.watch = PriceWatch(store, clock=clock)
         self.vytria = vytria_sync or VytriaPriceSync(store, clock=clock, sleep=sleep)
 
-    def enqueue(self, competitor_ids: list[str] | None = None) -> int:
+    def enqueue(self, competitor_ids: list[str] | None = None, eans: list[str] | None = None) -> int:
         """One current job per watched pair, never a discovery request. Only verified URLs are eligible."""
         self.search.ensure_config()
         now = self._now()
         added = 0
+        selected, params = "", []
+        for column, values in (("ean", eans), ("competitor_id", competitor_ids)):
+            if values is not None:
+                selected += f" AND monitor_jobs.{column} IN ({','.join('?' for _ in values)})"
+                params.extend(values)
         with self.store._connect() as con, con:
-            con.execute("""UPDATE monitor_jobs SET state='inactive',eligible=0,lease_until=NULL,updated_at=?
-                WHERE NOT EXISTS(SELECT 1 FROM watch_products w WHERE w.ean=monitor_jobs.ean AND w.active=1)
-                OR NOT EXISTS(SELECT 1 FROM competitors c WHERE c.id=monitor_jobs.competitor_id AND c.active=1)""",
-                        (_iso(now),))
+            con.execute(f"""UPDATE monitor_jobs SET state='inactive',eligible=0,lease_until=NULL,updated_at=?
+                WHERE (NOT EXISTS(SELECT 1 FROM watch_products w WHERE w.ean=monitor_jobs.ean AND w.active=1)
+                OR NOT EXISTS(SELECT 1 FROM competitors c WHERE c.id=monitor_jobs.competitor_id AND c.active=1))
+                {selected}""", (_iso(now), *params))
             rows = con.execute("""SELECT u.* FROM competitor_product_urls u
                 JOIN watch_products w ON w.ean=u.ean AND w.active=1
                 JOIN competitors c ON c.id=u.competitor_id AND c.active=1
@@ -109,6 +114,8 @@ class PriceMonitor:
             for row in rows:
                 cid, ean = row["competitor_id"], row["ean"]
                 if (competitor_ids is not None and cid not in competitor_ids) or (cid, ean) in seen:
+                    continue
+                if eans is not None and ean not in eans:
                     continue
                 seen.add((cid, ean))
                 interval = self.watch.monitor_interval_hours(ean, cid)
@@ -141,20 +148,21 @@ class PriceMonitor:
                                    if job["last_ok_at"] else None)
                     con.execute("UPDATE monitor_jobs SET not_before=?,valid_until=? WHERE id=?",
                                 (_iso(due), valid_until, job["id"]))
-        self.check_stale()
+        self.check_stale(competitor_ids, eans)
         return added
 
-    def _claim(self, cid: str) -> dict | None:
+    def _claim(self, cid: str, eans: list[str] | None = None) -> dict | None:
         now = _iso(self._now())
+        selected = "" if eans is None else f" AND j.ean IN ({','.join('?' for _ in eans)})"
         with self.store._connect() as con:
             con.execute("BEGIN IMMEDIATE")
-            row = con.execute("""SELECT j.* FROM monitor_jobs j
+            row = con.execute(f"""SELECT j.* FROM monitor_jobs j
                 JOIN watch_products w ON w.ean=j.ean AND w.active=1
                 JOIN competitors c ON c.id=j.competitor_id AND c.active=1
-                WHERE j.competitor_id=? AND
+                WHERE j.competitor_id=? {selected} AND
                   ((j.state IN ('pending','waiting','blocked','unavailable') AND
                     (j.not_before IS NULL OR j.not_before<=?)) OR (j.state='running' AND j.lease_until<=?))
-                ORDER BY j.not_before,j.id LIMIT 1""", (cid, now, now)).fetchone()
+                ORDER BY j.not_before,j.id LIMIT 1""", (cid, *(eans or []), now, now)).fetchone()
             if row is None:
                 con.commit()
                 return None
@@ -178,13 +186,13 @@ class PriceMonitor:
                     (job["id"], _iso(self._now()), state, detail[:1000]))
 
     def run(self, competitor_ids: list[str] | None = None, *, max_jobs: int = 200,
-            deadline_seconds: float = 900) -> MonitorReport:
+            deadline_seconds: float = 900, eans: list[str] | None = None) -> MonitorReport:
         """An explicitly requested bounded batch. Does not enable periodic work or search for any URL."""
         if not 1 <= max_jobs <= 5000 or not 1 <= deadline_seconds <= 14400:
             raise ValueError("Lote de 1-5000 trabajos y plazo de 1-14400 segundos")
         report = MonitorReport()
         started = time.monotonic()
-        self.enqueue(competitor_ids)
+        self.enqueue(competitor_ids, eans)
         summary, _ = self.store.dashboard(now=self._now())
         own = dict(summary[["ean", "own_price_eur"]].itertuples(index=False, name=None)) if not summary.empty else {}
         with self.store._connect() as con:
@@ -204,7 +212,7 @@ class PriceMonitor:
                         first = con.execute("SELECT COALESCE(MAX(id),0) FROM access_requests").fetchone()[0]
                     try:
                         while report.processed < max_jobs and time.monotonic() - started < deadline_seconds:
-                            job = self._claim(cid)
+                            job = self._claim(cid, eans)
                             if job is None:
                                 break
                             report.processed += 1
@@ -222,7 +230,7 @@ class PriceMonitor:
                                 WHERE competitor_id=? AND id>?""", (cid, first)).fetchone()[0]
             except Timeout:
                 report.stopped[cid] = "Otra ejecución está consultando a este competidor"
-        self.check_stale()
+        self.check_stale(competitor_ids, eans)
         return report
 
     def _process(self, job: dict, config: dict, fetcher: GovernedFetcher, own_price: float | None) -> str:
@@ -362,13 +370,19 @@ class PriceMonitor:
         if eligible and own_price is not None and price < own_price and not was_cheaper:
             self._alert(con, job, "undercut", sample["at"], before, price, f"Vytria: {own_price:g} EUR")
 
-    def check_stale(self) -> int:
+    def check_stale(self, competitor_ids: list[str] | None = None, eans: list[str] | None = None) -> int:
+        selected, params = "", []
+        for column, values in (("ean", eans), ("competitor_id", competitor_ids)):
+            if values is not None:
+                selected += f" AND j.{column} IN ({','.join('?' for _ in values)})"
+                params.extend(values)
         """Local-only check, idempotent per last successful sample. No HTTP or email."""
         with self.store._connect() as con, con:
             before = con.total_changes
-            for row in con.execute("""SELECT j.* FROM monitor_jobs j JOIN watch_products w ON w.ean=j.ean
+            for row in con.execute(f"""SELECT j.* FROM monitor_jobs j JOIN watch_products w ON w.ean=j.ean
                 JOIN competitors c ON c.id=j.competitor_id WHERE w.active=1 AND c.active=1
-                AND j.valid_until<? AND j.last_offer_id IS NOT NULL""", (_iso(self._now()),)).fetchall():
+                AND j.valid_until<? AND j.last_offer_id IS NOT NULL {selected}""",
+                                   (_iso(self._now()), *params)).fetchall():
                 self._alert(con, dict(row), "stale", row["last_ok_at"], row["last_ok_at"], row["valid_until"])
             return con.total_changes - before
 
@@ -451,7 +465,14 @@ class PriceMonitor:
         own_details = summary.set_index("ean").to_dict("index") if not summary.empty else {}
         with self.store._connect() as con:
             rows = pd.read_sql_query("""SELECT w.ean,p.brand,p.model,p.color,c.id AS competitor_id,
-                c.name AS competitor,j.url,j.state,j.detail,j.sample,j.previous_sample,
+                c.name AS competitor,COALESCE(u.url,j.url) AS url,u.source AS url_source,
+                CASE WHEN EXISTS(SELECT 1 FROM pilot_url_candidates pc WHERE pc.ean=w.ean
+                    AND pc.competitor_id=c.id AND pc.url=COALESCE(u.url,j.url) AND pc.state='confirmed')
+                    THEN 'Piloto: ficha reutilizada'
+                    WHEN u.source='auto_watch' THEN 'Motor de vigilancia'
+                    WHEN u.url IS NOT NULL THEN 'Ficha registrada / importación'
+                    ELSE 'Sin ficha verificada' END AS provenance,
+                j.state,j.detail,l.state AS locate_state,l.detail AS locate_detail,j.sample,j.previous_sample,
                 j.last_ok_at,j.valid_until,j.eligible,
                 COALESCE(g.interval_hours,s.interval_hours,24) AS interval_hours,
                 EXISTS(SELECT 1 FROM competitor_product_urls u WHERE u.ean=w.ean AND u.competitor_id=c.id
@@ -460,6 +481,10 @@ class PriceMonitor:
                 JOIN watch_groups g ON g.name=w.group_name CROSS JOIN competitors c
                 LEFT JOIN competitor_schedule s ON s.competitor_id=c.id
                 LEFT JOIN monitor_jobs j ON j.ean=w.ean AND j.competitor_id=c.id
+                LEFT JOIN locate_jobs l ON l.ean=w.ean AND l.competitor_id=c.id
+                LEFT JOIN competitor_product_urls u ON u.rowid=(
+                    SELECT x.rowid FROM competitor_product_urls x WHERE x.ean=w.ean AND x.competitor_id=c.id
+                    AND x.status='verified' ORDER BY x.verified_at DESC,x.url LIMIT 1)
                 WHERE w.active=1 AND c.active=1 ORDER BY p.brand,p.model,p.color,c.name""", con)
         if rows.empty:
             return rows
@@ -496,6 +521,7 @@ class PriceMonitor:
             comparable = comparable and not restricted
             state = ("Bloqueado" if gate.code in ("blocked_manual", "blocked_wait") else
                      "Sin autorización" if gate.code in ("not_authorized", "prohibited") else
+                     "Revisión de identidad" if not row["located"] and row["locate_state"] == "review" else
                      "Ficha localizada" if not row["state"] and row["located"] else
                      "Sin localizar" if not row["state"] else
                      "Ficha retirada" if row["state"] == "gone" else

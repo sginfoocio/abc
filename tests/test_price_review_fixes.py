@@ -103,7 +103,8 @@ def test_prada_five_tabs_render_with_real_values(prada):
     app.selectbox(key="products_selected_ean").set_value("8056597877329").run(timeout=90)
     assert not app.exception
     assert any(len(frame.value) == 2 for frame in app.dataframe)  # full history keeps both observations
-    app.selectbox(key="price_admin_section").set_value("Competidores").run(timeout=90)
+    from tests.admin_navigation import navigate
+    navigate(app, "Competidores")
     states = next(frame.value for frame in app.dataframe if "Operatividad" in frame.value.columns)
     assert len(states) == 14  # the selected-competitor UI keeps all 14 status rows visible
 

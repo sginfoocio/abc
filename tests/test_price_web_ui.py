@@ -5,6 +5,7 @@ from streamlit.testing.v1 import AppTest
 from price_web import OPERABILITY_TEXT, WebPriceSearch
 from app_pages.price_comparator import WEB_STATUS_TEXT
 from tests.test_price_review_fixes import _freeze
+from tests.admin_navigation import navigate
 from tests.web_fixtures import PRADA, FakeSite, competitor_id, index_url, make_search, prada_page, url_of
 
 SCRIPT = "from app_pages.price_comparator import render_price_comparator_page\nrender_price_comparator_page()"
@@ -27,10 +28,10 @@ def ui(tmp_path, monkeypatch):
 def _run(admin_section="Competidores"):
     app = AppTest.from_string(SCRIPT).run(timeout=90)
     if admin_section == "Búsqueda manual":
-        app.selectbox(key="price_admin_section").set_value("Piloto y consultas").run(timeout=90)
+        navigate(app, "Piloto y consultas")
         app.selectbox(key="price_pilot_section").set_value(admin_section).run(timeout=90)
     else:
-        app.selectbox(key="price_admin_section").set_value(admin_section).run(timeout=90)
+        navigate(app, admin_section)
     assert not app.exception
     return app
 

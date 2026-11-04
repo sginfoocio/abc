@@ -266,7 +266,8 @@ def ui(tmp_path, monkeypatch):
 
 
 def _find(app):
-    app.selectbox(key="price_admin_section").set_value("Piloto y consultas").run(timeout=90)
+    from tests.admin_navigation import navigate
+    navigate(app, "Piloto y consultas")
     app.selectbox(key="price_pilot_section").set_value("Búsqueda manual").run(timeout=90)
     app.text_input(key="web_text").set_value(EAN).run(timeout=90)
     app.multiselect(key="web_competitors").set_value(["Visio Factory"])
@@ -281,7 +282,8 @@ def _submit(app, cid, url):
 
 
 def _states_frame(app):
-    app.selectbox(key="price_admin_section").set_value("Competidores").run(timeout=90)
+    from tests.admin_navigation import navigate
+    navigate(app, "Competidores")
     return next(f.value for f in app.dataframe if "Operatividad" in f.value.columns).set_index("Competidor")
 
 

@@ -142,9 +142,9 @@ def test_watch_admin_ui_adds_products_and_shows_authorizations(tmp_path, monkeyp
     monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
     app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
                               "render_price_comparator_page()").run(timeout=30)
-    app.selectbox(key="price_admin_section").set_value("Vigilancia automática").run(timeout=30)
+    from tests.admin_navigation import watch_section
+    watch_section(app, "Añadir productos")
     assert not app.exception
-    app.selectbox(key="price_watch_section").set_value("Añadir productos").run(timeout=30)
     app.text_area(key="watch_bulk_text").set_value(f"{EAN}\n123").run(timeout=30)
     app.button(key="watch_add_bulk").click().run(timeout=30)
     assert not app.exception
@@ -153,10 +153,12 @@ def test_watch_admin_ui_adds_products_and_shows_authorizations(tmp_path, monkeyp
     for section in ("Productos vigilados", "Reglas de vigilancia", "Grupos y frecuencia", "Localización automática",
                     "Precios y monitorización", "Alertas", "Autorizaciones por método",
                     "Presupuestos", "Bloqueos e incidencias"):
-        app.selectbox(key="price_watch_section").set_value(section).run(timeout=30)
+        watch_section(app, section)
         assert not app.exception, section
-    app.selectbox(key="price_watch_section").set_value("Autorizaciones por método").run(timeout=30)
-    matrix = next(frame.value for frame in app.dataframe if "Competidor" in frame.value.columns)
+    watch_section(app, "Autorizaciones por método")
+    cid = store.competitors().set_index("name").loc["Domanci", "id"]
+    app.selectbox(key="admin_competitor_id").set_value(cid).run(timeout=30)
+    matrix = next(frame.value for frame in app.dataframe if "Fichas de producto" in frame.value.columns)
     matrix = matrix.set_index("Competidor")
     assert "Prohibido" in matrix.loc["Domanci"].tolist()
     assert "Autorizado" not in matrix.values.ravel().tolist()
@@ -177,8 +179,8 @@ def test_locator_ui_counts_queue_and_runs_without_requests_when_nothing_is_autho
     assert report.queued == total and f"{total} búsquedas en cola" in report.summary
     app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
                               "render_price_comparator_page()").run(timeout=30)
-    app.selectbox(key="price_admin_section").set_value("Vigilancia automática").run(timeout=30)
-    app.selectbox(key="price_watch_section").set_value("Localización automática").run(timeout=30)
+    from tests.admin_navigation import watch_section
+    watch_section(app, "Localización automática")
     assert not app.exception
     assert {metric.label: metric.value for metric in app.metric}["Pendientes"] == str(total)
     app.button(key="locate_enqueue").click().run(timeout=30)
@@ -203,8 +205,8 @@ def test_locator_ui_sources_and_schedule_without_requests(tmp_path, monkeypatch)
     monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
     app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
                               "render_price_comparator_page()").run(timeout=30)
-    app.selectbox(key="price_admin_section").set_value("Vigilancia automática").run(timeout=30)
-    app.selectbox(key="price_watch_section").set_value("Localización automática").run(timeout=30)
+    from tests.admin_navigation import watch_section
+    watch_section(app, "Localización automática")
     assert not app.exception
     assert any("PRICE_LOCATOR_SCHEDULE_ENABLED" in str(item.value) for item in app.warning)
     domanci = store.competitors().set_index("name").loc["Domanci", "id"]
@@ -216,7 +218,7 @@ def test_locator_ui_sources_and_schedule_without_requests(tmp_path, monkeypatch)
     app.selectbox(key="locate_source_adapter").set_value("itemlist")
     app.button[[b.label for b in app.button].index("Guardar fuente")].click().run(timeout=30)
     assert not app.exception and any("Fuente guardada" in str(item.value) for item in app.success)
-    app.selectbox(key="locate_schedule_competitor").set_value(domanci)
+    app.selectbox(key="locate_schedule_competitor").set_value(domanci).run(timeout=30)
     app.number_input(key="locate_schedule_interval").set_value(48)
     app.checkbox(key="locate_schedule_enabled").check()
     app.button[[b.label for b in app.button].index("Guardar planificación")].click().run(timeout=30)

@@ -4,7 +4,9 @@ Cloud tiene su propio motor de localización y vigilancia de precios. Se ejecuta
 
 La fase 1 crea las bases para gestionar miles de EAN y muchos competidores sin registrar URLs a mano. El piloto de 20 EAN (`price_pilot.py`, tablas `pilot_*`) **no cambia**: sigue funcionando hasta que se valide el nuevo motor.
 
-Ubicación en Cloud: **Comparador de precios → Administración → Vigilancia automática**. Al abrir la pantalla no se realiza ninguna petición HTTP.
+Ubicación en Cloud: **Comparador de precios → Administración**. La administración se organiza en seis apartados;
+véase [navegación, auditoría y operación supervisada](ADMINISTRACION_COMPARADOR.md).
+Al abrir las pantallas no se realiza ninguna petición HTTP ni se activa la planificación.
 
 ## Contenido de la fase 1
 
@@ -113,7 +115,10 @@ El slug de la URL ya contiene marca, modelo y color. Así, un listado de marca p
 
 ## Fase 2: motor de localización propio (`price_locator.py`)
 
-Ubicación: **Vigilancia automática → Localización automática**. Al añadir productos a la vigilancia se crean sus búsquedas en todos los competidores activos (sin HTTP). Las búsquedas se procesan por lotes con «Procesar lote» o con la línea de órdenes:
+Ubicación habitual: **Administración → Actualizaciones → Lote supervisado**.
+Los controles independientes están en **Colas y revisión (avanzado) → Localización**.
+Al añadir productos a la vigilancia se crean sus búsquedas en todos los competidores activos (sin HTTP).
+También puede utilizarse la línea de órdenes:
 
 ```bash
 python price_locator.py enqueue               # prepara la cola (idempotente)
@@ -384,7 +389,7 @@ Para comprobar un lote ya terminado **no pulsar Preparar ni Actualizar precios**
   `offer_history(ean)` y muestra precio, moneda, stock, mercado, identidad, fecha y URL
   ya guardados. La tabla permite descargar sus filas desde el menú de Streamlit.
   Su visibilidad depende de los filtros/ofertas recientes del detalle.
-- Tras aplicar la corrección, **Vigilancia automática → Precios y monitorización →
+- Tras aplicar la corrección, **Actualizaciones → Colas y revisión (avanzado) → Monitorización →
   Trabajos de monitorización** muestra `jobs()` y la tabla comercial sin ejecutar
   el motor; también se pueden descargar las tablas desde su menú.
 - El CSV de **ejecuciones del piloto** no acredita este lote del motor nuevo.
@@ -436,14 +441,14 @@ ofertas nuevas. No ejecutar el monitor para verificar estos datos.
 
 ### Uso y prueba supervisada
 
-En **Comparador → Administración → Vigilancia automática**:
+En **Comparador → Administración**:
 
 1. Añadir productos de Vytria (selección, importación de EAN o reglas), con marca/modelo/color completos.
-2. Revisar «Autorizaciones por método» y «Presupuestos». Las autorizaciones del piloto no se transfieren implícitamente al motor escalable.
-3. En «Localización automática», ejecutar un lote dirigido al competidor autorizado.
-4. En «Precios y monitorización», elegir **un competidor**, revisar el presupuesto y marcar la confirmación del lote. El botón procesa como máximo diez fichas por defecto y solo trabajos vencidos.
+2. En «Competidores», revisar permisos por método y presupuestos. Las autorizaciones del piloto no se transfieren implícitamente al motor escalable.
+3. En «Actualizaciones → Lote supervisado», seleccionar EAN y competidores y revisar fichas, trabajos y consumo previsto.
+4. Preparar sin HTTP y confirmar expresamente la ejecución. Los controles independientes por motor siguen en «Colas y revisión (avanzado)».
 5. Consultar precio Vytria/competidor, mejor competidor, diferencias (Vytria menos competidor, porcentaje sobre Vytria), stock, moneda, IVA, fecha y estado. Hay filtros de marca/estado/búsqueda y evolución histórica reutilizada.
-6. «Alertas» permite cambiar el umbral y descargar el resumen de correo, sin enviar nada.
+6. «Alertas e incidencias» permite cambiar el umbral y descargar el resumen de correo, sin enviar nada.
 7. El dashboard general recibe las ofertas del mismo histórico; no hace falta volver a importarlas.
 
 CLI (desde el directorio de la aplicación; no ejecutar en producción sin aprobación):
