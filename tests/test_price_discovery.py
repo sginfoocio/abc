@@ -14,6 +14,7 @@ from price_pilot import PilotError, SAMPLE_EANS, pilot_scope
 from price_scheduler import CompetitorScheduler
 from price_web import Outcome, WebSearchError, product_search_urls
 from price_web_extract import ProductPage, extract_product, resolve_market
+from price_watch import PriceWatch
 from tests.test_price_pilot import known
 from tests.web_fixtures import BASE, ROBOTS_OK, prada_page
 
@@ -340,6 +341,59 @@ def test_edel_discard_preserves_confirmed_product_url_and_is_idempotent(pilot):
     assert coverage.state == "confirmed"
     assert coverage.url.endswith("/PR-65ZS-ZVN09T-de-Prada.html")
     assert discovery.pending().isdisjoint({(cid, ean)})
+
+
+def test_confirmation_audit_separates_history_pairs_and_watch_links(pilot):
+    _, store, _, site, cid, _ = pilot
+    discovery = PilotDiscovery(store)
+    scope = pilot_scope(store)
+    other_ean = "8056597877329"
+    url = "https://www.edel-optics.es/PR-27ZS-16K08Z-de-Prada.html"
+    other_url = "https://www.edel-optics.es/PR-27ZS-16K08Z-alternativa.html"
+    now = "2026-10-31T12:00:00+00:00"
+    with store._connect() as connection, connection:
+        runs = [connection.execute("""INSERT INTO pilot_runs(
+            started_at,status,scope,competitors,operation,selection,selection_request)
+            VALUES(?,'done',?,?,'discovery','[]','[]')""",
+                                   (now, json.dumps(scope["eans"]), json.dumps(scope["competitors"]))).lastrowid
+                for _ in range(5)]
+        for run_id, candidate_url, origin in (
+            (runs[0], url, "manual"), (runs[1], url, "manual"),
+            (runs[2], other_url, "manual"), (runs[3], url, ""),
+        ):
+            connection.execute("""INSERT INTO pilot_url_candidates(
+                competitor_id,ean,url,run_id,state,method,evidence,identity,checked_at,review_origin,reviewed_at)
+                VALUES(?,?,?,?,'confirmed','ean','{}','{}',?,?,?)""",
+                               (cid, EAN, candidate_url, run_id, now, origin, now))
+        connection.execute("""INSERT INTO pilot_url_candidates(
+            competitor_id,ean,url,run_id,state,method,evidence,identity,checked_at,review_origin,reviewed_at)
+            VALUES(?,?,?,?,'confirmed','ean','{}','{}',?,'manual',?)""",
+                           (cid, other_ean, "https://www.edel-optics.es/PR-65ZS-ZVN09T-de-Prada.html",
+                            runs[4], now, now))
+        connection.execute("""INSERT INTO competitor_product_urls(
+            competitor_id,ean,url,match_status,status,verified_at,source)
+            VALUES(?,?,?,'exact_match','verified',?,'user')""", (cid, EAN, url, now))
+    PriceWatch(store).add([EAN, other_ean], actor="reviewer")
+    before_calls = list(site.calls)
+
+    metrics, frame = discovery.confirmation_audit()
+
+    assert metrics["confirmed_rows"] == 5
+    assert metrics["manual_rows"] == 4
+    assert metrics["manual_pairs"] == 2
+    assert metrics["manual_urls"] == 3
+    assert metrics["manual_duplicate_url_rows"] == 1
+    assert metrics["ui_manual_scope_rows"] == 5
+    assert metrics["ui_manual_scope_pairs"] == 2
+    assert metrics["manual_reusable_pairs"] == 1
+    assert metrics["manual_pending_binding_rows"] == 2
+    assert metrics["watch_pairs"] == 2 * store.competitors()["active"].eq(1).sum()
+    assert metrics["watch_verified_pairs"] == 1
+    assert set(frame["origin_label"]) == {"Manual", "Otra / no registrada"}
+    assert frame.loc[frame["url"] == url, "link_state"].eq("Disponible en vigilancia").all()
+    assert frame.loc[frame["url"] == other_url, "link_state"].eq("Otra URL verificada").all()
+    assert frame.loc[frame["ean"] == other_ean, "link_state"].eq("Sin vínculo verificado").all()
+    assert site.calls == before_calls
 
 
 def test_discarding_last_candidate_does_not_claim_product_is_missing(pilot):

@@ -19,6 +19,7 @@ from price_locator import (ADAPTERS, JOB_STATES, MAX_DEPTH, SCHEDULE_ENV, SOURCE
                            schedule_enabled)
 from price_monitor import (ALERTS, STATES, SCHEDULE_ENV as MONITOR_ENV, PriceMonitor,
                            schedule_enabled as monitor_enabled)
+from price_discovery import PilotDiscovery
 from price_watch import DEFAULT_GROUP, SOURCES, PriceWatch, WatchReport, eans_from_frame, parse_eans
 from vytria_price_sync import STATUS_LABELS, SyncInProgress, VytriaPriceSync
 from app_pages.price_options import ordered, product_eans
@@ -650,8 +651,48 @@ def _render_alerts(store: PriceComparatorStore) -> None:
 
 ADMIN_SECTIONS = (
     "Panel general", "Productos en vigilancia", "Competidores", "Actualizaciones",
-    "Alertas e incidencias", "Configuración y diagnóstico",
+    "Alertas e incidencias", "Configuración y diagnóstico", "Fichas confirmadas",
 )
+
+
+def _render_confirmation_audit(store: PriceComparatorStore) -> None:
+    metrics, confirmations = PilotDiscovery(store).confirmation_audit()
+    st.caption("Inventario de solo lectura. Distingue registros históricos, pares únicos y fichas verificadas "
+               "en productos actualmente vigilados; no modifica vínculos ni ejecuta consultas HTTP.")
+    cols = st.columns(4)
+    cols[0].metric("Confirmaciones manuales · registros", metrics["manual_rows"])
+    cols[1].metric("Pares manuales distintos · histórico", metrics["manual_pairs"])
+    cols[2].metric("Pares manuales disponibles en vigilancia", metrics["manual_reusable_pairs"])
+    cols[3].metric("Pares vigilados con ficha verificada",
+                   f"{metrics['watch_verified_pairs']}/{metrics['watch_pairs']}")
+
+    details = st.columns(4)
+    details[0].metric("Contador anterior · alcance del piloto", metrics["ui_manual_scope_rows"])
+    details[1].metric("Pares distintos en ese alcance", metrics["ui_manual_scope_pairs"])
+    details[2].metric("Origen no manual/no registrado en ese contador", metrics["unknown_origin_scope_rows"])
+    details[3].metric("Repeticiones de la misma URL", metrics["manual_duplicate_url_rows"])
+    pending = st.columns(2)
+    pending[0].metric("Confirmaciones pendientes de vínculo", metrics["manual_pending_binding_rows"])
+    pending[1].metric("Manuales no disponibles en la vigilancia actual", metrics["manual_unavailable_rows"])
+    st.caption(f"El contador anterior incluía {metrics['manual_scope_rows']} registros con origen manual "
+               "dentro del alcance actual del piloto. El contador de vigilancia usa el conjunto separado "
+               "de productos y competidores activos.")
+
+    if confirmations.empty:
+        st.info("No hay candidatos confirmados en el historial.")
+        return
+    columns = {
+        "brand": "Marca", "model": "Modelo", "color": "Color", "ean": "EAN",
+        "competitor": "Competidor", "origin_label": "Procedencia de confirmación",
+        "review_origin": "Origen registrado",
+        "run_id": "Ejecución", "reviewed_at": "Fecha de revisión", "url": "URL confirmada",
+        "pilot_scope": "En piloto actual", "watched": "Producto vigilado",
+        "competitor_active": "Competidor activo", "link_state": "Estado del vínculo",
+        "link_reason": "Motivo",
+    }
+    display = confirmations.rename(columns=columns)
+    st.dataframe(display[list(columns.values())], hide_index=True, width="stretch",
+                 column_config={"URL confirmada": st.column_config.LinkColumn("URL confirmada")})
 
 
 def _render_overview(store: PriceComparatorStore) -> None:
@@ -848,12 +889,15 @@ def render_admin(store: PriceComparatorStore, data: dict) -> None:
     from app_pages import price_comparator as page
 
     _notices()
+    section = st.selectbox("Administración", ADMIN_SECTIONS, key="price_admin_section")
+    if section == "Fichas confirmadas":
+        _render_confirmation_audit(store)
+        return
     watch, access = PriceWatch(store), AccessControl(store)
     watch.ensure_defaults()
     access.ensure_defaults()
     PriceLocator(store).seed_sources()
     names = {r["id"]: r["name"] for r in store.competitors().to_dict("records")}
-    section = st.selectbox("Administración", ADMIN_SECTIONS, key="price_admin_section")
     if section == "Panel general":
         _render_overview(store)
     elif section == "Productos en vigilancia":
@@ -901,7 +945,7 @@ def render_admin(store: PriceComparatorStore, data: dict) -> None:
             _render_alerts(store)
         else:
             _render_incidents(access, names)
-    else:
+    elif section == "Configuración y diagnóstico":
         task = st.selectbox("Diagnóstico", ["Parámetros generales", "Importaciones técnicas",
                                            "Auditoría, históricos y exportaciones", "Piloto anterior",
                                            "Recuperación de búsquedas"], key="watch_diagnostic_task")

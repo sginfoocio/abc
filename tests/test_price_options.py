@@ -96,6 +96,7 @@ _render_batch(store, names)
 
 def test_process_options_keep_their_functional_order():
     assert ADMIN_SECTIONS == ("Panel general", "Productos en vigilancia", "Competidores",
-                              "Actualizaciones", "Alertas e incidencias", "Configuración y diagnóstico")
+                              "Actualizaciones", "Alertas e incidencias", "Configuración y diagnóstico",
+                              "Fichas confirmadas")
     assert STATE_OPTIONS[0] == "Todos"
     assert STATE_OPTIONS[-1] == "Sin comparación"

@@ -169,7 +169,7 @@ def test_observation_export_preserves_original_history_and_provenance(tmp_path):
     assert pd.isna(previous["valid_until"]) and previous["checked_at"] == previous["captured_at"]
 
 
-def test_six_sections_and_all_competitor_controls_are_offline(tmp_path, monkeypatch):
+def test_seven_sections_and_all_competitor_controls_are_offline(tmp_path, monkeypatch):
     store, _, _, monitor, _, _, _ = _monitor_env(tmp_path)
     monitor.run()
     monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
@@ -184,6 +184,22 @@ def test_six_sections_and_all_competitor_controls_are_offline(tmp_path, monkeypa
             for task in app.selectbox(key="competitor_card_section").options:
                 app.selectbox(key="competitor_card_section").set_value(task).run(timeout=30)
                 assert not app.exception, task
+
+
+def test_confirmed_url_audit_is_read_only_and_never_uses_http(tmp_path, monkeypatch):
+    store, _, _, _, _, _, _ = _monitor_env(tmp_path)
+    monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
+    monkeypatch.setattr("requests.get", lambda *a, **k: pytest.fail("No real HTTP"))
+    app = AppTest.from_string("from price_comparator import PriceComparatorStore\n"
+                              "from app_pages.price_watch import render_admin\n"
+                              "render_admin(PriceComparatorStore(), {})").run(timeout=30)
+    assert not app.exception
+    before = _dump(store)
+
+    app.selectbox(key="price_admin_section").set_value("Fichas confirmadas").run(timeout=30)
+
+    assert not app.exception
+    assert _dump(store) == before
 
 
 def test_monitor_metrics_respect_every_filter_and_reading_does_not_modify_data(tmp_path, monkeypatch):

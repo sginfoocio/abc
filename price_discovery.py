@@ -185,6 +185,98 @@ class PilotDiscovery:
             return frame.iloc[:0]
         return frame[frame.ean.isin(scope["eans"]) & frame.competitor_id.isin(scope["competitors"])]
 
+    def confirmation_audit(self) -> tuple[dict[str, int], pd.DataFrame]:
+        scope = pilot_scope(self.store)
+        scope_pairs = ({(cid, ean) for cid in scope["competitors"] for ean in scope["eans"]}
+                       if scope else set())
+        with self.store._connect() as connection:
+            frame = pd.read_sql_query("""SELECT pc.id,pc.ean,pc.competitor_id,c.name AS competitor,
+                    p.brand,p.model,p.color,pc.url,pc.run_id,pc.review_origin,pc.reviewed_at,
+                    CASE WHEN w.active=1 THEN 1 ELSE 0 END AS watched,
+                    CASE WHEN c.active=1 THEN 1 ELSE 0 END AS competitor_active,
+                    exact.status AS exact_url_status,
+                    (SELECT u.url FROM competitor_product_urls u
+                     WHERE u.competitor_id=pc.competitor_id AND u.ean=pc.ean AND u.status='verified'
+                     ORDER BY u.verified_at DESC,u.url LIMIT 1) AS selected_verified_url
+                FROM pilot_url_candidates pc
+                JOIN competitors c ON c.id=pc.competitor_id
+                JOIN products p ON p.ean=pc.ean
+                LEFT JOIN watch_products w ON w.ean=pc.ean
+                LEFT JOIN competitor_product_urls exact
+                    ON exact.competitor_id=pc.competitor_id AND exact.ean=pc.ean AND exact.url=pc.url
+                WHERE pc.state='confirmed'
+                ORDER BY pc.id DESC""", connection)
+            frame = frame.astype(object).where(frame.notna(), None)
+            watch_totals = connection.execute("""SELECT COUNT(*) AS pairs,
+                    COALESCE(SUM(EXISTS(SELECT 1 FROM competitor_product_urls u
+                        WHERE u.ean=w.ean AND u.competitor_id=c.id AND u.status='verified')),0) AS verified
+                FROM watch_products w CROSS JOIN competitors c
+                WHERE w.active=1 AND c.active=1""").fetchone()
+
+        if frame.empty:
+            frame["pilot_scope"] = pd.Series(dtype=bool)
+            frame["origin_label"] = pd.Series(dtype=str)
+            frame["link_state"] = pd.Series(dtype=str)
+            frame["link_reason"] = pd.Series(dtype=str)
+            frame["reusable"] = pd.Series(dtype=bool)
+        else:
+            frame["pilot_scope"] = [
+                (row.competitor_id, row.ean) in scope_pairs for row in frame.itertuples()
+            ]
+            frame["origin_label"] = frame["review_origin"].map(
+                lambda origin: "Manual" if origin == MANUAL_ORIGIN else
+                "Automática" if origin == AUTO_ORIGIN else "Otra / no registrada")
+
+            def link_state(row: pd.Series) -> tuple[str, str, bool]:
+                if not row["watched"]:
+                    return "No reutilizable", "El producto no está actualmente en vigilancia", False
+                if not row["competitor_active"]:
+                    return "No reutilizable", "El competidor no está activo", False
+                if row["selected_verified_url"] == row["url"]:
+                    return "Disponible en vigilancia", "URL confirmada seleccionada como verificada", True
+                if row["selected_verified_url"]:
+                    return ("Otra URL verificada", "El par tiene otra URL verificada; esta confirmación no se usa", False)
+                if row["exact_url_status"]:
+                    return ("Pendiente de verificación",
+                            f"La URL está registrada con estado «{row['exact_url_status']}», no verificada", False)
+                return "Sin vínculo verificado", "No hay una URL verificada vinculada a esta confirmación", False
+
+            states = [link_state(row) for _, row in frame.iterrows()]
+            frame["link_state"] = [item[0] for item in states]
+            frame["link_reason"] = [item[1] for item in states]
+            frame["reusable"] = [item[2] for item in states]
+
+        manual = frame[frame["review_origin"] == MANUAL_ORIGIN]
+        ui_manual = frame[(frame["review_origin"] != AUTO_ORIGIN) & frame["pilot_scope"]]
+        scope_manual = frame[(frame["review_origin"] == MANUAL_ORIGIN) & frame["pilot_scope"]]
+        unknown_origin_scope = frame[(frame["review_origin"] != AUTO_ORIGIN)
+                                     & (frame["review_origin"] != MANUAL_ORIGIN) & frame["pilot_scope"]]
+        manual_pairs = set(zip(manual["competitor_id"], manual["ean"]))
+        manual_urls = set(zip(manual["competitor_id"], manual["ean"], manual["url"]))
+        ui_pairs = set(zip(ui_manual["competitor_id"], ui_manual["ean"]))
+        reusable_pairs = set(zip(
+            frame.loc[frame["reusable"] & frame["review_origin"].eq(MANUAL_ORIGIN), "competitor_id"],
+            frame.loc[frame["reusable"] & frame["review_origin"].eq(MANUAL_ORIGIN), "ean"],
+        ))
+        metrics = {
+            "confirmed_rows": len(frame),
+            "manual_rows": len(manual),
+            "manual_pairs": len(manual_pairs),
+            "manual_urls": len(manual_urls),
+            "manual_duplicate_url_rows": len(manual) - len(manual_urls),
+            "ui_manual_scope_rows": len(ui_manual),
+            "ui_manual_scope_pairs": len(ui_pairs),
+            "manual_scope_rows": len(scope_manual),
+            "unknown_origin_scope_rows": len(unknown_origin_scope),
+            "manual_reusable_pairs": len(reusable_pairs),
+            "manual_pending_binding_rows": int((manual["watched"].eq(1) & manual["competitor_active"].eq(1)
+                                                & manual["exact_url_status"].ne("verified")).sum()),
+            "manual_unavailable_rows": int((~manual["reusable"].astype(bool)).sum()),
+            "watch_pairs": int(watch_totals["pairs"]),
+            "watch_verified_pairs": int(watch_totals["verified"]),
+        }
+        return metrics, frame
+
     def run(self, *, selection: Iterable[tuple[str, str]] | None = None, resume: bool = False,
             search: WebPriceSearch | None = None) -> int:
         return PricePilot(self.store).run(resume=resume, search=search, operation="discovery", selection=selection)
