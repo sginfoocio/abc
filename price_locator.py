@@ -783,7 +783,8 @@ class _Session:
         if result:
             return result
         plan = candidate_plan(product, self.config["domain"])
-        self._record_candidate_plan(job, plan)
+        if plan.candidates:
+            self._record_candidate_plan(job, plan)
         self._local_candidates(product, plan.runnable, excluded)
         if plan.runnable:
             result = self._match(product, excluded)
