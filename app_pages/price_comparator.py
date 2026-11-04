@@ -11,6 +11,7 @@ from zipfile import BadZipFile
 import pandas as pd
 import streamlit as st
 
+from app_pages.price_options import ordered, product_eans
 from cloud_design import page_title
 from competitor_requirements import requirement_for
 import price_analytics as analytics
@@ -312,8 +313,8 @@ def _reset_shared_filters() -> None:
 
 def _render_shared_filters(data: dict) -> None:
     summary, offers = data["summary"], data["offers"]
-    competitor_names = sorted(offers["competitor_name"].dropna().unique()) if not offers.empty else []
-    brand_names = (sorted(value for value in summary["brand"].dropna().unique() if value)
+    competitor_names = ordered(offers["competitor_name"].dropna().unique()) if not offers.empty else []
+    brand_names = (ordered(value for value in summary["brand"].dropna().unique() if value)
                    if "brand" in summary.columns else [])
     with st.container(horizontal=True, wrap=True, key="price_shared_filters"):
         brands = st.multiselect("Marca", brand_names, key="dashboard_brand")
@@ -454,7 +455,7 @@ def _render_summary(store: PriceComparatorStore, data: dict) -> None:
         return
     labels = {row["ean"]: f"{row['brand']} · {row['model']} · {row['color']} · {row['ean']}"
               for row in scoped.to_dict("records")}
-    selected_ean = st.selectbox("Producto", scoped["ean"].tolist(), key="dashboard_product",
+    selected_ean = st.selectbox("Producto", product_eans(scoped), key="dashboard_product",
                                 format_func=lambda ean: labels.get(ean, ean))
     _render_dashboard_product(store, data, scoped, selected_ean, DASHBOARD_WINDOWS[window],
                               selected_competitors)
@@ -481,7 +482,7 @@ def _render_products(store: PriceComparatorStore, data: dict) -> None:
                        "comparador_precios.xlsx", XLSX_MIME, key="products_export")
     if selected.selection.rows and selected.selection.rows[0] < len(summary):
         st.session_state["products_selected_ean"] = summary.iloc[selected.selection.rows[0]]["ean"]
-    options = summary["ean"].tolist()
+    options = product_eans(summary)
     current = st.session_state.get("products_selected_ean", st.session_state.get("dashboard_product"))
     if current not in options:
         current = options[0]
@@ -604,7 +605,7 @@ def _render_product_refresh(store: PriceComparatorStore, ean: str, key_prefix: s
                 "la combinación esté pendiente y el competidor tenga autorización.")
     else:
         options = dict(zip(available["competitor_id"], available["competitor"]))
-        selected = st.multiselect("Tiendas que se van a consultar", list(options),
+        selected = st.multiselect("Tiendas que se van a consultar", ordered(options, options.get),
                                   default=list(options), format_func=options.get,
                                   key=f"{key_prefix}_refresh_competitors_{ean}")
         approved = st.checkbox("He revisado las fichas y autorizo esta consulta supervisada",
@@ -633,7 +634,7 @@ def _render_product_refresh(store: PriceComparatorStore, ean: str, key_prefix: s
         names = dict(zip(missing["competitor_id"], missing["competitor"]))
         selected_missing = st.multiselect(
             "Competidores sin ficha: localizar de forma supervisada",
-            missing["competitor_id"].tolist(), format_func=names.get,
+            ordered(names, names.get), format_func=names.get,
             key=f"{key_prefix}_locate_competitors_{ean}")
         pairs = [(cid, ean) for cid in selected_missing]
         preview = None
@@ -705,7 +706,7 @@ def _render_web_finder(store: PriceComparatorStore) -> None:
     configs = search.configs()
     c1, c2 = st.columns([2, 2])
     text = c1.text_input("EAN o referencia", key="web_text", placeholder="8056597875349 · PR 27ZS 16K08Z")
-    names = c2.multiselect("Competidores", list(configs["name"]), key="web_competitors",
+    names = c2.multiselect("Competidores", ordered(configs["name"]), key="web_competitors",
                            help="Vacío = todos para la búsqueda almacenada. La consulta web exige elegir 1 a "
                                 f"{WEB_MAX_COMPETITORS}.")
     f1, f2, f3 = st.columns(3)
@@ -862,7 +863,7 @@ def _render_url_prompt(search: WebPriceSearch, ean: str, cid: str, name: str, la
 def _render_url_replacement(search: WebPriceSearch, registered: list[tuple[str, str, str]]) -> None:
     with st.expander("Sustituir una ficha registrada (cambió o dejó de existir)"):
         options = {f"{name} · EAN {ean}": (ean, cid) for ean, cid, name in registered}
-        choice = st.selectbox("Producto y competidor", list(options), key="web_replace_choice")
+        choice = st.selectbox("Producto y competidor", ordered(options), key="web_replace_choice")
         ean, cid = options[choice]
         current = search.url_state(ean, cid)
         st.caption(f"{current['text']}: {current['url']}")
@@ -1061,7 +1062,7 @@ def _render_pilot(store: PriceComparatorStore) -> None:
                 st.session_state["pilot_eans"] = list(SAMPLE_EANS)
                 st.rerun()
         defaults = scope["eans"] if scope else []
-        selected = st.multiselect("Productos del piloto (exactamente 20)", list(eligible.index),
+        selected = st.multiselect("Productos del piloto (exactamente 20)", product_eans(eligible.reset_index()),
                                   default=[ean for ean in defaults if ean in eligible.index],
                                   max_selections=MAX_PRODUCTS, key="pilot_eans",
                                   format_func=lambda ean: f"{ean} · {eligible.loc[ean, 'brand']} · "
@@ -1075,7 +1076,7 @@ def _render_pilot(store: PriceComparatorStore) -> None:
                     "el calibre es informativo; siguen siendo obligatorios marca, modelo, código de color "
                     "y los demás requisitos comerciales.")
         competitors = {row["id"]: row["name"] for row in pilot.competitors()}
-        cids = st.multiselect("Seis competidores", list(competitors), default=list(competitors),
+        cids = st.multiselect("Seis competidores", ordered(competitors, competitors.get), default=list(competitors),
                               max_selections=6, format_func=competitors.get, key="pilot_competitors")
         limits = {}
         for cid in cids:
@@ -1128,9 +1129,10 @@ def _render_pilot_price_refresh(store: PriceComparatorStore) -> None:
             st.info("Configure primero los 20 EAN y seis competidores del piloto.")
             return
         names = {row["id"]: row["name"] for row in pilot.competitors()}
-        selected_eans = st.multiselect("Productos seleccionados", scope["eans"], key="admin_price_eans")
+        selected_eans = st.multiselect("Productos seleccionados", product_eans(store.products(), scope["eans"]),
+                                       key="admin_price_eans")
         selected_competitors = st.multiselect(
-            "Competidores seleccionados", list(scope["competitors"]),
+            "Competidores seleccionados", ordered(scope["competitors"], lambda cid: names.get(cid, cid)),
             format_func=lambda cid: names.get(cid, cid), key="admin_price_competitors")
         requested = [(cid, ean) for cid in selected_competitors for ean in selected_eans]
         plan_rows = []
@@ -1193,11 +1195,11 @@ def _render_discovery(pilot: PricePilot, busy: bool) -> None:
     mode = st.radio("Alcance de ejecución", ["Una referencia y un competidor",
                     "Varios productos de un competidor", "Todos los pendientes"],
                     horizontal=True, key="discovery_execution_mode")
-    competitor = st.selectbox("Competidor", list(scope["competitors"]),
+    competitor = st.selectbox("Competidor", ordered(scope["competitors"], lambda cid: names.get(cid, cid)),
                               format_func=lambda cid: names.get(cid, cid),
                               key="discovery_execution_competitor",
                               disabled=mode == "Todos los pendientes")
-    available_eans = list(scope["eans"])
+    available_eans = product_eans(pilot.store.products(), scope["eans"])
     if mode == "Una referencia y un competidor":
         ean = st.selectbox("EAN", available_eans, key="discovery_execution_ean")
         requested = [(competitor, ean)]
@@ -1287,8 +1289,9 @@ def _render_discovery(pilot: PricePilot, busy: bool) -> None:
                     pilot.close_interrupted_discovery(note=close_note)
                     st.rerun()
     f1, f2, f3, f4 = st.columns(4)
-    ean_filter = f1.multiselect("Filtrar EAN", list(coverage.ean.unique()), key="discovery_ean_filter")
-    cid_filter = f2.multiselect("Filtrar competidor", list(coverage.competitor.unique()), key="discovery_cid_filter")
+    ean_filter = f1.multiselect("Filtrar EAN", product_eans(pilot.store.products(), coverage.ean.unique()),
+                                key="discovery_ean_filter")
+    cid_filter = f2.multiselect("Filtrar competidor", ordered(coverage.competitor.unique()), key="discovery_cid_filter")
     method_filter = f3.multiselect("Filtrar método", list(coverage.method.unique()), key="discovery_method_filter")
     state_filter = f4.multiselect("Filtrar estado", list(coverage.Estado.unique()), key="discovery_state_filter")
     filtered = coverage
@@ -1362,7 +1365,7 @@ def _render_candidate_group(frame: pd.DataFrame, products: pd.DataFrame, competi
                  column_config={"URL": st.column_config.LinkColumn("URL")})
     labels = dict(zip(frame["id"].astype(int), _candidate_rows(frame, products, competitor_names).apply(
         lambda row: f"{row['Producto']} · {row['Competidor']}", axis=1)))
-    selected = st.selectbox("Consultar evidencias", list(labels), format_func=labels.get,
+    selected = st.selectbox("Consultar evidencias", ordered(labels, labels.get), format_func=labels.get,
                             key=f"discovery_evidence_{group}")
     row = frame.set_index("id").loc[selected]
     with st.expander("Evidencias de la ficha"):
@@ -1441,7 +1444,7 @@ def _render_budget_recovery(store: PriceComparatorStore) -> None:
     if jobs.empty:
         st.info("No hay errores de presupuesto interno de localización para revisar.")
         return
-    competitor_names = ["Todos"] + sorted(jobs["Competidor"].dropna().unique().tolist())
+    competitor_names = ["Todos"] + ordered(jobs["Competidor"].dropna().unique().tolist())
     selected_competitor = st.selectbox("Filtrar por competidor", competitor_names,
                                        key="price_recovery_competitor")
     visible = jobs if selected_competitor == "Todos" else jobs[jobs["Competidor"] == selected_competitor]
@@ -1524,7 +1527,7 @@ def _render_pending_form(pilot: PricePilot, discovery: PilotDiscovery, pending: 
             return (f"{product['brand']} {product['model']} · {product['color']} · "
                     f"{competitor_names.get(candidate['competitor_id'], candidate['competitor_id'])}")
 
-        selected_id = st.selectbox("Candidato", pending["id"].tolist(), key="pending_candidate",
+        selected_id = st.selectbox("Candidato", ordered(pending["id"].tolist(), candidate_label), key="pending_candidate",
                                    format_func=candidate_label)
         row = pending.set_index("id").loc[selected_id]
         product = products.loc[row["ean"]]
@@ -1639,7 +1642,7 @@ def _render_competitors(store: PriceComparatorStore, data: dict) -> None:
                "periódicas. «Comparables»: ofertas vigentes con identificación, IVA, mercado, moneda y stock "
                "confirmados. Una URL pública o un robots.txt permisivo no equivalen a autorización.")
     names = {competitors.loc[row["Competidor"], "id"]: row["Competidor"] for row in rows}
-    ids = list(names)
+    ids = ordered(names, names.get)
     preferred = next((cid for cid, name in names.items() if name == "Visio Factory"), ids[0])
     selected = st.selectbox("Configurar un competidor", ids, index=ids.index(preferred),
                             format_func=names.get, key="admin_competitor_id")
@@ -1738,7 +1741,7 @@ def _render_competitor_config(scheduler: CompetitorScheduler, row: dict) -> None
     with st.container():
         if row["suspended_at"]:
             st.error(f"Suspendido: {row['suspended_reason']}. Revise la incidencia y reanude manualmente.")
-        options = [""] + list(CONNECTORS)
+        options = [""] + ordered(CONNECTORS, lambda name: CONNECTORS[name].label)
         connector = st.selectbox("Conector", options, index=options.index(row["connector"]) if row["connector"] in options else 0,
                                  format_func=lambda v: CONNECTORS[v].label if v else "Pendiente de configurar",
                                  key=f"{key}_connector")
@@ -1855,7 +1858,7 @@ def _render_admin_history(store: PriceComparatorStore) -> None:
         st.download_button("Descargar ejecuciones del piloto (CSV)",
                            pilot_runs.to_csv(index=False).encode("utf-8"),
                            "ejecuciones-piloto.csv", "text/csv", key="admin_pilot_runs_export")
-    competitor_names = sorted(store.competitors()["name"].dropna().unique().tolist())
+    competitor_names = ordered(store.competitors()["name"].dropna().unique().tolist())
     selected_name = st.selectbox("Filtrar peticiones por competidor", ["Todos", *competitor_names],
                                  key="admin_history_competitor")
     filtered_requests = requests if selected_name == "Todos" else requests[requests["competitor"] == selected_name]

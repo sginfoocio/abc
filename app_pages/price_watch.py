@@ -21,6 +21,7 @@ from price_monitor import (ALERTS, STATES, SCHEDULE_ENV as MONITOR_ENV, PriceMon
                            schedule_enabled as monitor_enabled)
 from price_watch import DEFAULT_GROUP, SOURCES, PriceWatch, WatchReport, eans_from_frame, parse_eans
 from vytria_price_sync import STATUS_LABELS, SyncInProgress, VytriaPriceSync
+from app_pages.price_options import ordered, product_eans
 
 def _actor() -> str:
     return str(st.session_state.get("auth_user") or st.session_state.get("auth_role") or "admin")
@@ -65,7 +66,7 @@ def _render_watchlist(watch: PriceWatch) -> None:
         return
     c1, c2 = st.columns(2)
     query = c1.text_input("Filtrar productos vigilados", key="watch_list_query").strip()
-    brands = c2.multiselect("Marcas vigiladas", sorted(frame["brand"].unique()), key="watch_list_brands")
+    brands = c2.multiselect("Marcas vigiladas", ordered(frame["brand"].unique()), key="watch_list_brands")
     if query:
         text = frame[["ean", "brand", "model", "color"]].fillna("").agg(" ".join, axis=1)
         frame = frame[text.str.contains(query, case=False, regex=False)]
@@ -79,8 +80,8 @@ def _render_watchlist(watch: PriceWatch) -> None:
         "group_name": "Grupo", "source": "Origen", "rule_name": "Regla", "added_by": "Añadido por",
         "added_at": "Fecha"}), hide_index=True, width="stretch")
     labels = {row.ean: f"{row.ean} · {row.brand} {row.model} {row.color}" for row in frame.itertuples()}
-    selected = st.multiselect("Productos", list(labels), format_func=labels.get, key="watch_selected")
-    groups = watch.groups()["name"].tolist()
+    selected = st.multiselect("Productos", product_eans(frame), format_func=labels.get, key="watch_selected")
+    groups = ordered(watch.groups()["name"])
     c1, c2, c3 = st.columns([2, 1, 1])
     target = c1.selectbox("Mover al grupo", groups, key="watch_move_group")
     if c2.button("Mover", key="watch_move", disabled=not selected, width="stretch"):
@@ -90,14 +91,14 @@ def _render_watchlist(watch: PriceWatch) -> None:
 
 
 def _render_add(watch: PriceWatch, store: PriceComparatorStore) -> None:
-    groups = watch.groups()["name"].tolist()
+    groups = ordered(watch.groups()["name"])
     group = st.selectbox("Grupo de destino", groups, index=groups.index(DEFAULT_GROUP), key="watch_add_group")
     st.markdown("**Selección individual**")
     catalog = watch.catalog()
     available = catalog[(catalog["watched"] == 0) & catalog["complete"]]
     labels = {row.ean: f"{row.ean} · {row.brand} {row.model} {row.color} — {row.commercial_name}"
               for row in available.itertuples()}
-    picked = st.multiselect("Productos del catálogo", list(labels), format_func=labels.get, key="watch_pick",
+    picked = st.multiselect("Productos del catálogo", product_eans(available), format_func=labels.get, key="watch_pick",
                             placeholder="Buscar por EAN, marca, modelo o color")
     incomplete = int((~catalog["complete"]).sum())
     if incomplete:
@@ -145,12 +146,12 @@ def _render_rules(watch: PriceWatch) -> None:
     with st.form("watch_rule_form"):
         name = st.text_input("Nombre de la regla", key="rule_name")
         c1, c2 = st.columns(2)
-        brand = c1.selectbox("Marca", [""] + sorted(catalog["brand"].dropna().unique().tolist()), key="rule_brand")
-        category = c2.selectbox("Categoría", [""] + sorted(catalog["category"].dropna().unique().tolist()),
+        brand = c1.selectbox("Marca", [""] + ordered(catalog["brand"].dropna().unique().tolist()), key="rule_brand")
+        category = c2.selectbox("Categoría", [""] + ordered(catalog["category"].dropna().unique().tolist()),
                                 key="rule_category")
         model_prefix = c1.text_input("Modelo empieza por", key="rule_model")
         text_contains = c2.text_input("Nombre o modelo contiene", key="rule_text")
-        group = st.selectbox("Grupo", watch.groups()["name"].tolist(), key="rule_group")
+        group = st.selectbox("Grupo", ordered(watch.groups()["name"]), key="rule_group")
         active = st.checkbox("Activa", value=True, key="rule_active")
         preview = st.form_submit_button("Previsualizar")
         save = st.form_submit_button("Guardar regla")
@@ -205,7 +206,7 @@ def _render_methods(access: AccessControl, competitor_id: str | None = None) -> 
     with st.form("access_method_form"):
         c1, c2, c3 = st.columns(3)
         competitor = (next(iter(names)) if len(names) == 1 else c1.selectbox(
-            "Competidor", sorted(names, key=names.get), format_func=names.get, key="access_competitor"))
+            "Competidor", ordered(names, names.get), format_func=names.get, key="access_competitor"))
         method = c2.selectbox("Método", list(METHODS), format_func=METHODS.get, key="access_method")
         status = c3.selectbox("Decisión", list(METHOD_STATES), format_func=METHOD_STATES.get, key="access_status")
         note = st.text_area("Justificación (condiciones de uso, acuerdo, robots.txt…)", key="access_note")
@@ -248,7 +249,7 @@ def _render_budgets(access: AccessControl, names: dict[str, str]) -> None:
                          format_func={"competitor": "Competidor", "provider": "Proveedor de búsqueda externa"}.get)
     if scope == "competitor":
         scope_id = (next(iter(names)) if len(names) == 1 else st.selectbox(
-            "Competidor", sorted(names, key=names.get), format_func=names.get, key="budget_cid"))
+            "Competidor", ordered(names, names.get), format_func=names.get, key="budget_cid"))
     else:
         scope_id = st.text_input("Identificador del proveedor", key="budget_provider").strip().lower()
     if not scope_id:
@@ -314,7 +315,7 @@ def _render_locator(store: PriceComparatorStore, names: dict[str, str]) -> None:
         result = locator.enqueue()
         st.success(f"{result['created']} búsquedas nuevas · {result['relocate']} relocalizaciones · "
                    f"{result['reopened']} reabiertas tras cambios de autorización.")
-    target = c2.selectbox("Competidor", ["Todos", *sorted(names, key=names.get)], key="locate_competitor",
+    target = c2.selectbox("Competidor", ["Todos", *ordered(names, names.get)], key="locate_competitor",
                           format_func=lambda value: names.get(value, value))
     max_jobs = c3.number_input("Máx. productos", 1, 2000, 50, key="locate_max_jobs")
     deadline = c4.number_input("Plazo (min)", 1, 120, 10, key="locate_deadline")
@@ -349,10 +350,10 @@ def _render_locator(store: PriceComparatorStore, names: dict[str, str]) -> None:
             columns={"ean": "EAN", "brand": "Marca", "model": "Modelo", "color": "Color", "competitor": "Competidor",
                      "url": "Ficha", "detail": "Evidencia", "updated_at": "Fecha"}),
             hide_index=True, width="stretch", column_config={"Ficha": st.column_config.LinkColumn("Ficha")})
-        labels = {row.id: f"{row.ean} · {row.brand} {row.model} {row.color} · {row.competitor}"
+        labels = {row.id: f"{row.brand} · {row.model} · {row.color} · {row.competitor} · {row.ean}"
                   for row in review.itertuples()}
         with st.form("locate_review_form"):
-            job_id = st.selectbox("Candidato", list(labels), format_func=labels.get, key="locate_review_job")
+            job_id = st.selectbox("Candidato", ordered(labels, labels.get), format_func=labels.get, key="locate_review_job")
             note = st.text_input("Motivo de la decisión", key="locate_review_note")
             accept, reject = st.columns(2)
             decision = ("accept" if accept.form_submit_button("Confirmar ficha") else
@@ -400,7 +401,7 @@ def _render_sources(locator: PriceLocator, names: dict[str, str]) -> None:
                  "max_pages", "active", "note", "created_by"]], hide_index=True, width="stretch")
         with st.form("locate_source_form"):
             s1, s2 = st.columns([1, 1])
-            cid = s1.selectbox("Competidor", sorted(names, key=names.get), format_func=names.get,
+            cid = s1.selectbox("Competidor", ordered(names, names.get), format_func=names.get,
                                key="locate_source_competitor")
             kind = s2.selectbox("Clase de listado", list(SOURCE_KINDS), key="locate_source_kind",
                                 format_func=SOURCE_KINDS.get)
@@ -410,7 +411,7 @@ def _render_sources(locator: PriceLocator, names: dict[str, str]) -> None:
             follow = f1.text_input("Sublistados a seguir (patrón de ruta)", placeholder=r"^/gafas-de-sol/[a-z-]+$",
                                    key="locate_source_follow")
             depth = f2.number_input("Profundidad", 0, MAX_DEPTH, 0, key="locate_source_depth")
-            adapter = f3.selectbox("Adaptador", list(ADAPTERS), key="locate_source_adapter",
+            adapter = f3.selectbox("Adaptador", ordered(ADAPTERS, lambda name: ADAPTERS[name].label), key="locate_source_adapter",
                                    format_func=lambda name: ADAPTERS[name].label)
             s3, s4, s5 = st.columns(3)
             refresh = s3.number_input("Caducidad (h)", 1, 24 * 90, 168, key="locate_source_refresh")
@@ -441,7 +442,7 @@ def _render_locate_schedule(locator: PriceLocator, names: dict[str, str]) -> Non
             "deadline_minutes": "Plazo (min)", "next_run_at": "Próxima", "last_run_at": "Última",
             "last_summary": "Resultado"}), hide_index=True, width="stretch")
         cid = (next(iter(names)) if len(names) == 1 else st.selectbox(
-            "Competidor", sorted(names, key=names.get), format_func=names.get, key="locate_schedule_competitor"))
+            "Competidor", ordered(names, names.get), format_func=names.get, key="locate_schedule_competitor"))
         with locator.store._connect() as con:
             saved = con.execute("SELECT * FROM locate_schedule WHERE competitor_id=?", (cid,)).fetchone()
         current = dict(saved) if saved else {"interval_hours": 24, "max_jobs": 200,
@@ -509,7 +510,7 @@ def _render_monitor(store: PriceComparatorStore, names: dict[str, str], *, advan
                "incluido confirmados. Caducidad: un intervalo del grupo o competidor (24 h por defecto).")
     if not monitor_enabled():
         st.warning(f"Monitorización periódica desactivada ({MONITOR_ENV}). Los lotes supervisados son explícitos.")
-    cid = st.selectbox("Competidor", sorted(names, key=names.get), format_func=names.get,
+    cid = st.selectbox("Competidor", ordered(names, names.get), format_func=names.get,
                        key="monitor_competitor")
     if advanced:
         c1, c2 = st.columns(2)
@@ -530,8 +531,8 @@ def _render_monitor(store: PriceComparatorStore, names: dict[str, str], *, advan
     if frame.empty:
         st.info("Añada productos a vigilancia y localice sus fichas para comenzar.")
     else:
-        brands = st.multiselect("Marcas", sorted(frame["brand"].unique()), key="monitor_brands")
-        status = st.multiselect("Estados", sorted(frame["status"].unique()), key="monitor_status")
+        brands = st.multiselect("Marcas", ordered(frame["brand"].unique()), key="monitor_brands")
+        status = st.multiselect("Estados", frame["status"].unique().tolist(), key="monitor_status")
         query = st.text_input("Buscar EAN, modelo o color", key="monitor_query").strip()
         shown = frame[frame["competitor_id"] == cid]
         if brands:
@@ -580,7 +581,7 @@ def _render_monitor(store: PriceComparatorStore, names: dict[str, str], *, advan
         st.caption("Incluye observaciones históricas de los productos filtrados; origen, ficha, método, "
                    "estado de identidad, IVA y fechas originales. No ejecuta consultas HTTP.")
         with st.expander("Evolución histórica del producto"):
-            ean = st.selectbox("EAN", shown["ean"].unique().tolist(), key="monitor_history_ean")
+            ean = st.selectbox("EAN", product_eans(shown), key="monitor_history_ean")
             series = analytics.price_series(store, ean, 30) if ean else pd.DataFrame()
             if series.empty:
                 st.info("Todavía no hay observaciones históricas.")
@@ -767,8 +768,8 @@ def _render_batch(store: PriceComparatorStore, names: dict[str, str]) -> None:
         return
     labels = {row["ean"]: f"{row['ean']} · {row['brand']} {row['model']} {row['color']}"
               for row in watch.to_dict("records")}
-    eans = st.multiselect("Productos del lote", list(labels), format_func=labels.get, key="batch_eans")
-    cids = st.multiselect("Competidores del lote", list(names), format_func=names.get, key="batch_competitors")
+    eans = st.multiselect("Productos del lote", product_eans(watch), format_func=labels.get, key="batch_eans")
+    cids = st.multiselect("Competidores del lote", ordered(names, names.get), format_func=names.get, key="batch_competitors")
     scope = (tuple(sorted(eans)), tuple(sorted(cids)))
     if scope != st.session_state.get("batch_selection") or st.session_state.pop("batch_reset", False):
         st.session_state["batch_approved"] = False

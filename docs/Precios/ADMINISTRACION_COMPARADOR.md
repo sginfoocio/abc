@@ -133,6 +133,21 @@ Un resultado `ok`/`partial` debe contrastarse con sus contadores, precios y fech
 una excepción de render por sí sola no acredita el resultado de producción.
 No repetir una sincronización para diagnosticarlo.
 
+### Orden de las opciones
+
+Las listas de datos del comparador y sus seis apartados comparten orden natural,
+sin distinguir mayúsculas ni acentos: `Óptica 2` precede a `Optica 10`.
+Competidores se ordenan por nombre visible; marcas, categorías y grupos por nombre.
+El mismo criterio admite colecciones cuando se ofrezcan como lista (actualmente se
+configuran como fuentes, no hay un selector de nombres de colección).
+Los productos se ordenan por marca, modelo y código de color, con EAN como desempate
+e identificador. Los nombres repetidos se desempatan por identificador estable.
+No se sustituyen claves de widgets ni valores guardados por índices ordenados.
+
+Se conservan los órdenes funcionales de navegación, pasos, métodos, estados,
+intervalos, decisiones y acciones, y los encabezados «Todos» o vacíos.
+Reordenar una lista no prepara colas, autoriza accesos ni realiza consultas.
+
 ## Dependencia e integración
 
 Esta rama se apila sobre **PR #112**, con autorización del solicitante. No modifica
