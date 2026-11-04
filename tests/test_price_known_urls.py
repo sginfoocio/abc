@@ -213,13 +213,15 @@ def ui(store, monkeypatch, no_requests):
 
 def _run():
     app = AppTest.from_string(SCRIPT).run(timeout=90)
-    app.selectbox(key="price_admin_section").set_value("Competidores").run(timeout=90)
+    from tests.admin_navigation import navigate
+    navigate(app, "Competidores")
     assert not app.exception
     return app
 
 
 def _search(app, text):
-    app.selectbox(key="price_admin_section").set_value("Piloto y consultas").run(timeout=90)
+    from tests.admin_navigation import navigate
+    navigate(app, "Piloto y consultas")
     app.selectbox(key="price_pilot_section").set_value("Búsqueda manual").run(timeout=90)
     app.text_input(key="web_text").set_value(text).run(timeout=90)
     app.radio(key="web_mode").set_value("Almacenados")

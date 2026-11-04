@@ -166,7 +166,8 @@ def test_page_with_real_stored_offer_shows_gap_chart_and_competitor_requests(tmp
     assert values["Productos comparados"] == "1 / 1"
     assert values["Más caro"] == "100,0 %"
     assert values["Diferencia media vs. mejor"] == "+11,1 %"
-    app.selectbox(key="price_admin_section").set_value("Competidores").run(timeout=60)
+    from tests.admin_navigation import navigate
+    navigate(app, "Competidores", timeout=60)
     states = next(frame.value for frame in app.dataframe if "Operatividad" in frame.value.columns)
     edel = states[states["Competidor"] == "Edel-Optics"].iloc[0]
     assert edel["Operatividad"] == "Pendiente de revisión de condiciones"

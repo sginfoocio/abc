@@ -299,31 +299,39 @@ class PriceLocator:
         self.external_search, self.external_provider = external_search, external_provider
 
     # queue ------------------------------------------------------------------------------------
-    def enqueue(self) -> dict[str, int]:
+    def enqueue(self, competitor_ids: list[str] | None = None, eans: list[str] | None = None) -> dict[str, int]:
         """Create the missing product × competitor jobs (idempotent) and reopen what needs another look:
         dead verified pages (relocation) and pairs previously without an authorised method."""
         now = _iso(self._now())
+        selection, params = "", []
+        job_selection = ""
+        for column, values in (("ean", eans), ("competitor_id", competitor_ids)):
+            if values is not None:
+                placeholders = ",".join("?" for _ in values)
+                selection += f" AND {'w.ean' if column == 'ean' else 'c.id'} IN ({placeholders})"
+                job_selection += f" AND {column} IN ({placeholders})"
+                params.extend(values)
         self.search.ensure_config()
         with self.store._connect() as connection, connection:
-            created = connection.execute("""
+            created = connection.execute(f"""
                 INSERT INTO locate_jobs(ean,competitor_id,kind,state,priority,detail,created_at,updated_at)
                 SELECT w.ean,c.id,'locate',
                        CASE WHEN EXISTS(SELECT 1 FROM competitor_product_urls u WHERE u.competitor_id=c.id
                                         AND u.ean=w.ean AND u.status='verified') THEN 'done' ELSE 'pending' END,
                        ?, '', ?, ?
-                FROM watch_products w CROSS JOIN competitors c WHERE w.active=1 AND c.active=1
-                ON CONFLICT(competitor_id,ean) DO NOTHING""", (PRIORITY_NEW, now, now)).rowcount
-            relocate = connection.execute("""
+                FROM watch_products w CROSS JOIN competitors c WHERE w.active=1 AND c.active=1 {selection}
+                ON CONFLICT(competitor_id,ean) DO NOTHING""", (PRIORITY_NEW, now, now, *params)).rowcount
+            relocate = connection.execute(f"""
                 UPDATE locate_jobs SET kind='relocate',state='pending',priority=?,attempts=0,not_before=NULL,
                     detail='La ficha verificada dejó de responder: se busca su nueva dirección',updated_at=?
-                WHERE state='done' AND EXISTS(SELECT 1 FROM competitor_product_urls u WHERE
+                WHERE state='done' {job_selection} AND EXISTS(SELECT 1 FROM competitor_product_urls u WHERE
                         u.competitor_id=locate_jobs.competitor_id AND u.ean=locate_jobs.ean
                         AND u.status='needs_relocation')
                   AND NOT EXISTS(SELECT 1 FROM competitor_product_urls u WHERE
                         u.competitor_id=locate_jobs.competitor_id AND u.ean=locate_jobs.ean AND u.status='verified')
-                """, (PRIORITY_RELOCATE, now)).rowcount
-            reopened = connection.execute("""UPDATE locate_jobs SET not_before=NULL,updated_at=?
-                WHERE state='unavailable' AND not_before IS NOT NULL""", (now,)).rowcount
+                """, (PRIORITY_RELOCATE, now, *params)).rowcount
+            reopened = connection.execute(f"""UPDATE locate_jobs SET not_before=NULL,updated_at=?
+                WHERE state='unavailable' AND not_before IS NOT NULL {job_selection}""", (now, *params)).rowcount
         return {"created": created, "relocate": relocate, "reopened": reopened}
 
     def _claimable_sql(self) -> str:
@@ -331,14 +339,16 @@ class PriceLocator:
             AND ((j.state IN {CLAIMABLE} AND (j.not_before IS NULL OR j.not_before<=?))
                  OR (j.state='running' AND j.lease_until<=?))"""
 
-    def _claim(self, competitor_id: str) -> dict | None:
+    def _claim(self, competitor_id: str, eans: list[str] | None = None) -> dict | None:
         now = self._now()
+        selected = "" if eans is None else f" AND j.ean IN ({','.join('?' for _ in eans)})"
         with self.store._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 while True:
                     row = connection.execute(f"""SELECT j.* FROM locate_jobs j WHERE {self._claimable_sql()}
-                        ORDER BY j.priority,j.id LIMIT 1""", (competitor_id, _iso(now), _iso(now))).fetchone()
+                        {selected} ORDER BY j.priority,j.id LIMIT 1""",
+                                             (competitor_id, _iso(now), _iso(now), *(eans or []))).fetchone()
                     if row is None:
                         connection.commit()
                         return None
@@ -376,25 +386,29 @@ class PriceLocator:
             VALUES(?,?,?,?,?,?,?)""", (job_id, _iso(self._now()), state, method, url[:500], detail[:1000], requests))
 
     def _settle_all(self, competitor_id: str, state: str, detail: str, not_before: datetime | None,
-                    pilot: set[str]) -> int:
+                    pilot: set[str], eans: list[str] | None = None) -> int:
         """Bulk transition without any request (no authorised method, or the whole competitor is suspended)."""
         now = _iso(self._now())
         excluded = sorted(pilot)
         marks = ",".join("?" * len(excluded))
+        selected = "" if eans is None else f" AND ean IN ({','.join('?' for _ in eans)})"
         with self.store._connect() as connection, connection:
             if excluded:
                 connection.execute(f"""UPDATE locate_jobs SET state='pilot',lease_until=NULL,updated_at=?,
                     detail='Par incluido en el piloto supervisado: se gestiona allí'
-                    WHERE competitor_id=? AND ean IN ({marks}) AND state<>'pilot'""", (now, competitor_id, *excluded))
+                    WHERE competitor_id=? AND ean IN ({marks}) AND state<>'pilot' {selected}""",
+                                   (now, competitor_id, *excluded, *(eans or [])))
             return connection.execute(f"""UPDATE locate_jobs SET state=?,detail=?,not_before=?,lease_until=NULL,
-                updated_at=? WHERE id IN (SELECT j.id FROM locate_jobs j WHERE {self._claimable_sql()}
+                updated_at=? WHERE 1=1 {selected} AND id IN (
+                SELECT j.id FROM locate_jobs j WHERE {self._claimable_sql()}
                 {f'AND j.ean NOT IN ({marks})' if excluded else ''})""",
                                       (state, detail[:1000], _iso(not_before) if not_before else None, now,
-                                       competitor_id, now, now, *excluded)).rowcount
+                                       *(eans or []), competitor_id, now, now, *excluded)).rowcount
 
     # run --------------------------------------------------------------------------------------
     def run(self, competitor_ids: list[str] | None = None, *, max_jobs: int = 200,
-            deadline_seconds: float | None = None, monotonic: Callable[[], float] = time.monotonic) -> RunReport:
+            deadline_seconds: float | None = None, monotonic: Callable[[], float] = time.monotonic,
+            eans: list[str] | None = None) -> RunReport:
         """Process a bounded batch. Competitors are taken one after another, each under the shared lock."""
         from price_pilot import pilot_scope
 
@@ -402,7 +416,7 @@ class PriceLocator:
         scope = pilot_scope(self.store)
         started = monotonic()
         with self.store._connect() as connection:
-            ids = competitor_ids or [row[0] for row in connection.execute("""SELECT c.id FROM competitors c
+            ids = competitor_ids if competitor_ids is not None else [row[0] for row in connection.execute("""SELECT c.id FROM competitors c
                 WHERE c.active=1 AND EXISTS(SELECT 1 FROM locate_jobs j WHERE j.competitor_id=c.id) ORDER BY c.name""")]
         for competitor_id in ids:
             if report.processed >= max_jobs or _expired(deadline_seconds, started, monotonic):
@@ -410,28 +424,29 @@ class PriceLocator:
             pilot = set(scope["eans"]) if scope and competitor_id in scope["competitors"] else set()
             try:
                 with self.search._lock(competitor_id):
-                    self._run_competitor(competitor_id, pilot, report, max_jobs, deadline_seconds, started, monotonic)
+                    self._run_competitor(competitor_id, pilot, report, max_jobs, deadline_seconds, started, monotonic, eans)
             except Timeout:
                 report.stopped[competitor_id] = "Otra ejecución está consultando a este competidor"
         return report
 
     def _run_competitor(self, competitor_id: str, pilot: set[str], report: RunReport, max_jobs: int,
-                        deadline_seconds: float | None, started: float, monotonic) -> None:
+                        deadline_seconds: float | None, started: float, monotonic,
+                        eans: list[str] | None = None) -> None:
         session = _Session(self, competitor_id)
         gate = self.access.check(competitor_id, "ficha")
         if not gate.allowed and not gate.waitable and gate.code not in ("not_authorized", "prohibited"):
             state = "blocked" if gate.code == "blocked_manual" else "waiting"
-            report.states[state] += self._settle_all(competitor_id, state, gate.message, gate.retry_at, pilot)
+            report.states[state] += self._settle_all(competitor_id, state, gate.message, gate.retry_at, pilot, eans)
             report.stopped[competitor_id] = gate.message
             return
         if "ficha" not in session.methods:
             detail = f"{UNAVAILABLE_TEXT}: consulta de fichas no autorizada para este competidor"
             report.states["unavailable"] += self._settle_all(competitor_id, "unavailable", detail,
-                                                             self._now() + RETRY_UNAVAILABLE, pilot)
+                                                             self._now() + RETRY_UNAVAILABLE, pilot, eans)
             return
         try:
             while report.processed < max_jobs and not _expired(deadline_seconds, started, monotonic):
-                job = self._claim(competitor_id)
+                job = self._claim(competitor_id, eans)
                 if job is None:
                     break
                 report.processed += 1
@@ -447,7 +462,7 @@ class PriceLocator:
                     report.states[stop.state] += 1
                     # The whole competitor is suspended, not just this job: no request is attempted for the rest.
                     report.states[stop.state] += self._settle_all(competitor_id, stop.state, stop.detail,
-                                                                  stop.retry_at, pilot)
+                                                                  stop.retry_at, pilot, eans)
                     report.stopped[competitor_id] = stop.detail
                     break
                 except (ConnectorError, WebSearchError, ValueError) as exc:

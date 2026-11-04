@@ -425,14 +425,15 @@ def test_monitoring_ui_shows_prices_and_alerts_without_network(tmp_path, monkeyp
         raise AssertionError("Opening the screen must not send requests")
 
     monkeypatch.setattr("requests.get", forbidden)
-    app = AppTest.from_string("from app_pages.price_watch import render_watch_admin\n"
+    app = AppTest.from_string("from app_pages.price_watch import render_admin\n"
                               "from price_comparator import PriceComparatorStore\n"
-                              "render_watch_admin(PriceComparatorStore())").run(timeout=30)
+                              "render_admin(PriceComparatorStore(), {})").run(timeout=30)
+    from tests.admin_navigation import watch_section
     for section in ("Precios y monitorización", "Alertas"):
-        app.selectbox(key="price_watch_section").set_value(section).run(timeout=30)
+        watch_section(app, section)
         assert not app.exception
     assert any("envío automático desactivado" in str(item.value) for item in app.info)
-    app.selectbox(key="price_watch_section").set_value("Precios y monitorización").run(timeout=30)
+    watch_section(app, "Precios y monitorización")
     assert app.button(key="monitor_run").disabled
     app.button(key="monitor_enqueue").click().run(timeout=30)
     assert not app.exception
@@ -558,14 +559,16 @@ def test_monitoring_ui_mixed_dates_and_invalid_validity_without_writes(tmp_path,
     monkeypatch.setattr(PriceMonitor, "run", forbidden)
     monkeypatch.setattr(PriceMonitor, "enqueue", forbidden)
     site.calls.clear()
-    app = AppTest.from_string("from app_pages.price_watch import render_watch_admin\n"
+    app = AppTest.from_string("from app_pages.price_watch import render_admin\n"
                              "from price_comparator import PriceComparatorStore\n"
-                             "render_watch_admin(PriceComparatorStore())").run(timeout=30)
+                             "render_admin(PriceComparatorStore(), {})").run(timeout=30)
     # The existing admin entry point seeds default configuration on its first opening.
     with store._connect() as con:
         before = "\n".join(con.iterdump())
-    app.selectbox(key="price_watch_section").set_value("Precios y monitorización").run(timeout=30)
+    from tests.admin_navigation import watch_section
+    watch_section(app, "Precios y monitorización")
     assert not app.exception
+    app.selectbox(key="monitor_competitor").set_value(cid).run(timeout=30)
     assert any("1 registros sin fecha de vigencia válida" in str(item.value) for item in app.warning)
     assert not site.calls
     with store._connect() as con:

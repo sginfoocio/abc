@@ -337,7 +337,8 @@ def test_page_shows_insufficient_data_message_and_renders_with_data(tmp_path, mo
     }.issubset(rendered_headers)
     assert app.metric[0].value == "0 / 1"
     assert app.metric[1].value == "Sin datos" and app.metric[2].value == "Sin datos"
-    app.selectbox(key="price_admin_section").set_value("Historial y diagnósticos").run(timeout=30)
+    from tests.admin_navigation import navigate
+    navigate(app, "Historial y diagnósticos", timeout=30)
     assert app.button(key="update_competitors").disabled # nothing enabled yet: Pendiente de configurar
     now = datetime.now(timezone.utc)
     store.set_setting("price_expiry_days", 30)
@@ -384,7 +385,8 @@ def test_shared_filters_remain_visible_across_admin_and_reset(tmp_path, monkeypa
         "from app_pages.price_comparator import render_price_comparator_page\n"
         "render_price_comparator_page()").run(timeout=30)
     assert not app.exception
-    app.selectbox(key="price_admin_section").set_value("Configuración general").run(timeout=30)
+    from tests.admin_navigation import navigate
+    navigate(app, "Configuración general", timeout=30)
     assert app.multiselect(key="dashboard_brand") is not None
     assert app.multiselect(key="dashboard_competitor") is not None
     assert app.selectbox(key="dashboard_state") is not None

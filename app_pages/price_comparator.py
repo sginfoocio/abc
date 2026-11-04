@@ -901,15 +901,17 @@ def _render_web_section(search: WebPriceSearch, row: dict) -> None:
     st.markdown(f"**Mercado / moneda verificados:** {market} · **IVA de los precios:** "
                 f"{WEB_TAX_TEXT.get(row['tax_policy'], row['tax_policy'])}")
     problems = [WEB_ACCESS_TEXT.get(row["access_status"], row["access_status"])]
-    if row["last_error"]:
+    if pd.notna(row["last_error"]) and row["last_error"]:
         problems.append(f"último error: {row['last_error']}")
     if row["error_count"]:
         problems.append(f"{int(row['error_count'])} error(es)")
-    if row["blocked_at"]:
+    if pd.notna(row["blocked_at"]) and row["blocked_at"]:
         problems.append(f"bloqueado el {row['blocked_at']}: no se reintenta")
     st.markdown("**Acceso:** " + " · ".join(problems))
-    st.caption(f"{row['robots_summary'] or 'robots.txt sin comprobar'} · Última consulta: "
-               f"{row['last_query_at'] or '—'} · Ofertas web confirmadas: {int(row['confirmed'])}")
+    robots = row["robots_summary"] if pd.notna(row["robots_summary"]) and row["robots_summary"] else "robots.txt sin comprobar"
+    st.caption(f"{robots} · Última consulta: "
+               f"{row['last_query_at'] if pd.notna(row['last_query_at']) and row['last_query_at'] else '—'} · "
+               f"Ofertas web confirmadas: {int(row['confirmed'])}")
     pages = search.registered_pages(competitor_id=cid)
     if pages.empty:
         st.info("Sin URLs conocidas para este competidor. Añada una abajo; no hace falta configurar un feed.")
@@ -1641,7 +1643,9 @@ def _render_competitors(store: PriceComparatorStore, data: dict) -> None:
     preferred = next((cid for cid, name in names.items() if name == "Visio Factory"), ids[0])
     selected = st.selectbox("Configurar un competidor", ids, index=ids.index(preferred),
                             format_func=names.get, key="admin_competitor_id")
-    _render_competitor_panels(search, scheduler, states_frame, selected)
+    from app_pages.price_watch import render_competitor_card
+
+    render_competitor_card(store, selected, search, scheduler, states_frame)
 
 
 def _render_data_sources(store: PriceComparatorStore) -> None:
@@ -1696,26 +1700,9 @@ def _render_data_sources(store: PriceComparatorStore) -> None:
     if not competitors.empty:
         st.divider()
         st.subheader("Competidores registrados")
-        st.caption("Mercado y moneda requieren confirmación antes de importar o consultar ofertas.")
-        edited = st.data_editor(
-            competitors[["id", "name", "domain", "market", "currency", "active", "query_method",
-                         "last_checked_at", "connectivity"]],
-            disabled=["id", "name", "domain", "query_method", "last_checked_at", "connectivity"],
-            column_config={
-                "active": st.column_config.CheckboxColumn("Activo"),
-                "market": st.column_config.TextColumn("Mercado"),
-                "currency": st.column_config.TextColumn("Moneda ISO"),
-            },
-            width="stretch", hide_index=True, key="price_competitors_editor",
-        )
-        if st.button("Guardar configuración de competidores"):
-            try:
-                store.save_competitors(edited[["id", "market", "currency", "active", "query_method"]])
-            except (ValueError, sqlite3.Error) as exc:
-                st.error(f"No se pudo guardar la configuración: {exc}")
-            else:
-                st.success("Configuración guardada.")
-                st.rerun()
+        st.caption("Consulta técnica de los registros importados. Edite cada ficha en Administración → "
+                   "Competidores. Mercado, moneda e IVA se confirman en Fuentes y conectores.")
+        st.dataframe(competitors, width="stretch", hide_index=True)
 
 
 def _render_competitor_panels(search: WebPriceSearch, scheduler: CompetitorScheduler,
@@ -1732,7 +1719,7 @@ def _render_competitor_panels(search: WebPriceSearch, scheduler: CompetitorSched
     if mine:
         st.caption(f"Localización: {LOCATION_TEXT[mine['location']]} · Extracción: "
                    f"{EXTRACTION_TEXT[mine['extraction']]} · Operatividad: {OPERABILITY_TEXT[mine['operability']]}")
-    location_tab, automatic_tab = st.tabs(["Localización, acceso y límites web", "Actualización automática"])
+    location_tab, automatic_tab = st.tabs(["Localización, acceso y límites web", "Conector anterior (avanzado)"])
     with location_tab:
         _render_web_section(search, web_row)
         restrictions, needed = requirement_for(web_row["name"])
@@ -1833,62 +1820,11 @@ def _render_settings(store: PriceComparatorStore) -> None:
                "(web y actualización automática) está en Administración → Competidores.")
 
 
-def _admin_jump(section: str) -> None:
-    st.session_state["price_admin_section"] = section
-
-
-def _render_admin_overview(store: PriceComparatorStore) -> None:
-    st.subheader("Estado general")
-    try:
-        scope = pilot_scope(store)
-        coverage = PilotDiscovery(store).coverage()
-        budget_errors = PricePilot(store).budget_recovery_jobs()
-    except (PilotError, sqlite3.Error) as exc:
-        st.error(f"No se pudo cargar el estado del piloto: {exc}")
-        return
-    with store._connect() as connection:
-        latest = connection.execute("SELECT * FROM pilot_runs ORDER BY id DESC LIMIT 1").fetchone()
-        budget_used = connection.execute(
-            "SELECT COALESCE(SUM(requests),0) FROM pilot_budgets WHERE run_id=?",
-            (latest["id"],)).fetchone()[0] if latest else 0
-    states = coverage["state"] if not coverage.empty else pd.Series(dtype=str)
-    if scope is None:
-        pilot_status, ean_count, pilot_competitors = "Sin configurar", 0, 0
-    else:
-        pilot_status = "Habilitado" if scope["enabled"] else "Deshabilitado"
-        ean_count, pilot_competitors = len(scope["eans"]), len(scope["competitors"])
-    metrics = [
-        ("Estado del piloto", pilot_status),
-        ("EAN incluidos", ean_count),
-        ("Competidores del piloto", pilot_competitors),
-        ("Ofertas confirmadas", int(store.coverage_table()["confirmed_offers"].sum())),
-        ("Candidatos pendientes", int(states.isin(["candidate_found", "pending_validation"]).sum())),
-        ("Localizaciones sin resolver", int(states.eq("pending").sum())),
-        ("Errores de presupuesto", len(budget_errors)),
-        ("Última ejecución / HTTP usados", (
-            f"#{latest['id']} · {latest['started_at']} · {budget_used}" if latest
-            else f"Sin ejecuciones · {budget_used}")),
-    ]
-    for offset in range(0, len(metrics), 4):
-        cols = st.columns(4)
-        for column, (label, value) in zip(cols, metrics[offset:offset + 4]):
-            column.metric(label, value)
-    st.caption("Las cifras describen el piloto persistido; abrir esta pantalla no realiza consultas HTTP.")
-    shortcuts = st.columns(4)
-    shortcuts[0].button("Ver competidores", key="admin_jump_competitors",
-                        on_click=_admin_jump, args=("Competidores",), width="stretch")
-    shortcuts[1].button("Abrir piloto", key="admin_jump_pilot",
-                        on_click=_admin_jump, args=("Piloto y consultas",), width="stretch")
-    shortcuts[2].button("Revisar recuperación", key="admin_jump_recovery",
-                        on_click=_admin_jump, args=("Recuperación de búsquedas",), width="stretch")
-    shortcuts[3].button("Ver diagnósticos", key="admin_jump_history",
-                        on_click=_admin_jump, args=("Historial y diagnósticos",), width="stretch")
-
-
 def _render_admin_history(store: PriceComparatorStore) -> None:
     st.subheader("Ejecuciones y diagnósticos")
     st.caption("Estas acciones solo consultan al hacer clic. Los historiales y presupuestos se leen sin lanzar trabajos.")
-    _render_actions(store)
+    with st.expander("Ejecución del conector anterior (avanzado)"):
+        _render_actions(store)
     scheduler = _make_scheduler(store)
     scheduled = scheduler.overview()
     if not scheduled.empty:
@@ -1966,36 +1902,6 @@ def render_price_comparator_page() -> None:
     with pending_tab:
         _render_pending_reviews(PricePilot(store))
     with admin_tab:
-        section = st.selectbox("Administración", [
-            "Estado general", "Competidores", "Piloto y consultas", "Recuperación de búsquedas",
-            "Vigilancia automática", "Datos e importaciones", "Configuración general", "Historial y diagnósticos",
-        ], key="price_admin_section")
-        if section == "Estado general":
-            _render_admin_overview(store)
-        elif section == "Competidores":
-            _render_competitors(store, data)
-        elif section == "Piloto y consultas":
-            pilot_section = st.selectbox("Tarea del piloto", [
-                "Configuración del piloto", "Localización supervisada", "Actualización de precios", "Búsqueda manual",
-            ], key="price_pilot_section")
-            pilot = PricePilot(store)
-            if pilot_section == "Configuración del piloto":
-                _render_pilot(store)
-            elif pilot_section == "Localización supervisada":
-                _render_discovery(pilot, pilot.is_running())
-            elif pilot_section == "Actualización de precios":
-                _render_pilot_price_refresh(store)
-            else:
-                _render_web_finder(store)
-        elif section == "Recuperación de búsquedas":
-            _render_budget_recovery(store)
-        elif section == "Vigilancia automática":
-            from app_pages.price_watch import render_watch_admin
+        from app_pages.price_watch import render_admin
 
-            render_watch_admin(store)
-        elif section == "Datos e importaciones":
-            _render_data_sources(store)
-        elif section == "Configuración general":
-            _render_settings(store)
-        else:
-            _render_admin_history(store)
+        render_admin(store, data)

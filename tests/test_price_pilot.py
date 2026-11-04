@@ -464,7 +464,8 @@ def test_ui_scope_plan_and_manual_confirmation(pilot, monkeypatch):
     monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
     app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
                               "render_price_comparator_page()").run(timeout=30)
-    app.selectbox(key="price_admin_section").set_value("Piloto y consultas").run(timeout=30)
+    from tests.admin_navigation import navigate
+    navigate(app, "Piloto y consultas", timeout=30)
     assert not app.exception
     assert app.selectbox(key="price_pilot_section").value == "Configuración del piloto"
     assert len(app.multiselect(key="pilot_eans").value) == 20
@@ -606,7 +607,8 @@ def test_ui_launches_only_approved_discovery_in_background(pilot, monkeypatch):
     monkeypatch.setattr(page, "_launch", lambda target, *args: calls.append((target, args)))
     app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
                               "render_price_comparator_page()").run(timeout=30)
-    app.selectbox(key="price_admin_section").set_value("Piloto y consultas").run(timeout=30)
+    from tests.admin_navigation import navigate
+    navigate(app, "Piloto y consultas", timeout=30)
     app.selectbox(key="price_pilot_section").set_value("Localización supervisada").run(timeout=30)
     app.selectbox(key="discovery_execution_competitor").set_value(cid).run(timeout=30)
     selected_ean = app.selectbox(key="discovery_execution_ean").value
@@ -639,7 +641,8 @@ def test_ui_shows_unauthorized_competitor_reasons_without_http(pilot, monkeypatc
     name = next(row["name"] for row in service.competitors() if row["id"] == cid)
     app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
                               "render_price_comparator_page()").run(timeout=30)
-    app.selectbox(key="price_admin_section").set_value("Piloto y consultas").run(timeout=30)
+    from tests.admin_navigation import navigate
+    navigate(app, "Piloto y consultas", timeout=30)
     app.selectbox(key="price_pilot_section").set_value("Localización supervisada").run(timeout=30)
     app.selectbox(key="discovery_execution_competitor").set_value(cid).run(timeout=30)
     assert not app.exception
@@ -656,7 +659,8 @@ def test_ui_prepares_budget_recovery_with_audit_and_no_http(pilot, monkeypatch):
     monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
     app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
                               "render_price_comparator_page()").run(timeout=30)
-    app.selectbox(key="price_admin_section").set_value("Recuperación de búsquedas").run(timeout=30)
+    from tests.admin_navigation import navigate
+    navigate(app, "Recuperación de búsquedas", timeout=30)
     assert not app.exception
     assert any("no hace consultas HTTP" in item.value for item in app.caption)
     app.multiselect(key="price_recovery_job_ids").set_value([job_id]).run(timeout=30)

@@ -6,6 +6,7 @@ from streamlit.testing.v1 import AppTest
 from price_comparator import PriceComparatorStore
 from tests.test_price_comparator import PRODUCTS, _store
 from tests.test_price_scheduler import _setup
+from tests.admin_navigation import navigate
 
 
 def test_settings_defaults_persist_and_are_validated(tmp_path):
@@ -45,14 +46,14 @@ def test_admin_sections_list_competitors_and_save_general_config(tmp_path, monke
                               "render_price_comparator_page()").run(timeout=30)
     assert not app.exception
     assert app.selectbox(key="price_admin_section").options == [
-        "Estado general", "Competidores", "Piloto y consultas", "Recuperación de búsquedas",
-        "Vigilancia automática", "Datos e importaciones", "Configuración general", "Historial y diagnósticos",
+        "Panel general", "Productos en vigilancia", "Competidores", "Actualizaciones",
+        "Alertas e incidencias", "Configuración y diagnóstico",
     ]
     app.selectbox(key="price_admin_section").set_value("Competidores").run(timeout=30)
     competitors = next(frame.value for frame in app.dataframe if "Operatividad" in frame.value.columns)
     assert len(competitors) == 16
     assert competitors["Estado"].notna().all()
-    app.selectbox(key="price_admin_section").set_value("Configuración general").run(timeout=30)
+    navigate(app, "Configuración general", timeout=30)
     app.selectbox(key="cfg_retention").set_value(6)
     app.number_input(key="cfg_expiry").set_value(10)
     app.number_input(key="cfg_odoo_hours").set_value(6.0)
@@ -70,7 +71,7 @@ def test_manual_competitor_update_runs_in_background_thread(tmp_path, monkeypatc
     monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
     app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
                               "render_price_comparator_page()").run(timeout=30)
-    app.selectbox(key="price_admin_section").set_value("Historial y diagnósticos").run(timeout=30)
+    navigate(app, "Historial y diagnósticos", timeout=30)
     assert not app.button(key="update_competitors").disabled
     app.button(key="update_competitors").click().run(timeout=30)
     assert [call[0] for call in calls] == [page._run_competitors]  # never executed inside the script thread
