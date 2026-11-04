@@ -169,3 +169,56 @@ def test_iso_parser_handles_sqlite_pandas_and_python_dates():
     assert str(parsed.dtype).endswith(", UTC]")
     assert parsed.iloc[1] == parsed.iloc[2] == pd.Timestamp("2026-11-04T09:00:00Z")
     assert parsed.iloc[3:].isna().all()
+
+
+def test_current_dashboard_and_kpis_use_same_instants_as_history(tmp_path, monkeypatch):
+    store = _fresh(tmp_path, monkeypatch)
+    _own(store, [(3, 100), (2, 80)])
+    _offers(store, [("Tienda EUR", 90, 2)])
+    _history(store, ["2025-03-01T10:00:00+02:00", "2025-03-01T07:30:00-03:00"],
+             ["2025-03-01T12:30:00+02:00"])
+    with store._connect() as con, con:
+        con.execute("UPDATE vytria_prices SET price=80,synced_at='2025-03-01T07:30:00-03:00'")
+        con.execute("""INSERT INTO own_prices(ean,market,price,currency,fx_to_eur,captured_at,source,fingerprint)
+            VALUES(?,'ES',70,'EUR',1,'2025-03-01T07:30:00-03:00','manual','date-test')""", (EAN,))
+    # 12:30+02:00 is before the fixed clock at 12:00Z, despite its text order.
+    # It is also within a one-hour window, despite 12:30+02:00 > 12:00Z lexically.
+    summary, _ = store.dashboard(1)
+    assert pa.kpis(summary, 0)["best_price_pct"] == 100
+    with store._connect() as con, con:
+        con.execute("UPDATE offers SET captured_at='2025-03-01T09:30:00-03:00'")
+    # 09:30-03:00 is in the future, despite its text being earlier than noon.
+    summary, _ = store.dashboard(1)
+    assert pa.kpis(summary, 0)["comparable"] == 0
+    assert store.current_offers(1).empty
+
+
+def test_current_comparison_orders_manual_prices_and_competitor_updates_in_utc(tmp_path, monkeypatch):
+    store = _fresh(tmp_path, monkeypatch)
+    _offers(store, [("Tienda EUR", 90, 2), ("Tienda EUR", 95, 1)])
+    _history(store, [], ["2025-03-01T10:00:00+02:00", "2025-03-01T07:30:00-03:00"])
+    with store._connect() as con, con:
+        for at, price in [("2025-03-01T10:00:00+02:00", 100), ("2025-03-01T07:30:00-03:00", 80)]:
+            con.execute("""INSERT INTO own_prices(ean,market,price,currency,fx_to_eur,captured_at,source,fingerprint)
+                VALUES(?,'ES',?,'EUR',1,?,'manual',?)""", (EAN, price, at, at))
+    summary, _ = store.dashboard(1)
+    assert summary.iloc[0]["own_price_eur"] == 80
+    assert summary.iloc[0]["competitor_min_eur"] == 95
+    assert pa.kpis(summary, 0)["best_price_pct"] == 100
+
+
+@pytest.mark.parametrize("check", ["invalid", "2025-03-01T14:00:00Z", "2025-02-25T10:00:00Z"])
+def test_current_and_historical_freshness_ignore_invalid_or_misordered_checks(tmp_path, monkeypatch, check):
+    store = _fresh(tmp_path, monkeypatch)
+    _own(store, [(0.1, 80)])
+    _offers(store, [("Tienda EUR", 90, 0.1)])
+    _history(store, ["2025-03-01T10:00:00Z"], ["2025-03-01T10:00:00Z"], check)
+    with store._connect() as con:
+        before = list(con.iterdump())
+    summary, _ = store.dashboard(1)
+    assert pa.kpis(summary, 0)["best_price_pct"] == 100
+    assert len(store.current_offers(1)) == 1
+    series = pa.competitiveness_series(store, 0, datetime(2025, 3, 1, 12, tzinfo=timezone.utc), expiry_days=1)
+    assert series["best_price_pct"].tolist() == [100]
+    with store._connect() as con:
+        assert list(con.iterdump()) == before

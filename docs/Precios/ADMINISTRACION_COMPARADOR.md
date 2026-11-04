@@ -98,6 +98,10 @@ Las observaciones sin fecha válida quedan fuera del cálculo; las fechas no vac
 inválidas generan un aviso con campo y cantidad, sin volcar datos. Una comprobación
 nula/inválida no renueva un precio: se conserva su fecha de captura válida.
 No se reescriben los históricos ni se generan observaciones para rellenar gráficos.
+Las lecturas comerciales actuales también filtran y eligen el último precio por
+instante UTC (incluida la importación manual), no por `MAX` ni ordenación de textos.
+Una fecha futura de captura no entra en los KPIs, y una comprobación anterior,
+inválida o futura no sustituye la fecha de captura válida.
 
 Para verificar si Vytria guardó precios antes de una excepción de visualización,
 consultar **Actualizaciones → Precios y observaciones → Precio Vytria y ciclo diario**
