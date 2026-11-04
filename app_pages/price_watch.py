@@ -4,6 +4,7 @@ Opening these screens never performs HTTP requests.
 """
 from __future__ import annotations
 
+import json
 import pandas as pd
 import streamlit as st
 from typing import TYPE_CHECKING
@@ -801,6 +802,27 @@ def _render_batch(store: PriceComparatorStore, names: dict[str, str]) -> None:
     with st.expander("Detalle de permisos, consumo y frecuencias"):
         st.dataframe(display[["EAN", "Competidor", "Frecuencia efectiva (h)", "Acceso", "HTTP base",
                               "HTTP restantes hoy", "Previsión"]], hide_index=True, width="stretch")
+    with st.expander("Candidatas locales y requisitos pendientes (sin HTTP)"):
+        st.caption("Hipótesis de la investigación del 04/11/2026, no fichas verificadas ni ofertas. "
+                   "La generación no autoriza consultas ni acredita mercado, IVA o stock. "
+                   "Los ejemplos conservan su locale y la URL completa de variante.")
+        candidates = []
+        for row in preview.to_dict("records"):
+            for candidate in row["local_candidates"]:
+                candidates.append({"EAN": row["ean"], "Competidor": row["competitor"],
+                                   "URL candidata": candidate["url"], "Estado": candidate["state"],
+                                   "Regla": candidate["rule"], "Procedencia": candidate["origin"],
+                                   "Atributos": json.dumps(candidate["attributes"], ensure_ascii=False),
+                                   "Evidencias": ", ".join(candidate["evidence"]), "Motivo": candidate["reason"]})
+        if candidates:
+            st.dataframe(pd.DataFrame(candidates), hide_index=True, width="stretch",
+                         column_config={"URL candidata": st.column_config.LinkColumn("URL candidata")})
+        requirements = preview.loc[preview["candidate_reason"].ne(""),
+                                   ["ean", "competitor", "candidate_reason_code", "candidate_reason"]]
+        if not requirements.empty:
+            st.dataframe(requirements.rename(columns={"ean": "EAN", "competitor": "Competidor",
+                         "candidate_reason_code": "Requisito", "candidate_reason": "Motivo"}),
+                         hide_index=True, width="stretch")
     st.warning("El consumo de localización es variable. El mínimo no es una cuota reservada. "
                "Robots, paginación, pausas, límites compartidos y bloqueos se comprueban de nuevo al ejecutar. "
                "Las fichas verificadas se reutilizan; los pares pendientes del piloto se gestionan en el piloto.")

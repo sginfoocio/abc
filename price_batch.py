@@ -10,6 +10,7 @@ from price_comparator import PriceComparatorStore
 from price_locator import PriceLocator, link_matches
 from price_monitor import PriceMonitor, _inventory_datetime
 from price_pilot import pilot_scope
+from price_url_candidates import CandidatePlan, candidate_plan
 
 
 class WatchBatch:
@@ -32,6 +33,10 @@ class WatchBatch:
             marks = ",".join("?" for _ in competitors)
             index = con.execute(f"""SELECT competitor_id,signature FROM discovery_index
                                     WHERE competitor_id IN ({marks})""", competitors).fetchall()
+            products = {r["ean"]: dict(r) for r in con.execute("SELECT * FROM products")}
+            domains = {r["id"]: r["domain"] for r in con.execute("SELECT id,domain FROM competitors")}
+            access_states = {r["competitor_id"]: r["access_status"] for r in con.execute(
+                "SELECT competitor_id,access_status FROM competitor_web_config")}
         if not set(eans) <= watched or not set(competitors) <= active:
             raise ValueError("La selección contiene productos no vigilados o competidores inactivos")
         frame = self.monitor.inventory()
@@ -62,6 +67,7 @@ class WatchBatch:
             cid, ean = row["competitor_id"], row["ean"]
             gate, discovery, remaining, signatures = policies[cid]
             indexed = any(link_matches(sig, row["model"], row["color"]) for sig in signatures)
+            plan = candidate_plan(products[ean], domains[cid]) if not row["located"] else CandidatePlan()
             pilot = bool(scope and cid in scope["competitors"] and ean in scope["eans"] and not row["located"])
             job = jobs.get((ean, cid), {})
             sampled = job.get("sampled_at")
@@ -79,13 +85,21 @@ class WatchBatch:
                 action = "Localizar y monitorizar"
             needs_http = action in {"Monitorizar", "Localizar y monitorizar"}
             allowed = gate.allowed or gate.waitable
-            if not row["located"] and not (discovery or indexed):
+            if not row["located"] and not (discovery or indexed or plan.runnable):
                 allowed = False
             reason = gate.message if not allowed else ""
-            if not row["located"] and not (discovery or indexed):
+            if not row["located"] and not (discovery or indexed or plan.runnable):
                 reason = "Sin fuente y método de localización autorizados; revisar índice/configuración"
+                if plan.reason:
+                    reason += f" · {plan.reason}"
+            if access_states.get(cid) in {"blocked", "robots_restricted"}:
+                allowed = False
+                reason = self.locator.search._gate({"access_status": access_states[cid]})
             rows.append({**row, "action": action, "ready": bool(allowed and needs_http),
                          "access": reason or ("Autorizado; pausas aplicables" if allowed else "Revisión necesaria"),
+                         "candidate_count": len(plan.runnable), "candidate_reason": plan.reason,
+                         "candidate_reason_code": plan.reason_code,
+                         "local_candidates": [candidate.provenance() for candidate in plan.candidates],
                          "remaining_http": remaining, "minimum_http": int(needs_http),
                          "estimate": ("1 ficha + robots si no está en caché" if row["located"] else
                                       "Variable: listados, paginación y ficha; limitado por presupuesto")})

@@ -1,5 +1,9 @@
 # Identidad del comparador: EAN o modelo y color
 
+La ampliacion documental del localizador del 04/11/2026 se describe en
+[PRICE_URL_ADAPTERS.md](PRICE_URL_ADAPTERS.md). Generar una URL candidata no
+verifica identidad ni modifica las reglas de contradiccion de este documento.
+
 ## Revision conjunta del 1 de noviembre de 2026
 
 Base cotejada: `9d240daf38ae5a9629d370d32641986cf9ef4cad`. Al iniciar

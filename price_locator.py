@@ -52,6 +52,7 @@ from price_web import (_LOC, _PRODUCT_SITEMAP, Outcome, WebPriceSearch, WebSearc
                        product_search_urls, validate_competitor_url)
 from price_web_extract import ProductPage, extract_product, parse_html
 from price_web_fetch import MAX_SITEMAP_BYTES, PageGone, RobotsDenied, _requests_transport
+from price_url_candidates import CandidatePlan, UrlCandidate, candidate_plan
 
 JOB_STATES = {
     "pending": "Pendiente",
@@ -433,6 +434,11 @@ class PriceLocator:
                         deadline_seconds: float | None, started: float, monotonic,
                         eans: list[str] | None = None) -> None:
         session = _Session(self, competitor_id)
+        if session.config["access_status"] in {"blocked", "robots_restricted"}:
+            detail = self.search._gate(session.config)
+            report.states["blocked"] += self._settle_all(competitor_id, "blocked", detail, None, pilot, eans)
+            report.stopped[competitor_id] = detail
+            return
         gate = self.access.check(competitor_id, "ficha")
         if not gate.allowed and not gate.waitable and gate.code not in ("not_authorized", "prohibited"):
             state = "blocked" if gate.code == "blocked_manual" else "waiting"
@@ -758,8 +764,9 @@ class _Session:
     # job --------------------------------------------------------------------------------------
     def process(self, job: dict) -> _Result:
         cid, ean = self.competitor_id, job["ean"]
+        self._job_visits = 0
         with self.store._connect() as connection:
-            product = dict(connection.execute("SELECT ean,brand,model,color,caliber FROM products WHERE ean=?",
+            product = dict(connection.execute("SELECT ean,brand,model,color,caliber,category FROM products WHERE ean=?",
                                               (ean,)).fetchone())
             known = connection.execute("SELECT url,status FROM competitor_product_urls WHERE competitor_id=? AND ean=?",
                                        (cid, ean)).fetchall()
@@ -775,7 +782,17 @@ class _Session:
         result = self._match(product, excluded)
         if result:
             return result
+        plan = candidate_plan(product, self.config["domain"])
+        if plan.candidates:
+            self._record_candidate_plan(job, plan)
+        self._local_candidates(product, plan.runnable, excluded)
+        if plan.runnable:
+            result = self._match(product, excluded)
+            if result:
+                return result
         executed, restrictions = [], []
+        if plan.reason:
+            restrictions.append(f"{plan.reason_code}: {plan.reason}")
         for method in DISCOVERY_ORDER:
             if method not in self.methods:
                 if method != "external":
@@ -795,6 +812,32 @@ class _Session:
                                            f"{', '.join(executed)}. No implica que el producto no exista; "
                                            "se reintentará cuando caduquen las fuentes")
 
+    def _record_candidate_plan(self, job: dict, plan: CandidatePlan) -> None:
+        detail = json.dumps({"reason_code": plan.reason_code, "reason": plan.reason,
+                             "candidates": [candidate.provenance() for candidate in plan.candidates]},
+                            ensure_ascii=False)
+        # Keep the entire documentary plan, including non-runnable parents/conflicts, in the existing audit log.
+        with self.store._connect() as connection, connection:
+            connection.execute("""INSERT INTO locate_events(job_id,at,state,method,url,detail,requests)
+                VALUES(?,?,'pending','local_candidates','',?,0)""", (job["id"], _iso(self._now()), detail))
+
+    def _local_candidates(self, product: dict, candidates: list[UrlCandidate], excluded: set[str]) -> None:
+        """Only during an approved, governed run. No verified URL or offer is created by generation."""
+        for candidate in candidates:
+            url = canonical(validate_competitor_url(candidate.url, self.config["domain"]))
+            if url in excluded:
+                continue
+            label = f"{product['brand']} {product['model']} {product['color']}"
+            self._index([(url, label)], "ficha", candidate.origin)
+            with self.store._connect() as connection, connection:
+                row = connection.execute("""SELECT candidate_evidence FROM discovery_index
+                    WHERE competitor_id=? AND url=?""", (self.competitor_id, url)).fetchone()
+                evidence = json.loads(row["candidate_evidence"])
+                evidence[product["ean"]] = candidate.provenance()
+                connection.execute("""UPDATE discovery_index SET candidate_evidence=?
+                    WHERE competitor_id=? AND url=?""",
+                                   (json.dumps(evidence, ensure_ascii=False), self.competitor_id, url))
+
     # matching against the local index ---------------------------------------------------------
     def _match(self, product: dict, excluded: set[str]) -> _Result | None:
         wanted_model, wanted_color = model_key(product["model"]), key(product["color"])
@@ -807,10 +850,10 @@ class _Session:
                       and link_matches(row["signature"], product["model"], product["color"])]
         # Calibre never decides identity; it only orders equivalent pages (the same lens first).
         candidates.sort(key=lambda row: (not (lens and lens in row["signature"].split()), row["first_seen"]))
-        visits, review = 0, None
+        review = None
         for row in candidates:
-            page, fresh = self._facts(row, product["ean"], visits < MAX_VISITS_PER_JOB)
-            visits += fresh
+            page, fresh = self._facts(row, product["ean"], self._job_visits < MAX_VISITS_PER_JOB)
+            self._job_visits += fresh
             if page is None:
                 continue
             url = page.url or row["url"]
@@ -826,6 +869,10 @@ class _Session:
                     f"modelo + código de color (calibre y EAN publicado no exigidos) · descubierta mediante {source} "
                     f"en {row['source_url'] or url} · comprobada {row['checked_at'] or _iso(self._now())} · "
                     + "; ".join(match.reasons + match.observations))[:1000]
+            provenance = json.loads(row["candidate_evidence"]).get(product["ean"])
+            if provenance:
+                # The full generation evidence remains in discovery_index even when the human note is bounded.
+                note = (f"{provenance['rule']} [{', '.join(provenance['evidence'])}] · " + note)[:1000]
             outcome = Outcome(product["ean"], self.competitor_id, self.config["name"], state, url=url,
                               method=f"locator:{row['method']}", page=page,
                               match_status=EXACT if state == "exact" else status)
