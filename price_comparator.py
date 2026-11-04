@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import logging
 from io import BytesIO
 import math
 import os
@@ -89,13 +90,23 @@ _MONITOR_OFFER_GUARD = """AND (NOT EXISTS(
               24)/24.0 >= julianday('now')))"""
 
 
+def iso_datetimes(values: pd.Series, field: str) -> pd.Series:
+    """Stored ISO dates in UTC; legacy naive dates mean UTC, never local time."""
+    parsed = pd.to_datetime(values, format="ISO8601", utc=True, errors="coerce")
+    invalid = values.notna() & values.astype("string").str.strip().ne("") & parsed.isna()
+    if invalid.any():
+        logging.getLogger(__name__).warning(
+            "%s: %d fecha(s) ISO8601 inválida(s); excluidas del cálculo temporal", field, int(invalid.sum()))
+    return parsed
+
+
 def vytria_price_states(frame: pd.DataFrame, expiry_days: int, watched_eans: set[str], *,
                         now: datetime | None = None) -> pd.DataFrame:
     """One freshness rule for the dashboard, monitoring and the sync diagnostics."""
     result = frame.copy()
     at = pd.Timestamp(now or datetime.now(timezone.utc))
     at = at.tz_localize("UTC") if at.tzinfo is None else at.tz_convert("UTC")
-    synced = pd.to_datetime(result["synced_at"], utc=True, errors="coerce", format="mixed")
+    synced = iso_datetimes(result["synced_at"], "synced_at")
     hours = pd.Series(float(expiry_days * 24), index=result.index)
     hours.loc[result["ean"].isin(watched_eans)] = min(24, expiry_days * 24)
     valid_until = synced + pd.to_timedelta(hours, unit="h")
@@ -1422,7 +1433,7 @@ class PriceComparatorStore:
         # in comparisons only when validated, not flagged stale by a later incident and recently synced.
         synced = vytria_price_states(synced, self.price_expiry_days(), watched, now=now)
         # Manual contingency prices of watched products have the same maximum daily validity.
-        own_dates = pd.to_datetime(own["captured_at"], utc=True, errors="coerce", format="mixed")
+        own_dates = iso_datetimes(own["captured_at"], "captured_at")
         daily_now = pd.Timestamp(now)
         own = own[~own["ean"].isin(watched) | (
             own_dates.gt(daily_now - timedelta(hours=24)) & own_dates.le(daily_now))]
