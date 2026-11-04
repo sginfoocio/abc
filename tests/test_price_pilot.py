@@ -17,6 +17,7 @@ from tests.web_fixtures import BASE, NOW, PRADA, FakeSite, competitor_id, index_
 @pytest.fixture
 def pilot(tmp_path, monkeypatch):
     _freeze(monkeypatch)
+    monkeypatch.setattr("price_pilot.stamp", lambda: NOW.isoformat(timespec="seconds"))
     store = PriceComparatorStore(tmp_path / "pilot.sqlite3")
     extras = []
     for index in range(80):
