@@ -45,6 +45,7 @@ def test_inventory_datetime_rejects_missing_or_invalid_values(value):
 def _monitor_env(tmp_path, *, count=1):
     site = Site()
     store, access, locator, clock, cid = _env(tmp_path, site)
+    clock.now = datetime.now(timezone.utc)
     with store._connect() as con, con:
         con.execute("UPDATE competitors SET active=(id=?)", (cid,))
         con.execute("UPDATE competitor_web_config SET tax_policy='included' WHERE competitor_id=?", (cid,))
@@ -92,12 +93,14 @@ def test_verified_watch_only_and_no_search_on_subsequent_updates(tmp_path):
 def test_price_stock_alerts_and_persistent_deduplication(tmp_path):
     store, _, _, monitor, clock, cid, site = _monitor_env(tmp_path)
     store.import_own_prices(pd.DataFrame([{"EAN": EAN, "Mercado": "ES", "Precio": "115", "Moneda": "EUR",
-                                          "Fuente": "Vytria", "Fecha": clock().isoformat()}]))
+                                          "Origen": "Vytria", "Fecha consulta": clock().isoformat()}]))
     monitor.run([cid])
     _edit(site, monitor, price=110)
     _advance(clock)
+    store.import_own_prices(pd.DataFrame([{"EAN": EAN, "Mercado": "ES", "Precio": "115", "Moneda": "EUR",
+                                          "Origen": "Vytria", "Fecha consulta": clock().isoformat()}]))
     monitor.run([cid])
-    assert set(monitor.alerts()["kind"]) == {"price_down", "undercut"}
+    assert set(monitor.alerts()["kind"]) == {"price_down", "undercut", "stale"}
     _edit(site, monitor, price=130, stock=False)
     _advance(clock)
     monitor.run([cid])
@@ -258,6 +261,9 @@ def test_frequency_group_override_stale_alert_and_schedule_switch(tmp_path, monk
     assert monitor.check_stale() == 0
     assert monitor.inventory().iloc[0]["status"] == "Precio caducado"
     monkeypatch.setenv(SCHEDULE_ENV, "1")
+    assert monitor.tick()["runs"] == []  # daily competitor work also requires the own-price switch
+    monitor.vytria.set_auto_enabled(True)
+    monkeypatch.setattr(monitor.vytria, "run_watched_scheduled", lambda: None)
     assert len(monitor.tick()["runs"]) == 1
     assert monitor.tick()["runs"][0]["summary"].startswith("0 trabajos")
     assert len(monitor.alerts().query("kind == 'stale'")) == earlier_episodes + 1
@@ -268,6 +274,7 @@ def test_full_500_ean_location_monitoring_changes_recovery_and_pilot_isolation(t
     site = Site()
     other_site = Site(base="https://usd.example")
     store, access, locator, clock, cid = _env(tmp_path, site)
+    clock.now = datetime.now(timezone.utc)
     other = store.competitors().set_index("name").loc["Tienda USD", "id"]
     with store._connect() as con, con:
         con.execute("UPDATE competitors SET active=(id IN (?,?))", (cid, other))
@@ -312,7 +319,7 @@ def test_full_500_ean_location_monitoring_changes_recovery_and_pilot_isolation(t
     assert site.count("/marca/") + other_site.count("/marca/") == discovery_calls
     assert len(monitor.inventory().query("comparable")) == 1000
     alerts = monitor.alerts(limit=2000)
-    assert set(alerts["kind"]) == {"price_down", "availability"}
+    assert set(alerts["kind"]) == {"price_down", "availability", "stale"}
     assert not alerts.duplicated("event_key").any()
     assert monitor.run(ids, max_jobs=1000).processed == 0
     assert len(monitor.alerts(limit=2000)) == len(alerts)
@@ -400,8 +407,9 @@ def test_missing_price_does_not_refresh_price_freshness(tmp_path):
     monitor.run([cid])
     assert monitor.jobs().iloc[0]["last_ok_at"] == initial
     assert monitor.run([cid]).processed == 0
+    assert monitor.inventory().iloc[0]["status"] == "Precio caducado"
     _advance(clock)
-    assert monitor.check_stale() == 1
+    assert monitor.check_stale() == 0  # the first missed daily update already persisted the alert
     assert monitor.inventory().iloc[0]["status"] == "Precio caducado"
 
 

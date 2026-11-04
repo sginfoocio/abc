@@ -30,6 +30,7 @@ from price_watch import PriceWatch
 from price_web import Outcome, WebPriceSearch, WebSearchError, comparability_gap, validate_competitor_url
 from price_web_extract import ProductPage, extract_product
 from price_web_fetch import PageGone, RobotsDenied, _requests_transport
+from vytria_price_sync import SyncInProgress, VytriaPriceSync
 
 SCHEDULE_ENV = "PRICE_MONITOR_SCHEDULE_ENABLED"
 STATES = {"pending": "Pendiente", "running": "En ejecución", "done": "Terminada",
@@ -82,11 +83,13 @@ class MonitorReport:
 
 class PriceMonitor:
     def __init__(self, store: PriceComparatorStore, *, transport=_requests_transport,
-                 clock: Callable[[], datetime] = _utc, sleep: Callable[[float], None] = time.sleep) -> None:
+                 clock: Callable[[], datetime] = _utc, sleep: Callable[[float], None] = time.sleep,
+                 vytria_sync: VytriaPriceSync | None = None) -> None:
         self.store, self._now, self._transport, self._sleep = store, clock, transport, sleep
         self.access = AccessControl(store, clock=clock)
         self.search = WebPriceSearch(store, clock=clock)
         self.watch = PriceWatch(store, clock=clock)
+        self.vytria = vytria_sync or VytriaPriceSync(store, clock=clock, sleep=sleep)
 
     def enqueue(self, competitor_ids: list[str] | None = None) -> int:
         """One current job per watched pair, never a discovery request. Only verified URLs are eligible."""
@@ -122,7 +125,7 @@ class PriceMonitor:
                     continue
                 if job["last_ok_at"]:
                     con.execute("UPDATE monitor_jobs SET valid_until=? WHERE id=?",
-                                (_iso(datetime.fromisoformat(job["last_ok_at"]) + timedelta(hours=interval * 2)),
+                                (_iso(datetime.fromisoformat(job["last_ok_at"]) + timedelta(hours=interval)),
                                  job["id"]))
                 changed = job["url"] != row["url"] or job["state"] in ("inactive", "gone", "review")
                 due = (datetime.fromisoformat(job["sampled_at"]) + timedelta(hours=interval)
@@ -134,7 +137,7 @@ class PriceMonitor:
                         detail='',updated_at=? WHERE id=?""",
                                 (row["url"], int(changed), _iso(now), job["id"]))
                 elif job["state"] == "done":
-                    valid_until = (_iso(datetime.fromisoformat(job["last_ok_at"]) + timedelta(hours=interval * 2))
+                    valid_until = (_iso(datetime.fromisoformat(job["last_ok_at"]) + timedelta(hours=interval))
                                    if job["last_ok_at"] else None)
                     con.execute("UPDATE monitor_jobs SET not_before=?,valid_until=? WHERE id=?",
                                 (_iso(due), valid_until, job["id"]))
@@ -182,7 +185,7 @@ class PriceMonitor:
         report = MonitorReport()
         started = time.monotonic()
         self.enqueue(competitor_ids)
-        summary, _ = self.store.dashboard()
+        summary, _ = self.store.dashboard(now=self._now())
         own = dict(summary[["ean", "own_price_eur"]].itertuples(index=False, name=None)) if not summary.empty else {}
         with self.store._connect() as con:
             ids = competitor_ids if competitor_ids is not None else [
@@ -321,7 +324,7 @@ class PriceMonitor:
                 ORDER BY captured_at DESC,id DESC LIMIT 1""",
                                 (job["ean"], job["competitor_id"], job["url"])).fetchone()
             last_ok = sample["at"] if page.has_price else job["last_ok_at"]
-            valid_until = _iso(at + timedelta(hours=hours * 2)) if page.has_price else job["valid_until"]
+            valid_until = _iso(at + timedelta(hours=hours)) if page.has_price else job["valid_until"]
             offer_id = offer["id"] if offer and page.has_price else job["last_offer_id"]
             con.execute("""UPDATE monitor_jobs SET state='done',attempts=0,lease_until=NULL,not_before=?,
                 last_ok_at=?,valid_until=?,last_offer_id=?,eligible=?,detail=?,updated_at=? WHERE id=?""",
@@ -393,7 +396,16 @@ class PriceMonitor:
                 with self.store._connect() as con:
                     plans = con.execute("""SELECT s.* FROM monitor_schedule s JOIN competitors c
                         ON c.id=s.competitor_id WHERE s.enabled=1 AND c.active=1""").fetchall()
-                return {"runs": [{"competitor": r["competitor_id"],
+                if not plans:
+                    return {"skipped": "Sin competidores habilitados", "runs": []}
+                if not self.vytria.auto_enabled:
+                    return {"skipped": "Active primero la sincronización diaria de Vytria", "runs": []}
+                try:
+                    sync = self.vytria.run_watched_scheduled()
+                except SyncInProgress as exc:
+                    return {"skipped": str(exc), "runs": []}
+                return {"vytria": asdict(sync) if sync else None,
+                        "runs": [{"competitor": r["competitor_id"],
                                   "summary": self.run([r["competitor_id"]], max_jobs=r["max_jobs"]).summary}
                                  for r in plans]}
         except Timeout:
@@ -418,9 +430,12 @@ class PriceMonitor:
 
     def alerts(self, limit: int = 200) -> pd.DataFrame:
         with self.store._connect() as con:
-            return pd.read_sql_query("""SELECT a.*,c.name AS competitor,p.brand,p.model,p.color FROM price_alerts a
+            return pd.read_sql_query("""SELECT a.id,a.event_key,a.ean,a.competitor_id,a.kind,a.at,a.old_value,
+                a.new_value,a.detail,c.name AS competitor,p.brand,p.model,p.color FROM price_alerts a
                 JOIN competitors c ON c.id=a.competitor_id JOIN products p ON p.ean=a.ean
-                ORDER BY a.id DESC LIMIT ?""", con, params=(limit,))
+                UNION ALL SELECT a.id,'vytria:' || a.history_id,a.ean,NULL,a.kind,a.at,a.old_value,a.new_value,a.detail,
+                'Vytria',p.brand,p.model,p.color FROM vytria_price_alerts a JOIN products p ON p.ean=a.ean
+                ORDER BY at DESC,id DESC LIMIT ?""", con, params=(limit,))
 
     def email_summary(self, limit: int = 200) -> str:
         rows = self.alerts(limit)
@@ -431,15 +446,19 @@ class PriceMonitor:
         return "\n".join(lines)
 
     def inventory(self) -> pd.DataFrame:
-        summary, _ = self.store.dashboard()
+        summary, _ = self.store.dashboard(now=self._now())
         own = summary.set_index("ean")["own_price_eur"].to_dict() if not summary.empty else {}
+        own_details = summary.set_index("ean").to_dict("index") if not summary.empty else {}
         with self.store._connect() as con:
             rows = pd.read_sql_query("""SELECT w.ean,p.brand,p.model,p.color,c.id AS competitor_id,
                 c.name AS competitor,j.url,j.state,j.detail,j.sample,j.previous_sample,
                 j.last_ok_at,j.valid_until,j.eligible,
+                COALESCE(g.interval_hours,s.interval_hours,24) AS interval_hours,
                 EXISTS(SELECT 1 FROM competitor_product_urls u WHERE u.ean=w.ean AND u.competitor_id=c.id
                     AND u.status='verified') AS located
-                FROM watch_products w JOIN products p ON p.ean=w.ean CROSS JOIN competitors c
+                FROM watch_products w JOIN products p ON p.ean=w.ean
+                JOIN watch_groups g ON g.name=w.group_name CROSS JOIN competitors c
+                LEFT JOIN competitor_schedule s ON s.competitor_id=c.id
                 LEFT JOIN monitor_jobs j ON j.ean=w.ean AND j.competitor_id=c.id
                 WHERE w.active=1 AND c.active=1 ORDER BY p.brand,p.model,p.color,c.name""", con)
         if rows.empty:
@@ -462,6 +481,8 @@ class PriceMonitor:
             else:
                 try:
                     valid_until = _inventory_datetime(validity)
+                    valid_until = min(valid_until, _inventory_datetime(row["last_ok_at"])
+                                      + timedelta(hours=row["interval_hours"]))
                 except ValueError:
                     date_issue = "Fecha de vigencia inválida"
                     logging.getLogger(__name__).warning(
@@ -487,7 +508,11 @@ class PriceMonitor:
                      "No comparable" if row["state"] == "done" else STATES.get(row["state"], row["state"]))
             price, vytria = page.get("price"), own.get(row["ean"])
             diff = vytria - price if comparable and vytria is not None and pd.notna(vytria) else None
+            own_row = own_details.get(row["ean"], {})
             data.append({**row, "status": state, "date_issue": date_issue, "own_price_eur": vytria, "price": price,
+                         "own_price_source": own_row.get("own_price_source", ""),
+                         "own_price_checked_at": own_row.get("own_price_checked_at"),
+                         "own_price_status": own_row.get("own_price_status", ""),
                          "currency": page.get("currency", ""), "includes_tax": page.get("includes_tax"),
                          "availability": page.get("availability", "unknown"), "comparable": comparable,
                          "difference_eur": diff, "difference_pct": diff / vytria * 100 if diff is not None
