@@ -159,6 +159,7 @@ class WatchBatch:
             legacy = [(cid, r["ean"]) for r in preview.to_dict("records")
                       if r["competitor_id"] == cid and r["ean"] in selected and r["pilot_route"]]
             context = PricePilot(self.store).watch_check(legacy, approved=approved) if legacy else nullcontext(None)
+            started_at = stamp()
             with context as pilot_run_id:
                 located = self.locator.run([cid], eans=selected, max_jobs=len(selected), deadline_seconds=300,
                                            **({"point_check": True, "pilot_run_id": pilot_run_id}
@@ -177,6 +178,7 @@ class WatchBatch:
                        "location_processed": located.processed, "monitor_processed": monitored.processed,
                        "requests": located.requests + monitored.requests,
                        "processed_pairs": len(processed), "pilot_run_id": pilot_run_id,
+                       "started_at": started_at, "finished_at": stamp(),
                        "errors": {**located.stopped, **monitored.stopped}}
                 result["runs"].append(run)
                 if pilot_run_id is not None:
@@ -204,7 +206,7 @@ class WatchBatch:
                 with self.store._connect() as con, con:
                     con.execute("""INSERT INTO locate_runs(competitor_id,trigger,started_at,finished_at,status,
                         processed,requests,summary) VALUES(?,?,?,?,?,?,?,?)""",
-                        (cid, "watch:point_check" if point_check else "watch:batch", stamp(), stamp(),
+                        (cid, "watch:point_check" if point_check else "watch:batch", started_at, run["finished_at"],
                          "stopped" if run["errors"] else "ok", len(processed), run["requests"],
                          json.dumps({"run": run, "pairs": [p for p in result["pairs"] if p["competitor_id"] == cid]},
                                     ensure_ascii=False)))
