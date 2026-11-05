@@ -977,7 +977,8 @@ class _Session:
         checked = row["checked_at"] and datetime.fromisoformat(row["checked_at"]) > self._now() - FACTS_TTL
         refresh = self.point_check and row["url"] not in self._checked_urls and row["check_state"] != "robots"
         if checked and not refresh and row["check_state"] == "product":
-            self._job_current_source |= row["url"] in self._checked_urls
+            if self.point_check:
+                self._job_current_source |= row["url"] in self._checked_urls
             page = ProductPage(**json.loads(row["facts"]))
             # Do not rewrite historical rows; a cached category still cannot be used as a product.
             return (None if product_page_rejection("", page.url) else page), 0
