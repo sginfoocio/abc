@@ -771,7 +771,12 @@ def _render_batch(store: PriceComparatorStore, names: dict[str, str]) -> None:
               for row in watch.to_dict("records")}
     eans = st.multiselect("Productos del lote", product_eans(watch), format_func=labels.get, key="batch_eans")
     cids = st.multiselect("Competidores del lote", ordered(names, names.get), format_func=names.get, key="batch_competitors")
-    scope = (tuple(sorted(eans)), tuple(sorted(cids)))
+    point_check = st.checkbox("Comprobación puntual: nuevo intento de negativos y lectura actual de fichas",
+                              key="batch_point_check")
+    st.caption("Una sola pasada por par seleccionado. No modifica frecuencias, no acepta revisiones ni anula "
+               "permisos, robots, bloqueos, pausas, presupuestos o reservas. Los pares del piloto antiguo "
+               "se registran en una nueva ejecución supervisada del piloto, con las fuentes autorizadas actuales.")
+    scope = (tuple(sorted(eans)), tuple(sorted(cids)), point_check)
     if scope != st.session_state.get("batch_selection") or st.session_state.pop("batch_reset", False):
         st.session_state["batch_approved"] = False
         st.session_state.pop("batch_prepared", None)
@@ -782,7 +787,7 @@ def _render_batch(store: PriceComparatorStore, names: dict[str, str]) -> None:
         return
     batch = WatchBatch(store)
     try:
-        preview = batch.preview(eans, cids)
+        preview = batch.preview(eans, cids, point_check=point_check)
     except ValueError as exc:
         st.error(str(exc))
         return
@@ -796,7 +801,10 @@ def _render_batch(store: PriceComparatorStore, names: dict[str, str]) -> None:
         "ean": "EAN", "competitor": "Competidor", "action": "Trabajo necesario", "url": "Ficha reutilizada",
         "provenance": "Procedencia", "status": "Precio", "interval_hours": "Frecuencia efectiva (h)", "access": "Acceso",
         "minimum_http": "HTTP base", "remaining_http": "HTTP restantes hoy", "estimate": "Previsión"})
-    st.dataframe(display[["EAN", "Competidor", "Trabajo necesario", "Precio", "Procedencia", "Ficha reutilizada"]],
+    display = display.rename(columns={"defer_reason": "Motivo de aplazamiento", "queue_state": "Estado de cola",
+                                      "not_before": "No antes de", "attempts": "Intentos", "pilot_route": "Flujo piloto"})
+    st.dataframe(display[["EAN", "Competidor", "Trabajo necesario", "Precio", "Procedencia", "Ficha reutilizada",
+                          "Motivo de aplazamiento", "Estado de cola", "No antes de", "Intentos", "Flujo piloto"]],
                  hide_index=True, width="stretch", column_config={
                      "Ficha reutilizada": st.column_config.LinkColumn("Ficha reutilizada", display_text="Ver ficha")})
     with st.expander("Detalle de permisos, consumo y frecuencias"):
@@ -828,7 +836,7 @@ def _render_batch(store: PriceComparatorStore, names: dict[str, str]) -> None:
                "Las fichas verificadas se reutilizan; los pares pendientes del piloto se gestionan en el piloto.")
     if st.button("Preparar trabajos sin HTTP", key="batch_prepare"):
         try:
-            batch.prepare(eans, cids)
+            batch.prepare(eans, cids, point_check=point_check)
             st.session_state["batch_prepared"] = scope
             st.session_state["batch_approved"] = False
             _refresh("Lote preparado sin HTTP. Revise la vista previa y confirme la ejecución.")
@@ -845,7 +853,8 @@ def _render_batch(store: PriceComparatorStore, names: dict[str, str]) -> None:
                            key="batch_approved")
     if st.button("Ejecutar lote supervisado", key="batch_execute", disabled=not (prepared and approved)):
         try:
-            result = batch.execute(eans, cids, approved=approved, sync_vytria=sync, max_jobs=int(maximum))
+            result = batch.execute(eans, cids, approved=approved, sync_vytria=sync, max_jobs=int(maximum),
+                                   point_check=point_check)
             st.session_state["batch_result"] = result
             st.session_state.pop("batch_prepared", None)
             st.session_state["batch_reset"] = True
@@ -859,11 +868,18 @@ def _render_batch(store: PriceComparatorStore, names: dict[str, str]) -> None:
             if result["vytria"]["status"] == "error":
                 st.error(result["vytria"]["error"])
         st.dataframe(pd.DataFrame(result["runs"]), hide_index=True, width="stretch")
+        st.caption(f"Pares realmente procesados: {result['processed_pairs']}. "
+                   "Un trabajo procesado puede reutilizar datos sin realizar una petición nueva.")
+        st.dataframe(pd.DataFrame(result["pairs"]), hide_index=True, width="stretch")
+        st.download_button("Exportar resultado del lote (JSON)",
+                           json.dumps(result, ensure_ascii=False, indent=2).encode("utf-8"),
+                           "resultado-lote.json", "application/json", key="batch_result_export")
         if result["skipped"]:
             st.info("Pares sin ejecución: precio todavía vigente, gestión en piloto, revisión o restricciones de acceso.")
             st.dataframe(pd.DataFrame(result["skipped"]), hide_index=True, width="stretch")
         if result["deferred"]:
-            st.warning(f"{result['deferred']} pares aptos pendientes por el límite del lote.")
+            st.warning(f"{result['deferred']} pares aptos no procesados: límite, reserva, bloqueo o cambio "
+                       "de estado. Consulte el motivo por par; una selección no cuenta como ejecución.")
 
 
 def render_admin(store: PriceComparatorStore, data: dict) -> None:

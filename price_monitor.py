@@ -16,7 +16,8 @@ import logging
 from numbers import Number
 import os
 import time
-from typing import Callable
+from typing import AbstractSet, Callable
+from urllib.parse import urlparse
 
 from filelock import FileLock, Timeout
 import pandas as pd
@@ -24,7 +25,7 @@ import pandas as pd
 from price_access import AccessControl, AccessDenied, GovernedFetcher
 from price_comparator import PriceComparatorStore
 from price_connectors import ConnectorBlocked, ConnectorError
-from price_locator import LEASE, MAX_ATTEMPTS, PriceLocator
+from price_locator import LEASE, MAX_ATTEMPTS, PriceLocator, job_deferral
 from price_references import EXACT, classify
 from price_watch import PriceWatch
 from price_web import Outcome, WebPriceSearch, WebSearchError, comparability_gap, validate_competitor_url
@@ -74,6 +75,7 @@ class MonitorReport:
     requests: int = 0
     states: Counter = field(default_factory=Counter)
     stopped: dict[str, str] = field(default_factory=dict)
+    outcomes: list[dict] = field(default_factory=list)
 
     @property
     def summary(self) -> str:
@@ -151,25 +153,40 @@ class PriceMonitor:
         self.check_stale(competitor_ids, eans)
         return added
 
-    def _claim(self, cid: str, eans: list[str] | None = None) -> dict | None:
+    def _claim(self, cid: str, eans: list[str] | None = None, *, point_check: bool = False,
+               completed: AbstractSet[str] = frozenset()) -> dict | None:
         now = _iso(self._now())
         selected = "" if eans is None else f" AND j.ean IN ({','.join('?' for _ in eans)})"
         with self.store._connect() as con:
             con.execute("BEGIN IMMEDIATE")
-            row = con.execute(f"""SELECT j.* FROM monitor_jobs j
+            rows = con.execute(f"""SELECT j.* FROM monitor_jobs j
                 JOIN watch_products w ON w.ean=j.ean AND w.active=1
                 JOIN competitors c ON c.id=j.competitor_id AND c.active=1
-                WHERE j.competitor_id=? {selected} AND
-                  ((j.state IN ('pending','waiting','blocked','unavailable') AND
-                    (j.not_before IS NULL OR j.not_before<=?)) OR (j.state='running' AND j.lease_until<=?))
-                ORDER BY j.not_before,j.id LIMIT 1""", (cid, *(eans or []), now, now)).fetchone()
+                WHERE j.competitor_id=? {selected}
+                  AND j.state IN ('pending','waiting','blocked','unavailable','running'
+                                  {",'done'" if point_check else ""})
+                ORDER BY j.not_before,j.id""", (cid, *(eans or []))).fetchall()
+            row = next((r for r in rows if r["ean"] not in completed and not job_deferral(
+                dict(r), self._now(), monitoring=True, point_check=point_check,
+                check_attempts=point_check)), None)
             if row is None:
                 con.commit()
                 return None
             con.execute("""UPDATE monitor_jobs SET state='running',attempts=attempts+1,lease_until=?,
                 updated_at=? WHERE id=?""", (_iso(self._now() + LEASE), now, row["id"]))
+            if point_check:
+                self._event(con, dict(row), row["state"],
+                            f"Comprobación puntual aprobada; plazo anterior {row['not_before']}")
+                con.execute("""UPDATE monitor_jobs SET
+                    previous_sample=CASE WHEN sample<>'' THEN sample ELSE previous_sample END,
+                    sample='',sampled_at=NULL WHERE id=?""", (row["id"],))
             con.commit()
-            return dict(row)
+            job = dict(row)
+            if point_check:
+                job["previous_sample"] = job["sample"] or job["previous_sample"]
+                job["sample"] = ""
+                job["sampled_at"] = None
+            return job
 
     def _finish(self, job: dict, state: str, detail: str, *, retry_at: datetime | None = None) -> None:
         with self.store._connect() as con, con:
@@ -186,7 +203,8 @@ class PriceMonitor:
                     (job["id"], _iso(self._now()), state, detail[:1000]))
 
     def run(self, competitor_ids: list[str] | None = None, *, max_jobs: int = 200,
-            deadline_seconds: float = 900, eans: list[str] | None = None) -> MonitorReport:
+            deadline_seconds: float = 900, eans: list[str] | None = None,
+            point_check: bool = False, pilot_run_id: int | None = None) -> MonitorReport:
         """An explicitly requested bounded batch. Does not enable periodic work or search for any URL."""
         if not 1 <= max_jobs <= 5000 or not 1 <= deadline_seconds <= 14400:
             raise ValueError("Lote de 1-5000 trabajos y plazo de 1-14400 segundos")
@@ -204,22 +222,44 @@ class PriceMonitor:
             try:
                 with self.search._lock(cid):
                     config = self.search.config(cid)
-                    fetcher = GovernedFetcher(
-                        self.access, cid, "ficha", purpose="monitor", transport=self._transport, sleep=self._sleep,
-                        pause_seconds=0, retries=0, max_requests=1_000_000,
-                        timeout=float(config["timeout_seconds"] or 15))
+                    guard = reserved = None
+                    if pilot_run_id is not None:
+                        from price_pilot import PricePilot
+                        guard, reserved = PricePilot(self.store).watch_check_hooks(
+                            pilot_run_id, cid, clock=self._now, sleep=self._sleep)
                     with self.store._connect() as con:
                         first = con.execute("SELECT COALESCE(MAX(id),0) FROM access_requests").fetchone()[0]
+
+                    fetcher = GovernedFetcher(
+                        self.access, cid, "ficha", purpose="monitor", transport=self._transport, sleep=self._sleep,
+                        pause_seconds=0, request_guard=guard, request_reserved=reserved,
+                        retries=0, max_requests=1_000_000,
+                        timeout=float(config["timeout_seconds"] or 15))
                     try:
+                        completed: set[str] = set()
                         while report.processed < max_jobs and time.monotonic() - started < deadline_seconds:
-                            job = self._claim(cid, eans)
+                            job = self._claim(cid, eans, point_check=point_check, completed=completed)
                             if job is None:
                                 break
                             report.processed += 1
-                            stop = self._process(job, config, fetcher, own.get(job["ean"]))
+                            completed.add(job["ean"])
+                            if point_check and job["state"] == "done":
+                                job["sample"] = ""
                             with self.store._connect() as con:
-                                state = con.execute("SELECT state FROM monitor_jobs WHERE id=?",
-                                                    (job["id"],)).fetchone()[0]
+                                before = con.execute("SELECT COALESCE(MAX(id),0) FROM access_requests").fetchone()[0]
+                            stop = (self._process(job, config, fetcher, own.get(job["ean"]), fresh=True)
+                                    if point_check else self._process(job, config, fetcher, own.get(job["ean"])))
+                            with self.store._connect() as con:
+                                saved = dict(con.execute("SELECT state,detail,url FROM monitor_jobs WHERE id=?",
+                                                         (job["id"],)).fetchone())
+                                requests = con.execute("""SELECT COUNT(*) FROM access_requests
+                                    WHERE competitor_id=? AND id>?""", (cid, before)).fetchone()[0]
+                                urls = con.execute("""SELECT url FROM access_requests
+                                    WHERE competitor_id=? AND id>?""", (cid, before)).fetchall()
+                            state = saved["state"]
+                            report.outcomes.append({"ean": job["ean"], **saved, "requests": requests,
+                                                    "commercial_requests": sum(
+                                                        urlparse(r["url"]).path != "/robots.txt" for r in urls)})
                             report.states[state] += 1
                             if stop:
                                 report.stopped[cid] = stop
@@ -233,7 +273,8 @@ class PriceMonitor:
         self.check_stale(competitor_ids, eans)
         return report
 
-    def _process(self, job: dict, config: dict, fetcher: GovernedFetcher, own_price: float | None) -> str:
+    def _process(self, job: dict, config: dict, fetcher: GovernedFetcher, own_price: float | None,
+                 *, fresh: bool = False) -> str:
         cid, ean, url = job["competitor_id"], job["ean"], job["url"]
         with self.store._connect() as con:
             verified = con.execute("""SELECT 1 FROM competitor_product_urls
@@ -255,7 +296,7 @@ class PriceMonitor:
                         WHERE competitor_id=? AND url=? AND state='done'
                         AND sample<>'' AND last_ok_at IS NOT NULL AND not_before>?
                         ORDER BY last_ok_at DESC LIMIT 1""", (cid, url, _iso(self._now()))).fetchone()
-                if shared:
+                if shared and not fresh:
                     shared_sample = json.loads(shared["sample"])
                     page = ProductPage(**shared_sample["page"])
                     sampled_at = shared_sample["at"]
@@ -295,7 +336,7 @@ class PriceMonitor:
             with self.store._connect() as con, con:
                 self._alert(con, job, "gone", job.get("last_ok_at") or url, url, None, str(exc))
             self._finish(job, "gone", str(exc))
-            PriceLocator(self.store, clock=self._now).enqueue()
+            PriceLocator(self.store, clock=self._now).enqueue([cid], [ean])
         except AccessDenied as exc:
             gate = exc.decision
             state = ("unavailable" if gate.code in ("not_authorized", "prohibited") else

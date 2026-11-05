@@ -49,6 +49,42 @@ candidatos con revision humana, nunca ofertas ni ampliacion del alcance.
 Ver [mercado y localizador](PRICE_PILOT_DISCOVERY.md). La consulta comercial
 de precios sigue reutilizando exclusivamente URLs guardadas.
 
+## Comprobacion puntual desde el lote supervisado
+
+En **Administracion > Actualizaciones > Lote supervisado**, la opcion explicita
+**Comprobacion puntual: nuevo intento de negativos y lectura actual de fichas**
+solicita una sola pasada sobre los EAN y competidores seleccionados. Preparar
+no realiza HTTP; cambiar seleccion u opcion invalida preparacion y aprobacion.
+La sincronizacion Vytria es independiente: desmarcarla si no esta autorizada.
+
+Sin esta opcion se respetan los precios vigentes y `not_before` de los negativos.
+La vista previa muestra estado, intentos, plazo y motivo de aplazamiento usando
+las mismas reglas que la reclamacion de trabajos. La opcion solo permite
+adelantar un negativo anterior y volver a leer una ficha verificada; no elimina
+esperas por errores, reservas activas, revisiones, maximo de intentos, robots,
+bloqueos, permisos, pausas ni presupuestos. No cambia frecuencias globales.
+Las fuentes autorizadas se leen de nuevo como maximo una vez por URL en esa
+sesion de localizacion; los hechos historicos no se borran ni se aceptan
+identidades pendientes. Una lectura compartida del listado puede comprobar
+varios pares, sin atribuirles peticiones HTTP individuales adicionales.
+
+Los pares del piloto antiguo requieren que este siga habilitado y no tenga
+otra ejecucion activa o interrumpida. El lote abre una ejecucion `watch_check`
+con seleccion inmutable en `pilot_runs` y trabajos propios en `pilot_jobs`,
+manteniendo la reserva del piloto durante ambas fases. Utiliza exclusivamente
+los metodos actualmente autorizados del motor gobernado, no convierte una
+autorizacion de catalogo en permiso de buscador interno. Conserva los trabajos,
+resultados y decisiones anteriores; aplica ademas presupuesto y pausa del piloto.
+
+El resultado exportable JSON contiene cada par en una categoria excluyente:
+`checked_now`, `reused` o `not_executed`, con los trabajos efectivamente
+reclamados, peticiones, estados y motivos. Una consulta solo a robots no cuenta
+como comprobacion comercial. Los pares no reclamados permanecen pendientes,
+no se descuentan como procesados. Un bloqueo de tienda detiene tambien su
+monitorizacion. El recibo por tienda queda en `locate_runs` con origen
+`watch:point_check`; los eventos de localizacion y monitorizacion y las reservas
+HTTP conservan la evidencia detallada. No se habilita ninguna planificacion.
+
 ## Activacion manual
 
 1. Sin ejecutar descargas generales, comprobar en Configuracion las

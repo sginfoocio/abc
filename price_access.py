@@ -399,14 +399,20 @@ class GovernedFetcher(WebFetcher):
     """
 
     def __init__(self, access: AccessControl, competitor_id: str, method: str, *, purpose: str, ean: str = "",
-                 sleep: Callable[[float], None] = time.sleep, **kwargs) -> None:
+                 sleep: Callable[[float], None] = time.sleep,
+                 request_guard: Callable[[], None] | None = None,
+                 request_reserved: Callable[[str, str], None] | None = None, **kwargs) -> None:
         super().__init__(sleep=sleep, **kwargs)
         self.access, self.competitor_id, self.method, self.purpose, self.ean = (
             access, competitor_id, method, purpose, ean)
         inner = self._transport
 
         def governed(url: str, headers: dict, timeout: float):
+            if request_guard is not None:
+                request_guard()
             request_id = self._reserve(url)
+            if request_reserved is not None:
+                request_reserved(url, self.ean)
             try:
                 status, response_headers, body = inner(url, headers, timeout)
             except ConnectorError as exc:
