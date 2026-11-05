@@ -107,6 +107,14 @@ class Fetched:
     url: str
     status: int
     content: bytes
+    requested_url: str = ""
+    redirects: list[dict[str, str | int]] = field(default_factory=list)
+
+    @property
+    def trace(self) -> dict:
+        if not self.requested_url:
+            return {"final_url": self.url}
+        return {"requested_url": self.requested_url, "final_url": self.url, "redirects": self.redirects}
 
     @property
     def text(self) -> str:
@@ -235,6 +243,8 @@ class WebFetcher:
     def get(self, url: str, *, max_bytes: int = MAX_PAGE_BYTES) -> Fetched:
         if urlparse(url).scheme != "https":
             raise ConnectorError("Solo se consultan páginas HTTPS")
+        requested_url = url
+        redirects: list[dict[str, str | int]] = []
         origin_host = _host(url)
         for _ in range(MAX_REDIRECTS + 1):
             if not self.rules(url).allowed(url):
@@ -244,6 +254,7 @@ class WebFetcher:
                 target = urljoin(url, headers.get("Location") or headers.get("location") or "")
                 if _host(target) != origin_host:
                     raise ConnectorError("Redirección a otro dominio: no se sigue")
+                redirects.append({"url": url, "status": status, "location": target})
                 url = target
                 continue
             if status in {404, 410}:
@@ -255,5 +266,5 @@ class WebFetcher:
             if _CAPTCHA.search(body[:20000].decode("utf-8", errors="ignore")) and b"application/ld+json" not in body:
                 self.blocked[origin_host] = "CAPTCHA o control antibot"
                 raise ConnectorBlocked("El sitio presenta un control antibot/CAPTCHA; no se intenta superarlo")
-            return Fetched(url, status, body)
+            return Fetched(url, status, body, requested_url, redirects)
         raise ConnectorError("Demasiadas redirecciones")

@@ -134,6 +134,10 @@ def parse_reference(text: str, *, brands: Iterable[str] = (), models: Iterable[s
     """
     brand_list = list(brands)
     raw = str(text or "")
+    # Observed Optima identifier grammar only; "53" remains opaque, not an inferred calibre.
+    identifier = re.fullmatch(r"(FT5634)-B@53([0-9]{3})#", raw.strip(), re.IGNORECASE)
+    if identifier:
+        return Reference(model=identifier.group(1).upper() + "B", color=identifier.group(2))
     caliber = extract_caliber(raw) or extract_lens(raw)
     if caliber:
         raw = _CALIBER.sub(" ", raw) if "-" in caliber else _LENS_TOKEN.sub(" ", raw)
@@ -148,6 +152,14 @@ def parse_reference(text: str, *, brands: Iterable[str] = (), models: Iterable[s
             for end in range(start + 1, len(parts) + 1):
                 if model_key("".join(parts[start:end])) != expected_model:
                     continue
+                model_length = end - start
+                following_model = model_key("".join(parts[end:end + model_length]))
+                prefix = re.match(r"[A-Z]+(?=\d)", expected_model)
+                if prefix and re.fullmatch(rf"{prefix.group()}\d+[A-Z]*", following_model):
+                    if following_model == expected_model:
+                        # The next occurrence supplies the reference; this one has no colour yet.
+                        continue
+                    return Reference(brand=brand, caliber=caliber, ambiguous=True)
                 color_start = end
                 matched_model = model
                 if color_start < len(parts) and parts[color_start] == "S" \
@@ -279,6 +291,10 @@ def classify(product: Mapping[str, Any], candidate: Mapping[str, Any]) -> MatchR
         reasons.append("EAN publicado no válido: no se aplica la excepción de calibre")
     if candidate.get("ambiguous") or any(ref.ambiguous for ref in references):
         reasons.append("Identificación ambigua: requiere revisión")
+        for index, (text, ref) in enumerate(zip([title, *(candidate.get("identifiers") or [])], references)):
+            if ref.ambiguous:
+                source = "título" if index == 0 else f"identificador {index}"
+                reasons.append(f"Varias referencias en {source}: {text}")
         return result(PROBABLE)
     identity_fields = [(own_brand, brands), (own_model, models), (own_color, colors)]
     contradictions = any(found and found != {expected} for expected, found in identity_fields)

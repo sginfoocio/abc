@@ -1,0 +1,57 @@
+{
+  "provenance": {
+    "kind": "Selected structured facts from supplied Cloud-export diagnosis; NOT HTML captures",
+    "diagnosis": "docs/Precios/analisis_exportacion_12/Diagnostico_12.json",
+    "diagnosis_sha256": "d216c68eade17710d3ba0c787be0b106fbb1124c7ff6cd45d43f8287a64fc07d",
+    "reported_raw_export_sha256_not_independently_verified": "300fd171be1f4d234e50adfb669c2ac726199e7bc2145cd3d31c62fa6128712d",
+    "deployed_commit": "51e16a1ddded2550ed9a61c3b49aa752f0743117",
+    "html_available": false,
+    "location_headers_available": false
+  },
+  "optima_category": {
+    "facts_url": "https://optica-optima.com/gafas-de-sol/",
+    "title": "Gafas de Sol Online en tu Óptica de Confianza",
+    "check_state": "product",
+    "price": null,
+    "pairs": [
+      {"ean": "0889214602701", "path": "tom-ford-ft1044-01a.html", "job": 120, "events": [7, 8], "requests": [60, 61]},
+      {"ean": "0889214519788", "path": "tom-ford-ft1044-01v.html", "job": 134, "events": [9, 10], "requests": [62, 63]},
+      {"ean": "0889214402547", "path": "tom-ford-ft1044-52s.html", "job": 148, "events": [11, 12], "requests": [64, 65]},
+      {"ean": "0889214684080", "path": "tom-ford-ft1044-93b.html", "job": 162, "events": [13, 14], "requests": [66, 67]},
+      {"ean": "0889214558626", "path": "tom-ford-ft1211-52n.html", "job": 176, "events": [15, 16], "requests": [68, 69]},
+      {"ean": "0889214635310", "path": "tom-ford-ft1355-28p.html", "job": 218, "events": [17, 18], "requests": [70, 71]},
+      {"ean": "0889214669742", "path": "tom-ford-ft1360-30a.html", "job": 232, "events": [19, 20], "requests": [72, 73]},
+      {"ean": "0889214642387", "path": "tom-ford-ft1362-01v.html", "job": 246, "events": [21, 22], "requests": [74, 75]},
+      {"ean": "0889214643322", "path": "tom-ford-ft1364-01a.html", "job": 260, "events": [23, 24], "requests": [76, 77]},
+      {"ean": "0889214686305", "path": "tom-ford-ft1396-32c.html", "job": 274, "events": [25, 26], "requests": [78, 79]}
+    ]
+  },
+  "optima_ft5634": {
+    "ean": "0889214042422",
+    "job": 288,
+    "events": [27, 28],
+    "requests": [80],
+    "candidate": {
+      "title": "Tom Ford FT5634-B 001",
+      "model": "",
+      "color": "",
+      "caliber": "",
+      "identifiers": ["FT5634-B@53001#", "GRDOOP"],
+      "ean_published": "0889214042422",
+      "ambiguous": false
+    }
+  },
+  "domanci_mu11ws": {
+    "ean": "8056597684446",
+    "job": 425,
+    "events": [43],
+    "requests": [140],
+    "candidate": {
+      "title": "Miu Miu MU 11WS MU 11WS 1AB5S0 54",
+      "identifiers": ["0MU_11WS1AB5S05421", "0MU_11WS1AB5S05421"],
+      "ean_published": "8056597684446",
+      "caliber": "54-21",
+      "ambiguous": false
+    }
+  }
+}

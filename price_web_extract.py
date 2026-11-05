@@ -56,6 +56,7 @@ class ProductPage:
     delivery_evidence: list[str] = field(default_factory=list)
     stock_conflict: bool = False
     notes: list[str] = field(default_factory=list)
+    url_trace: dict[str, Any] = field(default_factory=dict)
 
     @property
     def has_price(self) -> bool:
@@ -354,6 +355,7 @@ class _Collector(HTMLParser):
         self.lang = ""
         self.elements: list[dict[str, Any]] = []
         self.links: list[tuple[str, str]] = []
+        self.canonicals: list[str] = []
         self._stack: list[dict[str, Any]] = []
         self._in_title = False
         self._link: list[str] | None = None
@@ -368,6 +370,8 @@ class _Collector(HTMLParser):
                 self.meta.setdefault(name.lower(), attrs["content"])
         elif tag == "title":
             self._in_title = True
+        elif tag == "link" and "canonical" in attrs.get("rel", "").lower().split() and attrs.get("href"):
+            self.canonicals.append(attrs["href"])
         if tag == "a" and attrs.get("href"):
             self._link = [attrs["href"], ""]
         if tag in _VOID:
@@ -548,10 +552,34 @@ def extract_edel_search_cards(html: str, search_url: str, product: dict, *,
     return pages
 
 
+def product_page_rejection(html: str, url: str) -> str:
+    """Positive listing evidence, never inferred from a missing product match or a redirect."""
+    parsed_url = urlparse(url)
+    if (parsed_url.hostname or "").lower().removeprefix("www.") == "optica-optima.com" \
+            and parsed_url.path.rstrip("/") in {"/gafas-de-sol", "/gafas-graduadas"}:
+        return "no_product: ruta de categoría de Óptica Óptima, no ficha de producto"
+    nodes = []
+    for block in _LD_JSON.findall(html):
+        try:
+            nodes.extend(_nodes(json.loads(block.strip(), strict=False)))
+        except json.JSONDecodeError:
+            continue
+    for node in nodes:
+        if _is_type(node, "CollectionPage") and (
+                not node.get("url") or _url_key(urljoin(url, str(node["url"]))) == _url_key(url)):
+            return "no_product: CollectionPage, no ficha de producto"
+    if any(_is_type(node, "ItemList") for node in nodes) and not any(
+            _is_type(node, "Product") and _matches_product_url(node, url) for node in nodes):
+        return "no_product: ItemList sin un Product vinculado a la URL completa"
+    return ""
+
+
 def extract_product(html: str, url: str, *, price_selector: str = "", availability_selector: str = "",
-                    tax_policy: str = "unknown") -> ProductPage | None:
+                    tax_policy: str = "unknown", url_trace: dict[str, Any] | None = None) -> ProductPage | None:
     """Return what the page publishes, or None when it carries no product information at all."""
     parsed = parse_html(html)
+    if product_page_rejection(html, url):
+        return None
     if any("eoViewsListviewItemClassic" in element["attrs"].get("class", "").split()
            for element in parsed.elements):
         return None
@@ -600,6 +628,8 @@ def extract_product(html: str, url: str, *, price_selector: str = "", availabili
             page.market_conflict = True
         else:
             page.market, page.market_source = explicit, "ficha:product:market"
+    page.url_trace = {**(url_trace or {}), "final_url": url,
+                      "canonical_urls": list(dict.fromkeys(urljoin(url, href) for href in parsed.canonicals))}
     return page
 
 
