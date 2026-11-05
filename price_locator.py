@@ -38,7 +38,7 @@ import json
 import os
 import re
 import time
-from typing import Callable
+from typing import AbstractSet, Callable
 from urllib.parse import parse_qsl, unquote, urlencode, urljoin, urlparse
 
 from filelock import FileLock, Timeout
@@ -107,6 +107,34 @@ def _utc() -> datetime:
 
 def _iso(moment: datetime) -> str:
     return moment.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+
+def job_deferral(job: dict, now: datetime, *, point_check: bool = False,
+                 monitoring: bool = False, pilot_authorized: bool = False,
+                 check_attempts: bool = True) -> str:
+    """The preview and atomic claims use the same scheduling and retry rules."""
+    if not job:
+        return ""
+    state = job["state"]
+    if state in {"review", "failed", "inactive", "gone"}:
+        return f"Estado {state}: requiere revisión; la comprobación puntual no lo anula"
+    if check_attempts and int(job.get("attempts") or 0) >= MAX_ATTEMPTS:
+        return "Máximo de intentos alcanzado: requiere revisión"
+    if state == "running":
+        lease = job.get("lease_until")
+        return "" if lease and datetime.fromisoformat(lease) <= now else "Reserva activa de otra ejecución"
+    if state == "pilot" and not pilot_authorized:
+        return "Pendiente en piloto: requiere ejecución supervisada del piloto"
+    if point_check and (state == "not_found" or (monitoring and state == "done")
+                        or (state == "pilot" and pilot_authorized)):
+        return ""
+    claimable = {"pending", "waiting", "blocked", "unavailable"} if monitoring else set(CLAIMABLE)
+    if state not in claimable:
+        return f"Estado {state}: sin trabajo pendiente"
+    not_before = job.get("not_before")
+    if not_before and datetime.fromisoformat(not_before) > now:
+        return f"Aplazado hasta not_before={not_before}"
+    return ""
 
 
 def signature(url: str, label: str = "") -> str:
@@ -260,6 +288,7 @@ class RunReport:
     states: Counter = field(default_factory=Counter)
     requests: int = 0
     stopped: dict[str, str] = field(default_factory=dict)
+    outcomes: list[dict] = field(default_factory=list)
 
     @property
     def summary(self) -> str:
@@ -340,29 +369,41 @@ class PriceLocator:
             AND ((j.state IN {CLAIMABLE} AND (j.not_before IS NULL OR j.not_before<=?))
                  OR (j.state='running' AND j.lease_until<=?))"""
 
-    def _claim(self, competitor_id: str, eans: list[str] | None = None) -> dict | None:
+    def _claim(self, competitor_id: str, eans: list[str] | None = None, *,
+               point_check: bool = False, pilot_eans: AbstractSet[str] = frozenset(),
+               completed: AbstractSet[str] = frozenset()) -> dict | None:
         now = self._now()
         selected = "" if eans is None else f" AND j.ean IN ({','.join('?' for _ in eans)})"
         with self.store._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
-                while True:
-                    row = connection.execute(f"""SELECT j.* FROM locate_jobs j WHERE {self._claimable_sql()}
-                        {selected} ORDER BY j.priority,j.id LIMIT 1""",
-                                             (competitor_id, _iso(now), _iso(now), *(eans or []))).fetchone()
-                    if row is None:
-                        connection.commit()
-                        return None
-                    if row["attempts"] >= MAX_ATTEMPTS:
+                rows = connection.execute(f"""SELECT j.* FROM locate_jobs j WHERE j.competitor_id=?
+                    AND EXISTS(SELECT 1 FROM watch_products w WHERE w.ean=j.ean AND w.active=1)
+                    AND j.state IN ('pending','waiting','not_found','unavailable','blocked','running'
+                                    {",'pilot'" if point_check else ""})
+                    {selected} ORDER BY j.priority,j.id""", (competitor_id, *(eans or []))).fetchall()
+                for row in rows:
+                    lease_active = row["state"] == "running" and (
+                        not row["lease_until"] or datetime.fromisoformat(row["lease_until"]) > now)
+                    if not lease_active and row["ean"] not in completed and row["attempts"] >= MAX_ATTEMPTS:
                         connection.execute("""UPDATE locate_jobs SET state='failed',lease_until=NULL,updated_at=?,
                             detail='Interrumpido o con error en varios intentos: revisar' WHERE id=?""",
                                            (_iso(now), row["id"]))
                         self._event(connection, row["id"], "failed", "", "", "Demasiados intentos", 0)
                         continue
+                    if row["ean"] in completed or job_deferral(dict(row), now, point_check=point_check,
+                                                              pilot_authorized=row["ean"] in pilot_eans):
+                        continue
+                    if point_check:
+                        self._event(connection, row["id"], row["state"], "point_check", row["url"],
+                                    "Comprobación puntual aprobada; estado y plazo anteriores: "
+                                    f"{row['state']} / {row['not_before']}", 0)
                     connection.execute("""UPDATE locate_jobs SET state='running',attempts=attempts+1,lease_until=?,
                         updated_at=? WHERE id=?""", (_iso(now + LEASE), _iso(now), row["id"]))
                     connection.commit()
                     return dict(row)
+                connection.commit()
+                return None
             except BaseException:
                 if connection.in_transaction:
                     connection.rollback()
@@ -409,12 +450,17 @@ class PriceLocator:
     # run --------------------------------------------------------------------------------------
     def run(self, competitor_ids: list[str] | None = None, *, max_jobs: int = 200,
             deadline_seconds: float | None = None, monotonic: Callable[[], float] = time.monotonic,
-            eans: list[str] | None = None) -> RunReport:
+            eans: list[str] | None = None, point_check: bool = False,
+            pilot_run_id: int | None = None) -> RunReport:
         """Process a bounded batch. Competitors are taken one after another, each under the shared lock."""
         from price_pilot import pilot_scope
 
         report = RunReport()
         scope = pilot_scope(self.store)
+        pilot_pairs = set()
+        if pilot_run_id is not None:
+            from price_pilot import PricePilot
+            pilot_pairs = PricePilot(self.store).watch_check_pairs(pilot_run_id)
         started = monotonic()
         with self.store._connect() as connection:
             ids = competitor_ids if competitor_ids is not None else [row[0] for row in connection.execute("""SELECT c.id FROM competitors c
@@ -423,17 +469,25 @@ class PriceLocator:
             if report.processed >= max_jobs or _expired(deadline_seconds, started, monotonic):
                 break
             pilot = set(scope["eans"]) if scope and competitor_id in scope["competitors"] else set()
+            supervised = {ean for cid, ean in pilot_pairs if cid == competitor_id}
+            if supervised and (not point_check or eans is None or not supervised.issuperset(set(eans) & pilot)):
+                raise ValueError("Selección del piloto distinta de la comprobación aprobada")
             try:
                 with self.search._lock(competitor_id):
-                    self._run_competitor(competitor_id, pilot, report, max_jobs, deadline_seconds, started, monotonic, eans)
+                    self._run_competitor(competitor_id, pilot - supervised, report, max_jobs,
+                                         deadline_seconds, started, monotonic, eans,
+                                         point_check=point_check, pilot_eans=supervised,
+                                         pilot_run_id=pilot_run_id if supervised else None)
             except Timeout:
                 report.stopped[competitor_id] = "Otra ejecución está consultando a este competidor"
         return report
 
     def _run_competitor(self, competitor_id: str, pilot: set[str], report: RunReport, max_jobs: int,
                         deadline_seconds: float | None, started: float, monotonic,
-                        eans: list[str] | None = None) -> None:
-        session = _Session(self, competitor_id)
+                        eans: list[str] | None = None, *, point_check: bool = False,
+                        pilot_eans: AbstractSet[str] = frozenset(), pilot_run_id: int | None = None) -> None:
+        session = _Session(self, competitor_id, point_check=point_check, pilot_run_id=pilot_run_id)
+        completed: set[str] = set()
         if session.config["access_status"] in {"blocked", "robots_restricted"}:
             detail = self.search._gate(session.config)
             report.states["blocked"] += self._settle_all(competitor_id, "blocked", detail, None, pilot, eans)
@@ -452,11 +506,14 @@ class PriceLocator:
             return
         try:
             while report.processed < max_jobs and not _expired(deadline_seconds, started, monotonic):
-                job = self._claim(competitor_id, eans)
+                job = self._claim(competitor_id, eans, point_check=point_check,
+                                  pilot_eans=pilot_eans, completed=completed)
                 if job is None:
                     break
+                completed.add(job["ean"])
                 report.processed += 1
                 before = session.requests
+                before_commercial = session.commercial_requests
                 try:
                     result = (_Result("pilot", detail="Par incluido en el piloto supervisado: se gestiona allí")
                               if job["ean"] in pilot else session.process(job))
@@ -475,6 +532,14 @@ class PriceLocator:
                     self._finish(job, _Result("pending", detail=f"Error temporal: {exc}"),
                                  requests=session.requests - before)
                     report.states["pending"] += 1
+                finally:
+                    with self.store._connect() as connection:
+                        saved = dict(connection.execute("SELECT state,detail,url FROM locate_jobs WHERE id=?",
+                                                        (job["id"],)).fetchone())
+                    report.outcomes.append({"ean": job["ean"], **saved,
+                                            "requests": session.requests - before,
+                                            "commercial_requests": session.commercial_requests - before_commercial,
+                                            "current_source": point_check and session._job_current_source})
         finally:
             report.requests += session.requests
 
@@ -701,8 +766,21 @@ class PriceLocator:
 class _Session:
     """One competitor during one run: authorised methods, governed fetchers (robots.txt shared) and caches."""
 
-    def __init__(self, locator: PriceLocator, competitor_id: str) -> None:
+    def __init__(self, locator: PriceLocator, competitor_id: str, *, point_check: bool = False,
+                 pilot_run_id: int | None = None) -> None:
         self.locator, self.store, self.competitor_id = locator, locator.store, competitor_id
+        self.point_check = point_check
+        self._checked_urls: set[str] = set()
+        self._fresh_sources: set[str] = set()
+        self._fresh_sitemap = False
+        self._job_current_source = False
+        self.pilot_limits = None
+        self._pilot_guard = self._pilot_reserved = None
+        if pilot_run_id is not None:
+            from price_pilot import PricePilot
+            self.pilot_limits = PricePilot(self.store).watch_check_limits(pilot_run_id, competitor_id)
+            self._pilot_guard, self._pilot_reserved = PricePilot(self.store).watch_check_hooks(
+                pilot_run_id, competitor_id, clock=self.locator._now, sleep=self.locator._sleep)
         self.config = locator.search.config(competitor_id)
         self.methods = {method for method in METHODS if method != "external"
                         and locator.access.method_status(competitor_id, method) == "authorized"}
@@ -726,6 +804,13 @@ class _Session:
             return connection.execute("SELECT COUNT(*) FROM access_requests WHERE competitor_id=? AND id>?",
                                       (self.competitor_id, self._first_request)).fetchone()[0]
 
+    @property
+    def commercial_requests(self) -> int:
+        with self.store._connect() as connection:
+            urls = connection.execute("SELECT url FROM access_requests WHERE competitor_id=? AND id>?",
+                                      (self.competitor_id, self._first_request)).fetchall()
+        return sum(urlparse(row["url"]).path != "/robots.txt" for row in urls)
+
     def _now(self) -> datetime:
         return self.locator._now()
 
@@ -733,7 +818,8 @@ class _Session:
         if method not in self._fetchers:
             fetcher = GovernedFetcher(self.locator.access, self.competitor_id, method, purpose="locate",
                                       transport=self.locator._transport, sleep=self.locator._sleep,
-                                      pause_seconds=0.0, max_requests=1_000_000,
+                                      pause_seconds=0.0, request_guard=self._pilot_guard,
+                                      request_reserved=self._pilot_reserved, max_requests=1_000_000,
                                       timeout=float(self.config["timeout_seconds"] or 15),
                                       retries=int(self.config["retries"] or 0))
             # One robots.txt read and one block memory per competitor, whatever the method.
@@ -765,6 +851,7 @@ class _Session:
     def process(self, job: dict) -> _Result:
         cid, ean = self.competitor_id, job["ean"]
         self._job_visits = 0
+        self._job_current_source = False
         with self.store._connect() as connection:
             product = dict(connection.execute("SELECT ean,brand,model,color,caliber,category FROM products WHERE ean=?",
                                               (ean,)).fetchone())
@@ -888,11 +975,13 @@ class _Session:
     def _facts(self, row: dict, ean: str, may_fetch: bool) -> tuple[ProductPage | None, int]:
         """Identity facts of an indexed page: cached for every product, fetched (``ficha``) at most once."""
         checked = row["checked_at"] and datetime.fromisoformat(row["checked_at"]) > self._now() - FACTS_TTL
-        if checked and row["check_state"] == "product":
+        refresh = self.point_check and row["url"] not in self._checked_urls and row["check_state"] != "robots"
+        if checked and not refresh and row["check_state"] == "product":
+            self._job_current_source |= row["url"] in self._checked_urls
             page = ProductPage(**json.loads(row["facts"]))
             # Do not rewrite historical rows; a cached category still cannot be used as a product.
             return (None if product_page_rejection("", page.url) else page), 0
-        if checked or row["check_state"] == "robots" or not may_fetch:
+        if (checked and not refresh) or row["check_state"] == "robots" or not may_fetch:
             return None, 0
         state, facts, page = "product", "", None
         try:
@@ -924,6 +1013,7 @@ class _Session:
                                                      self.competitor_id, row["url"]))
         if state == "gone":
             self._retire(row["url"], "La ficha ya no existe en el sitio (retirada)")
+        self._checked_urls.add(row["url"])
         return page, 1
 
     # discovery --------------------------------------------------------------------------------
@@ -981,11 +1071,16 @@ class _Session:
 
     def _page(self, url: str, hours: float):
         """Stored copy of a listing if still valid. An unchanged listing stays valid longer (×2, ×4)."""
+        if self.point_check and url not in self._fresh_sources:
+            return None
         with self.store._connect() as connection:
             row = connection.execute("SELECT * FROM discovery_pages WHERE competitor_id=? AND url=?",
                                      (self.competitor_id, url)).fetchone()
         if row is None:
             return None
+        if self.point_check and url in self._fresh_sources:
+            self._job_current_source = True
+            return row
         factor = min(2 ** int(row["unchanged_runs"] or 0), MAX_REFRESH_FACTOR) if row["status"] == "ok" else 1
         if datetime.fromisoformat(row["fetched_at"]) <= self._now() - timedelta(hours=hours * factor):
             return None
@@ -994,6 +1089,11 @@ class _Session:
     def _record_page(self, url: str, method: str, status: str, links: int = 0, next_url: str = "",
                      detail: str = "", content_hash: str = "", children: list[str] | None = None) -> None:
         now = _iso(self._now())
+        if self.point_check and status == "ok":
+            self._fresh_sources.add(url)
+            self._job_current_source = True
+            if method == "sitemap":
+                self._fresh_sitemap = True
         with self.store._connect() as connection, connection:
             connection.execute("""INSERT INTO discovery_pages(competitor_id,url,method,fetched_at,status,links,
                 next_url,detail,content_hash,changed_at,unchanged_runs,children) VALUES(?,?,?,?,?,?,?,?,?,?,0,?)
@@ -1050,6 +1150,7 @@ class _Session:
         while queue and pages < int(source["max_pages"]):
             url, depth = queue.popleft()
             if url in self._visited:
+                self._job_current_source |= url in self._fresh_sources
                 continue
             self._visited.add(url)
             pages += 1
@@ -1099,6 +1200,7 @@ class _Session:
 
     def _sitemaps(self) -> str:
         if self._sitemaps_done:
+            self._job_current_source |= self._fresh_sitemap
             return "ran"
         self._sitemaps_done = True
         base = self.config["site_url"]

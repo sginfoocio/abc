@@ -1,7 +1,7 @@
 """Fail-closed, manually supervised price pilot. No network calls on configuration or rendering."""
 from __future__ import annotations
 
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -105,6 +105,96 @@ class PricePilot:
 
     def lock(self):
         return FileLock(f"{self.store.database_path}.pilot.lock", timeout=0)
+
+    def watch_check_pairs(self, run_id: int) -> set[tuple[str, str]]:
+        with self.store._connect() as con:
+            run = con.execute("SELECT * FROM pilot_runs WHERE id=?", (run_id,)).fetchone()
+        if run is None or run["operation"] != "watch_check" or run["status"] != "running":
+            raise PilotError("No hay una comprobación supervisada del piloto activa")
+        return {tuple(pair) for pair in json.loads(run["selection"])}
+
+    def watch_check_limits(self, run_id: int, cid: str) -> dict:
+        pairs = self.watch_check_pairs(run_id)
+        if not any(competitor == cid for competitor, _ in pairs):
+            raise PilotError("Competidor fuera de la comprobación supervisada del piloto")
+        with self.store._connect() as con:
+            row = con.execute("SELECT competitors FROM pilot_runs WHERE id=?", (run_id,)).fetchone()
+        return _limits(json.loads(row["competitors"]))[cid]
+
+    def watch_check_hooks(self, run_id: int, cid: str, *, clock, sleep):
+        from price_access import AccessDenied, Decision
+
+        limits = self.watch_check_limits(run_id, cid)
+
+        def guard():
+            with self.store._connect() as con:
+                budget = con.execute("SELECT * FROM pilot_budgets WHERE run_id=? AND competitor_id=?",
+                                     (run_id, cid)).fetchone()
+            if budget["requests"] >= limits["max_http_requests"]:
+                raise AccessDenied(Decision(False, "budget_pilot",
+                    "Presupuesto de la comprobación supervisada del piloto agotado"))
+            if budget["last_http_at"] is not None:
+                wait = limits["pause_seconds"] - (clock().timestamp() - budget["last_http_at"])
+                if wait > 0:
+                    sleep(wait)
+
+        def reserved(url, ean):
+            with self.store._connect() as con, con:
+                con.execute("""UPDATE pilot_budgets SET requests=requests+1,last_http_at=?
+                    WHERE run_id=? AND competitor_id=?""", (clock().timestamp(), run_id, cid))
+                if ean:
+                    con.execute("""INSERT INTO pilot_http_log(run_id,competitor_id,ean,url,result,requested_at)
+                        VALUES(?,?,?,?,'Reservada por acceso gobernado',?)""",
+                        (run_id, cid, ean, url, clock().isoformat()))
+
+        return guard, reserved
+
+    @contextmanager
+    def watch_check(self, pairs: list[tuple[str, str]], *, approved: bool):
+        """A new immutable supervised run; old pilot jobs and identity decisions remain untouched.
+
+        Discovery uses the governed watch engine and its explicitly authorised sources, never
+        the legacy internal-search strategy. The pilot lock is held for the complete check.
+        """
+        if not approved or not pairs:
+            raise PilotError("La comprobación del piloto requiere selección y aprobación explícitas")
+        try:
+            with self.lock():
+                scope = pilot_scope(self.store)
+                if scope is None or not scope["enabled"]:
+                    raise PilotError("Piloto desactivado; no se autoriza su comprobación puntual")
+                if any(cid not in scope["competitors"] or ean not in scope["eans"] for cid, ean in pairs):
+                    raise PilotError("Selección fuera del piloto")
+                with self.store._connect() as con, con:
+                    if con.execute("SELECT 1 FROM pilot_runs WHERE status IN ('running','interrupted')").fetchone():
+                        raise PilotError("Existe otra ejecución del piloto pendiente; no se inicia otra")
+                    selection = json.dumps(sorted(set(pairs)))
+                    run_id = con.execute("""INSERT INTO pilot_runs
+                        (started_at,status,scope,competitors,operation,selection,selection_request)
+                        VALUES(?,'running',?,?,'watch_check',?,?)""",
+                        (stamp(), json.dumps(scope["eans"]), json.dumps(scope["competitors"]),
+                         selection, selection)).lastrowid
+                    for cid, ean in sorted(set(pairs)):
+                        con.execute("INSERT INTO pilot_jobs(run_id,competitor_id,ean) VALUES(?,?,?)",
+                                    (run_id, cid, ean))
+                    for cid in sorted({cid for cid, _ in pairs}):
+                        con.execute("INSERT INTO pilot_budgets(run_id,competitor_id) VALUES(?,?)", (run_id, cid))
+                try:
+                    yield run_id
+                except BaseException:
+                    with self.store._connect() as con, con:
+                        con.execute("UPDATE pilot_runs SET status='interrupted',finished_at=? WHERE id=?",
+                                    (stamp(), run_id))
+                    raise
+                else:
+                    with self.store._connect() as con, con:
+                        con.execute("""UPDATE pilot_jobs SET status='done',outcome='not_executed',
+                            detail='No reclamado por el motor; conserva su motivo en el lote',checked_at=?
+                            WHERE run_id=? AND status='pending'""", (stamp(), run_id))
+                        con.execute("UPDATE pilot_runs SET status='done',finished_at=? WHERE id=?",
+                                    (stamp(), run_id))
+        except Timeout as exc:
+            raise PilotError("Otra ejecución mantiene la reserva del piloto") from exc
 
     def is_running(self) -> bool:
         try:
