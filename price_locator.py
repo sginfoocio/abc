@@ -50,7 +50,7 @@ from price_connectors import ConnectorBlocked, ConnectorError
 from price_references import EXACT, PROBABLE, REJECTED, classify, key, model_key, normalize_caliber, tokens
 from price_web import (_LOC, _PRODUCT_SITEMAP, Outcome, WebPriceSearch, WebSearchError, _same_site,
                        product_search_urls, validate_competitor_url)
-from price_web_extract import ProductPage, extract_product, parse_html
+from price_web_extract import ProductPage, extract_product, parse_html, product_page_rejection
 from price_web_fetch import MAX_SITEMAP_BYTES, PageGone, RobotsDenied, _requests_transport
 from price_url_candidates import CandidatePlan, UrlCandidate, candidate_plan
 
@@ -868,7 +868,7 @@ class _Session:
             note = (f"{'Confirmación automática' if state == 'exact' else 'Candidato automático'} · regla marca + "
                     f"modelo + código de color (calibre y EAN publicado no exigidos) · descubierta mediante {source} "
                     f"en {row['source_url'] or url} · comprobada {row['checked_at'] or _iso(self._now())} · "
-                    + "; ".join(match.reasons + match.observations))[:1000]
+                    + "; ".join(match.reasons + page.notes + match.observations))[:1000]
             provenance = json.loads(row["candidate_evidence"]).get(product["ean"])
             if provenance:
                 # The full generation evidence remains in discovery_index even when the human note is bounded.
@@ -889,7 +889,9 @@ class _Session:
         """Identity facts of an indexed page: cached for every product, fetched (``ficha``) at most once."""
         checked = row["checked_at"] and datetime.fromisoformat(row["checked_at"]) > self._now() - FACTS_TTL
         if checked and row["check_state"] == "product":
-            return ProductPage(**json.loads(row["facts"])), 0
+            page = ProductPage(**json.loads(row["facts"]))
+            # Do not rewrite historical rows; a cached category still cannot be used as a product.
+            return (None if product_page_rejection("", page.url) else page), 0
         if checked or row["check_state"] == "robots" or not may_fetch:
             return None, 0
         state, facts, page = "product", "", None
@@ -898,9 +900,16 @@ class _Session:
             final = validate_competitor_url(fetched.url, self.config["domain"])
             page = extract_product(fetched.text, final, price_selector=self.config["price_selector"],
                                    availability_selector=self.config["availability_selector"],
-                                   tax_policy=self.config["tax_policy"])
+                                   tax_policy=self.config["tax_policy"],
+                                   url_trace={**fetched.trace, "candidate_url": row["url"]})
             if page is None:
                 state = "no_product"
+                facts = json.dumps({
+                    **fetched.trace, "candidate_url": row["url"],
+                    "canonical_urls": list(dict.fromkeys(
+                        urljoin(final, href) for href in parse_html(fetched.text).canonicals)),
+                    "rejection": product_page_rejection(fetched.text, final) or "no_product: sin datos de producto",
+                }, ensure_ascii=False)
             else:
                 page.url = final
                 facts = json.dumps(asdict(page), ensure_ascii=False)

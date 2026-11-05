@@ -279,6 +279,10 @@ def classify(product: Mapping[str, Any], candidate: Mapping[str, Any]) -> MatchR
         reasons.append("EAN publicado no válido: no se aplica la excepción de calibre")
     if candidate.get("ambiguous") or any(ref.ambiguous for ref in references):
         reasons.append("Identificación ambigua: requiere revisión")
+        for index, (text, ref) in enumerate(zip([title, *(candidate.get("identifiers") or [])], references)):
+            if ref.ambiguous:
+                source = "título" if index == 0 else f"identificador {index}"
+                reasons.append(f"Varias referencias en {source}: {text}")
         return result(PROBABLE)
     identity_fields = [(own_brand, brands), (own_model, models), (own_color, colors)]
     contradictions = any(found and found != {expected} for expected, found in identity_fields)

@@ -264,7 +264,8 @@ class PriceMonitor:
                     validate_competitor_url(fetched.url, config["domain"])
                     page = extract_product(fetched.text, fetched.url, price_selector=config["price_selector"],
                                            availability_selector=config["availability_selector"],
-                                           tax_policy=config["tax_policy"])
+                                           tax_policy=config["tax_policy"],
+                                           url_trace={**fetched.trace, "candidate_url": url})
                     sampled_at = _iso(self._now())
                 product = self.search._product(ean)
                 match = classify(product, page.candidate()) if page else None

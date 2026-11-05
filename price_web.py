@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+import json
 import re
 from string import Formatter
 from typing import Any, Callable, Iterable
@@ -827,7 +828,8 @@ class WebPriceSearch:
                 self._mark_relocation(competitor_id, product["ean"], url)
             return outcome
         page = extract_product(fetched.text, fetched.url, price_selector=config["price_selector"],
-                               availability_selector=config["availability_selector"], tax_policy=config["tax_policy"])
+                               availability_selector=config["availability_selector"], tax_policy=config["tax_policy"],
+                               url_trace={**fetched.trace, "candidate_url": url})
         if page is None:
             outcome.detail, outcome.reason = "La página no publica datos de producto", "no_product_data"
             return outcome
@@ -912,6 +914,8 @@ class WebPriceSearch:
         evidence = outcome.detail or "Ficha pública verificada"
         if page:
             evidence += "".join(" | " + note for note in page.notes if note not in evidence)
+            if page.url_trace:
+                evidence += " | URL trace: " + json.dumps(page.url_trace, ensure_ascii=False)
         return {
             "EAN": product["ean"], "Competidor": config["name"], "Precio": page.price if priced else "",
             "Precio anterior": page.previous_price if priced and page.previous_price else "",
