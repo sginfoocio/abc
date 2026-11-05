@@ -6,7 +6,8 @@ verifica identidad ni modifica las reglas de contradiccion de este documento.
 
 La [revision offline de los 12 pendientes del piloto](PRICE_PILOT_REVIEW.md)
 documenta las categorias rechazadas como fichas, la trazabilidad de URLs y
-los limites de evidencia de los casos FT5634B y MU 11WS. No acepta ni
+las correcciones acotadas con facts estructurados de FT5634B y MU 11WS.
+No deduce calibre del identificador `FT5634-B@53001#` ni acepta ni
 reclasifica automaticamente revisiones historicas.
 
 ## Revision conjunta del 1 de noviembre de 2026

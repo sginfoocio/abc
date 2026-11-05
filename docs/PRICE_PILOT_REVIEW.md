@@ -2,177 +2,197 @@
 
 ## Alcance y fuentes
 
-Base: `51e16a1ddded2550ed9a61c3b49aa752f0743117` (main y version
-desplegada durante el piloto). Se revisaron codigo, evidencia documental
-local y los resultados existentes, sin HTTP comercial, ejecucion de colas
-ni acceso nuevo a SQLite de produccion.
+Base desplegada durante el piloto:
+`51e16a1ddded2550ed9a61c3b49aa752f0743117`. Esta ampliacion de #116
+sustituye el diagnostico preliminar que solo disponia del resumen del piloto.
+No se ejecutan consultas comerciales, trabajos ni modificaciones en Cloud.
 
-Los informes `piloto-67-resultados.csv` y `piloto-67-resultados.json`
-contienen los mismos 67 pares, incluidos los 12 pendientes. Hashes SHA256:
+El usuario aporta `Diagnostico_12.json` e `Informe_12_pendientes.txt` en
+`Precios/analisis_exportacion_12`. Se ha contrastado el JSON de diagnostico,
+SHA256 `d216c68eade17710d3ba0c787be0b106fbb1124c7ff6cd45d43f8287a64fc07d`.
+Identifica 12 pares distintos, trabajos, eventos, peticiones, textos originales,
+normalizaciones y estado del indice. Es un **diagnostico estructurado derivado**,
+no una respuesta HTML ni la exportacion SQL bruta completa.
+
+Ese paquete identifica como origen `evidencia_12_pares_20261105T093842Z.json`,
+exportado el `2026-11-05T09:38:42.511559+00:00`, con SHA256 declarado
+`300fd171be1f4d234e50adfb669c2ac726199e7bc2145cd3d31c62fa6128712d`.
+El archivo bruto no esta en la carpeta aportada: no se afirma haber verificado
+independientemente su hash ni campos omitidos del diagnostico. La evidencia
+minima utilizada queda versionada en
+[pilot_review_12_structured.json](../tests/fixtures/pilot_review_12_structured.json).
+Conserva textos, ceros iniciales, IDs y procedencia, sin reconstruir HTML.
+
+Los informes anteriores contienen los mismos 67 pares autorizados:
 
 - CSV: `7cf26df1da3aa69120f2c7845fc5b2673b51fc84b03e5954578448f3b846aa91`.
 - JSON: `9e452529cb3c13e05bb19ccba5d9ae048e0597329fcf71f58b607d8bb8383db9`.
 - Lista autorizada: `bacd331e87da9dbacf40074b7dd2f27e3162eca028b02efd6a256de412a4a1b6`.
 
-Estos informes conservan URL de resultado y nota del trabajo, pero no
-incluyen los HTML, `discovery_index.facts`, la evidencia completa de
-`locate_events`, ni las filas URL/resultado de `access_requests`.
-No equivalen a un registro de respuestas HTTP ni contienen canonical.
-Las pruebas nuevas son **sinteticas**, no capturas de las tiendas.
+El nuevo diagnostico recoge **23 registros HTTP: diez 301 y trece 200**.
+Uno de los 200 es robots (peticion 59), no una ficha. Para los doce pares,
+`checked_at` coincide con `updated_at` del trabajo y el evento final del
+piloto, segun el informe aportado. Indice/trabajos son snapshots mutables;
+esa coincidencia es consistente, no una garantia de inmutabilidad.
+`access_requests` carece de `job_id/run_id`: la correlacion por competidor,
+EAN, proposito e intervalo no prueba atribucion unica ante concurrencia.
+No hay HTML, encabezados `Location` ni canonical historicos.
 
-## 1. Diez Tom Ford de Optima: categoria registrada como candidata
+## 1. Diez Tom Ford de Optima: categoria guardada como product
 
-Los diez resultados guardados apuntan a
-`https://optica-optima.com/gafas-de-sol/`; no tienen ficha verificada,
-identidad confirmada ni oferta. Su nota conserva `sample_pattern:optima
-[E002]` y marca/modelo/color desconocidos.
+Los eventos `local_candidates` contienen las URL completas, no la categoria.
+Las peticiones registran cada candidata con **HTTP 301**, seguida de la
+categoria `https://optica-optima.com/gafas-de-sol/` con **HTTP 200**.
+Los facts conservan esa categoria, titulo
+`Gafas de Sol Online en tu Optica de Confianza` (con acento en el original),
+marca/modelo/color/EAN vacios, `ambiguous=false`, `check_state=product`.
+Los diez precios son **null**. El clasificador dejo las identidades sin
+confirmar y los trabajos en revision; no hubo oferta aceptada en esos facts.
 
-Con los EAN, modelos, colores, marca Tom Ford y categoria sol de esa regla,
-el adaptador del commit desplegado reconstruye las siguientes candidatas.
-**Reconstruccion determinista no significa peticion HTTP acreditada.**
-Todas llevan el prefijo `https://optica-optima.com/gafas-de-sol/`.
+En las primeras diez filas de esta tabla:
 
-| EAN (texto) | Candidata reconstruida: ultimo componente |
-|---|---|
-| 0889214602701 | tom-ford-ft1044-01a.html |
-| 0889214519788 | tom-ford-ft1044-01v.html |
-| 0889214402547 | tom-ford-ft1044-52s.html |
-| 0889214684080 | tom-ford-ft1044-93b.html |
-| 0889214558626 | tom-ford-ft1211-52n.html |
-| 0889214635310 | tom-ford-ft1355-28p.html |
-| 0889214669742 | tom-ford-ft1360-30a.html |
-| 0889214642387 | tom-ford-ft1362-01v.html |
-| 0889214643322 | tom-ford-ft1364-01a.html |
-| 0889214686305 | tom-ford-ft1396-32c.html |
+- El prefijo de candidata es `https://optica-optima.com/gafas-de-sol/`.
+- El primer ID HTTP corresponde a esa candidata (301); el segundo a la
+  categoria (200). El primer evento es generacion y el segundo resultado.
+- La causa demostrada es categoria clasificada como `product`, sin identidad.
+- Faltan `Location`, canonical y HTML; no se conoce por que la tienda
+  respondio asi ni la ubicacion de una ficha correcta.
+- Accion: mantener revision; ignorar categoria cacheada como ficha sin
+  reescribirla. No reintentar ni sustituir automaticamente la candidata.
 
-El recorrido de codigo es:
+| EAN (texto) | Candidata: ultimo componente | Trabajo | Eventos | HTTP | Resultado / accion |
+|---|---|---|---|---|---|
+| 0889214602701 | tom-ford-ft1044-01a.html | 120 | 7, 8 | 60, 61 | Categoria sin precio; mantener revision |
+| 0889214519788 | tom-ford-ft1044-01v.html | 134 | 9, 10 | 62, 63 | Categoria sin precio; mantener revision |
+| 0889214402547 | tom-ford-ft1044-52s.html | 148 | 11, 12 | 64, 65 | Categoria sin precio; mantener revision |
+| 0889214684080 | tom-ford-ft1044-93b.html | 162 | 13, 14 | 66, 67 | Categoria sin precio; mantener revision |
+| 0889214558626 | tom-ford-ft1211-52n.html | 176 | 15, 16 | 68, 69 | Categoria sin precio; mantener revision |
+| 0889214635310 | tom-ford-ft1355-28p.html | 218 | 17, 18 | 70, 71 | Categoria sin precio; mantener revision |
+| 0889214669742 | tom-ford-ft1360-30a.html | 232 | 19, 20 | 72, 73 | Categoria sin precio; mantener revision |
+| 0889214642387 | tom-ford-ft1362-01v.html | 246 | 21, 22 | 74, 75 | Categoria sin precio; mantener revision |
+| 0889214643322 | tom-ford-ft1364-01a.html | 260 | 23, 24 | 76, 77 | Categoria sin precio; mantener revision |
+| 0889214686305 | tom-ford-ft1396-32c.html | 274 | 25, 26 | 78, 79 | Categoria sin precio; mantener revision |
+| 0889214042422 | /gafas-graduadas/tom-ford-ft5634-b-001.html (Optima) | 288 | 27, 28 | 80 (200) | Falso conflicto titulo/identificador; correccion offline, no aceptar revision |
+| 8056597684446 | /es/gafas-de-sol/miu-miu-0mu-11ws-mu-11ws-1ab5s0-54.html (domanci.com) | 425 | 43 | 140 (200) | Falsa ambiguedad del titulo repetido; correccion offline, no aceptar revision |
 
-1. `candidate_plan` genera la URL completa, no la categoria. La registra
-   en `locate_events(method='local_candidates')` y en
-   `discovery_index.candidate_evidence`.
-2. `_facts` puede reutilizar `facts` cacheados o solicitar `row["url"]`.
-   En una consulta nueva, `WebFetcher.get` sigue unicamente redirecciones
-   HTTP admitidas por sus controles y devuelve la URL final en `Fetched.url`.
-3. `_facts` extrae usando esa URL; `_match` utiliza `page.url`, no
-   necesariamente la candidata original, al guardar el resultado.
+El flujo desplegado genera la URL completa, solicita `row["url"]`, sigue
+redirecciones admitidas por sus controles y extrae con `Fetched.url`.
+`_match` usa `page.url`, lo que explica como la URL de resultado puede ser
+distinta de la candidata. La secuencia 301/200 y los facts son consistentes
+con ese flujo, pero **sin Location no se certifica el encabezado de destino
+ni cada salto**. Tampoco se atribuye canonical.
 
-El codigo explica **como puede cambiar** la URL registrada, pero los
-CSV/JSON no acreditan que los diez casos siguieran una redireccion, su
-estado HTTP, sus saltos ni si los hechos procedian de cache. Tampoco
-permiten certificar cual se solicito efectivamente. Para resolver eso
-faltan las filas ya persistidas de `access_requests` y `discovery_index`,
-los eventos completos y, para canonical/contenido, la respuesta original
-o su evidencia estructurada. No se han inventado ni solicitado ahora.
+Hay peticiones nuevas por cada par y `checked_at` contemporaneo al piloto:
+no fue una ejecucion exclusivamente cacheada sin HTTP. No se puede descartar
+alguna reutilizacion intermedia ni reconstruir todo el ciclo de cache con
+este snapshot. La prueba offline demuestra que #116 ignora esos facts de
+categoria al leer cache, sin HTTP ni cambios historicos.
 
-### Defecto demostrado y correccion
+### Proteccion y limites
 
-Antes de corregir, un HTML sintetico con solo `<title>Gafas de sol</title>`
-devolvia `ProductPage`. Una categoria podia ademas heredar GTIN, moneda y
-precio de metadatos/selector de una tarjeta. Una `CollectionPage` con un
-`Product` en el grafo, o un `ItemList` con metadatos globales, tambien podia
-acabar como ficha. Esto **no prueba que esos HTML fueran los de Cloud**.
+Se mantiene el rechazo previo a identidad/precios de las rutas exactas
+Optima `/gafas-de-sol` y `/gafas-graduadas`, con o sin barra/query.
+Tambien se rechazan `CollectionPage` de la URL activa (o sin URL) e
+`ItemList` sin `Product` vinculado a la URL completa consultada. Una ficha
+con relacionados sigue admitida si su producto esta vinculado a su URL.
 
-Ahora se rechazan antes de extraer identidad/precios:
-
-- Las rutas exactas de categoria de Optima `/gafas-de-sol` y
-  `/gafas-graduadas`, con o sin barra final/query.
-- `CollectionPage` de la URL consultada (o sin URL declarada).
-- `ItemList` sin un `Product` vinculado a la URL completa consultada.
-
-Una ficha explicitamente vinculada a su URL puede mantener su lista de
-productos relacionados. Esta es una barrera basada en senales positivas,
-no una afirmacion de detectar todos los listados posibles.
-Una categoria historica cacheada se ignora al buscar nuevos candidatos,
-sin reescribir ni reclasificar esa fila. Los registros historicos
-`probable` del piloto no se corrigen ni aceptan automaticamente.
+Los HTML **sinteticos** demuestran ademas el riesgo de heredar precio/GTIN
+de tarjetas si una categoria no se bloquea. **Estos diez facts reales no
+contienen precio y no acreditan mezcla historica de precios de tarjetas**.
+Una URL plausible/documentada de Tom Ford no queda validada comercialmente
+por generar el slug; no se declara producto inexistente ni se cambia el
+alcance/autorizacion del adaptador por estas respuestas.
 
 ## 2. Optima 0889214042422: FT5634B / 001
 
-URL de resultado:
+La candidata, peticion HTTP 200 y URL de facts coinciden:
 `https://optica-optima.com/gafas-graduadas/tom-ford-ft5634-b-001.html`.
-La nota registra modelos `FT5634, FT5634B`, colores `001, B53001` y EAN
-identico. El calibre publicado y el interno quedan desconocidos.
 
-La procedencia que permite afirmar el codigo, sin atribuir fuentes que
-no estan en el informe:
+| Fuente persistida | Interpretacion anterior | Interpretacion corregida |
+|---|---|---|
+| Titulo `Tom Ford FT5634-B 001` | FT5634B / 001 | Sin cambios |
+| Identificador 1 `FT5634-B@53001#` | FT5634 / B@53001# (clave B53001) | FT5634B / 001 |
+| Identificador 2 `GRDOOP` | Sin referencia modelo/color relevante | Sin cambios, no se elimina |
+| `ean_published=0889214042422` | Identico al catalogo | Sin cambios; no supera contradicciones |
+| model/color/caliber explicitos vacios; `ambiguous=false` | Sin senales adicionales | Sin cambios |
 
-- `classify` extrae modelos/colores del titulo y de cada SKU/MPN mediante
-  `parse_reference`; agrega tambien `model` y `color` explicitos.
-- `FT5634B` puede proceder de una referencia completa reconocida o del
-  campo `model` explicito; `001`, de una referencia o `color` explicito.
-- `FT5634` / `B53001` se reproducen con
-  `parse_reference("Tom Ford FT5634-B53001", models=["FT5634B"])`:
-  no reconoce el modelo completo, y el fallback separa el ultimo token
-  como color. Ese resultado no contiene calibre.
-- El paquete documental atribuye **ese titulo concatenado a Otticait
-  (E047)**. Para Optima, E003 acredita el alias/slug `FT5634-B`, no ese
-  titulo ni un MPN actual.
+El primer identificador provocaba los conjuntos falsamente contradictorios
+`{FT5634,FT5634B}` y `{001,B53001}`. No se traslada a Optima el titulo
+compacto del ejemplo Otticait: ahora hay un texto original de Optima distinto.
 
-La mezcla modelo/calibre/color es, por tanto, un riesgo de parseo
-reproducible para ese texto: `B53001` puede ser tratado como color sin
-descomponerlo. **No se ha demostrado que ese fuera el titulo/MPN de
-Optima**, ni que `53` sea el calibre de este EAN. Para atribuir cada senal
-real hacen falta `facts` con titulo, model, color, identifiers y las
-fuentes estructuradas/HTML originales.
+La regla esta anclada al identificador completo **`FT5634-B@53ddd#`**,
+con exactamente tres digitos de color conservados como texto. No se
+generaliza a otros modelos, prefijos numericos o referencias sin marcadores.
+`53` se mantiene opaco: **no se deduce calibre 53**, ni puente.
+La regla interpreta el identificador, no lo ignora. Otro color/modelo,
+un identificador adicional contradictorio, GTIN diferente o pagina ambigua
+continuan impidiendo `exact_match`. El texto Otticait `FT5634-B53001`
+permanece pendiente, sin esta excepcion.
 
-No se cambia ese parser ni se anade una regla universal que separe `B`,
-`53` y `001`. La regresion mantiene la revision aunque el GTIN coincida;
-un color explicito contradictorio tampoco se acepta. El alias de URL
-documentado no es una autorizacion para corregir identidad publicada.
+El precio historico era 137 EUR y `market` estaba vacio. Son datos
+persistidos, no oferta comercial validada por este analisis. Faltan HTML
+y evidencia comercial adicional para revalidar precio, stock, IVA y mercado.
+La correccion offline no acepta la revision existente.
 
 ## 3. Domanci 8056597684446: MU 11WS / 1AB5S0
 
-URL de resultado:
-`https://domanci.com/es/gafas-de-sol/miu-miu-0mu-11ws-mu-11ws-1ab5s0-54.html`.
-Metodo guardado: `catalog`; origen: `/es/marca/miu-miu`.
+La URL de candidata/facts coincide con la peticion 140 HTTP 200.
+El origen documentado del trabajo sigue siendo `catalog`, no busqueda
+interna.
 
-La nota acredita que el comparador encontro EAN normalizado identico y
-calibre informativo `54-21`, pero no una identidad exacta. La condicion
-que produjo **ese texto concreto** es el retorno temprano de `classify`:
-`candidate["ambiguous"]` verdadero **o** alguna referencia del titulo/
-identificadores con `Reference.ambiguous=True`. Este veto ocurre antes de
-aceptar el EAN. El calibre no es el motivo de rechazo.
+- Titulo original: `Miu Miu MU 11WS MU 11WS 1AB5S0 54`.
+- Identificadores originales: `0MU_11WS1AB5S05421`, repetido.
+- EAN publicado identico; calibre explicito `54-21`; **pagina ambiguous=false**.
 
-Los informes no contienen cual de esas dos ramas se activo. La primera
-puede proceder de variantes no vinculadas univocamente, varias ofertas o
-GTIN publicados contradictorios; la segunda de varias interpretaciones
-modelo/color en titulo/SKU/MPN. No hay evidencia local suficiente para
-elegir una causa concreta. Ni el slug repetido, ni un EAN coincidente, ni
-la existencia de otra Miu Miu verificada justifican aceptarla.
+La ambiguedad historica se reproduce en **el titulo**, no en el indicador
+de pagina: la primera aparicion de MU 11WS produce una referencia sin color
+porque la siguiente palabra es MU; la segunda produce MU 11WS / 1AB5S0.
+El parser consideraba esas dos referencias distintas. Los identificadores
+compactos no eran ambiguos; `caliber_from_code` reconoce 54-21 y evita
+tratarlos como otra referencia ordinaria contradictoria. No se atribuye
+este veto a variantes/ofertas o a un calibre distinto.
 
-Se demuestra una carencia diagnostica: `_match` descartaba `page.notes`
-al componer la nota persistida. Una pagina sintetica con dos precios
-dejaba solo la identificacion ambigua generica. Ahora conserva tambien
-el motivo del extractor. Si el parser encuentra varias referencias,
-la razon indica titulo o numero de identificador y texto original.
-No se modifica el veto, ni se afirma que Domanci tuviera dos precios.
-Para concluir la causa historica faltan el `ProductPage` persistido y,
-si no conserva las senales, los nodos/HTML originales.
+Ahora una aparicion de modelo seguida inmediatamente por el mismo modelo,
+en la misma segmentacion, deja que la segunda aporte la referencia.
+No se descartan referencias completas con colores diferentes. Un modelo
+adyacente distinto de la misma familia queda ambiguo en vez de ignorarse;
+se conserva OPT y los vetos de campos explicitos, GTIN y pagina ambigua.
+Esto corrige ademas el negativo reproducido `MU 11WS MU 12WS ...`, antes
+capaz de ocultar el segundo modelo detras del GTIN.
 
-## Trazabilidad nueva, compatibilidad e historicos
+El precio historico era 227,50 EUR; no es una oferta validada por este
+analisis. Sin HTML no se audita otra vez la vinculacion de ofertas/variantes,
+stock, IVA o mercado. Se mantiene la revision historica pendiente.
 
-- `Fetched.trace` conserva URL solicitada, final y saltos HTTP reales
-  (`url`, `status`, `location`), sin consultar canonical.
-- `ProductPage.url_trace` conserva ademas candidata y canonical declarados,
-  sin reemplazar la URL/variante activa por canonical ni seguirlo.
-- Las comprobaciones rechazadas como `no_product` tambien conservan el
-  recorrido en `discovery_index.facts`, con motivo explicito.
-- Las fichas conservan el recorrido en facts, muestras del monitor y
-  evidencia de oferta mediante el flujo existente.
-- No hay cambio de esquema SQLite, migracion, permisos ni estados nuevos.
-  Los campos son aditivos con defaults para evidencia anterior. Una
-  evidencia antigua sin recorrido no se completa por suposicion.
-- No se actualizan los 12 historicos ni las 29 ausencias del piloto.
-  Si se revierte a codigo anterior, evaluar primero la compatibilidad con
-  nuevos campos JSON; no borrar evidencia para facilitar un rollback.
+## Trazabilidad, compatibilidad e historicos
+
+- `Fetched.trace`: solicitada, final y saltos HTTP reales
+  (`url`, `status`, `location`).
+- `ProductPage.url_trace`: tambien candidata y canonical declarados,
+  sin seguir canonical ni reemplazar la variante/query activa.
+- Rechazos `no_product`: conservan recorrido y motivo en facts.
+- Fichas: recorrido en facts, muestras del monitor y evidencia de oferta.
+- `_match` conserva notas del extractor; ambiguedad del parser identifica
+  titulo/numero de identificador y texto original.
+- Campos JSON aditivos con defaults: **sin migracion SQLite ni permisos,
+  estados o controles nuevos**. No completar trazas antiguas por suposicion.
+- Sin cambios a los 12 historicos, 29 pares no localizados, manifiestos,
+  ofertas, permisos, bloqueos, Otticait, Vytria, colas ni recurrencia.
 
 ## Validacion
 
-En la base, las regresiones iniciales produjeron **10 fallos y 2 pases**:
-categorias/listados, falta de recorrido URL y motivos de ambiguedad
-perdidos. Los escenarios FT contradictorios y una ficha con relacionados
-no justifican relajar identidad. Las pruebas adicionales cubren cache
-historica sin escrituras/HTTP y trazabilidad persistida en monitor/oferta.
+Antes de modificar el parser se ejecutaron los casos con los textos reales:
+FT permanecia `probable_match`, el titulo MU daba `ambiguous=true`.
+La nueva bateria produjo **3 fallos y 44 pases**: esos dos positivos y el
+negativo sintetico de segundo modelo MU 12WS aceptado indebidamente.
+
+Las pruebas distinguen:
+
+- HTML, transporte y contradicciones construidas **sinteticos**.
+- Proyecciones de **facts estructurados aportados**, no HTML capturado:
+  los dos casos de identidad y las diez categorias cacheadas sin precio.
+- Controles de no HTTP, no escritura historica, URL trace, deduplicacion,
+  GTIN/modelo/color/OPT contradictorios y permisos existentes.
 
 Comando minimo:
 
@@ -180,10 +200,13 @@ Comando minimo:
 python -m pytest tests/test_price_pilot_review_evidence.py -q
 ```
 
-La PR debe enlazar el resultado focalizado y la CI del commit final,
-incluido Docker. No se fusiona ni despliega como parte de esta revision.
+La PR debe enlazar pruebas y CI del commit final, incluido Docker.
+No se fusiona ni despliega como parte de esta revision.
 
-Resultado local: **443 passed** en 13 modulos focalizados (incluidas las
-14 regresiones nuevas), con comprobaciones de identidad/variantes,
-localizador, monitor, autorizacion, robots y confirmacion automatica.
-Lint focalizado `E9,F63,F7,F82,F401,F841` sin errores.
+Resultado local del modulo ampliado: **49 passed**, incluido el bloqueo de
+HTTP real y los diez casos de cache historica sin escrituras. Lint focalizado
+`E9,F63,F7,F82,F401,F841`, sintaxis Pylance y `git diff --check` correctos.
+Se cotejaron las doce proyecciones de la fixture contra el diagnostico
+aportado (textos, URLs, trabajos, eventos y peticiones).
+El resultado de la bateria ampliada y CI/Docker del SHA definitivo se
+publica en #116, sin atribuir al commit nuevo las comprobaciones del anterior.

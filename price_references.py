@@ -134,6 +134,10 @@ def parse_reference(text: str, *, brands: Iterable[str] = (), models: Iterable[s
     """
     brand_list = list(brands)
     raw = str(text or "")
+    # Observed Optima identifier grammar only; "53" remains opaque, not an inferred calibre.
+    identifier = re.fullmatch(r"(FT5634)-B@53([0-9]{3})#", raw.strip(), re.IGNORECASE)
+    if identifier:
+        return Reference(model=identifier.group(1).upper() + "B", color=identifier.group(2))
     caliber = extract_caliber(raw) or extract_lens(raw)
     if caliber:
         raw = _CALIBER.sub(" ", raw) if "-" in caliber else _LENS_TOKEN.sub(" ", raw)
@@ -148,6 +152,14 @@ def parse_reference(text: str, *, brands: Iterable[str] = (), models: Iterable[s
             for end in range(start + 1, len(parts) + 1):
                 if model_key("".join(parts[start:end])) != expected_model:
                     continue
+                model_length = end - start
+                following_model = model_key("".join(parts[end:end + model_length]))
+                prefix = re.match(r"[A-Z]+(?=\d)", expected_model)
+                if prefix and re.fullmatch(rf"{prefix.group()}\d+[A-Z]*", following_model):
+                    if following_model == expected_model:
+                        # The next occurrence supplies the reference; this one has no colour yet.
+                        continue
+                    return Reference(brand=brand, caliber=caliber, ambiguous=True)
                 color_start = end
                 matched_model = model
                 if color_start < len(parts) and parts[color_start] == "S" \

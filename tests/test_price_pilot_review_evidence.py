@@ -1,6 +1,8 @@
-"""Synthetic offline regressions, NOT captured responses from the twelve pilot reviews."""
+"""Offline regressions: synthetic HTML plus explicitly labelled exported structured facts."""
 from dataclasses import asdict
+from copy import deepcopy
 import json
+from pathlib import Path
 
 import pytest
 import requests
@@ -22,7 +24,7 @@ PRODUCT = BASE + "/gafas-de-sol/synthetic-product.html"
 @pytest.fixture(autouse=True)
 def offline(monkeypatch):
     def deny(*args, **kwargs):
-        pytest.fail("Commercial HTTP is forbidden in these synthetic regressions")
+        pytest.fail("Commercial HTTP is forbidden in these offline regressions")
     monkeypatch.setattr(requests.Session, "send", deny)
 
 
@@ -184,3 +186,94 @@ def test_ambiguous_miu_reference_stays_under_review_even_with_identical_gtin():
     ambiguous_page = ProductPage(url=PRODUCT, title="Miu Miu MU 11WS 1AB5S0",
                                  ean_published=product["ean"], ambiguous=True)
     assert classify(product, ambiguous_page.candidate()).status == PROBABLE
+
+
+STRUCTURED = json.loads((Path(__file__).parent / "fixtures" / "pilot_review_12_structured.json").read_text(
+    encoding="utf-8"))
+FORD = {"ean": "0889214042422", "brand": "Tom Ford", "model": "FT5634B", "color": "001"}
+MIU = {"ean": "8056597684446", "brand": "Miu Miu", "model": "MU 11WS", "color": "1AB5S0"}
+
+
+def test_exported_optima_identifier_is_parsed_not_discarded_or_used_as_caliber():
+    candidate = deepcopy(STRUCTURED["optima_ft5634"]["candidate"])
+    before = deepcopy(candidate)
+    match = classify(FORD, candidate)
+    assert match.status == EXACT
+    assert match.normalized["listing"]["models"] == ["FT5634B"]
+    assert match.normalized["listing"]["colors"] == ["001"]
+    assert match.normalized["listing"]["calibers"] == []
+    assert candidate == before
+    # Without the title, the observed identifier still contributes model and color.
+    match = classify(FORD, {**candidate, "title": "", "ean_published": "", "brand": "Tom Ford"})
+    assert match.status == EXACT
+    assert match.normalized["listing"]["calibers"] == []
+
+
+@pytest.mark.parametrize("identifiers", [
+    ["FT5634-B@53002#", "GRDOOP"],
+    ["FT5635-B@53001#", "GRDOOP"],
+    ["FT5634 001"],
+    ["FT5634-B@53001#", "FT5634B 002"],
+    ["FT5634-B@53001#", "FT5635B 001"],
+    ["FT5634-B@53001"], ["FT5634-B@53001# extra"],
+    ["FT5634-B@54001#"], ["FT5634-B@530001#"],
+])
+def test_observed_optima_format_does_not_hide_conflicting_or_unproven_identifiers(identifiers):
+    candidate = {**STRUCTURED["optima_ft5634"]["candidate"], "identifiers": identifiers}
+    assert classify(FORD, candidate).status != EXACT
+
+
+def test_exported_domanci_repeated_model_has_one_complete_reference():
+    candidate = deepcopy(STRUCTURED["domanci_mu11ws"]["candidate"])
+    before = deepcopy(candidate)
+    ref = parse_reference(candidate["title"], brands=["Miu Miu"], models=["MU 11WS"])
+    assert not ref.ambiguous and ref.model_key == "MU11WS" and ref.color_key == "1AB5S0"
+    assert ref.caliber == "54"
+    match = classify(MIU, candidate)
+    assert match.status == EXACT
+    assert match.normalized["listing"]["models"] == ["MU11WS"]
+    assert match.normalized["listing"]["colors"] == ["1AB5S0"]
+    assert candidate == before
+    assert classify(MIU, {**candidate, "ean_published": ""}).status == EXACT
+
+
+@pytest.mark.parametrize("title", [
+    "Miu Miu MU 11WS 7S0 MU 11WS 1AB5S0 54",
+    "Miu Miu MU 11WS MU 12WS 1AB5S0 54",
+    "Miu Miu MU 11WS MU 11WS 7S0 54",
+    "Miu Miu MU 11WS MU 11WS 1AB5S0 y MU 11WS 7S0 54",
+])
+def test_repeat_fix_preserves_actual_model_and_color_conflicts(title):
+    assert classify(MIU, {**STRUCTURED["domanci_mu11ws"]["candidate"], "title": title}).status != EXACT
+
+
+@pytest.mark.parametrize("product,key", [(FORD, "optima_ft5634"), (MIU, "domanci_mu11ws")])
+@pytest.mark.parametrize("fields", [
+    {"ean_published": "8056597875349"}, {"ambiguous": True}, {"color": "002"}, {"model": "OTHER123"},
+])
+def test_exported_identity_fixes_never_bypass_explicit_contradictions(product, key, fields):
+    assert classify(product, {**STRUCTURED[key]["candidate"], **fields}).status != EXACT
+
+
+@pytest.mark.parametrize("product,key", [(FORD, "optima_ft5634"), (MIU, "domanci_mu11ws")])
+def test_synthetic_html_conflicting_gtins_still_veto_exported_reference_formats(product, key):
+    observed = STRUCTURED[key]["candidate"]
+    node = {"@type": "Product", "url": PRODUCT, "name": observed["title"],
+            "sku": observed["identifiers"][0], "mpn": observed["identifiers"][1],
+            "gtin13": product["ean"], "gtin": "8056597875349"}
+    found = extract_product(ld(node), PRODUCT)
+    assert found and found.ambiguous
+    assert classify(product, found.candidate()).status != EXACT
+
+
+@pytest.mark.parametrize("pair", STRUCTURED["optima_category"]["pairs"])
+def test_exported_category_facts_are_rejected_without_fetch_or_history_rewrite(tmp_path, pair):
+    store, _, locator, clock, cid, site, _ = synthetic_env(tmp_path)
+    facts = STRUCTURED["optima_category"]
+    # A partial ProductPage from exported fields, NOT a reconstruction of missing HTML.
+    historical = ProductPage(url=facts["facts_url"], title=facts["title"], price=facts["price"])
+    row = {"checked_at": clock().isoformat(), "check_state": facts["check_state"],
+           "facts": json.dumps(asdict(historical))}
+    before = dump(store)
+    assert _Session(locator, cid)._facts(row, pair["ean"], False) == (None, 0)
+    assert not site.calls and dump(store) == before
