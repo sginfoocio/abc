@@ -23,6 +23,34 @@ class WatchBatch:
         self.monitor = monitor or PriceMonitor(store)
         self.access = self.monitor.access
 
+    def _prepare_snapshot(self, preview: pd.DataFrame) -> None:
+        for cid in preview["competitor_id"].drop_duplicates().tolist():
+            selected = preview.loc[preview["competitor_id"].eq(cid) & preview["ready"], "ean"].tolist()
+            if selected:
+                self.locator.enqueue([cid], selected)
+                self.monitor.enqueue([cid], selected)
+
+    def _unclaimed_reason(self, cid: str, ean: str, *, monitoring: bool,
+                          point_check: bool, pilot_authorized: bool) -> str:
+        with self.store._connect() as con:
+            if not con.execute("SELECT 1 FROM watch_products WHERE ean=? AND active=1", (ean,)).fetchone():
+                return "Ningún trabajo reclamado: el producto ya no está en vigilancia"
+            if not con.execute("SELECT 1 FROM competitors WHERE id=? AND active=1", (cid,)).fetchone():
+                return "Ningún trabajo reclamado: el competidor ya no está activo"
+            monitoring = monitoring or bool(con.execute("""SELECT 1 FROM competitor_product_urls
+                WHERE competitor_id=? AND ean=? AND status='verified' LIMIT 1""", (cid, ean)).fetchone())
+            table = "monitor_jobs" if monitoring else "locate_jobs"
+            row = con.execute(f"SELECT * FROM {table} WHERE competitor_id=? AND ean=?", (cid, ean)).fetchone()
+        if row is None:
+            return "Ningún trabajo reclamado: no existe trabajo en la cola correspondiente"
+        job = dict(row)
+        reason = job_deferral(job, self.monitor._now(), point_check=point_check, monitoring=monitoring,
+                              pilot_authorized=pilot_authorized)
+        if reason:
+            return f"Ningún trabajo reclamado: {reason}"
+        detail = f"; detalle: {job['detail']}" if job.get("detail") else ""
+        return f"Ningún trabajo reclamado: estado actual {job['state']}{detail}"
+
     def preview(self, eans: list[str], competitors: list[str], *, point_check: bool = False) -> pd.DataFrame:
         if not eans or not competitors:
             raise ValueError("Seleccione productos y competidores")
@@ -130,11 +158,7 @@ class WatchBatch:
 
     def prepare(self, eans: list[str], competitors: list[str], *, point_check: bool = False) -> pd.DataFrame:
         preview = self.preview(eans, competitors, point_check=point_check)
-        for cid in competitors:
-            selected = preview.loc[preview["competitor_id"].eq(cid) & preview["ready"], "ean"].tolist()
-            if selected:
-                self.locator.enqueue([cid], selected)
-                self.monitor.enqueue([cid], selected)
+        self._prepare_snapshot(preview)
         return self.preview(eans, competitors, point_check=point_check)
 
     def execute(self, eans: list[str], competitors: list[str], *, approved: bool,
@@ -150,7 +174,7 @@ class WatchBatch:
                       ["ean", "competitor", "action", "access", "defer_reason"]].to_dict("records")}
         if sync_vytria:
             result["vytria"] = asdict(self.monitor.vytria.run(trigger="watch:batch", watched_only=True))
-        self.prepare(eans, competitors, point_check=point_check)
+        self._prepare_snapshot(preview)
         remaining = max_jobs
         for cid in competitors:
             selected = preview[(preview["competitor_id"] == cid) & preview["ready"]]["ean"].tolist()[:remaining]
@@ -191,11 +215,16 @@ class WatchBatch:
                     requests = sum(r["requests"] for r in outcomes)
                     checked = any(r.get("commercial_requests") or r.get("current_source") for r in outcomes)
                     reused = bool(outcomes and outcomes[-1]["state"] in {"done", "not_found"})
+                    preview_row = preview.loc[(preview["competitor_id"] == cid) &
+                                              (preview["ean"] == ean)].iloc[0]
                     pair = {"ean": ean, "competitor_id": cid, "processed": ean in processed,
                             "category": "checked_now" if checked else "reused" if reused else "not_executed",
                             "requests": requests, "outcomes": outcomes,
                             "reason": (outcomes[-1]["detail"] if outcomes else
-                                       run["errors"].get(cid, "Ningún trabajo reclamado; revisar estado y plazo"))}
+                                       run["errors"].get(cid) or self._unclaimed_reason(
+                                           cid, ean, monitoring=bool(preview_row["located"]),
+                                           point_check=point_check,
+                                           pilot_authorized=bool(preview_row["pilot_route"] and point_check)))}
                     result["pairs"].append(pair)
                     if pilot_run_id is not None:
                         with self.store._connect() as con, con:
@@ -223,6 +252,17 @@ class WatchBatch:
                                         "processed": False, "category": "not_executed",
                                         "requests": 0, "outcomes": [], "reason": "Límite del lote"})
         return result
+
+
+def batch_pairs_export(pairs: list[dict]) -> pd.DataFrame:
+    """Keep nested execution outcomes readable and machine-parseable in CSV exports."""
+    rows = []
+    for pair in pairs:
+        row = dict(pair)
+        if isinstance(row.get("outcomes"), (list, dict)):
+            row["outcomes"] = json.dumps(row["outcomes"], ensure_ascii=False, sort_keys=True)
+        rows.append(row)
+    return pd.DataFrame(rows)
 
 
 def observation_export(store: PriceComparatorStore) -> pd.DataFrame:

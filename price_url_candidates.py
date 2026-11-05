@@ -202,6 +202,8 @@ def candidate_plan(product: dict, domain: str) -> CandidatePlan:
     examples = [example for example in EXAMPLES if example.shop == shop]
     candidates: dict[str, UrlCandidate] = {}
     for example in examples:
+        if shop == "amevista" and not urlparse(example.url).path.startswith("/es/"):
+            continue
         if (key(example.brand), model_key(example.model), example.category) != (brand, model, category):
             continue
         if example.color and key(example.color) != color:
@@ -228,31 +230,47 @@ def candidate_plan(product: dict, domain: str) -> CandidatePlan:
                              "needs_authorized_discovery" if needs_review else "",
                              "; ".join(candidate.reason for candidate in candidates.values() if candidate.reason))
 
-    # Rules are restricted to the brand/category combinations actually represented in the review.
+    # Keep generated URLs within the reviewed scopes and explicitly supplied patterns.
     scopes = {
         "optima": {("PRADA", "sol"), ("TOMFORD", "sol"), ("TOMFORD", "montura")},
         "bassol": {("PRADA", "sol"), ("MIUMIU", "montura"), ("GUCCI", "sol")},
+        "amevista": {
+            ("GUCCI", "sol"), ("PRADA", "sol"), ("TOMFORD", "sol"), ("TIFFANYCO", "sol"),
+        },
         "visual": {("PRADA", "sol"), ("MIUMIU", "montura")},
         "otticait": {("PRADA", "sol"), ("TOMFORD", "montura")},
         "visio": {("PRADA", "sol")},
     }
     if (brand, category) not in scopes.get(shop, set()) or (shop == "visio" and model != "PR27ZS"):
-        reason = {
-            "blickers": "Falta ID opaco por color y calibre; resolver mediante fuente autorizada",
-            "edel": "Falta Product Id de selectedSize; no es calibre ni EAN",
-            "amevista": "Falta alias/handle acreditado para este producto; no aplicar 0PR universal",
-            "mia": "Falta handle y nombre comercial acreditados (regard/dune no se eliminan)",
-            "opticalh": "Falta handle/variante acreditados; no exigir ni inventar sufijo numérico",
-            "universitaria": "Falta REF/handle de variante; puede ser alfanumérico",
-            "celine": "Falta ID/URL completa de variante con color, precio y stock vinculados",
-            "congafas": "Falta handle/nombre comercial por producto; el orden no es universal",
-            "domanci": "Evidencia insuficiente; candidatas históricas pendientes, no producto inexistente",
-        }.get(shop, "Marca/categoría/modelo fuera del alcance demostrado; requiere descubrimiento autorizado")
+        if shop == "amevista" and category != "sol":
+            reason = "La evidencia Amevista respalda rutas marca-modelo-color solo para gafas de sol"
+        elif shop == "amevista":
+            reason = "Marca fuera de los patrones Amevista documentados; requiere URL/alias acreditado"
+        else:
+            reason = {
+                "blickers": "Falta ID opaco por color y calibre; resolver mediante fuente autorizada",
+                "edel": "Falta Product Id de selectedSize; no es calibre ni EAN",
+                "mia": "Falta handle y nombre comercial acreditados (regard/dune no se eliminan)",
+                "opticalh": "Falta handle/variante acreditados; no exigir ni inventar sufijo numérico",
+                "universitaria": "Falta REF/handle de variante; puede ser alfanumérico",
+                "celine": "Falta ID/URL completa de variante con color, precio y stock vinculados",
+                "congafas": "Falta handle/nombre comercial por producto; el orden no es universal",
+                "domanci": "Evidencia insuficiente; candidatas históricas pendientes, no producto inexistente",
+            }.get(shop, "Marca/categoría/modelo fuera del alcance demostrado; requiere descubrimiento autorizado")
         return CandidatePlan(list(candidates.values()), "needs_authorized_discovery", reason)
 
     used = dict(attributes)
     lens, _, bridge = normalize_caliber(product.get("caliber", "")).partition("-")
     refs = [example.id for example in examples if key(example.brand) == brand and example.category == category]
+    if shop == "amevista":
+        used["locale"] = "es (Spanish-market catalog; E021 documents a separate US URL)"
+        if brand == "TIFFANYCO":
+            used["brand_alias"] = "tiffany (E020, E021)"
+        elif brand == "GUCCI":
+            refs.append("user-provided candidate URL")
+            used["evidence_note"] = "URL pattern only; not identity evidence"
+        elif brand == "PRADA":
+            used["model_alias_rule"] = "Observed PR model prefix; 0PR retained only on exact E017 URL"
     # Only this GTIN has dimensions explicitly associated in the package. Do not enrich the product record.
     if shop in {"bassol", "visual", "visio"} and ean == "8056597875349" \
             and (brand, model, color) == ("PRADA", "PR27ZS", "16K08Z") and not lens:
@@ -277,20 +295,27 @@ def candidate_plan(product: dict, domain: str) -> CandidatePlan:
     if shop in {"optima", "otticait"} and (brand, model, color) == ("TOMFORD", "FT5634B", "001"):
         model_slug = "ft5634-b"
         used["model_alias"] = "FT5634B -> FT5634-B (E003, E047)"
-    slug = f"{_slug(product['brand'])}-{model_slug}-{color.lower()}"
+    brand_slug = "tiffany" if shop == "amevista" and brand == "TIFFANYCO" else _slug(product["brand"])
+    slug = f"{brand_slug}-{model_slug}-{color.lower()}"
     if shop == "optima":
         path = f"/{'gafas-de-sol' if category == 'sol' else 'gafas-graduadas'}/{slug}.html"
     elif shop in {"bassol", "visual"}:
         path = f"/products/{slug}-{lens}"
     elif shop == "visio":
         path = f"/gafas-de-sol/todas-las-solares/{model.lower()}-{color.lower()}-{lens}-{bridge}.html"
+    elif shop == "amevista":
+        path = f"/es/{slug}"
     else:
         path = "/" + slug
     roots = {"optima": "https://optica-optima.com", "bassol": "https://www.opticabassol.com",
              "visual": "https://visual-click.com", "visio": "https://www.visiofactory.es",
-             "otticait": "https://www.otticait.com"}
+             "amevista": "https://www.amevista.com", "otticait": "https://www.otticait.com"}
     url = roots[shop] + path
     # An observed URL already supplies its precise locale/handle; do not generate locale alternatives.
     if not any(candidate.runnable for candidate in candidates.values()):
-        candidates.setdefault(url, UrlCandidate(url, f"sample_pattern:{shop}", used, sorted(set(refs))))
+        origin = "user-provided candidate URL" if shop == "amevista" and brand == "GUCCI" \
+            else EVIDENCE_SOURCE
+        candidates.setdefault(
+            url, UrlCandidate(url, f"sample_pattern:{shop}", used, sorted(set(refs)), origin=origin)
+        )
     return CandidatePlan(list(candidates.values()))

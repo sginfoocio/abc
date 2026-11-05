@@ -7,7 +7,9 @@ from streamlit.testing.v1 import AppTest
 
 from app_pages.price_watch import ADMIN_SECTIONS
 from price_batch import WatchBatch, observation_export
+from price_locator import LEASE, MAX_ATTEMPTS, RunReport
 from price_watch import PriceWatch
+from price_monitor import PriceMonitor
 from tests.test_price_daily import _daily_env
 from tests.test_price_locator import Site, _env, _gtin, _watch
 from tests.test_price_monitor import _edit, _monitor_env
@@ -87,6 +89,50 @@ def test_batch_revalidates_current_restrictions(tmp_path, kind):
     assert not batch.preview(eans, [cid])["ready"].any()
     assert batch.execute(eans, [cid], approved=True, sync_vytria=False)["runs"] == []
     assert not site.calls
+
+
+def test_monitor_preview_and_execution_share_retry_limit_policy(tmp_path):
+    store, _, locator, monitor, _, cid, site = _monitor_env(tmp_path)
+    batch = WatchBatch(store, locator=locator, monitor=monitor)
+    monitor.run([cid])
+    ean = monitor.inventory().iloc[0]["ean"]
+    with store._connect() as con, con:
+        con.execute("UPDATE monitor_jobs SET state='unavailable',attempts=?,not_before=NULL "
+                    "WHERE ean=? AND competitor_id=?", (MAX_ATTEMPTS, ean, cid))
+
+    preview = batch.preview([ean], [cid])
+    assert not preview.iloc[0]["ready"]
+    assert "Máximo de intentos alcanzado" in preview.iloc[0]["defer_reason"]
+    site.calls.clear()
+    result = batch.execute([ean], [cid], approved=True, sync_vytria=False)
+
+    assert result["processed_pairs"] == 0
+    assert "Máximo de intentos alcanzado" in result["pairs"][0]["reason"]
+    assert not site.calls
+
+
+def test_unclaimed_batch_pair_reports_live_queue_deferral(tmp_path, monkeypatch):
+    site = Site()
+    store, _, locator, clock, cid = _env(tmp_path, site)
+    ean = _gtin("841000000801")
+    _watch(store, [(ean, "Alpha", "AL1000", "93E", "")])
+    monitor = PriceMonitor(store, clock=clock, transport=site)
+    batch = WatchBatch(store, locator=locator, monitor=monitor)
+    preview = batch.preview([ean], [cid])
+    assert preview.iloc[0]["ready"]
+
+    def claim_nothing(competitor_ids, *, eans, max_jobs, deadline_seconds, **kwargs):
+        locator.enqueue(competitor_ids, eans)
+        with store._connect() as con, con:
+            con.execute("UPDATE locate_jobs SET state='running',lease_until=? WHERE ean=? AND competitor_id=?",
+                        ((clock() + LEASE).isoformat(), ean, cid))
+        return RunReport()
+
+    monkeypatch.setattr(locator, "run", claim_nothing)
+    result = batch.execute([ean], [cid], approved=True, sync_vytria=False)
+
+    assert result["processed_pairs"] == 0
+    assert "Reserva activa de otra ejecución" in result["pairs"][0]["reason"]
 
 
 def test_selection_and_explicit_confirmation_are_required(tmp_path):

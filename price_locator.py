@@ -512,6 +512,9 @@ class PriceLocator:
                     break
                 completed.add(job["ean"])
                 report.processed += 1
+                session._job_candidate_attempts = []
+                session._job_candidate_plan = {}
+                session._job_discovery = {}
                 before = session.requests
                 before_commercial = session.commercial_requests
                 try:
@@ -539,6 +542,9 @@ class PriceLocator:
                     report.outcomes.append({"ean": job["ean"], **saved,
                                             "requests": session.requests - before,
                                             "commercial_requests": session.commercial_requests - before_commercial,
+                                            "candidate_plan": session._job_candidate_plan,
+                                            "candidate_attempts": list(session._job_candidate_attempts),
+                                            "discovery": session._job_discovery,
                                             "current_source": point_check and session._job_current_source})
         finally:
             report.requests += session.requests
@@ -774,6 +780,9 @@ class _Session:
         self._fresh_sources: set[str] = set()
         self._fresh_sitemap = False
         self._job_current_source = False
+        self._job_candidate_attempts = []
+        self._job_candidate_plan = {}
+        self._job_discovery = {}
         self.pilot_limits = None
         self._pilot_guard = self._pilot_reserved = None
         if pilot_run_id is not None:
@@ -851,6 +860,9 @@ class _Session:
     def process(self, job: dict) -> _Result:
         cid, ean = self.competitor_id, job["ean"]
         self._job_visits = 0
+        self._job_candidate_attempts = []
+        self._job_candidate_plan = {}
+        self._job_discovery = {}
         self._job_current_source = False
         with self.store._connect() as connection:
             product = dict(connection.execute("SELECT ean,brand,model,color,caliber,category FROM products WHERE ean=?",
@@ -861,21 +873,30 @@ class _Session:
                 WHERE competitor_id=? AND ean=? AND state IN ('discarded','rejected')""", (cid, ean))}
         verified = [row["url"] for row in known if row["status"] == "verified"]
         if verified:
+            self._job_discovery = {"attempted": [], "reason": "Ficha verificada existente; reutilizada"}
             return _Result("done", verified[0], "known", "Ficha verificada ya registrada: se reutiliza sin consultas")
         pending = [row["url"] for row in known if row["status"] in ("probable", "pending_verification")]
         if pending:
+            self._job_discovery = {"attempted": [], "reason": "Candidata existente pendiente de revisión"}
             return _Result("review", pending[0], "known", "Candidato pendiente de revisión manual")
         excluded = {row["url"] for row in known} | discarded
         result = self._match(product, excluded)
         if result:
+            self._job_discovery = {"attempted": [], "reason": f"Índice local produjo estado {result.state}"}
             return result
         plan = candidate_plan(product, self.config["domain"])
+        self._job_candidate_plan = {
+            "reason_code": plan.reason_code,
+            "reason": plan.reason,
+            "candidates": [candidate.provenance() for candidate in plan.candidates],
+        }
         if plan.candidates:
             self._record_candidate_plan(job, plan)
         self._local_candidates(product, plan.runnable, excluded)
         if plan.runnable:
             result = self._match(product, excluded)
             if result:
+                self._job_discovery = {"attempted": [], "reason": f"Candidata produjo estado {result.state}"}
                 return result
         executed, restrictions = [], []
         if plan.reason:
@@ -894,7 +915,9 @@ class _Session:
             else:
                 restrictions.append(f"{METHODS[method]}: {outcome}")
         if not executed:
+            self._job_discovery = {"attempted": executed, "restrictions": restrictions}
             return _Result("unavailable", detail=f"{UNAVAILABLE_TEXT} ({'; '.join(restrictions)})")
+        self._job_discovery = {"attempted": executed, "restrictions": restrictions}
         return _Result("not_found", detail=f"Sin ficha de {product['brand']} {product['model']} {product['color']} en: "
                                            f"{', '.join(executed)}. No implica que el producto no exista; "
                                            "se reintentará cuando caduquen las fuentes")
@@ -939,17 +962,64 @@ class _Session:
         candidates.sort(key=lambda row: (not (lens and lens in row["signature"].split()), row["first_seen"]))
         review = None
         for row in candidates:
-            page, fresh = self._facts(row, product["ean"], self._job_visits < MAX_VISITS_PER_JOB)
+            attempt = {
+                "candidate_url": row["url"],
+                "source": row["method"],
+                "source_url": row["source_url"],
+                "checked_at": row["checked_at"],
+                "check_state": row["check_state"],
+            }
+            requests_before = self.requests
+            try:
+                page, fresh = self._facts(row, product["ean"], self._job_visits < MAX_VISITS_PER_JOB)
+            except AccessDenied as exc:
+                attempt.update({
+                    "requests": self.requests - requests_before,
+                    "access_failure": {"code": exc.decision.code, "reason": exc.decision.message},
+                })
+                self._job_candidate_attempts.append(attempt)
+                raise
+            except _Stop as exc:
+                attempt.update({
+                    "requests": self.requests - requests_before,
+                    "access_failure": {"state": exc.state, "reason": exc.detail},
+                })
+                self._job_candidate_attempts.append(attempt)
+                raise
             self._job_visits += fresh
+            attempt["requests"] = self.requests - requests_before
+            with self.store._connect() as connection:
+                checked = connection.execute("""SELECT checked_at,check_state,facts FROM discovery_index
+                    WHERE competitor_id=? AND url=?""", (self.competitor_id, row["url"])).fetchone()
+            facts = json.loads(checked["facts"] or "{}") if checked else {}
+            attempt["checked_at"] = checked["checked_at"] if checked else row["checked_at"]
+            attempt["check_state"] = checked["check_state"] if checked else row["check_state"]
             if page is None:
+                if attempt["check_state"] == "product":
+                    rejection = product_page_rejection("", facts.get("url") or row["url"])
+                    if rejection:
+                        attempt["rejection"] = rejection
+                for name in ("candidate_url", "requested_url", "final_url", "redirects",
+                             "canonical_urls", "rejection"):
+                    if name in facts:
+                        attempt[name] = facts[name]
+                self._job_candidate_attempts.append(attempt)
                 continue
             url = page.url or row["url"]
+            attempt["final_url"] = url
+            attempt["url_trace"] = page.url_trace
             if url in excluded:
+                attempt["rejection"] = "La URL final ya está excluida"
+                self._job_candidate_attempts.append(attempt)
                 continue
             match = classify(product, page.candidate())
             status = "manual_review" if page.ambiguous and match.status == EXACT else match.status
             if page.ambiguous and match.status == EXACT:
                 match.reasons.append("Ficha ambigua (varias variantes u ofertas): revisión manual")
+            attempt["identity_status"] = status
+            attempt["identity_reasons"] = list(match.reasons)
+            attempt["page_ambiguous"] = page.ambiguous
+            self._job_candidate_attempts.append(attempt)
             state = {EXACT: "exact", PROBABLE: "probable", REJECTED: "rejected"}.get(status, "probable")
             source = METHODS.get(row["method"], row["method"])
             note = (f"{'Confirmación automática' if state == 'exact' else 'Candidato automático'} · regla marca + "
