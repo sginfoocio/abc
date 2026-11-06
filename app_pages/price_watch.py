@@ -794,12 +794,34 @@ def _render_trial(store: PriceComparatorStore) -> None:
             return
         st.write({name: report[name] for name in ("status", "build_commit", "started_at", "expires_at",
                                                 "started_at_madrid", "expires_at_madrid", "heartbeat_at", "error")})
+        if report["recoveries"]:
+            recovery = report["recoveries"][-1]
+            st.caption(f"Compilación de recuperación: {recovery['note']['recovery_build_commit']} · "
+                       "El commit de activación y la ventana original se conservan.")
         st.caption("La configuración no demuestra ejecución: compruebe el heartbeat y los recibos de cada ciclo. "
                    "Los demás disparadores no pueden consultar estos pares, tampoco después de caducar.")
         st.dataframe(pd.DataFrame.from_dict(report["summary"], orient="index"), width="stretch")
         st.download_button("Descargar historial e informe del piloto (JSON)",
                            json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8"),
                            "piloto-72h-historial.json", "application/json", key="trial_report")
+        if report["status"] == "failed":
+            try:
+                service.recovery_preflight()
+            except ValueError as exc:
+                st.warning(f"Recuperación sin reintentos: {exc}")
+            else:
+                st.info("El fallo inicial no dejó sincronizaciones ni peticiones. Puede reanudar la misma "
+                        "ventana; se conservará en auditoría el estado anterior completo.")
+                info = load_build_info()
+                approved = st.checkbox("Autorizo reanudar el piloto fallido sin ampliar su fecha de cierre",
+                                       key="trial_resume_approval")
+                if st.button("Reanudar tras corregir el arranque", key="trial_resume",
+                             disabled=not approved or not info["build"].startswith("actions-")):
+                    try:
+                        service.resume_initial_sync_failure(actor=_actor(), build_commit=info["commit"])
+                        _refresh("Piloto recuperado con su ventana original. El trabajador continuará sin duplicar consultas.")
+                    except (ValueError, RuntimeError, Timeout) as exc:
+                        st.error(str(exc))
         if report["status"] == "active" and st.button("Detener piloto ahora", key="trial_stop"):
             service.stop(actor=_actor())
             _refresh("Piloto detenido: no se iniciarán consultas nuevas. Los recibos se conservan.")

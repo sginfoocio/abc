@@ -24,6 +24,8 @@ from price_connectors import ConnectorError
 LOG = logging.getLogger(__name__)
 MANIFEST_PATH = Path(__file__).with_name("price_trial_manifest.json")
 HEARTBEAT_KEY = "price_trial_worker_heartbeat"
+INITIAL_SYNC_FAILURE = "TrialDenied: EAN reservados al sincronizador filtrado del piloto de 72 h"
+PASSIVE_CLOSURE = {"closure_reason": "Piloto finalizado; sin consultas nuevas"}
 
 
 class TrialDenied(ConnectorError):
@@ -194,6 +196,74 @@ class PriceTrial:
             con.execute("""UPDATE price_trial SET status='stopped',stopped_at=?,error=?
                 WHERE id=1 AND status='active'""", (self.clock().isoformat(), f"Detenido por {actor}"))
 
+    def recovery_preflight(self):
+        """Only the known pre-I/O startup failure can be resumed; uncertain work is never replayed."""
+        row = trial_row(self.store)
+        if not row or row["status"] != "failed" or row["error"] != INITIAL_SYNC_FAILURE:
+            raise ValueError("Solo se recupera el fallo inicial conocido del contexto de sincronización")
+        now = self.clock()
+        if not datetime.fromisoformat(row["started_at"]) <= now < datetime.fromisoformat(row["expires_at"]):
+            raise ValueError("La ventana original no está vigente; no se reinicia ni se amplía")
+        prepared = self.preflight()
+        frozen = json.loads(row["manifest"])
+        if frozen != prepared["manifest"]:
+            raise ValueError("El manifiesto desplegado difiere del alcance congelado")
+        with self.store._connect() as con:
+            cycles = [dict(r) for r in con.execute("SELECT * FROM price_trial_cycles ORDER BY cycle")]
+            pairs = [dict(r) for r in con.execute("SELECT * FROM price_trial_pairs ORDER BY cycle,competitor_id,ean")]
+            marks = ",".join("?" for _ in frozen["competitors"])
+            requests = con.execute(f"""SELECT COUNT(*) FROM access_requests
+                WHERE competitor_id IN ({marks}) AND reserved_at>=?""",
+                                   (*frozen["competitors"], row["started_at"])).fetchone()[0]
+            syncs = con.execute("""SELECT COUNT(*) FROM vytria_sync_runs
+                WHERE trigger='trial:72h' AND started_at>=?""", (row["started_at"],)).fetchone()[0]
+        if requests or syncs:
+            raise ValueError("Hay peticiones o sincronizaciones previas: se requiere revisión; no se repiten")
+        expected = {(cycle, pair["competitor_id"], pair["ean"])
+                    for cycle in range(3) for pair in frozen["pairs"]}
+        if {(p["cycle"], p["competitor_id"], p["ean"]) for p in pairs} != expected:
+            raise ValueError("Los pares persistidos no coinciden con los tres ciclos congelados")
+        if len(cycles) != 3 or [c["cycle"] for c in cycles] != [0, 1, 2]:
+            raise ValueError("Ciclos persistidos inesperados")
+        for cycle in cycles:
+            scheduled = datetime.fromisoformat(row["started_at"]) + timedelta(hours=24 * cycle["cycle"])
+            if (datetime.fromisoformat(cycle["started_at"]) != scheduled
+                    or cycle["sync_state"] != ("running" if cycle["cycle"] == 0 else "pending")
+                    or json.loads(cycle["sync_receipt"]) != {}):
+                raise ValueError("Existe un ciclo previo o incierto: no se recupera automáticamente")
+        for pair in pairs:
+            receipt = json.loads(pair["receipt"])
+            if (pair["started_at"] is not None or pair["state"] not in {"pending", "done"}
+                    or receipt not in ({}, PASSIVE_CLOSURE)
+                    or (pair["state"] == "done" and receipt != PASSIVE_CLOSURE)):
+                raise ValueError("Existe un par iniciado o con recibo: no se repite trabajo incierto")
+        return {"trial": row, "cycles": cycles, "pairs": pairs}
+
+    def resume_initial_sync_failure(self, *, actor: str, build_commit: str):
+        if not actor.strip() or len(build_commit) != 40 or any(c not in "0123456789abcdef" for c in build_commit):
+            raise ValueError("Responsable y commit desplegado válidos requeridos")
+        with self.lock(), ExitStack() as stack:
+            row = trial_row(self.store)
+            if not row:
+                raise ValueError("No hay piloto persistido")
+            frozen = json.loads(row["manifest"])
+            for cid in sorted(frozen["competitors"]):
+                stack.enter_context(FileLock(f"{self.store.database_path}.competitor-{cid}.lock", timeout=0))
+            stack.enter_context(FileLock(f"{self.store.database_path}.vytria-sync.lock", timeout=0))
+            previous = self.recovery_preflight()
+            if build_commit == previous["trial"]["build_commit"]:
+                raise ValueError("Despliegue primero la corrección; no se reanuda con la compilación original")
+            at = self.clock().isoformat()
+            with self.store._connect() as con, con:
+                con.execute("""INSERT INTO access_audit(scope,scope_id,action,previous,current,actor,note,at)
+                    VALUES('price_trial','1','resume_initial_sync_failure','failed','active',?,?,?)""",
+                            (actor.strip(), json.dumps({"recovery_build_commit": build_commit,
+                                                       "previous": previous}, ensure_ascii=False), at))
+                con.execute("UPDATE price_trial_cycles SET sync_state='pending' WHERE cycle=0")
+                con.execute("""UPDATE price_trial_pairs SET state='pending',finished_at=NULL,receipt='{}'""")
+                con.execute("UPDATE price_trial SET status='active',stopped_at=NULL,error='' WHERE id=1")
+        return self.report()
+
     def _expire(self):
         now = self.clock().isoformat()
         with self.store._connect() as con, con:
@@ -331,6 +401,9 @@ class PriceTrial:
                              for r in con.execute("SELECT * FROM price_trial_cycles ORDER BY cycle")]
             row["pairs"] = [{**dict(r), "receipt": json.loads(r["receipt"])}
                             for r in con.execute("SELECT * FROM price_trial_pairs ORDER BY cycle,competitor_id,ean")]
+            row["recoveries"] = [{**dict(r), "note": json.loads(r["note"])} for r in con.execute(
+                """SELECT id,actor,note,at FROM access_audit WHERE scope='price_trial' AND scope_id='1'
+                AND action='resume_initial_sync_failure' ORDER BY id""")]
         row["summary"] = {}
         for saved in row["pairs"]:
             scheduled = datetime.fromisoformat(row["cycles"][saved["cycle"]]["started_at"])
@@ -396,7 +469,8 @@ def serve(command):
                     store = PriceComparatorStore()
                     PriceTrial(store).tick()
                     row = trial_row(store)
-                    if row and row["status"] != "active":
+                    if row and (row["status"] in {"stopped", "expired"}
+                                or utcnow() >= datetime.fromisoformat(row["expires_at"])):
                         return
             except Exception:
                 LOG.exception("Price trial worker failed; no automatic reactivation")
@@ -411,10 +485,18 @@ def serve(command):
         thread.join(timeout=20)
 
 
-if __name__ == "__main__":
+def main(argv=None):
+    # The script is __main__, but all guards import price_trial. The supervisor
+    # must use that same module and ContextVar, not a second copy created here.
+    from price_trial import serve as canonical_serve
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--serve", nargs=argparse.REMAINDER)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if not args.serve:
         parser.error("--serve requires the app command")
-    raise SystemExit(serve(args.serve))
+    return canonical_serve(args.serve)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
