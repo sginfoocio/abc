@@ -52,6 +52,8 @@ class WatchBatch:
         return f"Ningún trabajo reclamado: estado actual {job['state']}{detail}"
 
     def preview(self, eans: list[str], competitors: list[str], *, point_check: bool = False) -> pd.DataFrame:
+        from price_trial import active_execution
+        supervised_trial = active_execution(self.store) is not None
         if not eans or not competitors:
             raise ValueError("Seleccione productos y competidores")
         eans, competitors = list(dict.fromkeys(eans)), list(dict.fromkeys(competitors))
@@ -112,7 +114,7 @@ class WatchBatch:
             if (job.get("state") in {"review", "failed"} or row["locate_state"] in {"review", "failed"} or
                     (not row["located"] and (ean, cid) in pending)):
                 action = "Revisión / recuperación"
-            elif pilot and not point_check:
+            elif pilot and not point_check and not supervised_trial:
                 action = "Pendiente en piloto"
             elif row["located"]:
                 action = "Monitorizar" if due or point_check else "Reutilizar precio vigente"
@@ -134,8 +136,9 @@ class WatchBatch:
             # Normal monitor.enqueue reopens completed samples whose frequency is due.
             eligibility_job = {} if row["located"] and due and job.get("state") == "done" else queue
             deferred = job_deferral(eligibility_job, now, point_check=point_check,
-                                    monitoring=bool(row["located"]), pilot_authorized=pilot and point_check)
-            if pilot_member and point_check and (not scope["enabled"] or pilot_active):
+                                    monitoring=bool(row["located"]),
+                                    pilot_authorized=pilot and (point_check or supervised_trial))
+            if pilot_member and (point_check or supervised_trial) and (not scope["enabled"] or pilot_active):
                 deferred = "Piloto desactivado o con ejecución pendiente: no se inicia otra"
             if action == "Revisión / recuperación":
                 deferred = "Revisión pendiente: no se acepta ni se reintenta automáticamente"
@@ -143,11 +146,15 @@ class WatchBatch:
                 deferred = "Requiere comprobación puntual explícita del piloto supervisado"
             if not allowed:
                 deferred = reason
+            from price_trial import pair_reason
+            trial_reason = pair_reason(self.store, cid, ean, now)
+            if trial_reason:
+                deferred = trial_reason
             rows.append({**row, "action": action, "ready": bool(allowed and needs_http and not deferred),
                          "access": reason or ("Autorizado; pausas aplicables" if allowed else "Revisión necesaria"),
                          "defer_reason": deferred, "queue_state": queue.get("state", "sin preparar"),
                          "not_before": queue.get("not_before"), "attempts": queue.get("attempts", 0),
-                         "pilot_route": bool(pilot_member and point_check),
+                         "pilot_route": bool(pilot_member and (point_check or supervised_trial)),
                          "candidate_count": len(plan.runnable), "candidate_reason": plan.reason,
                          "candidate_reason_code": plan.reason_code,
                          "local_candidates": [candidate.provenance() for candidate in plan.candidates],
@@ -186,14 +193,14 @@ class WatchBatch:
             started_at = stamp()
             with context as pilot_run_id:
                 located = self.locator.run([cid], eans=selected, max_jobs=len(selected), deadline_seconds=300,
-                                           **({"point_check": True, "pilot_run_id": pilot_run_id}
-                                              if point_check else {}))
+                                           **({"point_check": point_check, "pilot_run_id": pilot_run_id}
+                                              if point_check or pilot_run_id is not None else {}))
                 # A store-level block must stop monitoring as well as discovery.
                 from price_monitor import MonitorReport
                 monitored = (MonitorReport() if located.stopped else self.monitor.run(
                     [cid], eans=selected, max_jobs=len(selected), deadline_seconds=300,
-                    **({"point_check": True, "pilot_run_id": pilot_run_id}
-                       if point_check else {})))
+                    **({"point_check": point_check, "pilot_run_id": pilot_run_id}
+                       if point_check or pilot_run_id is not None else {})))
                 processed = {r["ean"] for r in located.outcomes + monitored.outcomes}
                 remaining -= len(processed)
                 result["deferred"] -= len(processed)
@@ -202,6 +209,8 @@ class WatchBatch:
                        "location_processed": located.processed, "monitor_processed": monitored.processed,
                        "requests": located.requests + monitored.requests,
                        "processed_pairs": len(processed), "pilot_run_id": pilot_run_id,
+                       "location_deferred": located.deferred_reason,
+                       "monitor_deferred": monitored.deferred_reason,
                        "started_at": started_at, "finished_at": stamp(),
                        "errors": {**located.stopped, **monitored.stopped}}
                 result["runs"].append(run)
@@ -221,10 +230,11 @@ class WatchBatch:
                             "category": "checked_now" if checked else "reused" if reused else "not_executed",
                             "requests": requests, "outcomes": outcomes,
                             "reason": (outcomes[-1]["detail"] if outcomes else
-                                       run["errors"].get(cid) or self._unclaimed_reason(
+                                       run["errors"].get(cid) or located.deferred_reason or monitored.deferred_reason
+                                       or self._unclaimed_reason(
                                            cid, ean, monitoring=bool(preview_row["located"]),
                                            point_check=point_check,
-                                           pilot_authorized=bool(preview_row["pilot_route"] and point_check)))}
+                                           pilot_authorized=bool(preview_row["pilot_route"])))}
                     result["pairs"].append(pair)
                     if pilot_run_id is not None:
                         with self.store._connect() as con, con:

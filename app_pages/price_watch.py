@@ -760,9 +760,64 @@ def render_competitor_card(store: PriceComparatorStore, cid: str, search: WebPri
         _render_locate_schedule(PriceLocator(store), names)
 
 
+def _render_trial(store: PriceComparatorStore) -> None:
+    from filelock import Timeout
+    from build_info import load_build_info
+    from price_trial import PriceTrial, manifest
+
+    service = PriceTrial(store)
+    with st.expander("Piloto automático de 72 horas · 100 EAN × seis tiendas"):
+        report = service.report()
+        if report is None:
+            frozen = manifest()
+            st.caption("Tres ciclos diarios, Odoo tarifa 59 de solo lectura y los 600 pares explícitos del manifiesto. "
+                       "No se cambian permisos ni presupuestos; Otticait queda excluida. El cierre es absoluto.")
+            st.download_button("Descargar manifiesto de 600 pares (JSON)",
+                               json.dumps(frozen, ensure_ascii=False, indent=2).encode("utf-8"),
+                               "piloto-72h-manifiesto.json", "application/json", key="trial_manifest")
+            try:
+                prepared = service.preflight()
+            except ValueError as exc:
+                st.warning(str(exc))
+                return
+            st.dataframe(pd.DataFrame(prepared["limits"].values()), hide_index=True)
+            info = load_build_info()
+            approved = st.checkbox("Autorizo activar los 600 pares durante 72 horas y sincronizar solo esos 100 EAN",
+                                   key="trial_approval")
+            if st.button("Activar piloto de 72 horas", key="trial_activate",
+                         disabled=not approved or not info["build"].startswith("actions-")):
+                try:
+                    service.activate(actor=_actor(), build_commit=info["commit"])
+                    _refresh("Ventana persistida. El trabajador del servidor ejecutará el primer ciclo.")
+                except (ValueError, RuntimeError, Timeout) as exc:
+                    st.error(str(exc))
+            return
+        st.write({name: report[name] for name in ("status", "build_commit", "started_at", "expires_at",
+                                                "started_at_madrid", "expires_at_madrid", "heartbeat_at", "error")})
+        st.caption("La configuración no demuestra ejecución: compruebe el heartbeat y los recibos de cada ciclo. "
+                   "Los demás disparadores no pueden consultar estos pares, tampoco después de caducar.")
+        st.dataframe(pd.DataFrame.from_dict(report["summary"], orient="index"), width="stretch")
+        st.download_button("Descargar historial e informe del piloto (JSON)",
+                           json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8"),
+                           "piloto-72h-historial.json", "application/json", key="trial_report")
+        if report["status"] == "active" and st.button("Detener piloto ahora", key="trial_stop"):
+            service.stop(actor=_actor())
+            _refresh("Piloto detenido: no se iniciarán consultas nuevas. Los recibos se conservan.")
+
+
 def _render_batch(store: PriceComparatorStore, names: dict[str, str]) -> None:
     from price_batch import WatchBatch, batch_pairs_export
 
+    _render_trial(store)
+    with st.expander("Historial persistente de lotes"):
+        with store._connect() as con:
+            history = con.execute("""SELECT id,started_at,summary FROM locate_runs
+                WHERE trigger IN ('watch:batch','watch:point_check') ORDER BY id DESC LIMIT 100""").fetchall()
+        if history:
+            saved = st.selectbox("Ejecución guardada", [dict(r) for r in history],
+                                 format_func=lambda r: f"{r['id']} · {r['started_at']}", key="batch_history")
+            st.download_button("Descargar ejecución guardada (JSON)", saved["summary"].encode("utf-8"),
+                               f"lote-{saved['id']}.json", "application/json", key="batch_history_json")
     watch = PriceWatch(store).watchlist()
     if watch.empty:
         st.info("Añada productos en vigilancia para preparar una actualización.")

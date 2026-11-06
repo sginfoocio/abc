@@ -86,8 +86,16 @@ def pilot_scope(store: PriceComparatorStore) -> dict | None:
 
 
 def require_pilot_access(store: PriceComparatorStore, ean: str | None, competitor_id: str) -> None:
+    from price_trial import TrialDenied, active_execution, require_pair
+    try:
+        require_pair(store, competitor_id, ean, datetime.now(timezone.utc))
+    except TrialDenied as exc:
+        raise PilotError(str(exc)) from exc
     scope = pilot_scope(store)
     if scope is None:
+        return
+    trial = active_execution(store)
+    if trial and (competitor_id not in scope["competitors"] or trial.ean not in scope["eans"]):
         return
     if not scope["enabled"]:
         raise PilotError("Piloto desactivado: consultas detenidas; el catálogo completo sigue excluido")

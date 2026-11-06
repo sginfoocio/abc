@@ -147,6 +147,8 @@ class CompetitorScheduler:
     def verify(self, competitor_id: str) -> None:
         """Prove the authorised access works. Automatic queries stay impossible until this succeeds."""
         from price_pilot import pilot_scope
+        from price_trial import require_pair
+        require_pair(self.store, competitor_id, None, self._now())
 
         if pilot_scope(self.store) is not None:
             raise SchedulerConfigError("Verifique el acceso antes de guardar el piloto; no se descargan feeds generales")
@@ -332,6 +334,8 @@ class CompetitorScheduler:
                     SELECT id,ean,attempts FROM scheduler_jobs WHERE competitor_id=? AND status='pending'
                     AND not_before<=? ORDER BY not_before,id LIMIT ?""",
                                           (competitor_id, _iso(now), connector.batch_size)).fetchall()
+                from price_trial import pair_reason
+                jobs = [job for job in jobs if not pair_reason(self.store, competitor_id, job["ean"], now)]
                 if not jobs:
                     return
                 marks = ",".join("?" * len(jobs))
