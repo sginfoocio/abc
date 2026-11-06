@@ -309,6 +309,7 @@ def _reset_shared_filters() -> None:
     st.session_state["dashboard_state"] = analytics.STATE_ALL
     st.session_state["dashboard_period"] = "30 días"
     st.session_state["dashboard_search"] = ""
+    st.session_state.pop("summary_focus", None)
 
 
 def _render_shared_filters(data: dict) -> None:
@@ -352,6 +353,79 @@ def _render_shared_filters(data: dict) -> None:
     )
 
 
+def _summary_focus(segment: str | None) -> None:
+    st.session_state["summary_focus"] = segment
+
+
+def _render_summary_cards(summary: pd.DataFrame) -> None:
+    """Read-only navigation inside the already filtered catalogue; no queues or price refreshes."""
+    st.caption("Cada producto aparece en una sola tarjeta. Los que carecen de precio Vytria "
+               "se separan de los que no tienen una oferta comparable.")
+    for column, (segment, label) in zip(st.columns(5), analytics.SUMMARY_SEGMENTS.items()):
+        selected = analytics.summary_segment(summary, segment)
+        with column.container(border=True):
+            st.metric(label, len(selected))
+            st.button("Ver productos", key=f"summary_view_{segment}", width="stretch",
+                      disabled=selected.empty, on_click=_summary_focus, args=(segment,),
+                      type="primary" if st.session_state.get("summary_focus") == segment else "secondary",
+                      help=f"Mostrar los productos del grupo: {label.lower()}")
+    segment = st.session_state.get("summary_focus")
+    if segment not in analytics.SUMMARY_SEGMENTS:
+        return
+    selected = analytics.summary_segment(summary, segment)
+    st.subheader(f"Productos · {analytics.SUMMARY_SEGMENTS[segment]}")
+    st.button("Cerrar selección", key="summary_clear_focus", on_click=_summary_focus, args=(None,))
+    if selected.empty:
+        st.info("No hay productos de este grupo con los filtros actuales.")
+        return
+    table = analytics.commercial_table(selected)
+    columns = ["brand", "model", "color", "ean", "own_price_eur", "competitor_min_eur",
+               "difference_vs_competitor_pct", "best_competitor"]
+    selection = st.dataframe(table[columns].rename(columns=TABLE_LABELS), width="stretch", hide_index=True,
+                             key="summary_selected_products", on_select="rerun", selection_mode="single-row",
+                             column_config={
+                                 "Precio Vytria": st.column_config.NumberColumn(format="%.2f €"),
+                                 "Precio competidor": st.column_config.NumberColumn(format="%.2f €"),
+                                 "% vs mejor competidor": st.column_config.NumberColumn(format="%.1f %%"),
+                             })
+    if selection.selection.rows and selection.selection.rows[0] < len(selected):
+        st.session_state["dashboard_product"] = selected.iloc[selection.selection.rows[0]]["ean"]
+    st.caption("Seleccione una fila para ver su ficha en «Consultar una gafa».")
+
+
+def _render_summary_ranking(summary: pd.DataFrame, offers: pd.DataFrame) -> None:
+    st.header("Comparación por marca o competidor")
+    mode = st.radio("Agrupar comparación", ["Por marca", "Por competidor"], horizontal=True,
+                    key="summary_ranking_mode")
+    by = "brand" if mode == "Por marca" else "competitor"
+    ranking = analytics.summary_ranking(summary, offers, by=by)
+    if ranking.empty:
+        st.info("No hay comparaciones válidas para esta agrupación con los filtros actuales.")
+        return
+    labels = {
+        "name": "Marca" if by == "brand" else "Competidor", "catalog_products": "Catálogo",
+        "compared": "Comparados", "cheaper": "Más barato", "equal": "Empate",
+        "higher": "Más caro", "competitive_pct": "Competitivo (%)",
+        "mean_gap_pct": "Diferencia (%)", "last_checked_at": "Comprobación (UTC)",
+    }
+    shown = ranking.rename(columns=labels)
+    shown["Comprobación (UTC)"] = pd.to_datetime(shown["Comprobación (UTC)"], utc=True)
+    st.dataframe(shown, width="stretch", hide_index=True, key="summary_ranking", column_config={
+        "Competitivo (%)": st.column_config.NumberColumn(format="%.1f %%", help="Vytria igual o más barata"),
+        "Diferencia (%)": st.column_config.NumberColumn(format="%+.1f %%", help="Diferencia media por producto"),
+        "Comprobación (UTC)": st.column_config.DatetimeColumn(format="DD/MM/YYYY HH:mm"),
+    })
+    st.caption("Más barato, empate y más caro se refieren al precio de Vytria. Competitivo incluye el empate.")
+    if by == "brand":
+        st.caption("Cada EAN cuenta una vez en su marca, frente a su mejor competidor comparable. "
+                   "Los porcentajes usan solo los productos comparados de cada fila; sin muestra se muestran vacíos.")
+    else:
+        st.caption("Cada EAN cuenta una vez por competidor, frente al precio de esa tienda. "
+                   "Los porcentajes usan los comparados de cada fila; las filas no se suman como productos únicos.")
+    st.caption("Diferencia media: (precio Vytria − precio competidor) / precio competidor. "
+               "Un valor positivo indica que Vytria es más cara. Solo ofertas vigentes y comparables.")
+
+
 def _render_summary(store: PriceComparatorStore, data: dict) -> None:
     summary = data["filtered_summary"]
     if summary.empty:
@@ -386,6 +460,9 @@ def _render_summary(store: PriceComparatorStore, data: dict) -> None:
         st.caption(f"{indicators['no_information']} productos quedan fuera del porcentaje: "
                    f"{no_own} sin precio Vytria y {no_competitor} sin competencia comparable.")
 
+    st.header("Posición competitiva")
+    _render_summary_cards(scoped)
+
     coverage = analytics.comparison_coverage(scoped)
     st.header("Cobertura de comparación")
     st.caption(
@@ -399,20 +476,26 @@ def _render_summary(store: PriceComparatorStore, data: dict) -> None:
         config={"displayModeBar": False, "responsive": True},
     )
 
-    st.header("Posición competitiva")
+    st.header("Diferencias frente al mejor precio")
     if indicators["compared"]:
         st.caption(
             f"Solo productos con comparación válida ({indicators['compared']}); "
-            "los porcentajes usan esos productos como denominador. El empate cuenta como competitivo."
+            "Cada EAN cuenta una vez. Negativo: Vytria más barata; cero: empate; positivo: Vytria más cara. "
+            "Porcentaje calculado sobre el mejor precio competidor."
         )
         st.plotly_chart(
-            analytics.competitive_position_figure(scoped),
+            analytics.price_gap_figure(scoped),
             width="stretch",
-            key="dashboard_positioning_chart",
+            key="dashboard_price_gap_chart",
             config={"displayModeBar": False, "responsive": True},
         )
     else:
         st.info("No hay productos con comparación válida en el catálogo filtrado.")
+
+    ranking_offers = data["offers"]
+    if selected_competitors:
+        ranking_offers = ranking_offers[ranking_offers["competitor_name"].isin(selected_competitors)]
+    _render_summary_ranking(scoped, ranking_offers)
 
     st.header("Evolución de la competitividad")
     history = analytics.competitiveness_series(
