@@ -129,6 +129,8 @@ def job_deferral(job: dict, now: datetime, *, point_check: bool = False,
                         or (state == "pilot" and pilot_authorized)):
         return ""
     claimable = {"pending", "waiting", "blocked", "unavailable"} if monitoring else set(CLAIMABLE)
+    if pilot_authorized and not monitoring:
+        claimable.add("pilot")
     if state not in claimable:
         return f"Estado {state}: sin trabajo pendiente"
     not_before = job.get("not_before")
@@ -289,6 +291,7 @@ class RunReport:
     requests: int = 0
     stopped: dict[str, str] = field(default_factory=dict)
     outcomes: list[dict] = field(default_factory=list)
+    deferred_reason: str = ""
 
     @property
     def summary(self) -> str:
@@ -373,6 +376,10 @@ class PriceLocator:
                point_check: bool = False, pilot_eans: AbstractSet[str] = frozenset(),
                completed: AbstractSet[str] = frozenset()) -> dict | None:
         now = self._now()
+        from price_trial import select_eans
+        eans = select_eans(self.store, competitor_id, eans, now)
+        if eans == []:
+            return None
         selected = "" if eans is None else f" AND j.ean IN ({','.join('?' for _ in eans)})"
         with self.store._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -380,7 +387,7 @@ class PriceLocator:
                 rows = connection.execute(f"""SELECT j.* FROM locate_jobs j WHERE j.competitor_id=?
                     AND EXISTS(SELECT 1 FROM watch_products w WHERE w.ean=j.ean AND w.active=1)
                     AND j.state IN ('pending','waiting','not_found','unavailable','blocked','running'
-                                    {",'pilot'" if point_check else ""})
+                                    {",'pilot'" if point_check or pilot_eans else ""})
                     {selected} ORDER BY j.priority,j.id""", (competitor_id, *(eans or []))).fetchall()
                 for row in rows:
                     lease_active = row["state"] == "running" and (
@@ -468,18 +475,29 @@ class PriceLocator:
         for competitor_id in ids:
             if report.processed >= max_jobs or _expired(deadline_seconds, started, monotonic):
                 break
+            from price_trial import select_eans
+            selected_eans = select_eans(self.store, competitor_id, eans, self._now())
+            if selected_eans == []:
+                report.stopped[competitor_id] = "Par reservado al piloto de 72 h o ventana finalizada"
+                continue
             pilot = set(scope["eans"]) if scope and competitor_id in scope["competitors"] else set()
             supervised = {ean for cid, ean in pilot_pairs if cid == competitor_id}
-            if supervised and (not point_check or eans is None or not supervised.issuperset(set(eans) & pilot)):
+            from price_trial import active_execution
+            if supervised and ((not point_check and not active_execution(self.store)) or eans is None
+                               or not supervised.issuperset(set(eans) & pilot)):
                 raise ValueError("Selección del piloto distinta de la comprobación aprobada")
             try:
                 with self.search._lock(competitor_id):
                     self._run_competitor(competitor_id, pilot - supervised, report, max_jobs,
-                                         deadline_seconds, started, monotonic, eans,
+                                         deadline_seconds, started, monotonic, selected_eans,
                                          point_check=point_check, pilot_eans=supervised,
                                          pilot_run_id=pilot_run_id if supervised else None)
             except Timeout:
                 report.stopped[competitor_id] = "Otra ejecución está consultando a este competidor"
+        if _expired(deadline_seconds, started, monotonic):
+            report.deferred_reason = "Plazo de localización agotado; la cola pendiente continúa en otra pasada"
+        elif report.processed >= max_jobs:
+            report.deferred_reason = "Límite de trabajos de localización alcanzado"
         return report
 
     def _run_competitor(self, competitor_id: str, pilot: set[str], report: RunReport, max_jobs: int,

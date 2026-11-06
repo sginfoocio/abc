@@ -555,6 +555,9 @@ def extract_edel_search_cards(html: str, search_url: str, product: dict, *,
 def product_page_rejection(html: str, url: str) -> str:
     """Positive listing evidence, never inferred from a missing product match or a redirect."""
     parsed_url = urlparse(url)
+    if (parsed_url.hostname or "").lower().removeprefix("www.") == "congafasdesol.com" \
+            and not parsed_url.path.strip("/"):
+        return "no_product: portada de ConGafasDeSol, no ficha de producto"
     if (parsed_url.hostname or "").lower().removeprefix("www.") == "optica-optima.com" \
             and parsed_url.path.rstrip("/") in {"/gafas-de-sol", "/gafas-graduadas"}:
         return "no_product: ruta de categoría de Óptica Óptima, no ficha de producto"

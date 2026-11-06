@@ -761,6 +761,35 @@ class PriceComparatorStore:
                         PRIMARY KEY (competitor_id, url)
                     );
                     -- Periodic location (phase 3): per competitor, disabled by default.
+                    CREATE TABLE IF NOT EXISTS price_trial (
+                        id INTEGER PRIMARY KEY CHECK(id=1),
+                        status TEXT NOT NULL,
+                        started_at TEXT NOT NULL,
+                        expires_at TEXT NOT NULL,
+                        stopped_at TEXT,
+                        actor TEXT NOT NULL,
+                        build_commit TEXT NOT NULL,
+                        manifest TEXT NOT NULL,
+                        limits TEXT NOT NULL,
+                        heartbeat_at TEXT,
+                        error TEXT NOT NULL DEFAULT ''
+                    );
+                    CREATE TABLE IF NOT EXISTS price_trial_cycles (
+                        cycle INTEGER PRIMARY KEY CHECK(cycle BETWEEN 0 AND 2),
+                        started_at TEXT NOT NULL,
+                        sync_state TEXT NOT NULL DEFAULT 'pending',
+                        sync_receipt TEXT NOT NULL DEFAULT '{}'
+                    );
+                    CREATE TABLE IF NOT EXISTS price_trial_pairs (
+                        cycle INTEGER NOT NULL REFERENCES price_trial_cycles(cycle),
+                        competitor_id TEXT NOT NULL REFERENCES competitors(id),
+                        ean TEXT NOT NULL REFERENCES products(ean),
+                        state TEXT NOT NULL DEFAULT 'pending',
+                        started_at TEXT,
+                        finished_at TEXT,
+                        receipt TEXT NOT NULL DEFAULT '{}',
+                        PRIMARY KEY(cycle,competitor_id,ean)
+                    );
                     CREATE TABLE IF NOT EXISTS locate_schedule (
                         competitor_id TEXT PRIMARY KEY REFERENCES competitors(id),
                         enabled INTEGER NOT NULL DEFAULT 0,

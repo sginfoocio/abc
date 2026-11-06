@@ -76,6 +76,7 @@ class MonitorReport:
     states: Counter = field(default_factory=Counter)
     stopped: dict[str, str] = field(default_factory=dict)
     outcomes: list[dict] = field(default_factory=list)
+    deferred_reason: str = ""
 
     @property
     def summary(self) -> str:
@@ -155,6 +156,10 @@ class PriceMonitor:
 
     def _claim(self, cid: str, eans: list[str] | None = None, *, point_check: bool = False,
                completed: AbstractSet[str] = frozenset()) -> dict | None:
+        from price_trial import select_eans
+        eans = select_eans(self.store, cid, eans, self._now())
+        if eans == []:
+            return None
         now = _iso(self._now())
         selected = "" if eans is None else f" AND j.ean IN ({','.join('?' for _ in eans)})"
         with self.store._connect() as con:
@@ -219,6 +224,11 @@ class PriceMonitor:
         for cid in ids:
             if report.processed >= max_jobs or time.monotonic() - started >= deadline_seconds:
                 break
+            from price_trial import select_eans
+            selected_eans = select_eans(self.store, cid, eans, self._now())
+            if selected_eans == []:
+                report.stopped[cid] = "Par reservado al piloto de 72 h o ventana finalizada"
+                continue
             try:
                 with self.search._lock(cid):
                     config = self.search.config(cid)
@@ -238,11 +248,12 @@ class PriceMonitor:
                     try:
                         completed: set[str] = set()
                         while report.processed < max_jobs and time.monotonic() - started < deadline_seconds:
-                            job = self._claim(cid, eans, point_check=point_check, completed=completed)
+                            job = self._claim(cid, selected_eans, point_check=point_check, completed=completed)
                             if job is None:
                                 break
                             report.processed += 1
                             completed.add(job["ean"])
+                            self._job_trace = {}
                             if point_check and job["state"] == "done":
                                 job["sample"] = ""
                             with self.store._connect() as con:
@@ -250,14 +261,16 @@ class PriceMonitor:
                             stop = (self._process(job, config, fetcher, own.get(job["ean"]), fresh=True)
                                     if point_check else self._process(job, config, fetcher, own.get(job["ean"])))
                             with self.store._connect() as con:
-                                saved = dict(con.execute("SELECT state,detail,url FROM monitor_jobs WHERE id=?",
+                                saved = dict(con.execute("SELECT state,detail,url,sample FROM monitor_jobs WHERE id=?",
                                                          (job["id"],)).fetchone())
+                                saved["sample"] = json.loads(saved["sample"]) if saved["sample"] else None
                                 requests = con.execute("""SELECT COUNT(*) FROM access_requests
                                     WHERE competitor_id=? AND id>?""", (cid, before)).fetchone()[0]
                                 urls = con.execute("""SELECT url FROM access_requests
                                     WHERE competitor_id=? AND id>?""", (cid, before)).fetchall()
                             state = saved["state"]
                             report.outcomes.append({"ean": job["ean"], **saved, "requests": requests,
+                                                    "identity": self._job_trace,
                                                     "commercial_requests": sum(
                                                         urlparse(r["url"]).path != "/robots.txt" for r in urls)})
                             report.states[state] += 1
@@ -270,6 +283,10 @@ class PriceMonitor:
                                 WHERE competitor_id=? AND id>?""", (cid, first)).fetchone()[0]
             except Timeout:
                 report.stopped[cid] = "Otra ejecución está consultando a este competidor"
+        if time.monotonic() - started >= deadline_seconds:
+            report.deferred_reason = "Plazo de monitorización agotado; la cola pendiente continúa en otra pasada"
+        elif report.processed >= max_jobs:
+            report.deferred_reason = "Límite de trabajos de monitorización alcanzado"
         self.check_stale(competitor_ids, eans)
         return report
 
@@ -310,6 +327,14 @@ class PriceMonitor:
                     sampled_at = _iso(self._now())
                 product = self.search._product(ean)
                 match = classify(product, page.candidate()) if page else None
+                from price_web_extract import product_page_rejection
+                self._job_trace = {
+                    "candidate_url": url,
+                    "url_trace": page.url_trace if page else fetched.trace,
+                    "identity_status": match.status if match else "no_product",
+                    "identity_reasons": list(match.reasons) if match else [],
+                    "rejection": product_page_rejection(fetched.text, fetched.url) if page is None else "",
+                }
                 if page is None or match is None or match.status != EXACT or page.ambiguous:
                     detail = ("; ".join(match.reasons) if match else "Sin datos legibles de producto")
                     with self.store._connect() as con, con:

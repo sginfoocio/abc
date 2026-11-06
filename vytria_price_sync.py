@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass, field
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 import hashlib
+import json
 import re
 import sys
 import time
@@ -22,7 +24,7 @@ from typing import Any, Callable, Protocol
 import unicodedata
 
 from filelock import FileLock, Timeout
-from sqlalchemy import bindparam, create_engine, text
+from sqlalchemy import bindparam, create_engine, event, text
 from sqlalchemy.engine import URL, Engine
 from sqlalchemy.exc import InterfaceError, OperationalError
 
@@ -202,6 +204,9 @@ def _chunks(values: list, size: int = CHUNK_SIZE):
         yield values[start:start + size]
 
 
+_sql_request_guard: ContextVar[Callable[[], None] | None] = ContextVar("odoo_request_guard", default=None)
+
+
 class SqlOdooPriceReader:
     """SELECT-only reader. ``engine_factory`` allows tests and Cloud to share one code path."""
 
@@ -210,8 +215,23 @@ class SqlOdooPriceReader:
         self._engine_factory = engine_factory
         self.pricelist_id = pricelist_id
 
+    def fetch_guarded(self, eans: list[str], request_guard: Callable[[], None]) -> list[OdooProduct]:
+        token = _sql_request_guard.set(request_guard)
+        try:
+            return self.fetch(eans)
+        finally:
+            _sql_request_guard.reset(token)
+
     def fetch(self, eans: list[str]) -> list[OdooProduct]:
+        request_guard = _sql_request_guard.get()
+        if request_guard:
+            request_guard()
         engine = self._engine_factory()
+        def guard_query(*args):
+            if request_guard:
+                request_guard()
+        if request_guard:
+            event.listen(engine, "before_cursor_execute", guard_query)
         try:
             with engine.connect() as connection:
                 if connection.dialect.name == "postgresql":
@@ -222,6 +242,8 @@ class SqlOdooPriceReader:
                 finally:
                     connection.rollback()
         finally:
+            if request_guard:
+                event.remove(engine, "before_cursor_execute", guard_query)
             engine.dispose()
 
     def _fetch(self, connection, eans: list[str]) -> list[OdooProduct]:
@@ -416,14 +438,15 @@ class VytriaPriceSync:
             raise ValueError("La frecuencia de Odoo debe estar entre 1 hora y 30 días")
         self.set_setting("interval_hours", str(hours))
 
-    def run(self, trigger: str = "manual", *, watched_only: bool = False) -> SyncResult:
+    def run(self, trigger: str = "manual", *, watched_only: bool = False,
+            eans: list[str] | None = None) -> SyncResult:
         lock = FileLock(self._lock_path, timeout=0)
         try:
             lock.acquire()
         except Timeout as exc:
             raise SyncInProgress("Ya hay una sincronización de precios en curso") from exc
         try:
-            return self._run_locked(trigger, watched_only=watched_only)
+            return self._run_locked(trigger, watched_only=watched_only, eans=eans)
         finally:
             lock.release()
 
@@ -463,7 +486,23 @@ class VytriaPriceSync:
         except Timeout as exc:
             raise SyncInProgress("Ya hay una sincronización de precios en curso") from exc
 
-    def _run_locked(self, trigger: str, *, watched_only: bool = False) -> SyncResult:
+    def _run_locked(self, trigger: str, *, watched_only: bool = False,
+                    eans: list[str] | None = None) -> SyncResult:
+        from price_trial import TrialDenied, active_execution, require_sync, trial_row
+        if eans is not None:
+            if len(eans) != len(set(eans)) or any(normalize_gtin(e) != e for e in eans):
+                raise ValueError("Selección de sincronización no normalizada o duplicada")
+            selected = list(eans)
+        else:
+            with self.store._connect() as con:
+                selected = [r[0] for r in con.execute(
+                    "SELECT ean FROM watch_products WHERE active=1 ORDER BY ean" if watched_only else
+                    "SELECT ean FROM products ORDER BY ean")]
+            row = trial_row(self.store)
+            if row and not active_execution(self.store):
+                owned = set(json.loads(row["manifest"])["eans"])
+                selected = [ean for ean in selected if ean not in owned]
+        require_sync(self.store, selected, self._now())
         with self.store._connect() as connection, connection:
             # Holding the lock means any run still marked as running died without closing.
             connection.execute("""UPDATE vytria_sync_runs SET status='error',finished_at=?,
@@ -471,15 +510,13 @@ class VytriaPriceSync:
             run_id = connection.execute(
                 "INSERT INTO vytria_sync_runs(trigger,started_at,status) VALUES(?,?,'running')",
                 (trigger, self._at())).lastrowid
-            eans = [row["ean"] for row in connection.execute(
-                "SELECT ean FROM watch_products WHERE active=1 ORDER BY ean" if watched_only else
-                "SELECT ean FROM products ORDER BY ean")]
+            eans = selected
         result = SyncResult(run_id, "running", monitored=len(eans))
         try:
             products = self._fetch_with_retries(eans) if eans else []
             self._apply(result, eans, products)
             result.status = "ok" if not result.issues else "partial"
-        except OdooReadError as exc:
+        except (OdooReadError, TrialDenied) as exc:
             result.status, result.error = "error", str(exc)
         except Exception as exc:  # noqa: BLE001 - the run must always be closed, details stay out of the log
             result.status, result.error = "error", f"Error interno: {type(exc).__name__}"
@@ -494,9 +531,13 @@ class VytriaPriceSync:
         return result
 
     def _fetch_with_retries(self, eans: list[str]) -> list[OdooProduct]:
+        from price_trial import require_sync
         last: Exception | None = None
         for attempt in range(FETCH_ATTEMPTS):
+            require_sync(self.store, eans, self._now())
             try:
+                if isinstance(self.reader, SqlOdooPriceReader):
+                    return self.reader.fetch_guarded(eans, lambda: require_sync(self.store, eans, self._now()))
                 return self.reader.fetch(eans)
             except (OperationalError, InterfaceError, OSError) as exc:
                 last = exc

@@ -178,7 +178,8 @@ class AccessControl:
                           pause_seconds=row["pause_seconds"])
         # Competitor pause: the stricter of the budget and the existing per-competitor web pause.
         result["effective_pause"] = max(result["pause_seconds"] or 0.0, competitor_pause or 0.0)
-        return result
+        from price_trial import budget_limits
+        return budget_limits(self.store, scope_id, result) if scope == "competitor" else result
 
     def set_budget(self, scope: str, scope_id: str, *, daily_limit: int, per_minute_limit: int,
                    pause_seconds: float | None, actor: str) -> None:
@@ -243,6 +244,7 @@ class AccessControl:
     def reserve(self, competitor_id: str, method: str, *, purpose: str, ean: str = "", url: str = "",
                 provider: str | None = None) -> int:
         """Atomically check the gate and record the request before any I/O. Raises :class:`AccessDenied`."""
+        self._trial_guard(competitor_id, ean)
         scope, scope_id = ("provider", provider) if provider else ("competitor", competitor_id)
         with self.store._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -261,6 +263,13 @@ class AccessControl:
                     connection.rollback()
                 raise
         return request_id
+
+    def _trial_guard(self, competitor_id: str, ean: str) -> None:
+        from price_trial import TrialDenied, require_pair
+        try:
+            require_pair(self.store, competitor_id, ean, self._now())
+        except TrialDenied as exc:
+            raise AccessDenied(Decision(False, "trial_window", str(exc))) from exc
 
     def finish(self, request_id: int, result: str) -> None:
         with self.store._connect() as connection, connection:
@@ -411,6 +420,11 @@ class GovernedFetcher(WebFetcher):
             if request_guard is not None:
                 request_guard()
             request_id = self._reserve(url)
+            try:
+                self.access._trial_guard(self.competitor_id, self.ean)
+            except AccessDenied:
+                self.access.finish(request_id, "not_sent: trial_window")
+                raise
             if request_reserved is not None:
                 request_reserved(url, self.ean)
             try:
@@ -429,6 +443,7 @@ class GovernedFetcher(WebFetcher):
 
     def _reserve(self, url: str) -> int:
         while True:
+            self.access._trial_guard(self.competitor_id, self.ean)
             try:
                 return self.access.reserve(self.competitor_id, self.method, purpose=self.purpose, ean=self.ean,
                                            url=url)
