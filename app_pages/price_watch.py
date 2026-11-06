@@ -761,7 +761,7 @@ def render_competitor_card(store: PriceComparatorStore, cid: str, search: WebPri
 
 
 def _render_batch(store: PriceComparatorStore, names: dict[str, str]) -> None:
-    from price_batch import WatchBatch
+    from price_batch import WatchBatch, batch_pairs_export
 
     watch = PriceWatch(store).watchlist()
     if watch.empty:
@@ -870,7 +870,11 @@ def _render_batch(store: PriceComparatorStore, names: dict[str, str]) -> None:
         st.dataframe(pd.DataFrame(result["runs"]), hide_index=True, width="stretch")
         st.caption(f"Pares realmente procesados: {result['processed_pairs']}. "
                    "Un trabajo procesado puede reutilizar datos sin realizar una petición nueva.")
-        st.dataframe(pd.DataFrame(result["pairs"]), hide_index=True, width="stretch")
+        pair_export = batch_pairs_export(result["pairs"])
+        st.dataframe(pair_export, hide_index=True, width="stretch")
+        st.download_button("Exportar pares del lote (CSV)",
+                           pair_export.to_csv(index=False).encode("utf-8-sig"),
+                           "resultado-lote-pares.csv", "text/csv", key="batch_pairs_csv_export")
         st.download_button("Exportar resultado del lote (JSON)",
                            json.dumps(result, ensure_ascii=False, indent=2).encode("utf-8"),
                            "resultado-lote.json", "application/json", key="batch_result_export")

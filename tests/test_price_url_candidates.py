@@ -1,14 +1,16 @@
 """Documentary URL checks and explicitly SYNTHETIC shop responses. No captured HTML or live HTTP."""
 from dataclasses import asdict
+import csv
 import json
 import sqlite3
+from io import StringIO
 from urllib.parse import urlparse
 
 import pytest
 import requests
 from streamlit.testing.v1 import AppTest
 
-from price_batch import WatchBatch
+from price_batch import WatchBatch, batch_pairs_export
 from price_comparator import PriceComparatorStore, normalize_gtin
 from price_monitor import PriceMonitor
 from price_url_candidates import EXAMPLES, candidate_plan
@@ -19,6 +21,8 @@ PRADA = {"ean": "8056597875349", "brand": "Prada", "model": "PR 27ZS", "color": 
          "category": "All / Gafas de Sol"}
 FORD = {"ean": "889214042422", "brand": "Tom Ford", "model": "FT5634B", "color": "001",
         "category": "All / Monturas"}
+GUCCI = {"ean": "0889652494821", "brand": "Gucci", "model": "GG1660S", "color": "001",
+         "category": "All / Gafas de Sol"}
 
 
 @pytest.fixture(autouse=True)
@@ -111,14 +115,197 @@ def test_no_generation_outside_demonstrated_brand_category(shop, brand, category
 
 def test_aliases_do_not_expand_to_other_products():
     assert urls(plan_for(PRADA, "amevista")) == ["https://www.amevista.com/es/prada-0pr-27zs-16k08z"]
-    plan = plan_for({**PRADA, "color": "19J09Z"}, "amevista")
-    assert urls(plan) == ["https://www.amevista.com/es/prada-pr-27zs-19j09z"]
-    assert not plan_for({**PRADA, "model": "PR 65ZS", "color": "ZVN09T"}, "amevista").runnable
+    documented_pr = plan_for({**PRADA, "color": "19J09Z"}, "amevista")
+    assert urls(documented_pr) == ["https://www.amevista.com/es/prada-pr-27zs-19j09z"]
+    generated_pr = plan_for({**PRADA, "model": "PR 65ZS", "color": "ZVN09T"}, "amevista")
+    assert urls(generated_pr) == ["https://www.amevista.com/es/prada-pr-65zs-zvn09t"]
+    assert generated_pr.runnable[0].attributes["model_alias_rule"].startswith("Observed PR model prefix")
     tiffany = {**PRADA, "brand": "Tiffany & Co.", "model": "TF3104D", "color": "6216S4",
                "ean": "8056262010730"}
-    assert all("/tiffany-" in url for url in urls(plan_for(tiffany, "amevista")))
+    assert urls(plan_for(tiffany, "amevista")) == [
+        "https://www.amevista.com/es/tiffany-tf3104d-6216s4"
+    ]
+    assert urls(plan_for({**tiffany, "model": "TF3105D"}, "amevista")) == [
+        "https://www.amevista.com/es/tiffany-tf3105d-6216s4"
+    ]
     unknown = plan_for({**FORD, "model": "FT5737B", "color": "045"}, "optima")
     assert urls(unknown)[0].endswith("ft5737b-045.html")  # no universal "-B" rewrite
+
+
+@pytest.mark.parametrize("product,expected,evidence", [
+    ({**PRADA, "model": "PR 15WS", "color": "01R0A6"},
+     "https://www.amevista.com/es/prada-pr-15ws-01r0a6", ["E017", "E018"]),
+    ({**FORD, "brand": "Tom Ford", "model": "FT0711", "color": "01A",
+      "category": "All / Gafas de Sol"},
+     "https://www.amevista.com/es/tom-ford-ft0711-01a", ["E019"]),
+])
+def test_amevista_uses_documented_brand_model_color_patterns(product, expected, evidence):
+    plan = plan_for(product, "amevista")
+
+    assert urls(plan) == [expected]
+    assert plan.runnable[0].rule == "sample_pattern:amevista"
+    assert plan.runnable[0].evidence == evidence
+    assert plan.runnable[0].attributes["locale"] == "es (Spanish-market catalog; E021 documents a separate US URL)"
+
+
+@pytest.mark.parametrize("brand,category", [
+    ("Miu Miu", "sol"), ("Tom Ford", "montura"), ("Bottega Veneta", "sol"),
+])
+def test_amevista_excludes_undocumented_brand_category_combinations(brand, category):
+    product = {**PRADA, "brand": brand, "category": category, "model": "MODEL123", "color": "001"}
+
+    plan = plan_for(product, "amevista")
+
+    assert not plan.runnable
+    assert plan.reason_code == "needs_authorized_discovery"
+    if category != "sol":
+        assert "solo para gafas de sol" in plan.reason
+    else:
+        assert "Marca fuera" in plan.reason
+
+
+@pytest.mark.parametrize("product,expected", [
+    (GUCCI, "https://www.amevista.com/es/gucci-gg1660s-001"),
+    ({**GUCCI, "model": "GG1660S", "color": "002", "ean": "0889652494838"},
+     "https://www.amevista.com/es/gucci-gg1660s-002"),
+    ({**GUCCI, "model": "GG1680S", "color": "004", "ean": "0889652498782"},
+     "https://www.amevista.com/es/gucci-gg1680s-004"),
+])
+def test_amevista_gucci_candidates_are_scoped_and_not_ean_specific(product, expected):
+    plan = plan_for(product, "amevista")
+
+    assert urls(plan) == [expected]
+    provenance = plan.runnable[0].provenance()
+    assert provenance["rule"] == "sample_pattern:amevista"
+    assert provenance["evidence"] == ["user-provided candidate URL"]
+    assert provenance["origin"] == "user-provided candidate URL"
+    assert "not identity evidence" in provenance["attributes"]["evidence_note"]
+    assert not plan_for({**product, "category": "montura"}, "amevista").runnable
+    assert not plan_for({**product, "brand": "Ray Ban"}, "amevista").runnable
+
+
+def test_amevista_gucci_candidate_flows_through_preview_prepare_and_verified_identity(tmp_path):
+    site = Site(base="https://www.amevista.com", robots="User-agent: *\nAllow: /\n")
+    store, _, locator, _, cid = _env(tmp_path, site, name="Amevista", template=None, methods=("ficha",))
+    ean = normalize_gtin(GUCCI["ean"])
+    url = "https://www.amevista.com/es/gucci-gg1660s-001"
+    site.pages[url] = page(name="Gucci GG1660S 001", brand="Gucci", gtin=ean, price=123)
+    _watch(store, [(ean, "Gucci", "GG1660S", "001", "")])
+    batch = WatchBatch(store, locator=locator, monitor=PriceMonitor(store, transport=site))
+
+    preview = batch.preview([ean], [cid])
+
+    assert preview.iloc[0]["ready"]
+    assert preview.iloc[0]["candidate_count"] == 1
+    assert preview.iloc[0]["local_candidates"][0]["url"] == url
+    assert not site.calls and _urls(store, cid).empty
+    prepared = batch.prepare([ean], [cid])
+    assert prepared.iloc[0]["queue_state"] == "pending"
+    assert not site.calls and _urls(store, cid).empty
+    with store._connect() as con:
+        assert con.execute("SELECT COUNT(*) FROM offers").fetchone()[0] == 0
+
+    report = locator.run([cid], eans=[ean])
+
+    assert report.states["done"] == 1
+    assert report.outcomes[0]["candidate_plan"]["candidates"][0]["url"] == url
+    assert report.outcomes[0]["candidate_attempts"][0]["identity_status"] == "exact_match"
+    assert _urls(store, cid)["status"].tolist() == ["verified"]
+    assert _urls(store, cid)["url"].tolist() == [url]
+    with store._connect() as con:
+        assert con.execute("SELECT COUNT(*) FROM offers").fetchone()[0] == 0
+    assert site.calls == ["https://www.amevista.com/robots.txt", url]
+
+
+def test_amevista_gucci_supervised_batch_locates_then_monitors_without_vytria_sync(tmp_path):
+    site = Site(base="https://www.amevista.com", robots="User-agent: *\nAllow: /\n")
+    store, _, locator, _, cid = _env(tmp_path, site, name="Amevista", template=None, methods=("ficha",))
+    ean = normalize_gtin(GUCCI["ean"])
+    url = "https://www.amevista.com/es/gucci-gg1660s-001"
+    site.pages[url] = page(name="Gucci GG1660S 001", brand="Gucci", gtin=ean, price=123)
+    _watch(store, [(ean, "Gucci", "GG1660S", "001", "")])
+    monitor = PriceMonitor(store, transport=site)
+    batch = WatchBatch(store, locator=locator, monitor=monitor)
+
+    preview = batch.preview([ean], [cid])
+    assert preview.iloc[0]["ready"] and preview.iloc[0]["candidate_count"] == 1
+    prepared = batch.prepare([ean], [cid])
+    assert prepared.iloc[0]["ready"] and prepared.iloc[0]["queue_state"] == "pending"
+    assert site.calls == []
+
+    result = batch.execute([ean], [cid], approved=True, sync_vytria=False)
+
+    assert result["vytria"] is None
+    assert result["processed_pairs"] == 1
+    pair = result["pairs"][0]
+    assert pair["processed"] and pair["category"] == "checked_now"
+    assert pair["outcomes"][0]["candidate_plan"]["candidates"][0]["url"] == url
+    assert pair["outcomes"][0]["candidate_attempts"][0]["identity_status"] == "exact_match"
+    assert _urls(store, cid)["status"].tolist() == ["verified"]
+    assert _urls(store, cid)["url"].tolist() == [url]
+    assert result["runs"][0]["location_processed"] == 1
+    assert result["runs"][0]["monitor_processed"] == 1
+    assert "https://www.amevista.com/robots.txt" in site.calls
+    assert url in site.calls
+    csv_pair = next(csv.DictReader(StringIO(batch_pairs_export(result["pairs"]).to_csv(index=False))))
+    json_result = json.loads(json.dumps(result, ensure_ascii=False))
+    assert json.loads(csv_pair["outcomes"]) == json_result["pairs"][0]["outcomes"]
+    with store._connect() as con:
+        assert con.execute("SELECT COUNT(*) FROM offers WHERE ean=? AND competitor_id=?",
+                           (ean, cid)).fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("page_html,expected_state", [
+    (lambda ean: page(name="Gucci GG1660S 002", brand="Gucci", gtin=ean, price=123), "review"),
+    (lambda ean: '<script type="application/ld+json">' + json.dumps({
+        "@type": "Product", "name": "Gucci GG1660S 001", "brand": "Gucci",
+        "gtin13": ean, "gtin12": "889652494838",
+        "offers": {"@type": "Offer", "price": "123", "priceCurrency": "EUR",
+                   "availability": "https://schema.org/InStock"},
+    }) + "</script>", "review"),
+    (lambda ean: '<script type="application/ld+json">' + json.dumps({
+        "@type": "CollectionPage", "name": "Gucci GG1660S 001",
+        "url": "https://www.amevista.com/es/gucci-gg1660s-001",
+    }) + "</script>", "unavailable"),
+])
+def test_amevista_gucci_candidate_does_not_confirm_contradictory_variants(tmp_path, page_html, expected_state):
+    site = Site(base="https://www.amevista.com", robots="User-agent: *\nAllow: /\n")
+    store, _, locator, _, cid = _env(tmp_path, site, name="Amevista", template=None, methods=("ficha",))
+    ean = normalize_gtin(GUCCI["ean"])
+    url = "https://www.amevista.com/es/gucci-gg1660s-001"
+    site.pages[url] = page_html(ean)
+    _watch(store, [(ean, "Gucci", "GG1660S", "001", "")])
+
+    report = locator.run([cid], eans=[ean])
+
+    assert _jobs(store, cid)["state"].tolist() == [expected_state]
+    attempt = report.outcomes[0]["candidate_attempts"][0]
+    assert attempt["candidate_url"] == url
+    assert site.calls == ["https://www.amevista.com/robots.txt", url]
+    if expected_state == "review":
+        assert _urls(store, cid)["status"].tolist() == ["probable"]
+        assert _urls(store, cid)["url"].tolist() == [url]
+    else:
+        assert attempt["check_state"] == "no_product"
+        assert _urls(store, cid).empty
+    with store._connect() as con:
+        assert con.execute("SELECT COUNT(*) FROM offers").fetchone()[0] == 0
+
+
+def test_amevista_gucci_candidate_does_not_bypass_missing_ficha_permission(tmp_path):
+    site = Site(base="https://www.amevista.com", robots="User-agent: *\nAllow: /\n")
+    store, _, locator, _, cid = _env(tmp_path, site, name="Amevista", template=None, methods=())
+    ean = normalize_gtin(GUCCI["ean"])
+    _watch(store, [(ean, "Gucci", "GG1660S", "001", "")])
+    batch = WatchBatch(store, locator=locator, monitor=PriceMonitor(store, transport=site))
+
+    preview = batch.preview([ean], [cid])
+    prepared = batch.prepare([ean], [cid])
+
+    assert preview.iloc[0]["candidate_count"] == 1
+    assert not preview.iloc[0]["ready"] and not prepared.iloc[0]["ready"]
+    assert "fichas de producto" in preview.iloc[0]["defer_reason"].casefold()
+    assert site.calls == []
 
 
 def test_opaque_ids_are_mapped_not_calculated_and_locales_are_not_rewritten():
@@ -238,6 +425,46 @@ def test_preview_is_read_only_and_later_authorized_run_preserves_provenance(tmp_
     assert locator.run([cid]).processed == 0 and dump(store) == after
     assert len(site.calls) == 2  # synthetic robots + one synthetic ficha, no search
     assert batch.preview([PRADA["ean"]], [cid])["candidate_count"].tolist() == [0]
+
+
+def test_candidate_trace_keeps_category_rejection_and_url_lineage(tmp_path):
+    store, _, locator, _, cid, site, url = synthetic_env(tmp_path)
+    site.pages[url] = (
+        '<script type="application/ld+json">'
+        + json.dumps({"@context": "https://schema.org", "@type": "CollectionPage", "url": url})
+        + "</script>"
+    )
+
+    report = locator.run([cid], eans=[PRADA["ean"]])
+
+    assert report.outcomes[0]["state"] == "unavailable"
+    assert report.outcomes[0]["candidate_plan"]["candidates"][0]["url"] == url
+    attempt = report.outcomes[0]["candidate_attempts"][0]
+    assert attempt["candidate_url"] == url
+    assert attempt["requested_url"] == url
+    assert attempt["final_url"] == url
+    assert attempt["check_state"] == "no_product"
+    assert "CollectionPage" in attempt["rejection"]
+    assert any("sin autorizar" in reason for reason in report.outcomes[0]["discovery"]["restrictions"])
+    assert attempt["requests"] == 2  # synthetic robots.txt plus the candidate ficha
+    assert site.calls == ["https://optica-optima.com/robots.txt", url]
+    assert _urls(store, cid).empty
+    with store._connect() as con:
+        assert con.execute("SELECT COUNT(*) FROM offers").fetchone()[0] == 0
+
+
+def test_batch_csv_export_preserves_nested_outcomes_as_json():
+    outcomes = [{"ean": PRADA["ean"], "state": "unavailable",
+                 "candidate_attempts": [{"candidate_url": "https://example.test/p",
+                                         "rejection": "no_product: CollectionPage"}]}]
+    pairs = [{"ean": PRADA["ean"], "outcomes": outcomes}]
+    frame = batch_pairs_export(pairs)
+    csv_row = next(csv.DictReader(StringIO(frame.to_csv(index=False))))
+    json_payload = json.dumps({"pairs": pairs}, ensure_ascii=False)
+
+    assert "[object Object]" not in csv_row["outcomes"]
+    assert json.loads(csv_row["outcomes"]) == outcomes
+    assert json.loads(json_payload)["pairs"] == pairs
 
 
 @pytest.mark.parametrize("restriction", ["permission", "incident", "legacy_block", "legacy_robots", "budget", "robots"])
