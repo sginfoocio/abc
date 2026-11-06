@@ -217,16 +217,58 @@ def test_amevista_gucci_candidate_flows_through_preview_prepare_and_verified_ide
     assert site.calls == ["https://www.amevista.com/robots.txt", url]
 
 
-@pytest.mark.parametrize("page_html", [
-    lambda ean: page(name="Gucci GG1660S 002", brand="Gucci", gtin=ean, price=123),
-    lambda ean: '<script type="application/ld+json">' + json.dumps({
+def test_amevista_gucci_supervised_batch_locates_then_monitors_without_vytria_sync(tmp_path):
+    site = Site(base="https://www.amevista.com", robots="User-agent: *\nAllow: /\n")
+    store, _, locator, _, cid = _env(tmp_path, site, name="Amevista", template=None, methods=("ficha",))
+    ean = normalize_gtin(GUCCI["ean"])
+    url = "https://www.amevista.com/es/gucci-gg1660s-001"
+    site.pages[url] = page(name="Gucci GG1660S 001", brand="Gucci", gtin=ean, price=123)
+    _watch(store, [(ean, "Gucci", "GG1660S", "001", "")])
+    monitor = PriceMonitor(store, transport=site)
+    batch = WatchBatch(store, locator=locator, monitor=monitor)
+
+    preview = batch.preview([ean], [cid])
+    assert preview.iloc[0]["ready"] and preview.iloc[0]["candidate_count"] == 1
+    prepared = batch.prepare([ean], [cid])
+    assert prepared.iloc[0]["ready"] and prepared.iloc[0]["queue_state"] == "pending"
+    assert site.calls == []
+
+    result = batch.execute([ean], [cid], approved=True, sync_vytria=False)
+
+    assert result["vytria"] is None
+    assert result["processed_pairs"] == 1
+    pair = result["pairs"][0]
+    assert pair["processed"] and pair["category"] == "checked_now"
+    assert pair["outcomes"][0]["candidate_plan"]["candidates"][0]["url"] == url
+    assert pair["outcomes"][0]["candidate_attempts"][0]["identity_status"] == "exact_match"
+    assert _urls(store, cid)["status"].tolist() == ["verified"]
+    assert _urls(store, cid)["url"].tolist() == [url]
+    assert result["runs"][0]["location_processed"] == 1
+    assert result["runs"][0]["monitor_processed"] == 1
+    assert "https://www.amevista.com/robots.txt" in site.calls
+    assert url in site.calls
+    csv_pair = next(csv.DictReader(StringIO(batch_pairs_export(result["pairs"]).to_csv(index=False))))
+    json_result = json.loads(json.dumps(result, ensure_ascii=False))
+    assert json.loads(csv_pair["outcomes"]) == json_result["pairs"][0]["outcomes"]
+    with store._connect() as con:
+        assert con.execute("SELECT COUNT(*) FROM offers WHERE ean=? AND competitor_id=?",
+                           (ean, cid)).fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("page_html,expected_state", [
+    (lambda ean: page(name="Gucci GG1660S 002", brand="Gucci", gtin=ean, price=123), "review"),
+    (lambda ean: '<script type="application/ld+json">' + json.dumps({
         "@type": "Product", "name": "Gucci GG1660S 001", "brand": "Gucci",
         "gtin13": ean, "gtin12": "889652494838",
         "offers": {"@type": "Offer", "price": "123", "priceCurrency": "EUR",
                    "availability": "https://schema.org/InStock"},
-    }) + "</script>",
+    }) + "</script>", "review"),
+    (lambda ean: '<script type="application/ld+json">' + json.dumps({
+        "@type": "CollectionPage", "name": "Gucci GG1660S 001",
+        "url": "https://www.amevista.com/es/gucci-gg1660s-001",
+    }) + "</script>", "unavailable"),
 ])
-def test_amevista_gucci_candidate_does_not_confirm_contradictory_variants(tmp_path, page_html):
+def test_amevista_gucci_candidate_does_not_confirm_contradictory_variants(tmp_path, page_html, expected_state):
     site = Site(base="https://www.amevista.com", robots="User-agent: *\nAllow: /\n")
     store, _, locator, _, cid = _env(tmp_path, site, name="Amevista", template=None, methods=("ficha",))
     ean = normalize_gtin(GUCCI["ean"])
@@ -234,11 +276,18 @@ def test_amevista_gucci_candidate_does_not_confirm_contradictory_variants(tmp_pa
     site.pages[url] = page_html(ean)
     _watch(store, [(ean, "Gucci", "GG1660S", "001", "")])
 
-    locator.run([cid], eans=[ean])
+    report = locator.run([cid], eans=[ean])
 
-    assert _jobs(store, cid)["state"].tolist() == ["review"]
-    assert _urls(store, cid)["status"].tolist() == ["probable"]
-    assert _urls(store, cid)["url"].tolist() == [url]
+    assert _jobs(store, cid)["state"].tolist() == [expected_state]
+    attempt = report.outcomes[0]["candidate_attempts"][0]
+    assert attempt["candidate_url"] == url
+    assert site.calls == ["https://www.amevista.com/robots.txt", url]
+    if expected_state == "review":
+        assert _urls(store, cid)["status"].tolist() == ["probable"]
+        assert _urls(store, cid)["url"].tolist() == [url]
+    else:
+        assert attempt["check_state"] == "no_product"
+        assert _urls(store, cid).empty
     with store._connect() as con:
         assert con.execute("SELECT COUNT(*) FROM offers").fetchone()[0] == 0
 
@@ -408,11 +457,14 @@ def test_batch_csv_export_preserves_nested_outcomes_as_json():
     outcomes = [{"ean": PRADA["ean"], "state": "unavailable",
                  "candidate_attempts": [{"candidate_url": "https://example.test/p",
                                          "rejection": "no_product: CollectionPage"}]}]
-    frame = batch_pairs_export([{"ean": PRADA["ean"], "outcomes": outcomes}])
+    pairs = [{"ean": PRADA["ean"], "outcomes": outcomes}]
+    frame = batch_pairs_export(pairs)
     csv_row = next(csv.DictReader(StringIO(frame.to_csv(index=False))))
+    json_payload = json.dumps({"pairs": pairs}, ensure_ascii=False)
 
     assert "[object Object]" not in csv_row["outcomes"]
     assert json.loads(csv_row["outcomes"]) == outcomes
+    assert json.loads(json_payload)["pairs"] == pairs
 
 
 @pytest.mark.parametrize("restriction", ["permission", "incident", "legacy_block", "legacy_robots", "budget", "robots"])
