@@ -1,6 +1,9 @@
 """Synthetic shops/Odoo only. No Cloud data or captured commercial HTML."""
 from datetime import datetime, timedelta
 import json
+from pathlib import Path
+import runpy
+import sys
 
 import pytest
 import requests
@@ -10,6 +13,7 @@ from price_batch import WatchBatch, batch_pairs_export
 from price_comparator import PriceComparatorStore
 from price_monitor import PriceMonitor
 from price_trial import PriceTrial, TrialDenied, manifest, require_pair, trial_row
+import price_trial
 from price_web_extract import extract_product, product_page_rejection
 from tests.test_price_locator import Crash, Site, _env, _watch
 from tests.web_fixtures import page
@@ -55,6 +59,106 @@ def only_pair(store, cid, ean, cycle=0):
         con.execute("UPDATE price_trial_pairs SET state='done' WHERE cycle=?", (cycle,))
         con.execute("""UPDATE price_trial_pairs SET state='pending' WHERE cycle=? AND competitor_id=? AND ean=?""",
                     (cycle, cid, ean))
+
+
+def test_real_script_entrypoint_uses_canonical_sync_context(trial, monkeypatch):
+    service, _, _, _, _, _, _, _, reader = trial
+    called = []
+
+    def supervisor(command):
+        called.append(command)
+        # Run the actual synchronizer and trial guard, not a no-op sync fixture.
+        service.tick(max_pairs=0)
+        return 0
+
+    monkeypatch.setattr(price_trial, "serve", supervisor)
+    monkeypatch.setattr(sys, "argv", ["price_trial.py", "--serve", "synthetic-app", "--flag"])
+    with pytest.raises(SystemExit) as exc:
+        runpy.run_path(str(Path(price_trial.__file__)), run_name="__main__")
+    assert exc.value.code == 0
+    assert called == [["synthetic-app", "--flag"]]
+    assert reader.calls == [manifest()["eans"]]
+    assert service.report()["status"] == "active"
+
+
+def initial_failure(service, store):
+    with store._connect() as con, con:
+        con.execute("UPDATE price_trial SET status='failed',error=?,stopped_at=?",
+                    (price_trial.INITIAL_SYNC_FAILURE, service.clock().isoformat()))
+        con.execute("UPDATE price_trial_cycles SET sync_state='running' WHERE cycle=0")
+
+
+def test_resume_pre_io_failure_archives_state_without_extending_window(trial):
+    service, store, _, _, _, _, _, _, reader = trial
+    initial_failure(service, store)
+    before = service.report()  # The old report passively closed untouched pending pairs.
+    assert all(p["state"] == "done" for p in before["pairs"])
+    resumed = service.resume_initial_sync_failure(actor="operator", build_commit="b" * 40)
+    for field in ("started_at", "expires_at", "manifest", "limits", "build_commit"):
+        assert resumed[field] == before[field]
+    assert resumed["status"] == "active" and len(resumed["recoveries"]) == 1
+    assert resumed["recoveries"][0]["note"]["previous"]["trial"]["error"] == price_trial.INITIAL_SYNC_FAILURE
+    assert all(p["state"] == "pending" for p in resumed["pairs"])
+    assert not reader.calls
+    service.tick(max_pairs=0)
+    assert reader.calls == [manifest()["eans"]]
+    service.tick(max_pairs=0)
+    assert len(reader.calls) == 1
+    with pytest.raises(ValueError):
+        service.resume_initial_sync_failure(actor="operator", build_commit="b" * 40)
+
+
+@pytest.mark.parametrize("unsafe", ["expired", "stopped", "different_error", "old_build", "sync", "pair", "receipt", "http"])
+def test_recovery_never_replays_uncertain_work_or_restarts_window(trial, unsafe):
+    service, store, _, _, _, clock, cid, _, _ = trial
+    initial_failure(service, store)
+    build = "a" * 40 if unsafe == "old_build" else "b" * 40
+    if unsafe == "expired":
+        clock.advance(hours=73)
+        service.heartbeat()
+    with store._connect() as con, con:
+        if unsafe == "stopped":
+            con.execute("UPDATE price_trial SET status='stopped'")
+        elif unsafe == "different_error":
+            con.execute("UPDATE price_trial SET error='Other failure'")
+        elif unsafe == "sync":
+            con.execute("""INSERT INTO vytria_sync_runs(trigger,started_at,status)
+                VALUES('trial:72h',?,'running')""", (clock().isoformat(),))
+        elif unsafe == "pair":
+            con.execute("UPDATE price_trial_pairs SET started_at=? WHERE cycle=0", (clock().isoformat(),))
+        elif unsafe == "receipt":
+            con.execute("UPDATE price_trial_pairs SET receipt=? WHERE cycle=0", (json.dumps({"segments": []}),))
+        elif unsafe == "http":
+            con.execute("""INSERT INTO access_requests(scope,scope_id,competitor_id,method,purpose,url,reserved_at)
+                VALUES('competitor',?,?,'ficha','trial','https://example.test/p',?)""", (cid, cid, clock().isoformat()))
+    with store._connect() as con:
+        before = "\n".join(con.iterdump())
+    with pytest.raises(ValueError):
+        service.resume_initial_sync_failure(actor="operator", build_commit=build)
+    with store._connect() as con:
+        assert "\n".join(con.iterdump()) == before
+
+
+def test_recovery_ui_requires_explicit_approval_and_does_not_run_queries(trial, monkeypatch):
+    import build_info
+    from streamlit.testing.v1 import AppTest
+
+    service, store, _, _, _, _, _, site, reader = trial
+    initial_failure(service, store)
+    monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
+    monkeypatch.setattr(price_trial, "PriceTrial", lambda store: service)
+    monkeypatch.setattr(build_info, "load_build_info", lambda: {"commit": "b" * 40, "build": "actions-test"})
+    app = AppTest.from_string(
+        "from price_comparator import PriceComparatorStore\n"
+        "from app_pages.price_watch import _render_trial\n"
+        "_render_trial(PriceComparatorStore())").run(timeout=30)
+    assert not app.exception and app.button(key="trial_resume").disabled
+    app.checkbox(key="trial_resume_approval").set_value(True).run(timeout=30)
+    assert not app.button(key="trial_resume").disabled
+    app.button(key="trial_resume").click().run(timeout=30)
+    assert not app.exception
+    assert service.report()["status"] == "active"
+    assert not reader.calls and not site.calls
 
 
 def test_manifest_and_persisted_window_do_not_expand_after_restart(trial):

@@ -91,6 +91,37 @@ explícita, no borrar el estado de este experimento.
 
 ## Historial e informe final
 
+### Recuperación del fallo inicial de contexto
+
+El supervisor del contenedor debe ejecutarse desde el módulo canónico `price_trial`.
+Aunque Docker invoque el archivo como `__main__`, el punto de entrada delega en
+`price_trial.serve`: así comparte la misma `ContextVar` con los guardas del
+sincronizador y de las peticiones. Ejecutar dos copias del módulo hacía que la
+sincronización propia se rechazase como externa antes de empezar.
+
+Para el error exacto `TrialDenied: EAN reservados al sincronizador filtrado del
+piloto de 72 h`, la sección del piloto ofrece **Reanudar tras corregir el arranque**
+después de desplegar una compilación distinta de la original. Requiere autorización
+manual y vuelve a comprobar, bajo las reservas del trabajador, las seis tiendas y
+la sincronización, que:
+
+- la ventana original sigue vigente y el manifiesto es idéntico;
+- solo quedó la reserva inicial de sincronización, sin recibo ni ejecución Odoo;
+- no hay peticiones de las seis tiendas desde el inicio;
+- ningún par fue iniciado ni tiene recibos de ejecución o consumo incierto.
+
+Los cierres pasivos que produjo consultar el informe del piloto fallido no se
+confunden con trabajo ejecutado. Se archivan todos sus registros previos, la
+compilación de recuperación y el responsable en `access_audit`; el JSON incluye
+`recoveries`. Solo entonces se devuelven a pendiente esos pares intactos y la
+reserva vacía de sincronización. Se conservan el inicio, la caducidad, el actor y
+commit originales, el manifiesto y los límites: no empieza una nueva ventana.
+
+No se recuperan con este mecanismo otros errores, una parada voluntaria, un
+piloto caducado o reservas con trabajo potencialmente realizado. El trabajador
+mantiene heartbeat, sin consultas, mientras un fallo espera revisión; termina
+al llegar la caducidad absoluta incluso si no se ha recuperado.
+
 El servidor persiste ventana, ciclos y recibos por par en `price_trial`,
 `price_trial_cycles` y `price_trial_pairs`. El informe JSON vuelve a construirse
 desde esas tablas, sin consultas comerciales, incluso tras salir de la pantalla
