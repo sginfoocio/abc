@@ -364,7 +364,7 @@ def _render_summary_cards(summary: pd.DataFrame) -> None:
     for column, (segment, label) in zip(st.columns(5), analytics.SUMMARY_SEGMENTS.items()):
         selected = analytics.summary_segment(summary, segment)
         with column.container(border=True):
-            st.metric(label, len(selected))
+            st.metric(f"Productos · {label}", len(selected))
             st.button("Ver productos", key=f"summary_view_{segment}", width="stretch",
                       disabled=selected.empty, on_click=_summary_focus, args=(segment,),
                       type="primary" if st.session_state.get("summary_focus") == segment else "secondary",

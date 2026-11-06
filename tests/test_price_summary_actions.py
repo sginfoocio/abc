@@ -104,6 +104,14 @@ def test_cards_show_matching_products_and_clear_without_touching_shared_filters(
         f"_render_summary_cards(pd.DataFrame(json.loads({json.dumps(records)!r})))\n"
     ).run(timeout=30)
     assert not app.exception
+    metrics = [(metric.label, metric.value) for metric in app.metric]
+    assert metrics == [
+        ("Productos · Más barato", "1"),
+        ("Productos · Mismo precio", "1"),
+        ("Productos · Más caro", "1"),
+        ("Productos · Sin precio Vytria", "1"),
+        ("Productos · Sin oferta comparable", "1"),
+    ]
     app.button(key="summary_view_missing_own").click().run(timeout=30)
     assert not app.exception
     assert app.dataframe[0].value["EAN"].tolist() == ["3"]
@@ -112,6 +120,42 @@ def test_cards_show_matching_products_and_clear_without_touching_shared_filters(
     assert app.dataframe[0].value["EAN"].tolist() == ["2"]
     app.button(key="summary_clear_focus").click().run(timeout=30)
     assert not app.exception and not app.dataframe
+
+
+@pytest.mark.parametrize("rival_price, higher_pct, competitive_pct, counts", [
+    (None, "Sin datos", "Sin datos", (0, 0, 0, 0, 1)),
+    (90, "100,0 %", "0,0 %", (0, 0, 1, 0, 0)),
+    (100, "0,0 %", "100,0 %", (0, 1, 0, 0, 0)),
+    (110, "0,0 %", "100,0 %", (1, 0, 0, 0, 0)),
+])
+def test_summary_percentages_and_product_counts_have_distinct_labels(
+    tmp_path, monkeypatch, rival_price, higher_pct, competitive_pct, counts,
+):
+    store = _fresh(tmp_path, monkeypatch)
+    _own(store, [(5, 100.0)])
+    if rival_price is not None:
+        _offers(store, [("Tienda EUR", rival_price, 1)])
+    monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
+
+    app = AppTest.from_string(
+        "from app_pages.price_comparator import render_price_comparator_page\n"
+        "render_price_comparator_page()\n"
+    ).run(timeout=60)
+
+    assert not app.exception
+    labels = [metric.label for metric in app.metric]
+    card_labels = (
+        "Productos · Más barato", "Productos · Mismo precio", "Productos · Más caro",
+        "Productos · Sin precio Vytria", "Productos · Sin oferta comparable",
+    )
+    for label in (*card_labels, "Productos comparados", "Igual o más barato",
+                  "Más caro", "Diferencia media vs. mejor"):
+        assert labels.count(label) == 1
+    values = {metric.label: metric.value for metric in app.metric}
+    assert values["Más caro"] == higher_pct
+    assert values["Igual o más barato"] == competitive_pct
+    assert values["Productos comparados"] == ("0 / 1" if rival_price is None else "1 / 1")
+    assert [values[label] for label in card_labels] == [str(count) for count in counts]
 
 
 def test_ranking_toggle_does_not_present_a_brand_total_as_competitor_observations():
