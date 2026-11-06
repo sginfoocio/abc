@@ -15,6 +15,16 @@ from price_references import key, model_key, normalize_caliber, tokens
 REVIEW_DATE = "2026-11-04"
 REVIEW_BASE = "92243628b4e925ba9d549b076580726c383a43ac"
 EVIDENCE_SOURCE = "Diagonal_evidencia_Copilot/Evidencias_47.csv"
+SUPPLIED_PATTERN_DATE = "2026-11-06"
+SUPPLIED_PATTERNS = {
+    "domanci": (
+        "https://domanci.com/es/gafas-de-sol/miu-miu-mu-11zs-16k5s0-51.html",
+    ),
+    "congafas": (
+        "https://www.congafasdesol.com/prada-pr-d01s-0cd80l.html",
+        "https://www.congafasdesol.com/prada-pr06ys-09q5s0.html",
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -150,13 +160,15 @@ class UrlCandidate:
     origin: str = EVIDENCE_SOURCE
     state: str = "pending_verification"
     reason: str = ""
+    review_date: str = REVIEW_DATE
+    review_base: str = REVIEW_BASE
 
     @property
     def runnable(self) -> bool:
         return self.state == "pending_verification"
 
     def provenance(self) -> dict:
-        return {**asdict(self), "review_date": REVIEW_DATE, "review_base": REVIEW_BASE}
+        return asdict(self)
 
 
 @dataclass
@@ -183,6 +195,50 @@ def _slug(value: str) -> str:
     return "-".join(tokens(value)).lower()
 
 
+def _supplied_pattern_plan(product: dict, shop: str, category: str, attributes: dict) -> CandidatePlan:
+    """User-supplied route hypotheses; page identity and access remain governed by the reader."""
+    if shop == "congafas" and category != "sol":
+        return CandidatePlan(reason_code="needs_authorized_discovery",
+                             reason="El patrón aportado de ConGafasDeSol corresponde a gafas de sol")
+    used = dict(attributes)
+    used["pattern_examples"] = " | ".join(SUPPLIED_PATTERNS[shop])
+    used["evidence_note"] = "User-supplied route pattern; not captured HTTP or verified identity"
+    model = model_key(product["model"])
+    model_slug = _slug(product["model"])
+    prefix = re.fullmatch(r"(PR|MU)([A-Z0-9]+)", model)
+    if prefix:
+        model_slug = f"{prefix[1].lower()}-{prefix[2].lower()}"
+    elif re.fullmatch(r"FT\d{4}[A-Z]?", model):
+        model_slug = model.lower()
+    brand_slug, color = _slug(product["brand"]), key(product["color"]).lower()
+    if shop == "domanci":
+        lens = normalize_caliber(product.get("caliber", "")).partition("-")[0]
+        if not lens:
+            return CandidatePlan(reason_code="missing_attribute",
+                                 reason="Falta calibre asociado al EAN para construir la URL Domanci; no se infiere")
+        used["caliber"] = lens
+        used["dimension_source"] = "Explicit caliber on the target product record"
+        section = "gafas-de-sol" if category == "sol" else "monturas"
+        urls = [f"https://domanci.com/es/{section}/{brand_slug}-{model_slug}-{color}-{lens}.html"]
+        evidence = ["user:domanci-route-2026-11-06", "E032", "E033"]
+    else:
+        # Two supplied Prada examples demonstrate both PR-06YS and PR06YS spelling.
+        # Try no more than these two deterministic spellings, never a list of colour/size guesses.
+        spellings = [model_slug]
+        if key(product["brand"]) == "PRADA" and prefix and prefix[1] == "PR":
+            compact = model.lower()
+            spellings = [compact, model_slug] if prefix[2][0].isdigit() else [model_slug, compact]
+        urls = [f"https://www.congafasdesol.com/{brand_slug}-{spelling}-{color}.html"
+                for spelling in dict.fromkeys(spellings)]
+        evidence = ["user:congafas-route-2026-11-06"]
+    return CandidatePlan([
+        UrlCandidate(url, f"supplied_pattern:{shop}", used, evidence,
+                     origin="User-provided URL patterns, 2026-11-06",
+                     review_date=SUPPLIED_PATTERN_DATE, review_base="")
+        for url in urls
+    ])
+
+
 def candidate_plan(product: dict, domain: str) -> CandidatePlan:
     """Pure preview. Missing dimensions/opaque IDs are never enumerated or inferred from another colour."""
     host = urlparse(domain if "://" in domain else "https://" + domain).hostname or ""
@@ -199,6 +255,10 @@ def candidate_plan(product: dict, domain: str) -> CandidatePlan:
     brand, model, color = key(product["brand"]), model_key(product["model"]), key(product["color"])
     attributes = {name: str(product[name]) for name in ("ean", "brand", "model", "color", "category")}
     attributes["ean"] = ean
+    # An explicitly sized target can use the supplied Domanci route without treating
+    # an old historical URL (which did not associate its size to this EAN) as verified.
+    if shop == "domanci" and normalize_caliber(product.get("caliber", "")):
+        return _supplied_pattern_plan(product, shop, category, attributes)
     examples = [example for example in EXAMPLES if example.shop == shop]
     candidates: dict[str, UrlCandidate] = {}
     for example in examples:
@@ -229,6 +289,9 @@ def candidate_plan(product: dict, domain: str) -> CandidatePlan:
         return CandidatePlan(list(candidates.values()),
                              "needs_authorized_discovery" if needs_review else "",
                              "; ".join(candidate.reason for candidate in candidates.values() if candidate.reason))
+
+    if shop in SUPPLIED_PATTERNS:
+        return _supplied_pattern_plan(product, shop, category, attributes)
 
     # Keep generated URLs within the reviewed scopes and explicitly supplied patterns.
     scopes = {
