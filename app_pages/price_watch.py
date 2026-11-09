@@ -791,6 +791,7 @@ def _render_trial(store: PriceComparatorStore) -> None:
                     _refresh("Ventana persistida. El trabajador del servidor ejecutará el primer ciclo.")
                 except (ValueError, RuntimeError, Timeout) as exc:
                     st.error(str(exc))
+            _render_continuity(store, service)
             return
         st.write({name: report[name] for name in ("status", "build_commit", "started_at", "expires_at",
                                                 "started_at_madrid", "expires_at_madrid", "heartbeat_at", "error")})
@@ -801,6 +802,14 @@ def _render_trial(store: PriceComparatorStore) -> None:
         st.caption("La configuración no demuestra ejecución: compruebe el heartbeat y los recibos de cada ciclo. "
                    "Los demás disparadores no pueden consultar estos pares, tampoco después de caducar.")
         st.dataframe(pd.DataFrame.from_dict(report["summary"], orient="index"), width="stretch")
+        deferred = [{
+            "ciclo": pair["cycle"], "competidor": pair["competitor_id"], "EAN": pair["ean"],
+            "estado": pair["state"], "próxima comprobación": pair.get("next_check_at"),
+            "motivo": pair.get("defer_reason") or pair.get("pending_reason", ""),
+        } for pair in report["pairs"] if pair["state"] == "pending"]
+        if deferred:
+            st.caption("Las fechas y motivos de cada par pendiente se conservan; `done` no equivale a consultado.")
+            st.dataframe(pd.DataFrame(deferred), width="stretch", hide_index=True)
         st.download_button("Descargar historial e informe del piloto (JSON)",
                            json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8"),
                            "piloto-72h-historial.json", "application/json", key="trial_report")
@@ -825,6 +834,102 @@ def _render_trial(store: PriceComparatorStore) -> None:
         if report["status"] == "active" and st.button("Detener piloto ahora", key="trial_stop"):
             service.stop(actor=_actor())
             _refresh("Piloto detenido: no se iniciarán consultas nuevas. Los recibos se conservan.")
+    _render_continuity(store, service)
+
+
+def _render_continuity(store: PriceComparatorStore, service=None) -> None:
+    from filelock import Timeout
+    from build_info import load_build_info
+    from price_trial import PriceTrial, continuity_config
+
+    service = service or PriceTrial(store)
+    with st.expander("Continuidad de vigilancia · misma selección, activación independiente"):
+        config = continuity_config()
+        frozen = config["manifest"]
+        st.caption(
+            "Configuración preparada y desactivada. Reutiliza el manifiesto original de 100 EAN × seis tiendas; "
+            "no modifica ni prolonga el piloto expirado. La sincronización Vytria/Odoo es solo de lectura y "
+            "queda limitada a esos 100 EAN."
+        )
+        st.write({
+            "manifest_sha256": config["manifest_sha256"],
+            "responsable": "obligatorio al preparar y al activar; no se asigna una identidad por suposición",
+            "frecuencia de ofertas verificadas": f"{config['offer_check_interval_hours']} horas",
+            "frecuencia de sincronización": f"{config['interval_hours']} horas",
+            "presupuesto móvil": f"{config['daily_http_limit']} HTTP / 24 h por competidor",
+            "límite por minuto": config["per_minute_limit"],
+            "pausa efectiva mínima": f"{config['minimum_pause_seconds']} segundos",
+            "controles": config["controls"],
+            "inicio": "instante de activación, persistido en UTC y Madrid; no hay consultas mientras esté preparada",
+        })
+        st.json({"eans": frozen["eans"], "competitors": frozen["competitors"], "pairs": frozen["pairs"]})
+        st.download_button(
+            "Descargar configuración exacta de continuidad",
+            json.dumps(config, ensure_ascii=False, indent=2).encode("utf-8"),
+            "price-watch-continuity.json", "application/json", key="continuity_config_download",
+        )
+        report = service.continuity_report()
+        if report is None:
+            try:
+                prepared = service.continuity_preflight()
+            except ValueError as exc:
+                st.warning(str(exc))
+                return
+            st.dataframe(pd.DataFrame([
+                {"competitor_id": cid, **budget} for cid, budget in prepared["limits"].items()
+            ]), hide_index=True)
+            actor = st.text_input("Responsable de la preparación", value=config["responsible_default"] or "",
+                                  key="continuity_prepare_actor")
+            if st.button("Registrar configuración preparada (sin consultas)", key="continuity_prepare"):
+                try:
+                    service.prepare_continuity(actor=actor)
+                    _refresh("Configuración persistida como preparada; no se ha activado ni consultado ninguna tienda.")
+                except (ValueError, RuntimeError, Timeout) as exc:
+                    st.error(str(exc))
+            return
+        st.write({name: report[name] for name in (
+            "status", "actor", "build_commit", "prepared_at_madrid", "started_at_madrid",
+            "paused_at_madrid", "stopped_at_madrid", "heartbeat_at_madrid", "next_sync_at_madrid", "error",
+        )})
+        st.dataframe(pd.DataFrame([report["summary"]]), hide_index=True)
+        st.download_button(
+            "Descargar informe de continuidad",
+            json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8"),
+            "price-watch-continuity-report.json", "application/json", key="continuity_report_download",
+        )
+        if report["status"] == "prepared":
+            info = load_build_info()
+            actor = st.text_input("Responsable de la activación", value=report["actor"] or "",
+                                  key="continuity_activate_actor")
+            approved = st.checkbox(
+                "Autorizo iniciar ahora la continuidad exacta descrita arriba",
+                key="continuity_activation_approval",
+            )
+            if st.button("Activar continuidad", key="continuity_activate",
+                         disabled=not approved or not info["build"].startswith("actions-")):
+                try:
+                    service.activate_continuity(actor=actor, build_commit=info["commit"])
+                    _refresh("Continuidad activada por aprobación explícita. El trabajador empezará el ciclo persistido.")
+                except (ValueError, RuntimeError, Timeout) as exc:
+                    st.error(str(exc))
+        elif report["status"] == "active":
+            actor = st.text_input("Responsable del control", value=_actor(), key="continuity_control_actor")
+            if st.button("Pausar continuidad", key="continuity_pause"):
+                service.pause_continuity(actor=actor)
+                _refresh("Continuidad pausada; estado y próximas fechas conservados.")
+            if st.button("Detener continuidad", key="continuity_stop"):
+                service.stop_continuity(actor=actor)
+                _refresh("Continuidad detenida; historial y recibos conservados.")
+        elif report["status"] == "paused":
+            actor = st.text_input("Responsable del control", value=_actor(), key="continuity_resume_actor")
+            if st.button("Reanudar continuidad", key="continuity_resume"):
+                service.resume_continuity(actor=actor)
+                _refresh("Continuidad reanudada desde las fechas persistidas.")
+            if st.button("Detener continuidad", key="continuity_stop_paused"):
+                service.stop_continuity(actor=actor)
+                _refresh("Continuidad detenida; historial y recibos conservados.")
+        if report["pairs"]:
+            st.dataframe(pd.DataFrame(report["pairs"]), width="stretch", hide_index=True)
 
 
 def _render_batch(store: PriceComparatorStore, names: dict[str, str]) -> None:

@@ -1,0 +1,17 @@
+{
+  "status": "prepared",
+  "manifest_file": "price_trial_manifest.json",
+  "manifest_sha256": "be618e2e9a004cf0df7f9dba9163a1a53114b603012ee063c89ee11c50c31887",
+  "responsible_default": "",
+  "responsible_policy": "required_operator_at_activation",
+  "start_at": null,
+  "start_policy": "persist_current_time_at_activation",
+  "interval_hours": 24,
+  "offer_check_interval_hours": 24,
+  "daily_http_limit": 200,
+  "per_minute_limit": 10,
+  "minimum_pause_seconds": 3,
+  "require_explicit_activation": true,
+  "preserve_negative_deadlines": true,
+  "controls": ["pause", "resume", "stop"]
+}

@@ -51,6 +51,7 @@ _ADDED_COLUMNS = {
     "products": {"caliber": "TEXT NOT NULL DEFAULT ''"},
     "pilot_budgets": {"last_http_at": "REAL"},
     "price_pilot": {"last_error": "TEXT NOT NULL DEFAULT ''"},
+    "price_trial_pairs": {"next_check_at": "TEXT", "defer_reason": "TEXT NOT NULL DEFAULT ''"},
     "offers": {"ean_published": "TEXT NOT NULL DEFAULT ''", "model_code": "TEXT NOT NULL DEFAULT ''",
                "color_code": "TEXT NOT NULL DEFAULT ''", "caliber": "TEXT NOT NULL DEFAULT ''",
                "match_basis": "TEXT NOT NULL DEFAULT ''", "price_includes_tax": "INTEGER",
@@ -787,8 +788,69 @@ class PriceComparatorStore:
                         state TEXT NOT NULL DEFAULT 'pending',
                         started_at TEXT,
                         finished_at TEXT,
+                        next_check_at TEXT,
+                        defer_reason TEXT NOT NULL DEFAULT '',
                         receipt TEXT NOT NULL DEFAULT '{}',
                         PRIMARY KEY(cycle,competitor_id,ean)
+                    );
+                    CREATE TABLE IF NOT EXISTS price_continuity (
+                        id INTEGER PRIMARY KEY,
+                        status TEXT NOT NULL,
+                        prepared_at TEXT NOT NULL,
+                        started_at TEXT,
+                        paused_at TEXT,
+                        stopped_at TEXT,
+                        actor TEXT NOT NULL,
+                        build_commit TEXT NOT NULL,
+                        manifest TEXT NOT NULL,
+                        limits TEXT NOT NULL,
+                        interval_hours REAL NOT NULL,
+                        heartbeat_at TEXT,
+                        next_sync_at TEXT,
+                        sync_receipt TEXT NOT NULL DEFAULT '{}',
+                        error TEXT NOT NULL DEFAULT ''
+                    );
+                    CREATE TABLE IF NOT EXISTS price_continuity_pairs (
+                        id INTEGER PRIMARY KEY,
+                        continuity_id INTEGER NOT NULL REFERENCES price_continuity(id),
+                        competitor_id TEXT NOT NULL REFERENCES competitors(id),
+                        ean TEXT NOT NULL REFERENCES products(ean),
+                        state TEXT NOT NULL DEFAULT 'pending',
+                        next_check_at TEXT,
+                        defer_reason TEXT NOT NULL DEFAULT '',
+                        started_at TEXT,
+                        checked_at TEXT,
+                        UNIQUE(continuity_id,competitor_id,ean)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_price_continuity_due
+                        ON price_continuity_pairs(continuity_id,state,next_check_at,competitor_id,ean);
+                    CREATE TABLE IF NOT EXISTS price_continuity_checks (
+                        id INTEGER PRIMARY KEY,
+                        continuity_id INTEGER NOT NULL REFERENCES price_continuity(id),
+                        competitor_id TEXT NOT NULL REFERENCES competitors(id),
+                        ean TEXT NOT NULL REFERENCES products(ean),
+                        started_at TEXT NOT NULL,
+                        finished_at TEXT NOT NULL,
+                        state TEXT NOT NULL,
+                        category TEXT NOT NULL,
+                        requests INTEGER NOT NULL DEFAULT 0,
+                        http_commercial INTEGER NOT NULL DEFAULT 0,
+                        http_robots INTEGER NOT NULL DEFAULT 0,
+                        unconfirmed_http INTEGER NOT NULL DEFAULT 0,
+                        next_check_at TEXT,
+                        defer_reason TEXT NOT NULL DEFAULT '',
+                        receipt TEXT NOT NULL DEFAULT '{}'
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_price_continuity_checks_pair
+                        ON price_continuity_checks(continuity_id,competitor_id,ean,started_at);
+                    CREATE TABLE IF NOT EXISTS price_robots_cache (
+                        origin TEXT NOT NULL,
+                        agent TEXT NOT NULL,
+                        status INTEGER NOT NULL,
+                        rules_text TEXT NOT NULL,
+                        fetched_at TEXT NOT NULL,
+                        expires_at TEXT NOT NULL,
+                        PRIMARY KEY(origin,agent)
                     );
                     CREATE TABLE IF NOT EXISTS locate_schedule (
                         competitor_id TEXT PRIMARY KEY REFERENCES competitors(id),

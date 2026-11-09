@@ -27,7 +27,7 @@ import pandas as pd
 
 from price_comparator import PriceComparatorStore
 from price_connectors import BLOCK_STATUSES, ConnectorBlocked, ConnectorError
-from price_web_fetch import WebFetcher, _host
+from price_web_fetch import PersistentRobotsCache, WebFetcher, _host
 
 METHODS = {
     "ficha": "Fichas de producto",
@@ -411,6 +411,7 @@ class GovernedFetcher(WebFetcher):
                  sleep: Callable[[float], None] = time.sleep,
                  request_guard: Callable[[], None] | None = None,
                  request_reserved: Callable[[str, str], None] | None = None, **kwargs) -> None:
+        kwargs.setdefault("robots_cache", PersistentRobotsCache(access.store, clock=access._now))
         super().__init__(sleep=sleep, **kwargs)
         self.access, self.competitor_id, self.method, self.purpose, self.ean = (
             access, competitor_id, method, purpose, ean)

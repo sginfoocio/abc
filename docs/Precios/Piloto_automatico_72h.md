@@ -71,13 +71,14 @@ El fin es inicio + 72 horas, no «72 horas desde el último reinicio».
 
 Antes de cada claim y antes de cada nueva petición, también después de pausas,
 se comprueban estado, fecha y par exacto. No se interrumpe una petición iniciada.
-Al caducar se cierran los pendientes y el trabajador termina, sin futuras
-activaciones periódicas de este encargo. Reiniciar el contenedor no reactiva ni
-prolonga el piloto.
+Al caducar se cierran los pendientes y no se inician más consultas del piloto.
+El trabajador del contenedor permanece disponible para la vigilancia separada
+de continuidad, que está desactivada hasta una preparación y activación explícitas.
+Reiniciar el contenedor no reactiva ni prolonga el piloto.
 
 **Detener piloto ahora** persiste una parada anticipada. Las mismas guardas
-impiden nuevas consultas inmediatamente y el trabajador termina en su siguiente
-turno. No se borran recibos ni se cambian permisos o configuraciones ajenas.
+impiden nuevas consultas inmediatamente. No se borran recibos ni se cambian
+permisos o configuraciones ajenas.
 
 Las reservas interrumpidas se cierran como resultado incierto, incluso si el
 reinicio ocurre después de la caducidad: no se repiten para aparentar cobertura.
@@ -119,8 +120,8 @@ commit originales, el manifiesto y los límites: no empieza una nueva ventana.
 
 No se recuperan con este mecanismo otros errores, una parada voluntaria, un
 piloto caducado o reservas con trabajo potencialmente realizado. El trabajador
-mantiene heartbeat, sin consultas, mientras un fallo espera revisión; termina
-al llegar la caducidad absoluta incluso si no se ha recuperado.
+mantiene heartbeat, sin consultas del piloto, mientras un fallo espera revisión.
+La campaña no se reactiva al llegar la caducidad absoluta.
 
 El servidor persiste ventana, ciclos y recibos por par en `price_trial`,
 `price_trial_cycles` y `price_trial_pairs`. El informe JSON vuelve a construirse
@@ -135,7 +136,9 @@ o reiniciar sesión/servicio y una vez caducado.
 - segmentos con resultados estructurados, candidatas y trazas de URL/identidad;
 - peticiones reservadas, resultado HTTP conocido y reservas de consumo incierto;
 - resumen por ciclo/tienda de pares realmente procesados, fichas nuevas o
-  reutilizadas, comparables, sin stock, revisiones, sin localizar y aplazamientos.
+  reutilizadas, comparables, sin stock, revisiones, sin localizar, restricciones
+  y aplazamientos; incluye pares seleccionados, EAN distintos y HTTP comerciales
+  y de robots deduplicados por recibo.
 
 `http` cuenta peticiones iniciadas con resultado registrado, no selecciones ni
 observaciones históricas. `reserved_http` incluye reservas; `unconfirmed_http`
@@ -143,6 +146,8 @@ separa las que quedaron sin resultado tras una interrupción. Una reserva marcad
 `not_sent` no se presenta como consulta nueva. Las ofertas comparables requieren
 identidad revalidada, datos comparables, impuestos incluidos, disponibilidad y
 ausencia de contradicción de stock; `available` por sí solo no basta.
+`unavailable` o «sin acceso» no se cuentan como producto inexistente; solo un
+resultado `not_found` se refleja como no localizado.
 
 La sección **Historial persistente de lotes** permite además recuperar los últimos
 100 recibos de lotes supervisados anteriores mediante su JSON almacenado. Los
@@ -165,3 +170,6 @@ encontradas ni cobertura comercial.
 El resultado del primer ciclo debe obtenerse de estos recibos tras la activación
 real. No se debe declarar activo ni publicar horas de inicio o métricas reales
 a partir de esta documentación, configuración o simulaciones.
+
+La vigilancia posterior al piloto se prepara por separado y no hereda ni reinicia
+su historial. Véase [Continuidad de vigilancia para los mismos 100 EAN](Continuidad_vigilancia_100_EAN.md).

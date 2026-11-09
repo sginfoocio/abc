@@ -150,10 +150,24 @@ class WatchBatch:
             trial_reason = pair_reason(self.store, cid, ean, now)
             if trial_reason:
                 deferred = trial_reason
+            queue_not_before = queue.get("not_before")
+            valid_until = row.get("valid_until")
+            access_retry_at = gate.retry_at.isoformat() if gate.retry_at else None
+            if action == "Reutilizar precio vigente":
+                next_check_at = valid_until or queue_not_before
+            else:
+                next_check_at = access_retry_at or queue_not_before
+            if pd.isna(next_check_at):
+                next_check_at = None
+            elif hasattr(next_check_at, "isoformat"):
+                next_check_at = next_check_at.isoformat()
+            elif next_check_at is not None:
+                next_check_at = str(next_check_at)
             rows.append({**row, "action": action, "ready": bool(allowed and needs_http and not deferred),
                          "access": reason or ("Autorizado; pausas aplicables" if allowed else "Revisión necesaria"),
                          "defer_reason": deferred, "queue_state": queue.get("state", "sin preparar"),
-                         "not_before": queue.get("not_before"), "attempts": queue.get("attempts", 0),
+                         "not_before": queue_not_before, "next_check_at": next_check_at,
+                         "access_retry_at": access_retry_at, "attempts": queue.get("attempts", 0),
                          "pilot_route": bool(pilot_member and (point_check or supervised_trial)),
                          "candidate_count": len(plan.runnable), "candidate_reason": plan.reason,
                          "candidate_reason_code": plan.reason_code,

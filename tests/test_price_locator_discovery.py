@@ -442,8 +442,8 @@ def test_500_eans_incremental_index_reduces_requests_in_following_runs(tmp_path)
     locator.run([cid], max_jobs=10_000)
     incremental = shop.calls[first_run:]
     assert not [call for call in incremental if "/gafas-de-sol" in call]
-    assert sorted(set(incremental) - set(shop.fichas())) == [BASE + "/robots.txt"]  # re-read once per run
-    assert len(incremental) == 100 + 1 and set(_jobs(store, cid)["state"]) == {"done"}
+    assert not (set(incremental) - set(shop.fichas()))  # valid robots response is shared across runs
+    assert len(incremental) == 100 and set(_jobs(store, cid)["state"]) == {"done"}
 
     # Same 100 EANs on an empty index: listings must be read again.
     cold = Shop()

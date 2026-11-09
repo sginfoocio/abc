@@ -74,7 +74,7 @@ def test_current_verified_price_is_reused_by_default_and_read_now_only_when_expl
     assert point["processed_pairs"] == 1
     assert point["runs"][0]["monitor_processed"] == 1
     assert point["pairs"][0]["category"] == "checked_now"
-    assert len(site.calls) == 2 and not site.count("/marca/")
+    assert len(site.calls) == 1 and not site.count("/marca/")
     with store._connect() as con:
         assert con.execute("SELECT COUNT(*) FROM offers").fetchone()[0] == before
         assert [tuple(r) for r in con.execute("SELECT * FROM monitor_schedule")] == schedule
@@ -172,6 +172,8 @@ def test_active_legacy_pilot_is_reported_without_starting_another(pilot):
 def test_robot_only_attempt_does_not_count_as_commercial_check(tmp_path):
     store, _, locator, monitor, _, cid, site = _monitor_env(tmp_path)
     ean = monitor.inventory().iloc[0]["ean"]
+    with store._connect() as con, con:
+        con.execute("DELETE FROM price_robots_cache")
     site.robots = "User-agent: *\nDisallow: /gafas/\n"
     result = WatchBatch(store, locator=locator, monitor=monitor).execute(
         [ean], [cid], approved=True, sync_vytria=False, point_check=True)
@@ -244,7 +246,7 @@ def test_pilot_pause_and_budget_are_shared_across_methods_and_phases(pilot):
     result = WatchBatch(store, locator=locator, monitor=monitor).execute(
         [product["ean"]], [cid], approved=True, sync_vytria=False, point_check=True)
     assert result["runs"][0]["location_processed"] == result["runs"][0]["monitor_processed"] == 1
-    assert len(times) >= 5 and all(b - a >= 60 for a, b in zip(times, times[1:]))
+    assert len(times) >= 4 and all(b - a >= 60 for a, b in zip(times, times[1:]))
     with store._connect() as con:
         assert con.execute("SELECT requests FROM pilot_budgets").fetchone()[0] == len(times)
         assert 0 < con.execute("SELECT COUNT(*) FROM pilot_http_log").fetchone()[0] <= len(times)
@@ -271,8 +273,8 @@ def test_failed_fresh_check_cannot_replay_previous_success_sample(tmp_path):
     monitor._transport = site
     site.calls.clear()
     retried = monitor.run([cid], eans=[ean], point_check=True)
-    assert retried.states["done"] == 1 and retried.requests == 2
-    assert len(site.calls) == 2
+    assert retried.states["done"] == 1 and retried.requests == 1
+    assert len(site.calls) == 1
 
 
 def test_expired_locator_lease_does_not_override_attempt_cap(tmp_path):
