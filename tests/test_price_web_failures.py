@@ -34,8 +34,10 @@ def _offers(store) -> int:
 
 
 def _comparable(store, search) -> dict[str, int]:
-    summary, _ = store.dashboard(store.price_expiry_days())
-    pairs = analytics.comparable_pairs(summary, store.current_offers(store.price_expiry_days()))
+    now = search._now()
+    summary, _ = store.dashboard(store.price_expiry_days(), now=now)
+    pairs = analytics.comparable_pairs(
+        summary, store.current_offers(store.price_expiry_days(), now=now))
     return pairs["competitor"].value_counts().to_dict() if not pairs.empty else {}
 
 

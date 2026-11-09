@@ -80,11 +80,10 @@ Comprobaciones manuales limitadas a recibos ya guardados:
   confirmar si las cuatro incidencias corresponden a los mismos productos.
   No se inventan los EAN ni se repite una sincronización para averiguarlo.
 
-Los 596 IDs de recibo HTTP únicos del archivo suman 596 peticiones. La
-clasificación local por ruta de URL da 312 peticiones comerciales y 284 a
-`/robots.txt`, mientras el contexto verificado proporcionado indica 323 y 273.
-La diferencia de 11 no se ha podido reconciliar con los recibos disponibles;
-no se presenta como resuelta ni se cambia el dato fuente por suposición.
+Corrección del desglose HTTP anterior: al deduplicar por ID de recibo y clasificar
+las 596 peticiones únicas por ruta, el archivo registra 312 peticiones
+comerciales y 284 a `/robots.txt`. Esto reemplaza la cifra contextual previa de
+323 comerciales y 273 de robots, que era incorrecta; el total se mantiene en 596.
 
 La causa técnica de las lecturas repetidas de robots es que `WebFetcher` guardaba
 las reglas solo en memoria de instancia, mientras los flujos de monitorización y

@@ -1474,10 +1474,11 @@ class PriceComparatorStore:
                 SELECT * FROM own_prices WHERE ean=? ORDER BY captured_at DESC,id DESC
             """, connection, params=(normalized,))
 
-    def current_offers(self, max_age_days: int = 30) -> pd.DataFrame:
+    def current_offers(self, max_age_days: int = 30, *, now: datetime | None = None) -> pd.DataFrame:
         if max_age_days < 1:
             raise ValueError("La antigüedad debe ser al menos un día")
-        now = datetime.now(timezone.utc)
+        now = now or datetime.now(timezone.utc)
+        now = now.replace(tzinfo=timezone.utc) if now.tzinfo is None else now.astimezone(timezone.utc)
         with self._connect() as connection:
             frame = pd.read_sql_query("""
                 SELECT o.*,c.name AS competitor_name,p.brand,p.commercial_name,
