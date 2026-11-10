@@ -166,6 +166,16 @@ historicos, 146 rutas candidatas, 3 pares solo en revision y 313 pares sin ruta
 local documentada. En ConGafasDeSol se descartaron los slugs genericos de otras
 marcas: las rutas aportadas solo justifican Prada/sol y las fichas exactas
 E037-E038 siguen limitadas a Tom Ford FT0711.
+Por EAN, 93 de los 100 tienen al menos un enlace historico o candidato local;
+estos siete no tienen ruta utilizable en el corte:
+`0805289126577`, `0805289126584`, `0889652429717`, `0889652650838`,
+`0889652675602`, `8056262833902` y `8056266001833`. Los dos RB2140 marcados
+solo en revision se excluyen del recuento de rutas.
+
+La restriccion de nuevas candidatas no borra fichas verificadas ni recibos.
+Los 138 vinculos historicos del corte coinciden con URLs conservadas en los
+recibos del ciclo representado; los recibos de ciclos anteriores permanecen
+en el JSON fuente del piloto y no se reescriben.
 
 ## Validacion
 
@@ -181,6 +191,9 @@ adicionales para categoria, variante seleccionada, EAN/stock de esa variante,
 conflictos de IDs y auditoria sin peticiones reales. En descubrimiento, un EAN
 coincidente no confirma una ficha Edel si no se resolvio la variante; la
 candidata queda pendiente y no se indexa como verificada.
+La URL declarada en `Product` y la URL de `Offer` tambien deben concordar con
+la variante `selectedSize` solicitada; una discrepancia deja la ficha ambigua
+y sin EAN, precio o disponibilidad aceptables.
 
 Las suites existentes del comparador preservan variantes, FT1044/S,
 DUNE OPT, IVA, mercado, stock, ofertas condicionadas, historicos y acceso.

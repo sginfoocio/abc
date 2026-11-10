@@ -161,7 +161,7 @@ def _matches_product_url(node: dict, url: str) -> bool:
     declared = node.get("url")
     if isinstance(declared, str):
         identity_url = urljoin(url, declared)
-        if any(key == "variant" for key, _ in parse_qsl(urlparse(identity_url).query)) \
+        if any(key in {"variant", "selectedSize"} for key, _ in parse_qsl(urlparse(identity_url).query)) \
                 and _url_key(identity_url) != _url_key(url):
             return False
     return any(_url_key(value) == _url_key(url) for value in _product_urls(node, url))

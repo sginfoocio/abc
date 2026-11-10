@@ -120,6 +120,29 @@ def test_edel_variant_selection_conflicts_remain_ambiguous_without_offer_facts()
     assert any("más de una opción" in note for note in page.notes)
 
 
+def test_edel_product_offer_and_selected_radio_must_share_selected_size():
+    base = "https://www.edel-optics.es/PR-27ZS-16K08Z-de-Prada.html"
+    product = _edel_variant_node("111", "8056597875349", 243.5, "OutOfStock")
+    product["offers"]["url"] = base + "?selectedSize=222"
+    html = (
+        '<input type="radio" id="prd222" checked>'
+        '<script type="application/ld+json">' + json.dumps({
+            "@context": "https://schema.org", "@graph": [product],
+        }) + "</script>"
+    )
+
+    page = extract_product(html, base)
+
+    assert page is not None and page.ambiguous
+    assert page.variant_id == "222"
+    assert page.ean_published == ""
+    assert page.price is None and page.availability == "unknown"
+    assert classify(
+        {"ean": "8056597875349", "brand": "Prada", "model": "PR 27ZS", "color": "16K08Z"},
+        page.candidate(),
+    ).status != "exact_match"
+
+
 def test_url_slug_alone_proves_nothing():
     # Misma URL de PR 27ZS pero ficha de otro EAN: no puede ser coincidencia exacta.
     page = load("mia_burton", "https://miaburton.com/es/gafas-de-sol/prada/pr-27zs-16k08z")
