@@ -149,7 +149,7 @@ def test_amevista_uses_documented_brand_model_color_patterns(product, expected, 
 
 
 @pytest.mark.parametrize("brand,category", [
-    ("Tom Ford", "montura"), ("Bottega Veneta", "montura"), ("Ray Ban", "sol"),
+    ("Tom Ford", "montura"), ("Bottega Veneta", "montura"), ("Ray Ban", "montura"),
 ])
 def test_amevista_excludes_undocumented_brand_category_combinations(brand, category):
     product = {**PRADA, "brand": brand, "category": category, "model": "MODEL123", "color": "001"}
@@ -159,10 +159,62 @@ def test_amevista_excludes_undocumented_brand_category_combinations(brand, categ
     assert not plan.runnable
     assert plan.reason_code == "needs_authorized_discovery"
     if category != "sol":
-        assert ("solo cubre gafas de sol" in plan.reason if brand == "Bottega Veneta"
-                else "solo para gafas de sol" in plan.reason)
+        if brand == "Bottega Veneta":
+            assert "solo cubre gafas de sol" in plan.reason
+        elif brand == "Ray Ban":
+            assert "RB2140 y RB4472" in plan.reason
+        else:
+            assert "solo para gafas de sol" in plan.reason
     else:
         assert "Marca fuera" in plan.reason
+
+
+@pytest.mark.parametrize("product,expected", [
+    ({**PRADA, "ean": "0805289126577", "brand": "Ray Ban", "model": "RB2140", "color": "901"},
+     "https://www.amevista.com/es/ray-ban-rb2140-901-wayfarer"),
+    ({**PRADA, "ean": "0805289126584", "brand": "Ray Ban", "model": "RB2140", "color": "901"},
+     "https://www.amevista.com/es/ray-ban-rb2140-901-wayfarer"),
+    ({**PRADA, "ean": "8056266001833", "brand": "Ray Ban", "model": "RB2140", "color": "901S31"},
+     "https://www.amevista.com/es/ray-ban-rb2140-901s31-wayfarer"),
+    ({**PRADA, "ean": "8056262833902", "brand": "Ray Ban", "model": "RB4472", "color": "1359/2"},
+     "https://www.amevista.com/es/ray-ban-rb4472-1359-2"),
+    ({**PRADA, "ean": "0889652429717", "brand": "Saint Laurent", "model": "SL 596 DUNE", "color": "006"},
+     "https://www.edel-optics.es/SL-596-DUNE-006-de-Saint-Laurent.html"),
+    ({**PRADA, "ean": "0889652650838", "brand": "Saint Laurent", "model": "SL 872 ERIN", "color": "001"},
+     "https://www.edel-optics.es/SL-872-ERIN-001-de-Saint-Laurent.html"),
+    ({**PRADA, "ean": "0889652675602", "brand": "Saint Laurent", "model": "SL 908", "color": "002"},
+     "https://www.edel-optics.es/SL-908-002-de-Saint-Laurent.html"),
+])
+def test_seven_pending_products_get_only_documented_manual_routes(product, expected):
+    shop = "amevista" if product["brand"] == "Ray Ban" else "edel"
+    plan = plan_for(product, shop)
+
+    assert urls(plan) == [expected]
+    assert plan.runnable[0].origin.startswith("User-supplied manual observations")
+    assert plan.runnable[0].review_date == ""
+    assert plan.runnable[0].attributes["ean"] == normalize_gtin(product["ean"])
+    assert "price" not in plan.runnable[0].attributes
+    assert "selectedSize_product_id" not in plan.runnable[0].attributes
+
+
+def test_rayban_route_aliases_do_not_generalize_to_other_models_or_colors():
+    unknown_model = {**PRADA, "brand": "Ray Ban", "model": "RB4441D", "color": "667787"}
+    unknown_color = {**PRADA, "brand": "Ray Ban", "model": "RB4472", "color": "002"}
+    unobserved_rb2140_color = {**PRADA, "brand": "Ray Ban", "model": "RB2140", "color": "90158"}
+
+    assert not plan_for(unknown_model, "amevista").runnable
+    assert not plan_for(unknown_color, "amevista").runnable
+    assert not plan_for(unobserved_rb2140_color, "amevista").runnable
+
+
+def test_edel_saint_laurent_route_preserves_commercial_model_names_and_scope():
+    dune = {**PRADA, "brand": "Saint Laurent", "model": "SL 596 DUNE", "color": "003"}
+    unknown = {**dune, "model": "SL 999"}
+
+    assert urls(plan_for(dune, "edel")) == [
+        "https://www.edel-optics.es/SL-596-DUNE-003-de-Saint-Laurent.html"
+    ]
+    assert not plan_for(unknown, "edel").runnable
 
 
 @pytest.mark.parametrize("product,expected,evidence", [
@@ -221,7 +273,7 @@ def test_edel_attribute_route_leaves_variant_resolution_to_the_ficha(product, ex
     assert urls(plan) == [expected]
     candidate = plan.runnable[0]
     assert candidate.rule == "sample_pattern:edel"
-    assert candidate.attributes["variant_resolution"].startswith("Use the selected prd<id> radio")
+    assert candidate.attributes["variant_resolution"].startswith("Resolve the unique checked prd<id> control")
     assert "selectedSize" not in candidate.url
     assert candidate.attributes["ean"] == normalize_gtin(product["ean"])
 

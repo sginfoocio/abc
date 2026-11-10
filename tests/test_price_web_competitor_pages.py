@@ -5,7 +5,7 @@ import json
 import pytest
 
 from price_references import PROBABLE, caliber_from_code, classify, extract_lens
-from price_web_extract import extract_product
+from price_web_extract import extract_product, select_product_variant
 
 FIXTURES = Path(__file__).parent / "fixtures" / "web_pages"
 PR27 = {"ean": "8056597875349", "brand": "Prada", "model": "PR 27ZS", "color": "16K08Z", "caliber": "54-21"}
@@ -153,6 +153,109 @@ def test_edel_product_offer_and_selected_radio_must_share_selected_size(product_
         assert page.ean_published == ""
         assert page.price is None and page.availability == "unknown"
         assert match.status != "exact_match"
+
+
+@pytest.mark.parametrize(("ean", "size", "availability"), [
+    ("805289126577", "50-22", "InStock"),
+    ("805289126584", "54-18", "OutOfStock"),
+])
+def test_shared_amevista_product_group_binds_upc_size_price_and_stock_by_ean(ean, size, availability):
+    base = "https://www.amevista.com/es/ray-ban-rb2140-901-wayfarer"
+    variants = [
+        {"@type": "Product", "name": f"Ray-Ban RB2140 901 {other_size}", "model": "RB2140",
+         "color": "901", "size": other_size, "gtin12": other_ean, "url": base,
+         "offers": {"@type": "Offer", "url": base, "availability": f"https://schema.org/{other_stock}"}}
+        for other_ean, other_size, other_stock in [
+            ("805289126584", "54-18", "OutOfStock"),
+            ("805289126577", "50-22", "InStock"),
+        ]
+    ]
+    html = '<script type="application/ld+json">' + json.dumps({
+        "@context": "https://schema.org", "@type": "ProductGroup", "url": base,
+        "name": "Ray-Ban RB2140 901", "brand": {"@type": "Brand", "name": "Ray-Ban"},
+        "model": "RB2140", "color": "901",
+        "offers": {"@type": "Offer", "price": "99.60", "priceCurrency": "EUR",
+                   "availability": "https://schema.org/OutOfStock"},
+        "hasVariant": variants,
+    }) + "</script>"
+
+    shared = extract_product(html, base)
+    target_ean = "0" + ean
+    page = select_product_variant(shared, {
+        "ean": target_ean, "brand": "Ray-Ban", "model": "RB2140", "color": "901", "caliber": size,
+    })
+
+    assert shared is not None and shared.ambiguous and len(shared.structured_variants) == 2
+    assert page is not None and not page.ambiguous
+    assert (page.ean_published, page.caliber, page.price, page.currency, page.availability) == (
+        target_ean, size, 99.6, "EUR", "available" if availability == "InStock" else "unavailable")
+    assert classify(
+        {"ean": target_ean, "brand": "Ray-Ban", "model": "RB2140", "color": "901", "caliber": size},
+        page.candidate(),
+    ).status == "exact_match"
+    assert any("no por orden de listas" in note for note in page.notes)
+
+
+def test_shared_product_group_keeps_ean_size_contradiction_ambiguous():
+    base = "https://www.amevista.com/es/ray-ban-rb2140-901-wayfarer"
+    html = '<script type="application/ld+json">' + json.dumps({
+        "@context": "https://schema.org", "@type": "ProductGroup", "url": base,
+        "hasVariant": [{
+            "@type": "Product", "name": "Ray-Ban RB2140 901 50-22", "model": "RB2140",
+            "color": "901", "size": "50-22", "gtin12": "805289126577", "url": base,
+            "offers": {"@type": "Offer", "price": "99.60", "priceCurrency": "EUR",
+                       "availability": "https://schema.org/InStock"},
+        }, {
+            "@type": "Product", "name": "Ray-Ban RB2140 901 54-18", "model": "RB2140",
+            "color": "901", "size": "54-18", "gtin12": "805289126584", "url": base,
+            "offers": {"@type": "Offer", "price": "99.60", "priceCurrency": "EUR",
+                       "availability": "https://schema.org/OutOfStock"},
+        }],
+    }) + "</script>"
+
+    page = select_product_variant(extract_product(html, base), {
+        "ean": "0805289126577", "brand": "Ray-Ban", "model": "RB2140",
+        "color": "901", "caliber": "54-18",
+    })
+
+    assert page is not None and page.ambiguous
+    assert page.ean_published == "" and page.price is None and page.availability == "unknown"
+    assert any("calibre" in note for note in page.notes)
+
+
+@pytest.mark.parametrize(("model", "color", "ean", "size", "price"), [
+    ("SL 596 DUNE", "006", "889652429717", "58-14", 216.0),
+    ("SL 872 ERIN", "001", "889652650838", "52-16", 174.0),
+    ("SL 908", "002", "889652675602", "51-20", 126.0),
+])
+def test_edel_variant_control_binds_indexed_upc_and_availability_without_fixed_ids(
+        model, color, ean, size, price):
+    variant_id = "987654321"
+    url = f"https://www.edel-optics.es/{model.replace(' ', '-')}-{color}-de-Saint-Laurent.html"
+    node = {
+        "@type": "Product", "url": url + f"?selectedSize={variant_id}",
+        "name": f"Saint Laurent {model} {color} {size}",
+        "brand": {"@type": "Brand", "name": "Saint Laurent"}, "model": model, "color": color,
+        "size": size, "gtin12": ean,
+        "offers": {"@type": "Offer", "url": url + f"?selectedSize={variant_id}",
+                   "price": str(price), "priceCurrency": "EUR",
+                   "availability": "https://schema.org/InStock"},
+    }
+    html = (
+        f'<input type="radio" id="prd{variant_id}" checked>'
+        f'<div class="eoDetailListTileSize{variant_id}">EAN {ean}</div>'
+        '<script type="application/ld+json">' + json.dumps(node) + "</script>"
+    )
+
+    page = extract_product(html, url)
+    target = {"ean": "0" + ean, "brand": "Saint Laurent", "model": model,
+              "color": color, "caliber": size}
+
+    assert page is not None and not page.ambiguous
+    assert page.variant_id == variant_id
+    assert page.ean_published == target["ean"]
+    assert page.model == model and page.price == price and page.availability == "available"
+    assert classify(target, page.candidate()).status == "exact_match"
 
 
 def test_url_slug_alone_proves_nothing():

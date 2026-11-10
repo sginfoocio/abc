@@ -50,7 +50,8 @@ from price_connectors import ConnectorBlocked, ConnectorError
 from price_references import EXACT, PROBABLE, REJECTED, classify, key, model_key, normalize_caliber, tokens
 from price_web import (_LOC, _PRODUCT_SITEMAP, Outcome, WebPriceSearch, WebSearchError, _same_site,
                        product_search_urls, validate_competitor_url)
-from price_web_extract import ProductPage, extract_product, parse_html, product_page_rejection
+from price_web_extract import (ProductPage, extract_product, parse_html, product_page_rejection,
+                               select_product_variant)
 from price_web_fetch import MAX_SITEMAP_BYTES, PageGone, RobotsDenied, _requests_transport
 from price_url_candidates import CandidatePlan, UrlCandidate, candidate_plan
 
@@ -1023,6 +1024,7 @@ class _Session:
                         attempt[name] = facts[name]
                 self._job_candidate_attempts.append(attempt)
                 continue
+            page = select_product_variant(page, product)
             url = page.url or row["url"]
             attempt["final_url"] = url
             attempt["url_trace"] = page.url_trace

@@ -22,6 +22,7 @@ AMEVISTA_MANUAL_EVIDENCE = {
     ("MIUMIU", "montura"): "manual:amevista-miu-miu-frames",
     ("BOTTEGAVENETA", "sol"): "manual:amevista-bottega-veneta-sunglasses",
 }
+AMEVISTA_RAYBAN_EVIDENCE = "manual:amevista-ray-ban-rb2140-rb4472-routes"
 EDEL_MANUAL_EVIDENCE = "manual:edel-selected-variant-observations"
 SUPPLIED_PATTERNS = {
     "domanci": (
@@ -309,18 +310,28 @@ def candidate_plan(product: dict, domain: str) -> CandidatePlan:
         "amevista": {
             ("GUCCI", "sol"), ("PRADA", "sol"), ("TOMFORD", "sol"), ("TIFFANYCO", "sol"),
             ("MIUMIU", "sol"), ("MIUMIU", "montura"), ("BOTTEGAVENETA", "sol"),
+            ("RAYBAN", "sol"),
         },
         "edel": {("PRADA", "sol"), ("TOMFORD", "sol"), ("MIUMIU", "sol"), ("MIUMIU", "montura"),
-                 ("BOTTEGAVENETA", "sol")},
+                 ("BOTTEGAVENETA", "sol"), ("SAINTLAURENT", "sol")},
         "visual": {("PRADA", "sol"), ("MIUMIU", "montura")},
         "otticait": {("PRADA", "sol"), ("TOMFORD", "montura")},
         "visio": {("PRADA", "sol")},
     }
-    if (brand, category) not in scopes.get(shop, set()) or (shop == "visio" and model != "PR27ZS"):
+    if ((brand, category) not in scopes.get(shop, set())
+            or (shop == "visio" and model != "PR27ZS")
+            or (shop == "amevista" and brand == "RAYBAN"
+                and (model, color) not in {("RB2140", "901"), ("RB2140", "901S31"), ("RB4472", "13592")})
+            or (shop == "edel" and brand == "SAINTLAURENT"
+                and model not in {"SL596DUNE", "SL872ERIN", "SL908"})):
         if shop == "amevista" and brand == "MIUMIU":
             reason = "La regla Miu Miu de Amevista solo cubre las categorías sol y montura documentadas"
         elif shop == "amevista" and brand == "BOTTEGAVENETA":
             reason = "La regla Bottega Veneta de Amevista solo cubre gafas de sol"
+        elif shop == "amevista" and brand == "RAYBAN":
+            reason = "Amevista solo documenta Ray-Ban RB2140 y RB4472 con los formatos de color observados"
+        elif shop == "edel" and brand == "SAINTLAURENT":
+            reason = "Edel solo documenta Saint Laurent SL 596 DUNE, SL 872 ERIN y SL 908 en esta evidencia"
         elif shop == "amevista" and category != "sol":
             reason = "La evidencia Amevista respalda rutas marca-modelo-color solo para gafas de sol"
         elif shop == "amevista":
@@ -358,6 +369,24 @@ def candidate_plan(product: dict, domain: str) -> CandidatePlan:
             used["evidence_note"] = "URL pattern only; not identity evidence"
         elif brand == "PRADA":
             used["model_alias_rule"] = "Observed PR model prefix; 0PR retained only on exact E017 URL"
+        elif brand == "RAYBAN":
+            if model == "RB2140":
+                model_slug = "rb2140"
+                used["model_alias_rule"] = "RB2140 retains the documented -wayfarer suffix"
+            elif model == "RB4472" and color == "13592":
+                used["color_alias_rule"] = "RB4472 catalog color 13592 uses documented route color 1359-2"
+            else:
+                return CandidatePlan(reason_code="needs_authorized_discovery",
+                                     reason="Amevista Ray-Ban format is documented only for RB2140 and RB4472 1359/2")
+            used["evidence_note"] = MANUAL_COVERAGE_EVIDENCE
+            used["variant_resolution"] = (
+                "On shared fiches, bind the GTIN and size from the same structured Product variant; "
+                "never infer the mapping from list order. Normalize valid 12-digit UPCs."
+            )
+            used["price_rule"] = (
+                "A common published model/color price may be reused across calibers; stock remains variant-specific."
+            )
+            refs.append(AMEVISTA_RAYBAN_EVIDENCE)
         if evidence := AMEVISTA_MANUAL_EVIDENCE.get((brand, category)):
             refs.append(evidence)
             used["evidence_note"] = MANUAL_COVERAGE_EVIDENCE
@@ -365,8 +394,14 @@ def candidate_plan(product: dict, domain: str) -> CandidatePlan:
         refs.append(EDEL_MANUAL_EVIDENCE)
         used["evidence_note"] = MANUAL_COVERAGE_EVIDENCE
         used["variant_resolution"] = (
-            "Use the selected prd<id> radio only when uniquely checked and bound to that Product's selectedSize URL"
+            "Resolve the unique checked prd<id> control from the fiche; bind normalized UPC/EAN and Offer facts "
+            "to that same Product variant. Do not hard-code IDs or treat indexed-only UPCs as current-page evidence."
         )
+        if brand == "SAINTLAURENT":
+            used["identity_evidence_note"] = (
+                "Browser evidence records selected control and offer facts; UPC identity was recovered from "
+                "indexed pages and is not asserted as visible in the current browser read."
+            )
     # Only this GTIN has dimensions explicitly associated in the package. Do not enrich the product record.
     if shop in {"bassol", "visual", "visio"} and ean == "8056597875349" \
             and (brand, model, color) == ("PRADA", "PR27ZS", "16K08Z") and not lens:
@@ -392,7 +427,12 @@ def candidate_plan(product: dict, domain: str) -> CandidatePlan:
         model_slug = "ft5634-b"
         used["model_alias"] = "FT5634B -> FT5634-B (E003, E047)"
     brand_slug = "tiffany" if shop == "amevista" and brand == "TIFFANYCO" else _slug(product["brand"])
-    slug = f"{brand_slug}-{model_slug}-{color.lower()}"
+    color_slug = color.lower()
+    if shop == "amevista" and brand == "RAYBAN" and model == "RB2140":
+        color_slug += "-wayfarer"
+    elif shop == "amevista" and brand == "RAYBAN" and model == "RB4472":
+        color_slug = "1359-2"
+    slug = f"{brand_slug}-{model_slug}-{color_slug}"
     if shop == "optima":
         path = f"/{'gafas-de-sol' if category == 'sol' else 'gafas-graduadas'}/{slug}.html"
     elif shop in {"bassol", "visual"}:
@@ -418,6 +458,7 @@ def candidate_plan(product: dict, domain: str) -> CandidatePlan:
             origin, review_date, review_base = "user-provided candidate URL", REVIEW_DATE, REVIEW_BASE
         elif (shop == "amevista" and brand == "MIUMIU") \
                 or (shop == "amevista" and brand == "BOTTEGAVENETA" and category == "sol") \
+                or (shop == "amevista" and brand == "RAYBAN") \
                 or shop == "edel":
             origin, review_date, review_base = MANUAL_COVERAGE_EVIDENCE, "", ""
         else:

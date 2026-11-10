@@ -137,14 +137,30 @@ autorizacion o vigencia.
 - **Amevista:** Miu Miu genera candidatos por marca/modelo/color en sol y
   monturas, con evidencia separada por categoria. Bottega Veneta usa la misma
   forma de ruta solo para sol. No se reutiliza el patron de monturas para
-  Bottega ni se añade ninguna excepcion por EAN.
+  Bottega ni se añade ninguna excepcion por EAN. Para Ray-Ban se conservan
+  unicamente los formatos documentados: RB2140 901 y 901S31 mantienen el
+  sufijo `wayfarer`; RB4472 1359/2 publica `1359-2` en la URL. No se aplica
+  esta conversion de color ni el sufijo a otros modelos/colores.
+- En las fichas Amevista compartidas, cada Product se vincula por GTIN
+  normalizado y dimensiones publicadas en el mismo nodo estructurado. La
+  seleccion no depende del orden de listas paralelas. Un ProductGroup puede
+  aportar un precio comun sin stock; la disponibilidad procede de la variante.
+  El calibre no cambia el precio, pero una contradiccion publicada entre EAN
+  y dimensiones deja el par ambiguo. UPC-A de 12 digitos se normaliza con cero
+  inicial para comparar con EAN-13, sin perder el EAN original del manifiesto.
 - **Edel-Optics:** para Prada, Tom Ford, Miu Miu y Bottega Veneta dentro de las
   categorias demostradas, se genera la ruta modelo-color-marca sin inventar
   `selectedSize`. El parser resuelve el ID solo si la URL ya lo publica o si
   hay exactamente un radio `prd<id>` marcado y los datos de producto vinculan
   ese mismo ID. El EAN del microdato Edel se toma del bloque
   `eoDetailListTileSize<id>` coincidente. Una seleccion ausente, multiple o
-  contradictoria queda ambigua y no aporta oferta aceptable.
+  contradictoria queda ambigua y no aporta oferta aceptable. Se amplian rutas
+  para Saint Laurent SL 596 DUNE, SL 872 ERIN y SL 908, preservando los nombres
+  comerciales; los IDs de control se leen de la ficha y no se fijan en reglas.
+  En esta evidencia el navegador reviso control y oferta, mientras que los UPC
+  se recuperaron de paginas indexadas y no estaban visibles en la lectura
+  actual. La identidad no se acepta por ese UPC indexado sin que el motor la
+  vincule a datos estructurados de la variante.
 - La disponibilidad se conserva desde los datos de la variante seleccionada
   (JSON-LD o microdatos ya publicados). El ID se guarda como `variant_id` y
   `selectedSize` sigue siendo Product Id, nunca calibre ni EAN. No se importan
@@ -158,19 +174,25 @@ autorizacion o vigencia.
 
 La [matriz de 100 EAN × seis tiendas](PRICE_COVERAGE_100_EAN_6_STORES.csv)
 contiene una fila por par, la candidata local o URL historica, la categoria
-del ultimo ciclo y el motivo pendiente. `historical_link` significa solo que
-la evidencia del piloto guardo una ficha; `local_candidate` es solo una ruta
-propuesta; ninguno significa oferta comparable vigente ni acceso autorizado.
-No se ejecutaron consultas al crear la matriz. El corte contiene 138 vinculos
-historicos, 146 rutas candidatas, 3 pares solo en revision y 313 pares sin ruta
-local documentada. En ConGafasDeSol se descartaron los slugs genericos de otras
+del ultimo ciclo y el motivo pendiente. Columnas separadas indican si se
+verifico una ficha u oferta comparable en esta revision. `historical_link`
+significa solo que la evidencia del piloto guardo una ficha; `local_candidate`
+es una ruta propuesta; ninguno significa verificacion actual ni acceso
+autorizado. No se ejecutaron consultas al crear la matriz. El corte contiene
+138 vinculos historicos, 153 rutas candidatas, 3 pares solo en revision y 306
+pares sin ruta local documentada. Los 100 EAN tienen ahora al menos una ruta
+historica o candidata, no 100 fichas verificadas. No se verifico ninguna ficha
+ni oferta comparable en esta revision. En ConGafasDeSol se descartaron los slugs genericos de otras
 marcas: las rutas aportadas solo justifican Prada/sol y las fichas exactas
 E037-E038 siguen limitadas a Tom Ford FT0711.
-Por EAN, 93 de los 100 tienen al menos un enlace historico o candidato local;
-estos siete no tienen ruta utilizable en el corte:
-`0805289126577`, `0805289126584`, `0889652429717`, `0889652650838`,
-`0889652675602`, `8056262833902` y `8056266001833`. Los dos RB2140 marcados
-solo en revision se excluyen del recuento de rutas.
+Las siete nuevas rutas cubren cuatro EAN en Amevista (los dos RB2140 901
+comparten pagina) y tres en Edel-Optics. Para RB2140 901S31 la entrega
+publicada para el 9 de diciembre, y para RB4472 la del 11 de noviembre, se
+conservan como plazos; una fecha futura no se convierte en stock inmediato.
+El precio comun visible entre calibres RB2140 es evidencia de pagina, no un
+precio validado por el comparador. Los UPC indexados de Edel siguen
+diferenciados de la evidencia actual de navegador. Los pares con ruta candidata
+permanecen pendientes de comprobacion y las restricciones/permisos no cambian.
 
 La restriccion de nuevas candidatas no borra fichas verificadas ni recibos.
 Los 138 vinculos historicos del corte coinciden con URLs conservadas en los
