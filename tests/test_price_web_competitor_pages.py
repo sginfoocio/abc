@@ -120,10 +120,16 @@ def test_edel_variant_selection_conflicts_remain_ambiguous_without_offer_facts()
     assert any("más de una opción" in note for note in page.notes)
 
 
-def test_edel_product_offer_and_selected_radio_must_share_selected_size():
+@pytest.mark.parametrize(("product_id", "offer_id", "accepted"), [
+    ("111", "222", False),
+    ("222", "111", False),
+    ("222", "222", True),
+])
+def test_edel_product_offer_and_selected_radio_must_share_selected_size(product_id, offer_id, accepted):
     base = "https://www.edel-optics.es/PR-27ZS-16K08Z-de-Prada.html"
-    product = _edel_variant_node("111", "8056597875349", 243.5, "OutOfStock")
-    product["offers"]["url"] = base + "?selectedSize=222"
+    product = _edel_variant_node(product_id, "8056597875349", 200, "InStock")
+    product["url"] = base + f"?selectedSize={product_id}"
+    product["offers"]["url"] = base + f"?selectedSize={offer_id}"
     html = (
         '<input type="radio" id="prd222" checked>'
         '<script type="application/ld+json">' + json.dumps({
@@ -133,14 +139,20 @@ def test_edel_product_offer_and_selected_radio_must_share_selected_size():
 
     page = extract_product(html, base)
 
-    assert page is not None and page.ambiguous
+    assert page is not None and page.ambiguous is (not accepted)
     assert page.variant_id == "222"
-    assert page.ean_published == ""
-    assert page.price is None and page.availability == "unknown"
-    assert classify(
+    match = classify(
         {"ean": "8056597875349", "brand": "Prada", "model": "PR 27ZS", "color": "16K08Z"},
         page.candidate(),
-    ).status != "exact_match"
+    )
+    if accepted:
+        assert page.ean_published == "8056597875349"
+        assert page.price == 200 and page.availability == "available"
+        assert match.status == "exact_match"
+    else:
+        assert page.ean_published == ""
+        assert page.price is None and page.availability == "unknown"
+        assert match.status != "exact_match"
 
 
 def test_url_slug_alone_proves_nothing():

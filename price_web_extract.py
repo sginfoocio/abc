@@ -196,16 +196,20 @@ def _offer_facts(node: dict, url: str) -> dict[str, Any]:
     for offer in _as_list(node.get("offers")):
         if isinstance(offer, dict):
             collect(offer)
-    facts: dict[str, Any] = {"ambiguous": False, "notes": [], "stock_evidence": [], "delivery_evidence": []}
+    facts: dict[str, Any] = {
+        "ambiguous": False, "variant_conflict": False, "notes": [], "stock_evidence": [], "delivery_evidence": []
+    }
     variant_offers = [(o, restrictions) for o, restrictions in offers if isinstance(o.get("url"), str)
                       and urlparse(urljoin(url, o["url"])).path == urlparse(url).path
                       and urlparse(urljoin(url, o["url"])).query]
     if variant_offers and (len(variant_offers) > 1 or any(
-            key == "variant" for o, _ in variant_offers for key, _ in parse_qsl(urlparse(o["url"]).query))):
+            key in {"variant", "selectedSize"}
+            for o, _ in variant_offers for key, _ in parse_qsl(urlparse(o["url"]).query))):
         offers = [(o, restrictions) for o, restrictions in variant_offers
                   if _url_key(urljoin(url, o["url"])) == _url_key(url)]
         if not offers:
             facts["ambiguous"] = True
+            facts["variant_conflict"] = True
             facts["notes"].append("Ninguna oferta corresponde a la URL de variante solicitada")
     markets: set[str] = set()
     seen = []
@@ -338,6 +342,8 @@ def _from_json_ld(html: str, url: str) -> ProductPage | None:
     page.caliber = extract_caliber(page.title) or extract_caliber(urlparse(url).path.rsplit("/", 1)[-1])
     facts = _offer_facts(node, url)
     page.ambiguous |= facts["ambiguous"]
+    if facts["variant_conflict"]:
+        page.ean_published = ""
     page.notes += facts["notes"]
     page.price, page.currency = facts.get("price"), facts.get("currency", "")
     page.previous_price = facts.get("previous_price")
