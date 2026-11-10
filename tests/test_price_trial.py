@@ -12,9 +12,10 @@ from price_access import AccessDenied, GovernedFetcher
 from price_batch import WatchBatch, batch_pairs_export
 from price_comparator import PriceComparatorStore
 from price_monitor import PriceMonitor
-from price_trial import PriceTrial, TrialDenied, manifest, require_pair, trial_row
+from price_trial import PriceTrial, TrialDenied, continuity_config, manifest, require_pair, trial_row
 import price_trial
 from price_web_extract import extract_product, product_page_rejection
+from price_web_fetch import PersistentRobotsCache, RobotsDenied, WebFetcher
 from tests.test_price_locator import Crash, Site, _env, _watch
 from tests.web_fixtures import page
 from vytria_price_sync import SqlOdooPriceReader, VytriaPriceSync
@@ -503,3 +504,360 @@ def test_existing_legacy_scope_does_not_exclude_additional_trial_pairs_and_keeps
     assert pilot_scope(store) == scope_before
     with store._connect() as con:
         assert con.execute("SELECT COUNT(*) FROM pilot_runs WHERE operation='watch_check'").fetchone()[0] == int(legacy_pair)
+
+
+def _activate_continuity(service, clock):
+    clock.advance(hours=73)
+    service.tick(max_pairs=0)
+    prepared = service.prepare_continuity(actor="operator")
+    assert prepared["status"] == "prepared"
+    return service.activate_continuity(actor="operator", build_commit="c" * 40)
+
+
+def test_continuity_manifest_is_persisted_once_and_activation_is_explicit(trial):
+    service, store, _, _, _, clock, _, _, _ = trial
+    config = continuity_config()
+    assert config["require_explicit_activation"] is True
+    assert config["offer_check_interval_hours"] == 24
+    dockerfile = Path(price_trial.__file__).parents[0].joinpath("Dockerfile").read_text(encoding="utf-8")
+    assert "price_watch_continuity.json" in dockerfile
+    prepared = _activate_continuity(service, clock)
+    assert prepared["status"] == "active"
+    assert prepared["manifest"]["eans"] == manifest()["eans"]
+    assert prepared["manifest"]["competitors"] == manifest()["competitors"]
+    assert len(prepared["pairs"]) == 600
+    assert prepared["summary"]["selected_pairs"] == 600
+    assert prepared["summary"]["distinct_eans"] == 100
+    with store._connect() as con:
+        assert con.execute("SELECT COUNT(*) FROM price_continuity").fetchone()[0] == 1
+        assert con.execute("SELECT COUNT(*) FROM price_continuity_pairs").fetchone()[0] == 600
+        assert con.execute("""SELECT COUNT(DISTINCT ean) FROM price_continuity_pairs""").fetchone()[0] == 100
+    with pytest.raises(ValueError, match="pendiente de aprobación"):
+        service.activate_continuity(actor="operator", build_commit="c" * 40)
+    assert service.pause_continuity(actor="operator")["status"] == "paused"
+    assert service.resume_continuity(actor="operator")["status"] == "active"
+    stopped = service.stop_continuity(actor="operator")
+    assert stopped["status"] == "stopped" and len(stopped["pairs"]) == 600
+
+
+def test_continuity_ui_keeps_prepared_plan_inactive_until_explicit_approval(trial, monkeypatch):
+    from streamlit.testing.v1 import AppTest
+
+    import build_info
+    service, store, _, _, _, clock, _, _, _ = trial
+    clock.advance(hours=73)
+    service.tick(max_pairs=0)
+    service.prepare_continuity(actor="operator")
+    monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
+    monkeypatch.setattr(price_trial, "PriceTrial", lambda _store: service)
+    monkeypatch.setattr(build_info, "load_build_info",
+                        lambda: {"commit": "d" * 40, "build": "actions-test"})
+    app = AppTest.from_string(
+        "from price_comparator import PriceComparatorStore\n"
+        "from app_pages.price_watch import _render_continuity\n"
+        "_render_continuity(PriceComparatorStore())").run(timeout=30)
+    assert not app.exception
+    assert app.button(key="continuity_activate").disabled
+    app.checkbox(key="continuity_activation_approval").set_value(True).run(timeout=30)
+    assert not app.button(key="continuity_activate").disabled
+    assert service.continuity_report()["status"] == "prepared"
+
+
+def test_continuity_due_time_survives_restart_and_rechecks_after_expiry(trial):
+    import pandas as pd
+
+    service, store, _, _, _, clock, cid, _, reader = trial
+    active = _activate_continuity(service, clock)
+    target_ean = manifest()["eans"][0]
+    with store._connect() as con, con:
+        con.execute("UPDATE price_continuity_pairs SET state='review' WHERE continuity_id=?",
+                    (active["id"],))
+        con.execute("""UPDATE price_continuity_pairs SET state='pending',defer_reason='',next_check_at=NULL
+            WHERE continuity_id=? AND competitor_id=? AND ean=?""", (active["id"], cid, target_ean))
+
+    class Batch:
+        def __init__(self):
+            self.previews = 0
+            self.executions = 0
+
+        def preview(self, eans, competitors):
+            self.previews += 1
+            due_at = (clock() + timedelta(hours=24)).isoformat() if self.previews % 2 == 0 else None
+            return pd.DataFrame([{"action": "Monitorizar", "next_check_at": due_at,
+                                  "access_retry_at": None, "not_before": None, "valid_until": due_at,
+                                  "defer_reason": ""}])
+
+        def execute(self, eans, competitors, **kwargs):
+            self.executions += 1
+            return {"pairs": [{"ean": eans[0], "competitor_id": competitors[0], "processed": True,
+                               "category": "checked_now", "requests": 0, "outcomes": [], "reason": ""}]}
+
+    batch = Batch()
+    service._batch = batch
+    service.continuity_tick(max_pairs=1)
+    assert batch.executions == 1
+    with store._connect() as con:
+        saved = con.execute("""SELECT state,next_check_at FROM price_continuity_pairs
+            WHERE continuity_id=? AND competitor_id=? AND ean=?""",
+                            (active["id"], cid, target_ean)).fetchone()
+    assert saved["state"] == "pending"
+    assert saved["next_check_at"] == (clock() + timedelta(hours=24)).isoformat()
+
+    restarted = PriceTrial(store, clock=clock, batch=batch, sync=service._sync)
+    restarted.continuity_tick(max_pairs=1)
+    assert batch.executions == 1
+    assert len(reader.calls) == 1
+    clock.advance(hours=24)
+    restarted.continuity_tick(max_pairs=1)
+    assert batch.executions == 2
+    with store._connect() as con:
+        assert con.execute("""SELECT COUNT(*) FROM price_continuity_pairs
+            WHERE continuity_id=? AND competitor_id=? AND ean=?""",
+                           (active["id"], cid, target_ean)).fetchone()[0] == 1
+        assert con.execute("""SELECT COUNT(*) FROM price_continuity_checks
+            WHERE continuity_id=? AND competitor_id=? AND ean=?""",
+                           (active["id"], cid, target_ean)).fetchone()[0] == 2
+
+
+def test_interrupted_continuity_reservation_is_reviewed_and_never_replayed(trial):
+    service, store, access, _, _, clock, cid, site, _ = trial
+    active = _activate_continuity(service, clock)
+    ean = manifest()["eans"][0]
+    with store._connect() as con, con:
+        con.execute("UPDATE price_continuity_pairs SET state='review' WHERE continuity_id=?",
+                    (active["id"],))
+        con.execute("""UPDATE price_continuity_pairs SET state='running',started_at=?
+            WHERE continuity_id=? AND competitor_id=? AND ean=?""",
+                    (clock().isoformat(), active["id"], cid, ean))
+    with service.execution(0, cid, ean, program="continuity", program_id=active["id"]):
+        access.reserve(cid, "ficha", purpose="monitor", ean=ean, url="https://shop.example/item")
+    restarted = PriceTrial(store, clock=clock, batch=service._batch, sync=service._sync)
+    restarted.continuity_tick(max_pairs=1)
+    restarted.continuity_tick(max_pairs=1)
+    saved = next(pair for pair in restarted.continuity_report()["pairs"]
+                 if pair["competitor_id"] == cid and pair["ean"] == ean)
+    assert saved["state"] == "review"
+    assert "no se repite" in saved["defer_reason"]
+    assert restarted.continuity_report()["summary"]["http_unconfirmed_unique"] == 1
+    assert site.calls == []
+    with store._connect() as con:
+        assert con.execute("""SELECT COUNT(*) FROM price_continuity_checks
+            WHERE continuity_id=? AND competitor_id=? AND ean=?""",
+                           (active["id"], cid, ean)).fetchone()[0] == 1
+
+
+def test_trial_carries_unexpired_pair_deadlines_into_the_next_cycle(trial):
+    import pandas as pd
+
+    service, store, _, _, _, clock, cid, site, _ = trial
+    ean = manifest()["eans"][0]
+    next_check = clock() + timedelta(hours=47)
+    with store._connect() as con, con:
+        con.execute("UPDATE price_trial_pairs SET state='done' WHERE cycle=0")
+        con.execute("""UPDATE price_trial_pairs SET state='pending',next_check_at=?,defer_reason=?
+            WHERE cycle=0 AND competitor_id=? AND ean=?""",
+                    (next_check.isoformat(), "Vigencia todavía activa", cid, ean))
+    clock.advance(hours=24)
+    service.tick(max_pairs=0)
+    with store._connect() as con, con:
+        inherited = con.execute("""SELECT state,next_check_at,defer_reason FROM price_trial_pairs
+            WHERE cycle=1 AND competitor_id=? AND ean=?""", (cid, ean)).fetchone()
+        con.execute("UPDATE price_trial_pairs SET state='done' WHERE cycle=1")
+        con.execute("""UPDATE price_trial_pairs SET state='pending'
+            WHERE cycle=1 AND competitor_id=? AND ean=?""", (cid, ean))
+    assert inherited["state"] == "pending"
+    assert inherited["next_check_at"] == next_check.isoformat()
+    assert inherited["defer_reason"] == "Vigencia todavía activa"
+
+
+    class Batch:
+        previews = 0
+        executions = 0
+
+        def preview(self, eans, competitors):
+            self.previews += 1
+            next_at = (clock() + timedelta(hours=24)).isoformat() if self.previews % 2 == 0 else None
+            return pd.DataFrame([{"action": "Monitorizar", "next_check_at": next_at,
+                                  "access_retry_at": None, "not_before": None, "valid_until": next_at,
+                                  "defer_reason": ""}])
+
+        def execute(self, eans, competitors, **kwargs):
+            self.executions += 1
+            return {"pairs": [{"ean": eans[0], "competitor_id": competitors[0], "processed": True,
+                               "category": "checked_now", "requests": 0, "outcomes": [], "reason": ""}]}
+
+    batch = Batch()
+    service._batch = batch
+    service.tick(max_pairs=1)
+    assert batch.executions == 0
+    clock.advance(hours=23)
+    service.tick(max_pairs=1)
+    assert batch.executions == 1
+    assert site.calls == []
+
+
+def test_verified_offer_is_rechecked_when_its_24_hour_frequency_expires(trial):
+    import pandas as pd
+
+    service, store, _, _, _, clock, cid, _, _ = trial
+    service.tick(max_pairs=0)
+    target_ean = manifest()["eans"][0]
+    with store._connect() as con, con:
+        con.execute("UPDATE price_trial_pairs SET state='done' WHERE cycle=0")
+        con.execute("""UPDATE price_trial_pairs SET state='pending' WHERE cycle=0
+            AND competitor_id=? AND ean=?""", (cid, target_ean))
+
+    class Batch:
+        executions = 0
+
+        def preview(self, eans, competitors):
+            valid_until = (clock() + timedelta(hours=48)).isoformat()
+            return pd.DataFrame([{
+                "located": True,
+                "last_ok_at": clock().isoformat(),
+                "interval_hours": 48,
+                "next_check_at": valid_until,
+                "valid_until": valid_until,
+                "defer_reason": "",
+                "action": "Monitorizar",
+            }])
+
+        def execute(self, eans, competitors, **kwargs):
+            self.executions += 1
+            return {"runs": [], "pairs": [{
+                "ean": eans[0], "competitor_id": competitors[0], "processed": True,
+                "category": "checked_now", "outcomes": [],
+            }]}
+
+    batch = Batch()
+    service._batch = batch
+    service.tick(max_pairs=1)
+    with store._connect() as con:
+        first = con.execute("""SELECT state,next_check_at FROM price_trial_pairs
+            WHERE cycle=0 AND competitor_id=? AND ean=?""", (cid, target_ean)).fetchone()
+    assert first["state"] == "pending"
+    assert first["next_check_at"] == (clock() + timedelta(hours=24)).isoformat()
+
+    clock.advance(hours=24)
+    service.tick(max_pairs=1)
+    with store._connect() as con:
+        second = con.execute("""SELECT state FROM price_trial_pairs
+            WHERE cycle=1 AND competitor_id=? AND ean=?""", (cid, target_ean)).fetchone()
+        copies = con.execute("""SELECT COUNT(*) FROM price_trial_pairs
+            WHERE cycle=1 AND competitor_id=? AND ean=?""", (cid, target_ean)).fetchone()[0]
+    assert batch.executions == 2
+    assert second["state"] == "pending"
+    assert copies == 1
+
+
+def test_trial_report_deduplicates_shared_http_receipts(trial):
+    service, store, _, _, _, _, cid, _, _ = trial
+    eans = manifest()["eans"][:2]
+    request = {"id": 991, "result": "HTTP 200", "url": "https://shop.example/robots.txt"}
+    for ean in eans:
+        pair = [{"ean": ean, "processed": True, "category": "checked_now", "outcomes": []}]
+        segment = {"pairs": pair, "http_receipts": [request],
+                   "inventory_before": {"located": False, "action": "Monitorizar"},
+                   "inventory_after": {}}
+        with store._connect() as con, con:
+            con.execute("""UPDATE price_trial_pairs SET state='done',receipt=?
+                WHERE cycle=0 AND competitor_id=? AND ean=?""",
+                        (json.dumps({"segments": [segment]}), cid, ean))
+    for ean, state in zip(manifest()["eans"][2:4], ("unavailable", "not_found")):
+        pair = [{"ean": ean, "processed": True, "category": "checked_now",
+                 "outcomes": [{"state": state}]}]
+        segment = {"pairs": pair, "http_receipts": [],
+                   "inventory_before": {"located": False, "action": "Monitorizar"},
+                   "inventory_after": {}}
+        with store._connect() as con, con:
+            con.execute("""UPDATE price_trial_pairs SET state='done',receipt=?
+                WHERE cycle=0 AND competitor_id=? AND ean=?""",
+                        (json.dumps({"segments": [segment]}), cid, ean))
+    totals = service.report()["summary"][f"0:{cid}"]
+    assert totals["reserved_http"] == 1
+    assert totals["http"] == 1
+    assert totals["http_robots"] == 1
+    assert totals["http_commercial"] == 0
+    assert totals["not_located"] == 1
+    assert totals["restricted_or_unavailable"] == 1
+
+
+def test_continuity_budget_enforces_rolling_200_http_and_minimum_pacing(trial):
+    service, store, access, _, _, clock, cid, _, _ = trial
+    active = _activate_continuity(service, clock)
+    ean = manifest()["eans"][0]
+    access.set_budget("competitor", cid, daily_limit=1000, per_minute_limit=600,
+                      pause_seconds=0, actor="operator")
+    with service.execution(0, cid, ean, program="continuity", program_id=active["id"]):
+        budget = access.budget("competitor", cid)
+        assert budget["daily_limit"] == 200
+        assert budget["per_minute_limit"] == 10
+        assert budget["effective_pause"] >= 3
+        first = clock()
+        for _ in range(200):
+            access.reserve(cid, "ficha", purpose="monitor", ean=ean, url="https://shop.example/item")
+            clock.advance(seconds=6)
+        with pytest.raises(AccessDenied) as denied:
+            access.reserve(cid, "ficha", purpose="monitor", ean=ean, url="https://shop.example/item")
+        assert denied.value.decision.code == "budget_daily"
+        clock.now = first + timedelta(hours=24) - timedelta(seconds=1)
+        assert access.check(cid, "ficha").code == "budget_daily"
+        clock.advance(seconds=1)
+        assert access.check(cid, "ficha").allowed
+
+
+def test_persistent_robots_cache_reuses_response_but_evaluates_each_path_and_agent(trial):
+    service, store, _, _, _, clock, _, _, _ = trial
+    base = "https://www.amevista.com"
+    site = Site(base=base, robots="User-agent: *\nDisallow: /private\nAllow: /\n")
+    public = base + "/public"
+    site.pages[public] = page(name="Public product", price=123)
+    cache = PersistentRobotsCache(store, clock=clock)
+    fetcher = WebFetcher(transport=site, robots_cache=cache, sleep=lambda _: None)
+    with pytest.raises(RobotsDenied):
+        fetcher.get(base + "/private")
+    fetcher.get(public)
+    assert site.calls == [base + "/robots.txt", public]
+
+    other_agent = WebFetcher(transport=site, robots_cache=cache, agent_token="DifferentAgent",
+                             sleep=lambda _: None)
+    other_agent.get(public)
+    assert site.calls == [base + "/robots.txt", public, base + "/robots.txt", public]
+
+
+def test_persistent_robots_cache_obeys_expiry_and_does_not_cache_errors(trial):
+    service, store, _, _, _, clock, _, _, _ = trial
+    base = "https://www.amevista.com"
+    calls = []
+
+    def transport(url, headers, timeout):
+        calls.append(url)
+        if url.endswith("/robots.txt"):
+            return 200, {"Cache-Control": "max-age=1"}, b"User-agent: *\nAllow: /\n"
+        return 200, {}, b"page"
+
+    cache = PersistentRobotsCache(store, clock=clock)
+    first = WebFetcher(transport=transport, robots_cache=cache, sleep=lambda _: None)
+    first.rules(base + "/item")
+    clock.advance(seconds=2)
+    second = WebFetcher(transport=transport, robots_cache=cache, sleep=lambda _: None)
+    second.rules(base + "/item")
+    assert calls == [base + "/robots.txt", base + "/robots.txt"]
+    clock.advance(seconds=2)
+
+    failed_calls = []
+
+    def failed(url, headers, timeout):
+        failed_calls.append(url)
+        return 503, {}, b""
+
+    uncached = WebFetcher(transport=failed, robots_cache=cache, sleep=lambda _: None)
+    assert uncached.rules(base + "/item").deny_all
+    again = WebFetcher(transport=failed, robots_cache=cache, sleep=lambda _: None)
+    assert again.rules(base + "/item").deny_all
+    assert failed_calls == [base + "/robots.txt", base + "/robots.txt"]
+    agent = "Cache-Control-Test"
+    cache.put(base, agent, 200, {"Cache-Control": "max-age=60", "Age": "60"}, b"expired")
+    assert cache.get(base, agent) is None
+    cache.put(base, agent, 200, {"Cache-Control": "private, max-age=60"}, b"private")
+    assert cache.get(base, agent) is None

@@ -149,11 +149,11 @@ def comparability_gap(page: ProductPage, config: dict) -> str:
 class WebPriceSearch:
     def __init__(self, store: PriceComparatorStore, *, fetcher_factory: FetcherFactory | None = None,
                  external_search: Callable[[str, str], list[str]] | None = None,
-                 clock: Callable[[], datetime] = _utc) -> None:
+                 clock: Callable[[], datetime] | None = None) -> None:
         self.store = store
         self._factory = fetcher_factory or self._default_factory
         self.external_search = external_search  # (query, domain) -> URLs; needs a provider and key: pending
-        self._now = clock
+        self._now = clock or _utc
 
     @staticmethod
     def _default_factory(config: dict) -> WebFetcher:

@@ -20,6 +20,7 @@ PRADA = {"8056597875349": 312.0, "8056597877329": 195.0, "8056597875226": 273.0}
 
 def _freeze(monkeypatch):
     monkeypatch.setattr(pa, "_utc", lambda: NOW)
+    monkeypatch.setattr("price_web._utc", lambda: NOW)
     monkeypatch.setattr("price_comparator.datetime",
                         type("D", (datetime,), {"now": classmethod(lambda cls, tz=None: NOW)}))
 

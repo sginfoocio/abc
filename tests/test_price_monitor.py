@@ -74,7 +74,7 @@ def _advance(clock):
 def test_verified_watch_only_and_no_search_on_subsequent_updates(tmp_path):
     store, _, _, monitor, clock, cid, site = _monitor_env(tmp_path)
     assert monitor.run([cid]).states == {"done": 1}
-    assert len(site.calls) == 2  # robots + verified product, no listing/search
+    assert len(site.calls) == 1  # cached robots + verified product, no listing/search
     job = monitor.jobs().iloc[0]
     assert job["eligible"] == 1 and job["last_offer_id"] is not None
     assert monitor.inventory().iloc[0]["comparable"]
@@ -172,7 +172,7 @@ def test_block_suspends_competitor_and_429_resumes(tmp_path, block):
         site.status[url] = block
     report = monitor.run([cid])
     assert report.processed == 1 and cid in report.stopped
-    assert len(site.calls) == 2
+    assert len(site.calls) == 1  # the valid robots response is reused
     assert len(access.incidents(open_only=True)) == 1
     site.calls.clear()
     monitor.run([cid])
@@ -380,10 +380,10 @@ def test_receipt_recovery_after_import_before_completion_and_duplicate_ean_url(t
         patch.setattr(WebPriceSearch, "record", record_then_crash)
         with pytest.raises(Crash):
             monitor.run([cid])
-    assert len(site.calls) == 2 and len(store.offer_history(EAN)) == 1
+    assert len(site.calls) == 1 and len(store.offer_history(EAN)) == 1
     clock.advance(minutes=11)
     assert monitor.run([cid]).states == {"done": 2}
-    assert len(site.calls) == 2  # both EAN/calibres share one saved product receipt
+    assert len(site.calls) == 1  # both EAN/calibres share the saved product and robots receipts
     assert len(store.offer_history(EAN)) == len(store.offer_history(other)) == 1
 
 
@@ -443,7 +443,7 @@ def test_monitoring_ui_shows_prices_and_alerts_without_network(tmp_path, monkeyp
 def test_inventory_mixed_five_completed_and_unprocessed_jobs_is_read_only(tmp_path, monkeypatch):
     store, _, _, monitor, _, cid, site = _monitor_env(tmp_path, count=6)
     assert monitor.run([cid], max_jobs=5).states == {"done": 5}
-    assert len(site.calls) == 6  # robots + five simulated product pages
+    assert len(site.calls) == 5  # five simulated product pages; robots was already cached
     with store._connect() as con:
         for job in con.execute("SELECT * FROM monitor_jobs WHERE state='done'"):
             for key in ("lease_until", "last_ok_at", "sampled_at", "not_before", "valid_until"):

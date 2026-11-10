@@ -474,7 +474,7 @@ def summary(report: dict) -> dict:
     return out
 
 
-def main(argv=None, *, engine=None, helpers=None) -> int:
+def main(argv=None, *, engine=None, helpers=None, today: date | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.partner <= 0 or min(args.days, args.size, args.max_codes, args.max_lines, args.timeout_ms) <= 0:
@@ -486,7 +486,7 @@ def main(argv=None, *, engine=None, helpers=None) -> int:
         if helpers is None:
             required.append("image_repository")
         require_modules(tuple(required))
-        report, code = build_report(args, engine=engine, helpers=helpers)
+        report, code = build_report(args, engine=engine, helpers=helpers, today=today)
     except Blocker as blocker:
         report = {"schema": SCHEMA, "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                   "partner_id": args.partner, "blocker": {"code": blocker.code, "detail": blocker.detail},

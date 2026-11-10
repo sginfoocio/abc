@@ -312,6 +312,7 @@ def test_report_lists_proposal_and_keeps_literal_upc_in_csv(tmp_path, capsys):
     code = pilot.main(["--partner", str(SYNTHETIC_PARTNER), "--expect-name", "Supplier Test",
                        "--out", str(tmp_path / "o"), "--catalog", str(catalog), "--days", "60",
                        "--upc", U[0], "--upc", U[1], "--portal-groups", str(groups)], engine=odoo(LINES),
+                      today=TODAY,
                       helpers=helpers())
     assert code == 0
     csv_text = next((tmp_path / "o").glob("*.csv")).read_text(encoding="utf-8-sig")
