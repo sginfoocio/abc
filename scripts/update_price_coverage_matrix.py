@@ -158,7 +158,7 @@ def _route_metadata(row: dict[str, str]) -> dict[str, str]:
         "candidata_en_plan_local": str(bool(candidates)).lower(),
         "urls_en_plan_local": _json(candidate_urls),
         "consulta_gobernada_elegible_localmente": str(bool(runnable)).lower(),
-        "url_final_observada_esta_revision": "",
+        "url_final_observada_esta_revision": row.get("url_final_observada_esta_revision", ""),
         "elegibilidad_local": eligibility,
         "motivo_exclusion_o_pendiente": reason,
         "datos_pendientes": pending,
