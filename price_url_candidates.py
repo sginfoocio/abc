@@ -24,6 +24,7 @@ AMEVISTA_MANUAL_EVIDENCE = {
 }
 AMEVISTA_RAYBAN_EVIDENCE = "manual:amevista-ray-ban-rb2140-rb4472-routes"
 EDEL_MANUAL_EVIDENCE = "manual:edel-selected-variant-observations"
+VISIO_FORMAT_EVIDENCE = "user:visio-public-fiche-format-examples"
 SUPPLIED_PATTERNS = {
     "domanci": (
         "https://domanci.com/es/gafas-de-sol/miu-miu-mu-11zs-16k5s0-51.html",
@@ -249,6 +250,73 @@ def _supplied_pattern_plan(product: dict, shop: str, category: str, attributes: 
     ])
 
 
+def _visio_format_plan(product: dict, brand: str, model: str) -> CandidatePlan | None:
+    """Build only the additional Visio formats evidenced for these model families."""
+    family = (brand, model)
+    if family not in {("TOMFORD", "FT1044"), ("MIUMIU", "MU52YS"), ("RAYBAN", "RB2140")}:
+        return None
+
+    raw_caliber = normalize_caliber(product.get("caliber", ""))
+    lens, _, bridge = raw_caliber.partition("-")
+    explicit_bridge = str(product.get("bridge") or "").strip()
+    if explicit_bridge:
+        if not re.fullmatch(r"\d{1,2}", explicit_bridge):
+            return CandidatePlan(reason_code="missing_attribute", reason="Puente no reconocido para Visio")
+        if bridge and bridge != explicit_bridge:
+            return CandidatePlan(reason_code="missing_attribute",
+                                 reason="Calibre y puente contradictorios para construir la URL Visio")
+        bridge = explicit_bridge
+
+    needs_bridge = family != ("RAYBAN", "RB2140") or "/" in str(product.get("color", ""))
+    missing = (["calibre"] if not lens else []) + (["puente"] if needs_bridge and not bridge else [])
+    if missing:
+        return CandidatePlan(reason_code="missing_attribute",
+                             reason="Falta " + " y ".join(missing) + " asociado al EAN para construir la URL Visio")
+
+    color_value = str(product["color"]).strip().upper()
+    if family == ("MIUMIU", "MU52YS"):
+        if not re.fullmatch(r"ZVN[0-9A-Z]{3}", color_value):
+            return CandidatePlan(reason_code="needs_authorized_discovery",
+                                 reason="Visio solo documenta el separador ZVN-5D1 para Miu Miu MU52YS")
+        color_slug = f"{color_value[:3]}-{color_value[3:]}".lower()
+        model_slug = "mu-52ys"
+        size = f"{lens}-{bridge}"
+    elif family == ("TOMFORD", "FT1044"):
+        color_slug = color_value.lower()
+        model_slug = "ft1044-s"
+        size = f"{lens}-{bridge}"
+    else:
+        if not re.fullmatch(r"[A-Z0-9]+(?:/[A-Z0-9]+)?", color_value):
+            return CandidatePlan(reason_code="needs_authorized_discovery",
+                                 reason="Formato de color Ray-Ban no reconocido para Visio")
+        color_slug = color_value.lower().replace("/", "-")
+        model_slug = "rb2140"
+        size = f"{lens}-{bridge}" if "/" in color_value else lens
+
+    attributes = {
+        name: str(product[name]) for name in ("ean", "brand", "model", "color", "category")
+    }
+    attributes["ean"] = normalize_gtin(product["ean"])
+    attributes["caliber"] = lens
+    if bridge:
+        attributes["bridge"] = bridge
+    attributes["variant_resolution"] = (
+        "URL format only; ficha identity, EAN, selected variant, price and availability remain unverified"
+    )
+    url = ("https://www.visiofactory.es/gafas-de-sol/todas-las-solares/"
+           f"{model_slug}-{color_slug}-{size}.html")
+    candidate = UrlCandidate(
+        url,
+        "sample_pattern:visio",
+        attributes,
+        [VISIO_FORMAT_EVIDENCE],
+        origin=MANUAL_COVERAGE_EVIDENCE,
+        review_date="",
+        review_base="",
+    )
+    return CandidatePlan([candidate])
+
+
 def candidate_plan(product: dict, domain: str) -> CandidatePlan:
     """Pure preview. Missing dimensions/opaque IDs are never enumerated or inferred from another colour."""
     host = urlparse(domain if "://" in domain else "https://" + domain).hostname or ""
@@ -299,6 +367,11 @@ def candidate_plan(product: dict, domain: str) -> CandidatePlan:
         return CandidatePlan(list(candidates.values()),
                              "needs_authorized_discovery" if needs_review else "",
                              "; ".join(candidate.reason for candidate in candidates.values() if candidate.reason))
+
+    if shop == "visio" and category == "sol":
+        format_plan = _visio_format_plan(product, brand, model)
+        if format_plan is not None:
+            return format_plan
 
     if shop in SUPPLIED_PATTERNS:
         return _supplied_pattern_plan(product, shop, category, attributes)
