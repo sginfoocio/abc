@@ -29,7 +29,7 @@ from price_locator import LEASE, MAX_ATTEMPTS, PriceLocator, job_deferral
 from price_references import EXACT, classify
 from price_watch import PriceWatch
 from price_web import Outcome, WebPriceSearch, WebSearchError, comparability_gap, validate_competitor_url
-from price_web_extract import ProductPage, extract_product
+from price_web_extract import ProductPage, extract_product, select_product_variant
 from price_web_fetch import PageGone, RobotsDenied, _requests_transport
 from vytria_price_sync import SyncInProgress, VytriaPriceSync
 
@@ -309,13 +309,19 @@ class PriceMonitor:
                 validate_competitor_url(url, config["domain"])
                 fetcher.ean = ean
                 with self.store._connect() as con:
-                    shared = con.execute("""SELECT sample FROM monitor_jobs
+                    shared = con.execute("""SELECT ean,sample FROM monitor_jobs
                         WHERE competitor_id=? AND url=? AND state='done'
                         AND sample<>'' AND last_ok_at IS NOT NULL AND not_before>?
                         ORDER BY last_ok_at DESC LIMIT 1""", (cid, url, _iso(self._now()))).fetchone()
-                if shared and not fresh:
-                    shared_sample = json.loads(shared["sample"])
-                    page = ProductPage(**shared_sample["page"])
+                shared_sample = json.loads(shared["sample"]) if shared and not fresh else None
+                shared_page = ProductPage(**shared_sample["page"]) if shared_sample else None
+                product = self.search._product(ean)
+                shared_candidate = select_product_variant(shared_page, product) if shared_page else None
+                shared_match = classify(product, shared_candidate.candidate()) if shared_candidate else None
+                reuse_shared = bool(shared_candidate and shared_match and shared_match.status == EXACT
+                                    and not shared_candidate.ambiguous)
+                if reuse_shared:
+                    page = shared_candidate
                     sampled_at = shared_sample["at"]
                 else:
                     fetched = fetcher.get(url)
@@ -325,7 +331,8 @@ class PriceMonitor:
                                            tax_policy=config["tax_policy"],
                                            url_trace={**fetched.trace, "candidate_url": url})
                     sampled_at = _iso(self._now())
-                product = self.search._product(ean)
+                    product = self.search._product(ean)
+                    page = select_product_variant(page, product)
                 match = classify(product, page.candidate()) if page else None
                 from price_web_extract import product_page_rejection
                 self._job_trace = {

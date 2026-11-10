@@ -22,7 +22,7 @@ from price_comparator import PriceComparatorStore, normalize_gtin
 from price_connectors import Connector, ConnectorBlocked, ConnectorError, Observation
 from price_references import EXACT, PROBABLE, REJECTED, ReferenceIndex, classify, key, search_plan, tokens
 from price_web_extract import (ProductPage, extract_edel_search_cards, extract_product, parse_html,
-                               resolve_market)
+                               resolve_market, select_product_variant)
 from price_web_fetch import MAX_SITEMAP_BYTES, PageGone, RobotsDenied, WebFetcher
 
 ACCESS_STATES = ("unknown", "robots_allowed", "robots_restricted", "blocked", "pending_authorization")
@@ -713,6 +713,7 @@ class WebPriceSearch:
                     if product_url == fetched.url or any(card.url == product_url for card in outcomes):
                         continue
                     page.url = product_url
+                    page = select_product_variant(page, product)
                     match = classify(product, page.candidate())
                     if match.status == REJECTED:
                         continue
@@ -833,6 +834,7 @@ class WebPriceSearch:
         if page is None:
             outcome.detail, outcome.reason = "La página no publica datos de producto", "no_product_data"
             return outcome
+        page = select_product_variant(page, product)
         match = classify(product, page.candidate())
         status = match.status
         if page.ambiguous and status == EXACT:

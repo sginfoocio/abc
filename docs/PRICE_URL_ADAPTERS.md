@@ -128,6 +128,77 @@ Para una reversion de codigo, la columna aditiva puede permanecer; no hay
 que borrar historicos ni candidatas. Si se revirtiera a una version que no
 conoce los bloqueos heredados, revisar esa limitacion antes de reanudar.
 
+## Ampliacion de cobertura Amevista y Edel-Optics
+
+Se incorporan las observaciones manuales aportadas para esta correccion.
+No son capturas HTTP ni verifican identidad, oferta, mercado, IVA, stock,
+autorizacion o vigencia.
+
+- **Amevista:** Miu Miu genera candidatos por marca/modelo/color en sol y
+  monturas, con evidencia separada por categoria. Bottega Veneta usa la misma
+  forma de ruta solo para sol. No se reutiliza el patron de monturas para
+  Bottega ni se añade ninguna excepcion por EAN. Para Ray-Ban se conservan
+  unicamente los formatos documentados: RB2140 901 y 901S31 mantienen el
+  sufijo `wayfarer`; RB4472 1359/2 publica `1359-2` en la URL. No se aplica
+  esta conversion de color ni el sufijo a otros modelos/colores.
+- En las fichas Amevista compartidas, cada Product se vincula por GTIN
+  normalizado y dimensiones publicadas en el mismo nodo estructurado. La
+  seleccion no depende del orden de listas paralelas. Un ProductGroup puede
+  aportar un precio comun sin stock; la disponibilidad procede de la variante.
+  El calibre no cambia el precio, pero una contradiccion publicada entre EAN
+  y dimensiones deja el par ambiguo. UPC-A de 12 digitos se normaliza con cero
+  inicial para comparar con EAN-13, sin perder el EAN original del manifiesto.
+- **Edel-Optics:** para Prada, Tom Ford, Miu Miu y Bottega Veneta dentro de las
+  categorias demostradas, se genera la ruta modelo-color-marca sin inventar
+  `selectedSize`. El parser resuelve el ID solo si la URL ya lo publica o si
+  hay exactamente un radio `prd<id>` marcado y los datos de producto vinculan
+  ese mismo ID. El EAN del microdato Edel se toma del bloque
+  `eoDetailListTileSize<id>` coincidente. Una seleccion ausente, multiple o
+  contradictoria queda ambigua y no aporta oferta aceptable. Se amplian rutas
+  para Saint Laurent SL 596 DUNE, SL 872 ERIN y SL 908, preservando los nombres
+  comerciales; los IDs de control se leen de la ficha y no se fijan en reglas.
+  En esta evidencia el navegador reviso control y oferta, mientras que los UPC
+  se recuperaron de paginas indexadas y no estaban visibles en la lectura
+  actual. La identidad no se acepta por ese UPC indexado sin que el motor la
+  vincule a datos estructurados de la variante.
+- La disponibilidad se conserva desde los datos de la variante seleccionada
+  (JSON-LD o microdatos ya publicados). El ID se guarda como `variant_id` y
+  `selectedSize` sigue siendo Product Id, nunca calibre ni EAN. No se importan
+  disponibilidad, precio ni identificadores de los ejemplos manuales.
+- **Reevaluacion de continuidad:** la vista previa lee inventario, candidatas y
+  permisos locales, sin HTTP. Aplicar requiere responsable y motivo, y mueve
+  unicamente pares `restricted` con candidata ejecutable y permiso vigente a
+  `pending`, con proxima comprobacion persistida y una entrada en
+  `access_audit`. No cambia pares `review`, presupuestos, permisos, recibos ni
+  filas historicas; la consulta posterior sigue pasando por el flujo normal.
+
+La [matriz de 100 EAN × seis tiendas](PRICE_COVERAGE_100_EAN_6_STORES.csv)
+contiene una fila por par, la candidata local o URL historica, la categoria
+del ultimo ciclo y el motivo pendiente. Columnas separadas indican si se
+verifico una ficha u oferta comparable en esta revision. `historical_link`
+significa solo que la evidencia del piloto guardo una ficha; `local_candidate`
+es una ruta propuesta; ninguno significa verificacion actual ni acceso
+autorizado. No se ejecutaron consultas al crear la matriz. El corte contiene
+138 vinculos historicos, 153 rutas candidatas, 3 pares solo en revision y 306
+pares sin ruta local documentada. Los 100 EAN tienen ahora al menos una ruta
+historica o candidata, no 100 fichas verificadas. No se verifico ninguna ficha
+ni oferta comparable en esta revision. En ConGafasDeSol se descartaron los slugs genericos de otras
+marcas: las rutas aportadas solo justifican Prada/sol y las fichas exactas
+E037-E038 siguen limitadas a Tom Ford FT0711.
+Las siete nuevas rutas cubren cuatro EAN en Amevista (los dos RB2140 901
+comparten pagina) y tres en Edel-Optics. Para RB2140 901S31 la entrega
+publicada para el 9 de diciembre, y para RB4472 la del 11 de noviembre, se
+conservan como plazos; una fecha futura no se convierte en stock inmediato.
+El precio comun visible entre calibres RB2140 es evidencia de pagina, no un
+precio validado por el comparador. Los UPC indexados de Edel siguen
+diferenciados de la evidencia actual de navegador. Los pares con ruta candidata
+permanecen pendientes de comprobacion y las restricciones/permisos no cambian.
+
+La restriccion de nuevas candidatas no borra fichas verificadas ni recibos.
+Los 138 vinculos historicos del corte coinciden con URLs conservadas en los
+recibos del ciclo representado; los recibos de ciclos anteriores permanecen
+en el JSON fuente del piloto y no se reescriben.
+
 ## Validacion
 
 [Pruebas nuevas](../tests/test_price_url_candidates.py): URLs documentales,
@@ -136,6 +207,15 @@ dos RB2140, padres, GTIN/color contradictorios, reutilizacion, deduplicacion,
 trazabilidad persistida, migracion SQLite y vista previa sin escrituras.
 Todas las respuestas de tiendas son **sinteticas** y el transporte real
 `requests.Session.send` esta prohibido en estas pruebas.
+
+Las rutas Amevista/Edel y el flujo de reevaluacion tienen regresiones
+adicionales para categoria, variante seleccionada, EAN/stock de esa variante,
+conflictos de IDs y auditoria sin peticiones reales. En descubrimiento, un EAN
+coincidente no confirma una ficha Edel si no se resolvio la variante; la
+candidata queda pendiente y no se indexa como verificada.
+La URL declarada en `Product` y la URL de `Offer` tambien deben concordar con
+la variante `selectedSize` solicitada; una discrepancia deja la ficha ambigua
+y sin EAN, precio o disponibilidad aceptables.
 
 Las suites existentes del comparador preservan variantes, FT1044/S,
 DUNE OPT, IVA, mercado, stock, ofertas condicionadas, historicos y acceso.

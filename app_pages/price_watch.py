@@ -928,6 +928,42 @@ def _render_continuity(store: PriceComparatorStore, service=None) -> None:
             if st.button("Detener continuidad", key="continuity_stop_paused"):
                 service.stop_continuity(actor=actor)
                 _refresh("Continuidad detenida; historial y recibos conservados.")
+        if report["status"] == "active" and report["summary"]["restricted_pairs"]:
+            key = f"continuity_reevaluation_{report['id']}"
+            with st.expander("Reevaluación auditada de pares restringidos"):
+                st.caption(
+                    "La vista previa solo lee el inventario y los permisos locales; no consulta tiendas ni "
+                    "consume presupuesto. Solo reprograma pares restringidos con candidato y acceso vigentes. "
+                    "No modifica revisiones, recibos ni históricos."
+                )
+                if st.button("Previsualizar pares reprogramables", key=key + "_preview"):
+                    try:
+                        st.session_state[key] = service.reevaluate_restricted_pairs()
+                    except (ValueError, RuntimeError, Timeout) as exc:
+                        st.error(str(exc))
+                preview = st.session_state.get(key)
+                if preview is not None:
+                    st.dataframe(pd.DataFrame([{
+                        "EAN": item["ean"], "Competidor": item["competitor_id"],
+                        "Reprogramable": item["eligible"], "Candidatas": " · ".join(item["candidate_urls"]),
+                        "Motivo": item["reason"], "Próxima comprobación": item["next_check_at"],
+                    } for item in preview]), width="stretch", hide_index=True)
+                    eligible = any(item["eligible"] for item in preview)
+                    with st.form(key + "_apply"):
+                        actor = st.text_input("Responsable de la reevaluación", value=_actor(),
+                                              key=key + "_actor")
+                        note = st.text_input("Motivo de la reevaluación", key=key + "_note")
+                        confirmed = st.checkbox("Confirmo reprogramar solo los pares elegibles",
+                                                key=key + "_confirm")
+                        submitted = st.form_submit_button(
+                            "Aplicar reevaluación auditada", disabled=not eligible or not confirmed)
+                    if submitted:
+                        try:
+                            service.reevaluate_restricted_pairs(actor=actor, note=note, apply=True)
+                            st.session_state.pop(key, None)
+                            _refresh("Reevaluación auditada; ningún par fue consultado durante la acción.")
+                        except (ValueError, RuntimeError, Timeout) as exc:
+                            st.error(str(exc))
         if report["pairs"]:
             st.dataframe(pd.DataFrame(report["pairs"]), width="stretch", hide_index=True)
 
