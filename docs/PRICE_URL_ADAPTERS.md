@@ -128,6 +128,45 @@ Para una reversion de codigo, la columna aditiva puede permanecer; no hay
 que borrar historicos ni candidatas. Si se revirtiera a una version que no
 conoce los bloqueos heredados, revisar esa limitacion antes de reanudar.
 
+## Ampliacion de cobertura Amevista y Edel-Optics
+
+Se incorporan las observaciones manuales aportadas para esta correccion.
+No son capturas HTTP ni verifican identidad, oferta, mercado, IVA, stock,
+autorizacion o vigencia.
+
+- **Amevista:** Miu Miu genera candidatos por marca/modelo/color en sol y
+  monturas, con evidencia separada por categoria. Bottega Veneta usa la misma
+  forma de ruta solo para sol. No se reutiliza el patron de monturas para
+  Bottega ni se añade ninguna excepcion por EAN.
+- **Edel-Optics:** para Prada, Tom Ford, Miu Miu y Bottega Veneta dentro de las
+  categorias demostradas, se genera la ruta modelo-color-marca sin inventar
+  `selectedSize`. El parser resuelve el ID solo si la URL ya lo publica o si
+  hay exactamente un radio `prd<id>` marcado y los datos de producto vinculan
+  ese mismo ID. El EAN del microdato Edel se toma del bloque
+  `eoDetailListTileSize<id>` coincidente. Una seleccion ausente, multiple o
+  contradictoria queda ambigua y no aporta oferta aceptable.
+- La disponibilidad se conserva desde los datos de la variante seleccionada
+  (JSON-LD o microdatos ya publicados). El ID se guarda como `variant_id` y
+  `selectedSize` sigue siendo Product Id, nunca calibre ni EAN. No se importan
+  disponibilidad, precio ni identificadores de los ejemplos manuales.
+- **Reevaluacion de continuidad:** la vista previa lee inventario, candidatas y
+  permisos locales, sin HTTP. Aplicar requiere responsable y motivo, y mueve
+  unicamente pares `restricted` con candidata ejecutable y permiso vigente a
+  `pending`, con proxima comprobacion persistida y una entrada en
+  `access_audit`. No cambia pares `review`, presupuestos, permisos, recibos ni
+  filas historicas; la consulta posterior sigue pasando por el flujo normal.
+
+La [matriz de 100 EAN × seis tiendas](PRICE_COVERAGE_100_EAN_6_STORES.csv)
+contiene una fila por par, la candidata local o URL historica, la categoria
+del ultimo ciclo y el motivo pendiente. `historical_link` significa solo que
+la evidencia del piloto guardo una ficha; `local_candidate` es solo una ruta
+propuesta; ninguno significa oferta comparable vigente ni acceso autorizado.
+No se ejecutaron consultas al crear la matriz. El corte contiene 138 vinculos
+historicos, 146 rutas candidatas, 3 pares solo en revision y 313 pares sin ruta
+local documentada. En ConGafasDeSol se descartaron los slugs genericos de otras
+marcas: las rutas aportadas solo justifican Prada/sol y las fichas exactas
+E037-E038 siguen limitadas a Tom Ford FT0711.
+
 ## Validacion
 
 [Pruebas nuevas](../tests/test_price_url_candidates.py): URLs documentales,
@@ -136,6 +175,12 @@ dos RB2140, padres, GTIN/color contradictorios, reutilizacion, deduplicacion,
 trazabilidad persistida, migracion SQLite y vista previa sin escrituras.
 Todas las respuestas de tiendas son **sinteticas** y el transporte real
 `requests.Session.send` esta prohibido en estas pruebas.
+
+Las rutas Amevista/Edel y el flujo de reevaluacion tienen regresiones
+adicionales para categoria, variante seleccionada, EAN/stock de esa variante,
+conflictos de IDs y auditoria sin peticiones reales. En descubrimiento, un EAN
+coincidente no confirma una ficha Edel si no se resolvio la variante; la
+candidata queda pendiente y no se indexa como verificada.
 
 Las suites existentes del comparador preservan variantes, FT1044/S,
 DUNE OPT, IVA, mercado, stock, ofertas condicionadas, historicos y acceso.

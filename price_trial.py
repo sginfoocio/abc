@@ -781,6 +781,82 @@ class PriceTrial:
         except Timeout:
             return
 
+    def reevaluate_restricted_pairs(self, *, actor: str = "", note: str = "",
+                                    apply: bool = False) -> list[dict]:
+        if apply and (not actor.strip() or not note.strip()):
+            raise ValueError("Responsable y motivo obligatorios para aplicar la reevaluación")
+        with self.continuity_lock():
+            continuity = continuity_row(self.store)
+            if not continuity or continuity["status"] != "active":
+                raise ValueError("La reevaluación solo está disponible con la continuidad activa")
+            with self.store._connect() as con:
+                pairs = [dict(pair) for pair in con.execute("""SELECT * FROM price_continuity_pairs
+                    WHERE continuity_id=? AND state='restricted' ORDER BY competitor_id,ean""",
+                                                            (continuity["id"],))]
+            if not pairs:
+                return []
+            from price_batch import WatchBatch
+
+            batch = self._batch or WatchBatch(self.store)
+            proposals = []
+            evaluated_at = self.clock().isoformat()
+            for pair in pairs:
+                with self.execution(0, pair["competitor_id"], pair["ean"],
+                                    program="continuity", program_id=continuity["id"]):
+                    rows = batch.preview([pair["ean"]], [pair["competitor_id"]]).to_dict("records")
+                if len(rows) != 1:
+                    raise ValueError(f"No se pudo previsualizar el par {pair['competitor_id']}/{pair['ean']}")
+                preview = rows[0]
+                candidate_count = int(preview.get("candidate_count") or 0)
+                ready = bool(preview.get("ready")) and candidate_count > 0
+                if ready:
+                    reason = "Candidato local y permiso vigente; queda pendiente la consulta supervisada."
+                elif not candidate_count:
+                    reason = (preview.get("candidate_reason") or preview.get("defer_reason")
+                              or preview.get("access") or "No hay candidata local ejecutable.")
+                else:
+                    reason = (preview.get("defer_reason") or preview.get("access")
+                              or "El par sigue restringido por su cola o por una revisión pendiente.")
+                proposals.append({
+                    "id": pair["id"], "competitor_id": pair["competitor_id"], "ean": pair["ean"],
+                    "eligible": ready, "applied": False, "reason": str(reason),
+                    "candidate_urls": [item["url"] for item in preview.get("local_candidates", [])
+                                       if item.get("url")],
+                    "next_check_at": evaluated_at if ready else preview.get("next_check_at"),
+                    "previous_reason": pair["defer_reason"],
+                })
+            eligible = [proposal for proposal in proposals if proposal["eligible"]]
+            if apply and eligible:
+                now = self.clock().isoformat()
+                recheck_reason = "Reevaluación auditada; consulta posterior sujeta a permisos y presupuesto."
+                changed = []
+                with self.store._connect() as con, con:
+                    for proposal in eligible:
+                        updated = con.execute("""UPDATE price_continuity_pairs
+                            SET state='pending',next_check_at=?,defer_reason=?
+                            WHERE id=? AND continuity_id=? AND state='restricted'""",
+                                              (now, recheck_reason, proposal["id"], continuity["id"])).rowcount
+                        if updated:
+                            changed.append(proposal)
+                    if changed:
+                        previous = [{"id": item["id"], "competitor_id": item["competitor_id"],
+                                     "ean": item["ean"], "state": "restricted",
+                                     "defer_reason": item["previous_reason"]} for item in changed]
+                        current = [{"id": item["id"], "competitor_id": item["competitor_id"],
+                                    "ean": item["ean"], "state": "pending", "next_check_at": now,
+                                    "candidate_urls": item["candidate_urls"]} for item in changed]
+                        con.execute("""INSERT INTO access_audit(scope,scope_id,action,previous,current,actor,note,at)
+                            VALUES('price_continuity',?,'reevaluate_restricted_pairs',?,?,?,?,?)""",
+                                    (str(continuity["id"]), json.dumps(previous, ensure_ascii=False),
+                                     json.dumps(current, ensure_ascii=False), actor.strip(), note.strip(), now))
+                changed_ids = {item["id"] for item in changed}
+                for proposal in proposals:
+                    if proposal["id"] in changed_ids:
+                        proposal["applied"] = True
+                        proposal["reason"] = recheck_reason
+                        proposal["next_check_at"] = now
+            return proposals
+
     def continuity_report(self) -> dict | None:
         row = continuity_row(self.store)
         if not row:

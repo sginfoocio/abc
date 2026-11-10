@@ -149,7 +149,7 @@ def test_amevista_uses_documented_brand_model_color_patterns(product, expected, 
 
 
 @pytest.mark.parametrize("brand,category", [
-    ("Miu Miu", "sol"), ("Tom Ford", "montura"), ("Bottega Veneta", "sol"),
+    ("Tom Ford", "montura"), ("Bottega Veneta", "montura"), ("Ray Ban", "sol"),
 ])
 def test_amevista_excludes_undocumented_brand_category_combinations(brand, category):
     product = {**PRADA, "brand": brand, "category": category, "model": "MODEL123", "color": "001"}
@@ -159,9 +159,71 @@ def test_amevista_excludes_undocumented_brand_category_combinations(brand, categ
     assert not plan.runnable
     assert plan.reason_code == "needs_authorized_discovery"
     if category != "sol":
-        assert "solo para gafas de sol" in plan.reason
+        assert ("solo cubre gafas de sol" in plan.reason if brand == "Bottega Veneta"
+                else "solo para gafas de sol" in plan.reason)
     else:
         assert "Marca fuera" in plan.reason
+
+
+@pytest.mark.parametrize("product,expected,evidence", [
+    ({**PRADA, "ean": "8056262398043", "brand": "Miu Miu", "model": "MU 04ZS",
+      "color": "14L4I0", "category": "All / Gafas de Sol"},
+     "https://www.amevista.com/es/miu-miu-mu-04zs-14l4i0", "manual:amevista-miu-miu-sunglasses"),
+    ({**PRADA, "ean": "8056597981361", "brand": "Miu Miu", "model": "MU 01XV",
+      "color": "VAU1O1", "category": "All / Monturas"},
+     "https://www.amevista.com/es/miu-miu-mu-01xv-vau1o1", "manual:amevista-miu-miu-frames"),
+    ({**PRADA, "ean": "0889652637075", "brand": "Bottega Veneta", "model": "BV1274S",
+      "color": "005", "category": "All / Gafas de Sol"},
+     "https://www.amevista.com/es/bottega-veneta-bv1274s-005", "manual:amevista-bottega-veneta-sunglasses"),
+])
+def test_amevista_manual_brand_category_patterns_are_attribute_based(product, expected, evidence):
+    plan = plan_for(product, "amevista")
+
+    assert urls(plan) == [expected]
+    candidate = plan.runnable[0]
+    assert candidate.rule == "sample_pattern:amevista"
+    assert candidate.evidence == [evidence]
+    assert candidate.origin.startswith("User-supplied manual observations")
+    assert candidate.attributes["ean"] == normalize_gtin(product["ean"])
+    assert "not captured HTTP" in candidate.attributes["evidence_note"]
+    assert candidate.review_date == ""
+    alternate_ean = plan_for({**product, "ean": "8056597886918"}, "amevista")
+    assert urls(alternate_ean) == [expected]
+
+
+def test_amevista_miu_miu_pattern_is_category_scoped():
+    sun = {**PRADA, "brand": "Miu Miu", "model": "MU 04ZS", "color": "14L4I0",
+           "category": "All / Gafas de Sol"}
+    frames = {**sun, "model": "MU 01XV", "color": "VAU1O1", "category": "All / Monturas"}
+
+    sun_plan = plan_for(sun, "amevista")
+    frame_plan = plan_for(frames, "amevista")
+    assert sun_plan.runnable[0].attributes["category"] == sun["category"]
+    assert frame_plan.runnable[0].attributes["category"] == frames["category"]
+    assert sun_plan.runnable[0].evidence != frame_plan.runnable[0].evidence
+    assert plan_for({**sun, "brand": "Bottega Veneta", "category": "All / Monturas"},
+                    "amevista").runnable == []
+    assert plan_for({**sun, "brand": "Tom Ford", "category": "All / Monturas"},
+                    "amevista").runnable == []
+
+
+@pytest.mark.parametrize("product,expected", [
+    ({**PRADA, "ean": "8056262398043", "brand": "Miu Miu", "model": "MU 04ZS",
+      "color": "14L4I0", "category": "All / Gafas de Sol"},
+     "https://www.edel-optics.es/MU-04ZS-14L4I0-de-Miu-Miu.html"),
+    ({**PRADA, "ean": "0889652637075", "brand": "Bottega Veneta", "model": "BV1274S",
+      "color": "005", "category": "All / Gafas de Sol"},
+     "https://www.edel-optics.es/BV1274S-005-de-Bottega-Veneta.html"),
+])
+def test_edel_attribute_route_leaves_variant_resolution_to_the_ficha(product, expected):
+    plan = plan_for(product, "edel")
+
+    assert urls(plan) == [expected]
+    candidate = plan.runnable[0]
+    assert candidate.rule == "sample_pattern:edel"
+    assert candidate.attributes["variant_resolution"].startswith("Use the selected prd<id> radio")
+    assert "selectedSize" not in candidate.url
+    assert candidate.attributes["ean"] == normalize_gtin(product["ean"])
 
 
 @pytest.mark.parametrize("product,expected", [
@@ -319,7 +381,12 @@ def test_opaque_ids_are_mapped_not_calculated_and_locales_are_not_rewritten():
     edel = plan_for(PRADA, "edel")
     assert urls(edel)[0].endswith("?selectedSize=1907958")
     assert "caliber" not in edel.runnable[0].attributes
-    assert not plan_for({**PRADA, "color": "002", "caliber": "54"}, "edel").runnable
+    unobserved_variant = plan_for({**PRADA, "color": "002", "caliber": "54"}, "edel")
+    assert urls(unobserved_variant) == [
+        "https://www.edel-optics.es/PR-27ZS-002-de-Prada.html"
+    ]
+    assert "selectedSize" not in unobserved_variant.runnable[0].url
+    assert "caliber" not in unobserved_variant.runnable[0].attributes
 
 
 def test_commercial_names_and_dune_opt_remain_distinct():
@@ -333,6 +400,31 @@ def test_commercial_names_and_dune_opt_remain_distinct():
     fausto = {**PRADA, "ean": "889214029614", "brand": "Tom Ford", "model": "FT0711", "color": "01A"}
     assert "fausto-ft0711-01a" in urls(plan_for(fausto, "congafas"))[0]
     assert "ft0711-fausto-75s" in urls(plan_for({**fausto, "color": "75S"}, "congafas"))[0]
+
+
+@pytest.mark.parametrize("brand,category", [
+    ("Miu Miu", "sol"), ("Bottega Veneta", "sol"), ("Prada", "montura"),
+])
+def test_congafas_supplied_pattern_is_limited_to_documented_prada_sunglasses(brand, category):
+    product = {**PRADA, "brand": brand, "model": "MODEL123", "color": "001",
+               "category": category}
+
+    plan = plan_for(product, "congafas")
+
+    assert not plan.runnable
+    assert plan.reason_code == "needs_authorized_discovery"
+    assert "Prada" in plan.reason or "monturas" in plan.reason
+
+
+def test_congafas_supplied_pattern_remains_available_for_prada_sunglasses():
+    product = {**PRADA, "model": "PR 99ZS", "color": "01A"}
+
+    plan = plan_for(product, "congafas")
+
+    assert [candidate.url for candidate in plan.runnable] == [
+        "https://www.congafasdesol.com/prada-pr99zs-01a.html",
+        "https://www.congafasdesol.com/prada-pr-99zs-01a.html",
+    ]
 
 
 def test_conflicting_documentary_identifiers_and_content_never_become_runnable():

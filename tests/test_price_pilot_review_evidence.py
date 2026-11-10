@@ -88,6 +88,7 @@ def test_fetch_trace_preserves_actual_redirects_without_following_canonical():
         "requested_url": requested, "final_url": final,
         "redirects": [{"url": requested, "status": 302, "location": final}],
         "canonical_urls": [canonical],
+        "selected_variant_url": "",
     }
     assert calls == [BASE + "/robots.txt", requested, final]
     assert ProductPage(**asdict(found)).url_trace == found.url_trace

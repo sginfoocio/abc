@@ -11,7 +11,7 @@ from html.parser import HTMLParser
 import json
 import re
 from typing import Any, Iterable
-from urllib.parse import parse_qsl, urljoin, urlparse
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 from price_comparator import normalize_gtin
 from price_references import caliber_from_code, extract_caliber, extract_lens, parse_reference
@@ -24,6 +24,7 @@ _PRESTASHOP_CURRENCY = re.compile(r"var prestashop\s*=\s*\{\"currency\":\{[^{}]*
 _AVAILABLE = {"instock", "limitedavailability"}
 _UNAVAILABLE = {"outofstock", "soldout", "discontinued"}
 _VOID = {"meta", "link", "img", "br", "hr", "input", "source", "area", "base", "col", "embed", "wbr"}
+_EDEL_SIZE_CLASS = re.compile(r"(?:^|\s)eoDetailListTileSize(\d+)(?:\s|$)")
 
 
 @dataclass
@@ -302,10 +303,17 @@ def _from_json_ld(html: str, url: str) -> ProductPage | None:
         return None
     page = ProductPage(url=url, method="json-ld", structured_type="schema.org/Product")
     page.variant_urls = list(dict.fromkeys(value for p in products for value in _product_urls(p, url)))
-    variants = [value for key, value in parse_qsl(urlparse(url).query) if key == "variant"]
+    variants = [value for key, value in parse_qsl(urlparse(url).query)
+                if key in {"variant", "selectedSize"}]
+    if len(set(variants)) > 1:
+        page.ambiguous = True
+        page.variant_scoped = True
+        page.notes.append("La URL contiene varios identificadores de variante incompatibles")
+        return page
     page.variant_id = variants[0] if len(set(variants)) == 1 else ""
     page.variant_scoped = len(products) > 1 or bool(variants) or any(
-        key == "variant" for value in page.variant_urls for key, _ in parse_qsl(urlparse(value).query))
+        key in {"variant", "selectedSize"}
+        for value in page.variant_urls for key, _ in parse_qsl(urlparse(value).query))
     matching = [p for p in products if _matches_product_url(p, url)]
     matching = list({json.dumps(p, sort_keys=True): p for p in matching}.values())
     if len(matching) == 1:
@@ -344,7 +352,75 @@ def _from_json_ld(html: str, url: str) -> ProductPage | None:
     page.notes.extend("Plazo publicado: " + value for value in page.delivery_evidence)
     if page.variant_scoped:
         page.notes.append("Variante según URL: " + url + "; identificadores: " + ", ".join(page.identifiers))
+        if any(key == "selectedSize" for key, _ in parse_qsl(urlparse(url).query)):
+            page.notes.append("selectedSize se conserva como Product Id de Edel-Optics, no como calibre ni EAN")
     return page
+
+
+class _EdelSelectedRadios(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.ids: list[str] = []
+
+    def handle_starttag(self, tag: str, values) -> None:
+        attrs = dict(values)
+        if tag.lower() != "input" or str(attrs.get("type") or "").lower() != "radio":
+            return
+        match = re.fullmatch(r"prd(\d+)", str(attrs.get("id") or ""), re.I)
+        if match and "checked" in attrs:
+            self.ids.append(match[1])
+
+
+def _edel_variant_facts(html: str, selected_id: str) -> tuple[set[str], str, bool]:
+    parsed = parse_html(html)
+    ids: set[str] = set()
+    eans: set[str] = set()
+    for element in parsed.elements:
+        classes = element["attrs"].get("class", "")
+        match = _EDEL_SIZE_CLASS.search(classes)
+        if not match:
+            continue
+        variant_id = match[1]
+        ids.add(variant_id)
+        if variant_id != selected_id:
+            continue
+        text = element["text"]
+        for raw in re.findall(r"\bEAN\b\s*:?\s*(\d{13})(?!\d)", text, re.I):
+            try:
+                eans.add(normalize_gtin(raw))
+            except ValueError:
+                continue
+    return ids, next(iter(eans)) if len(eans) == 1 else "", len(eans) > 1
+
+
+def _edel_selection(html: str, url: str) -> tuple[str, str, bool, str]:
+    if (urlparse(url).hostname or "").lower().removeprefix("www.") != "edel-optics.es":
+        return url, "", False, ""
+    query = parse_qsl(urlparse(url).query, keep_blank_values=True)
+    requested = [value for key, value in query if key == "selectedSize"]
+    if len(set(requested)) > 1 or any(not value for value in requested):
+        return url, "", False, "selectedSize ausente o contradictorio"
+    radios = _EdelSelectedRadios()
+    radios.feed(html)
+    radios.close()
+    if len(radios.ids) > 1:
+        return url, "", False, "La ficha publica más de una opción prd seleccionada"
+    radio_id = radios.ids[0] if radios.ids else ""
+    if requested and radio_id and requested[0] != radio_id:
+        return url, requested[0], False, "selectedSize y el radio prd seleccionado se contradicen"
+    selected_id = requested[0] if requested else radio_id
+    if not selected_id:
+        return url, "", False, ""
+    if requested:
+        return url, selected_id, False, ""
+    query.append(("selectedSize", selected_id))
+    selected_url = urlunparse(urlparse(url)._replace(query=urlencode(query)))
+    return selected_url, selected_id, True, ""
+
+
+def _ambiguous_edel_page(url: str, variant_id: str, reason: str) -> ProductPage:
+    return ProductPage(url=url, method="edel-variant-selection", structured_type="Edel-Optics variant",
+                       variant_id=variant_id, variant_scoped=True, ambiguous=True, notes=[reason])
 
 
 class _Collector(HTMLParser):
@@ -580,13 +656,28 @@ def product_page_rejection(html: str, url: str) -> str:
 def extract_product(html: str, url: str, *, price_selector: str = "", availability_selector: str = "",
                     tax_policy: str = "unknown", url_trace: dict[str, Any] | None = None) -> ProductPage | None:
     """Return what the page publishes, or None when it carries no product information at all."""
+    requested_url = url
     parsed = parse_html(html)
-    if product_page_rejection(html, url):
+    if product_page_rejection(html, requested_url):
         return None
     if any("eoViewsListviewItemClassic" in element["attrs"].get("class", "").split()
            for element in parsed.elements):
         return None
+    url, selected_size, radio_selected, selection_error = _edel_selection(html, requested_url)
+    if selection_error:
+        page = _ambiguous_edel_page(requested_url, selected_size, selection_error)
+        page.url_trace = {**(url_trace or {}), "final_url": requested_url}
+        return page
+    edel_ids, selected_ean, ean_conflict = _edel_variant_facts(html, selected_size) if selected_size else (set(), "", False)
+    if edel_ids and selected_size not in edel_ids:
+        page = _ambiguous_edel_page(requested_url, selected_size,
+                                    "selectedSize no coincide con los datos de variante de la ficha")
+        page.url_trace = {**(url_trace or {}), "final_url": requested_url}
+        return page
     page = _from_json_ld(html, url)
+    if page is None and selected_size and (radio_selected or not edel_ids):
+        page = _ambiguous_edel_page(
+            url, selected_size, "No hay datos de variante vinculados al Product Id seleccionado")
     meta = parsed.meta
     if page is None:
         title = meta.get("og:title") or " ".join(parsed.title.split())
@@ -608,6 +699,26 @@ def extract_product(html: str, url: str, *, price_selector: str = "", availabili
                     page.notes.append("EAN publicado no válido")
                 break
         page.caliber = extract_caliber(page.title) or extract_caliber(urlparse(url).path.rsplit("/", 1)[-1])
+    if selected_size and page is not None:
+        page.variant_id = selected_size
+        page.variant_scoped = True
+        if selected_ean and not page.ean_published:
+            page.ean_published = selected_ean
+        elif selected_ean and page.ean_published and selected_ean != page.ean_published:
+            page.ambiguous = True
+            page.notes.append("El EAN JSON-LD contradice el EAN vinculado al selectedSize")
+        if ean_conflict:
+            page.ambiguous = True
+            page.notes.append("El selectedSize tiene varios EAN publicados: revisión obligatoria")
+        if selected_ean:
+            page.notes.append(f"EAN vinculado a selectedSize={selected_size} en datos de variante")
+        if radio_selected:
+            page.notes.append(f"Product Id {selected_size} resuelto desde el único radio prd marcado")
+    elif (urlparse(requested_url).hostname or "").lower().removeprefix("www.") == "edel-optics.es":
+        page.ambiguous = True
+        page.variant_scoped = True
+        page.availability = "unknown"
+        page.notes.append("Edel-Optics sin Product Id de variante seleccionada: requiere revisión")
     if price_selector and page.price is None and not page.variant_scoped:
         text = css_text(parsed, price_selector)
         conditioned = re.search(r"\bPVP\b|recomendado|hist[oó]rico|cup[oó]n|coupon|promo(?:tional)? code", text, re.I)
@@ -631,8 +742,10 @@ def extract_product(html: str, url: str, *, price_selector: str = "", availabili
             page.market_conflict = True
         else:
             page.market, page.market_source = explicit, "ficha:product:market"
-    page.url_trace = {**(url_trace or {}), "final_url": url,
-                      "canonical_urls": list(dict.fromkeys(urljoin(url, href) for href in parsed.canonicals))}
+    page.url_trace = {**(url_trace or {}), "final_url": requested_url,
+                      "selected_variant_url": url if selected_size else "",
+                      "canonical_urls": list(dict.fromkeys(urljoin(requested_url, href)
+                                                           for href in parsed.canonicals))}
     return page
 
 

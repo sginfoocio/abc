@@ -63,11 +63,13 @@ def test_congafas_generates_only_two_prefix_spellings(model, color, first):
     assert all("caliber" not in c.attributes for c in plan.runnable)
 
 
-def test_congafas_general_pattern_and_documented_commercial_names():
+def test_congafas_pattern_is_scoped_and_keeps_documented_fausto_name():
     gucci = {**PRODUCT, "brand": "Gucci", "model": "GG1660S", "color": "001"}
-    assert [c.url for c in candidate_plan(gucci, "congafasdesol.com").runnable] == [
-        "https://www.congafasdesol.com/gucci-gg1660s-001.html"]
-    assert not candidate_plan({**gucci, "category": "montura"}, "congafasdesol.com").runnable
+    plan = candidate_plan(gucci, "congafasdesol.com")
+    assert not plan.runnable and plan.reason_code == "needs_authorized_discovery"
+    assert "Prada" in plan.reason
+    assert not candidate_plan({**gucci, "brand": "Prada", "category": "montura"},
+                              "congafasdesol.com").runnable
     ford = {**gucci, "brand": "Tom Ford", "model": "FT0711", "color": "01A"}
     assert [c.url for c in candidate_plan(ford, "congafasdesol.com").runnable] == [
         "https://www.congafasdesol.com/tom-ford-fausto-ft0711-01a.html"]

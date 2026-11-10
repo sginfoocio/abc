@@ -625,8 +625,8 @@ def test_product_discovery_mixed_selection_preserves_authorized_edel(pilot, monk
     discovery.run(selection=pairs, search=search)
     assert site.calls == [base + "/robots.txt", base + "/search?q=" + EAN, url]
     candidate = discovery.candidates().iloc[0]
-    assert (candidate.competitor_id, candidate.ean, candidate.state) == (edel, EAN, "confirmed")
-    assert [(r["url"], r["source"]) for r in search._indexed(edel, EAN)] == [(url, "auto_confirmed")]
+    assert (candidate.competitor_id, candidate.ean, candidate.state) == (edel, EAN, "pending_validation")
+    assert search._indexed(edel, EAN) == []
     assert commerce(store) == before
 
 
@@ -745,9 +745,8 @@ def test_sitemap_is_an_explicit_auto_alternative_not_external_search(pilot):
     assert site.calls == [BASE + "/robots.txt", BASE + "/sitemap.xml", url]
 
 
-@pytest.mark.parametrize("published,state", [("8056597875226", "confirmed"), (None, "confirmed"),
-                                            (EAN, "pending_validation")])
-def test_edel_optics_ean_strategy_suggestion_never_proves_published_gtin(pilot, published, state):
+@pytest.mark.parametrize("published", ["8056597875226", None, EAN])
+def test_edel_without_resolved_variant_stays_pending_even_with_matching_gtin(pilot, published):
     service, store, search, site, _, _ = pilot
     cid = next(row["id"] for row in service.competitors() if row["name"] == "Edel-Optics")
     config = search.config(cid)
@@ -762,11 +761,9 @@ def test_edel_optics_ean_strategy_suggestion_never_proves_published_gtin(pilot, 
     service.enable()
     discovery = PilotDiscovery(store)
     run_all_pending(discovery, search)
-    assert discovery.candidates().iloc[0].state == state
+    assert discovery.candidates().iloc[0].state == "pending_validation"
     assert site.calls == [base + "/robots.txt", base + "/search?q=8056597875226", base + "/pr26zs-16k08z.html"]
-    # The searched EAN is never stored as published: only brand + model + colour from the fetched page decide.
-    indexed = search._indexed(cid, "8056597875226")
-    assert [r["ean_published"] for r in indexed] == ([published or ""] if state == "confirmed" else [])
+    assert search._indexed(cid, "8056597875226") == []
 
 
 def test_ajax_search_is_reported_without_calling_endpoints(pilot):

@@ -16,6 +16,13 @@ REVIEW_DATE = "2026-11-04"
 REVIEW_BASE = "92243628b4e925ba9d549b076580726c383a43ac"
 EVIDENCE_SOURCE = "Diagonal_evidencia_Copilot/Evidencias_47.csv"
 SUPPLIED_PATTERN_DATE = "2026-11-06"
+MANUAL_COVERAGE_EVIDENCE = "User-supplied manual observations; not captured HTTP or verified identity"
+AMEVISTA_MANUAL_EVIDENCE = {
+    ("MIUMIU", "sol"): "manual:amevista-miu-miu-sunglasses",
+    ("MIUMIU", "montura"): "manual:amevista-miu-miu-frames",
+    ("BOTTEGAVENETA", "sol"): "manual:amevista-bottega-veneta-sunglasses",
+}
+EDEL_MANUAL_EVIDENCE = "manual:edel-selected-variant-observations"
 SUPPLIED_PATTERNS = {
     "domanci": (
         "https://domanci.com/es/gafas-de-sol/miu-miu-mu-11zs-16k5s0-51.html",
@@ -197,9 +204,11 @@ def _slug(value: str) -> str:
 
 def _supplied_pattern_plan(product: dict, shop: str, category: str, attributes: dict) -> CandidatePlan:
     """User-supplied route hypotheses; page identity and access remain governed by the reader."""
-    if shop == "congafas" and category != "sol":
-        return CandidatePlan(reason_code="needs_authorized_discovery",
-                             reason="El patrón aportado de ConGafasDeSol corresponde a gafas de sol")
+    if shop == "congafas" and (category != "sol" or key(product["brand"]) != "PRADA"):
+        reason = ("El patrón aportado de ConGafasDeSol solo documenta Prada en gafas de sol"
+                  if category == "sol" else
+                  "El patrón aportado de ConGafasDeSol corresponde a gafas de sol, no monturas")
+        return CandidatePlan(reason_code="needs_authorized_discovery", reason=reason)
     used = dict(attributes)
     used["pattern_examples"] = " | ".join(SUPPLIED_PATTERNS[shop])
     used["evidence_note"] = "User-supplied route pattern; not captured HTTP or verified identity"
@@ -299,27 +308,42 @@ def candidate_plan(product: dict, domain: str) -> CandidatePlan:
         "bassol": {("PRADA", "sol"), ("MIUMIU", "montura"), ("GUCCI", "sol")},
         "amevista": {
             ("GUCCI", "sol"), ("PRADA", "sol"), ("TOMFORD", "sol"), ("TIFFANYCO", "sol"),
+            ("MIUMIU", "sol"), ("MIUMIU", "montura"), ("BOTTEGAVENETA", "sol"),
         },
+        "edel": {("PRADA", "sol"), ("TOMFORD", "sol"), ("MIUMIU", "sol"), ("MIUMIU", "montura"),
+                 ("BOTTEGAVENETA", "sol")},
         "visual": {("PRADA", "sol"), ("MIUMIU", "montura")},
         "otticait": {("PRADA", "sol"), ("TOMFORD", "montura")},
         "visio": {("PRADA", "sol")},
     }
     if (brand, category) not in scopes.get(shop, set()) or (shop == "visio" and model != "PR27ZS"):
-        if shop == "amevista" and category != "sol":
+        if shop == "amevista" and brand == "MIUMIU":
+            reason = "La regla Miu Miu de Amevista solo cubre las categorías sol y montura documentadas"
+        elif shop == "amevista" and brand == "BOTTEGAVENETA":
+            reason = "La regla Bottega Veneta de Amevista solo cubre gafas de sol"
+        elif shop == "amevista" and category != "sol":
             reason = "La evidencia Amevista respalda rutas marca-modelo-color solo para gafas de sol"
         elif shop == "amevista":
             reason = "Marca fuera de los patrones Amevista documentados; requiere URL/alias acreditado"
+        elif shop == "visio" and brand == "PRADA" and category == "sol":
+            reason = f"Visio solo documenta la subregla Prada PR27ZS en sol; {model} requiere una fuente autorizada"
+        elif shop == "visio":
+            reason = (f"La muestra Visio no documenta {brand} {category}; el slug no permite inferir "
+                      "modelo, calibre ni puente")
+        elif shop == "edel":
+            reason = (f"Edel no tiene patrón de ruta documentado para {brand} {category}; no se inventa "
+                      "un handle ni un Product Id selectedSize")
         else:
             reason = {
                 "blickers": "Falta ID opaco por color y calibre; resolver mediante fuente autorizada",
-                "edel": "Falta Product Id de selectedSize; no es calibre ni EAN",
                 "mia": "Falta handle y nombre comercial acreditados (regard/dune no se eliminan)",
                 "opticalh": "Falta handle/variante acreditados; no exigir ni inventar sufijo numérico",
                 "universitaria": "Falta REF/handle de variante; puede ser alfanumérico",
                 "celine": "Falta ID/URL completa de variante con color, precio y stock vinculados",
                 "congafas": "Falta handle/nombre comercial por producto; el orden no es universal",
                 "domanci": "Evidencia insuficiente; candidatas históricas pendientes, no producto inexistente",
-            }.get(shop, "Marca/categoría/modelo fuera del alcance demostrado; requiere descubrimiento autorizado")
+            }.get(shop, f"Sin patrón documentado para {brand} {model} ({category}) en {shop}; "
+                        "requiere descubrimiento autorizado")
         return CandidatePlan(list(candidates.values()), "needs_authorized_discovery", reason)
 
     used = dict(attributes)
@@ -334,6 +358,15 @@ def candidate_plan(product: dict, domain: str) -> CandidatePlan:
             used["evidence_note"] = "URL pattern only; not identity evidence"
         elif brand == "PRADA":
             used["model_alias_rule"] = "Observed PR model prefix; 0PR retained only on exact E017 URL"
+        if evidence := AMEVISTA_MANUAL_EVIDENCE.get((brand, category)):
+            refs.append(evidence)
+            used["evidence_note"] = MANUAL_COVERAGE_EVIDENCE
+    elif shop == "edel":
+        refs.append(EDEL_MANUAL_EVIDENCE)
+        used["evidence_note"] = MANUAL_COVERAGE_EVIDENCE
+        used["variant_resolution"] = (
+            "Use the selected prd<id> radio only when uniquely checked and bound to that Product's selectedSize URL"
+        )
     # Only this GTIN has dimensions explicitly associated in the package. Do not enrich the product record.
     if shop in {"bassol", "visual", "visio"} and ean == "8056597875349" \
             and (brand, model, color) == ("PRADA", "PR27ZS", "16K08Z") and not lens:
@@ -368,17 +401,29 @@ def candidate_plan(product: dict, domain: str) -> CandidatePlan:
         path = f"/gafas-de-sol/todas-las-solares/{model.lower()}-{color.lower()}-{lens}-{bridge}.html"
     elif shop == "amevista":
         path = f"/es/{slug}"
+    elif shop == "edel":
+        edel_model = "-".join(str(product["model"]).strip().upper().split())
+        edel_brand = "-".join(token.title() for token in tokens(product["brand"]))
+        path = f"/{edel_model}-{color.upper()}-de-{edel_brand}.html"
     else:
         path = "/" + slug
     roots = {"optima": "https://optica-optima.com", "bassol": "https://www.opticabassol.com",
              "visual": "https://visual-click.com", "visio": "https://www.visiofactory.es",
-             "amevista": "https://www.amevista.com", "otticait": "https://www.otticait.com"}
+             "amevista": "https://www.amevista.com", "otticait": "https://www.otticait.com",
+             "edel": "https://www.edel-optics.es"}
     url = roots[shop] + path
     # An observed URL already supplies its precise locale/handle; do not generate locale alternatives.
     if not any(candidate.runnable for candidate in candidates.values()):
-        origin = "user-provided candidate URL" if shop == "amevista" and brand == "GUCCI" \
-            else EVIDENCE_SOURCE
+        if shop == "amevista" and brand == "GUCCI":
+            origin, review_date, review_base = "user-provided candidate URL", REVIEW_DATE, REVIEW_BASE
+        elif (shop == "amevista" and brand == "MIUMIU") \
+                or (shop == "amevista" and brand == "BOTTEGAVENETA" and category == "sol") \
+                or shop == "edel":
+            origin, review_date, review_base = MANUAL_COVERAGE_EVIDENCE, "", ""
+        else:
+            origin, review_date, review_base = EVIDENCE_SOURCE, REVIEW_DATE, REVIEW_BASE
         candidates.setdefault(
-            url, UrlCandidate(url, f"sample_pattern:{shop}", used, sorted(set(refs)), origin=origin)
+            url, UrlCandidate(url, f"sample_pattern:{shop}", used, sorted(set(refs)), origin=origin,
+                              review_date=review_date, review_base=review_base)
         )
     return CandidatePlan(list(candidates.values()))

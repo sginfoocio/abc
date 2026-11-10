@@ -374,9 +374,9 @@ def test_legacy_pilot_claim_authorization_does_not_override_not_before():
 def test_redirected_congafas_home_is_traced_without_product_or_offer(tmp_path):
     site = Site(base="https://www.congafasdesol.com", robots="User-agent: *\nAllow: /\n")
     store, _, locator, _, cid = _env(tmp_path, site, name="ConGafasDeSol", template=None, methods=("ficha",))
-    ean = "0889652494821"
-    _watch(store, [(ean, "Gucci", "GG1660S", "001", "")])
-    url = site.base + "/gucci-gg1660s-001.html"
+    ean = "0889214029614"
+    _watch(store, [(ean, "Tom Ford", "FT0711", "01A", "")])
+    url = site.base + "/tom-ford-fausto-ft0711-01a.html"
     home = site.base + "/"
     site.pages[home] = page(name="Gucci GG1660S 001", brand="Gucci", gtin=ean, price=123)
 
@@ -561,6 +561,87 @@ def test_continuity_ui_keeps_prepared_plan_inactive_until_explicit_approval(tria
     app.checkbox(key="continuity_activation_approval").set_value(True).run(timeout=30)
     assert not app.button(key="continuity_activate").disabled
     assert service.continuity_report()["status"] == "prepared"
+
+
+def test_restricted_pair_reevaluation_is_audited_and_never_queries_or_rewrites_history(trial):
+    import pandas as pd
+    from price_trial import active_execution
+
+    service, store, _, _, _, clock, cid, site, _ = trial
+    active = _activate_continuity(service, clock)
+    eligible_ean, blocked_ean = manifest()["eans"][:2]
+    with store._connect() as con, con:
+        con.execute("""UPDATE price_continuity_pairs SET state='restricted',defer_reason=?
+            WHERE continuity_id=? AND competitor_id=? AND ean IN (?,?)""",
+                    ("Restricción anterior", active["id"], cid, eligible_ean, blocked_ean))
+        con.execute("""INSERT INTO price_continuity_checks
+            (continuity_id,competitor_id,ean,started_at,finished_at,state,category,requests,
+             defer_reason,receipt) VALUES(?,?,?,?,?,'restricted','not_executed',0,?,'{}')""",
+                    (active["id"], cid, eligible_ean, clock().isoformat(), clock().isoformat(),
+                     "Restricción anterior"))
+
+    class Batch:
+        def preview(self, eans, competitors):
+            execution = active_execution(store)
+            assert execution and execution.program == "continuity"
+            assert execution.competitor_id == competitors[0] and execution.ean == eans[0]
+            eligible = eans[0] == eligible_ean
+            return pd.DataFrame([{
+                "ready": eligible, "candidate_count": 1,
+                "candidate_reason": "", "defer_reason": "" if eligible else "Acceso bloqueado",
+                "access": "Autorizado" if eligible else "Bloqueado",
+                "local_candidates": [{"url": "https://www.amevista.com/es/gucci-gg1660s-001"}],
+                "next_check_at": None,
+            }])
+
+    service._batch = Batch()
+    with store._connect() as con:
+        before_access_requests = con.execute("SELECT COUNT(*) FROM access_requests").fetchone()[0]
+    preview = service.reevaluate_restricted_pairs()
+
+    preview_by_ean = {item["ean"]: item for item in preview}
+    assert preview_by_ean[eligible_ean]["eligible"]
+    assert not preview_by_ean[blocked_ean]["eligible"]
+    with store._connect() as con:
+        states = {row["ean"]: row["state"] for row in con.execute("""SELECT ean,state
+            FROM price_continuity_pairs WHERE continuity_id=? AND competitor_id=? AND ean IN (?,?)""",
+                                                                  (active["id"], cid, eligible_ean, blocked_ean))}
+        assert states == {eligible_ean: "restricted", blocked_ean: "restricted"}
+        assert con.execute("SELECT COUNT(*) FROM price_continuity_checks WHERE continuity_id=?",
+                          (active["id"],)).fetchone()[0] == 1
+        assert con.execute("SELECT COUNT(*) FROM access_audit WHERE action='reevaluate_restricted_pairs'")\
+            .fetchone()[0] == 0
+
+    with pytest.raises(ValueError, match="Responsable y motivo"):
+        service.reevaluate_restricted_pairs(apply=True)
+    applied = service.reevaluate_restricted_pairs(actor="operator", note="Regla de cobertura corregida", apply=True)
+
+    applied_by_ean = {item["ean"]: item for item in applied}
+    assert applied_by_ean[eligible_ean]["applied"]
+    assert not applied_by_ean[blocked_ean]["applied"]
+    assert site.calls == []
+    with store._connect() as con:
+        rows = {row["ean"]: dict(row) for row in con.execute("""SELECT ean,state,next_check_at,defer_reason
+            FROM price_continuity_pairs WHERE continuity_id=? AND competitor_id=? AND ean IN (?,?)""",
+                                                              (active["id"], cid, eligible_ean, blocked_ean))}
+        assert rows[eligible_ean]["state"] == "pending"
+        assert rows[eligible_ean]["next_check_at"] == clock().isoformat()
+        assert rows[blocked_ean]["state"] == "restricted"
+        assert con.execute("SELECT COUNT(*) FROM price_continuity_checks WHERE continuity_id=?",
+                          (active["id"],)).fetchone()[0] == 1
+        audit = con.execute("""SELECT previous,current,actor,note FROM access_audit
+            WHERE action='reevaluate_restricted_pairs'""").fetchone()
+        assert audit["actor"] == "operator" and audit["note"] == "Regla de cobertura corregida"
+        previous = json.loads(audit["previous"])
+        current = json.loads(audit["current"])
+        assert next(item for item in previous if item["ean"] == eligible_ean)["defer_reason"] == "Restricción anterior"
+        assert next(item for item in current if item["ean"] == eligible_ean)["state"] == "pending"
+        assert con.execute("SELECT COUNT(*) FROM access_requests").fetchone()[0] == before_access_requests
+
+    service.reevaluate_restricted_pairs(actor="operator", note="Sin cambios", apply=True)
+    with store._connect() as con:
+        assert con.execute("SELECT COUNT(*) FROM access_audit WHERE action='reevaluate_restricted_pairs'")\
+            .fetchone()[0] == 1
 
 
 def test_continuity_due_time_survives_restart_and_rechecks_after_expiry(trial):

@@ -1,9 +1,10 @@
 """Estructuras reales de fichas de competidores (observadas el 2026-10-30), reducidas y sin conexión."""
 from pathlib import Path
+import json
 
 import pytest
 
-from price_references import caliber_from_code, classify, extract_lens
+from price_references import PROBABLE, caliber_from_code, classify, extract_lens
 from price_web_extract import extract_product
 
 FIXTURES = Path(__file__).parent / "fixtures" / "web_pages"
@@ -45,6 +46,78 @@ def test_real_structures_are_extracted(name, url, product, price, tax, market, c
         assert match.status == "exact_match"
     else:
         assert match.status == "exact_match"
+    if name == "edel_optics":
+        assert page.variant_id == "1907958"
+        assert "selectedSize" in page.url
+
+
+def _edel_variant_node(variant_id, ean, price, availability):
+    variant_url = ("https://www.edel-optics.es/PR-27ZS-16K08Z-de-Prada.html"
+                   f"?selectedSize={variant_id}")
+    return {
+        "@type": "Product", "url": variant_url, "name": "Prada PR 27ZS 16K08Z",
+        "brand": {"@type": "Brand", "name": "Prada"}, "model": "PR 27ZS", "color": "16K08Z",
+        "gtin13": ean, "offers": {
+            "@type": "Offer", "url": variant_url, "price": str(price), "priceCurrency": "EUR",
+            "availability": f"https://schema.org/{availability}",
+        },
+    }
+
+
+def test_edel_selected_radio_resolves_variant_id_and_scopes_offer_facts():
+    target = {"ean": "8056597875349", "brand": "Prada", "model": "PR 27ZS", "color": "16K08Z"}
+    url = "https://www.edel-optics.es/PR-27ZS-16K08Z-de-Prada.html"
+    html = (
+        '<input type="radio" id="prd1907958" checked>'
+        '<script type="application/ld+json">' + json.dumps({
+            "@context": "https://schema.org",
+            "@graph": [
+                _edel_variant_node("1907958", target["ean"], 243.5, "InStock"),
+                _edel_variant_node("1907959", "8056597875226", 250, "OutOfStock"),
+            ],
+        }) + "</script>"
+    )
+
+    page = extract_product(html, url)
+
+    assert page is not None
+    assert page.variant_id == "1907958"
+    assert page.url.endswith("?selectedSize=1907958")
+    assert page.url_trace["final_url"] == url
+    assert page.url_trace["selected_variant_url"] == page.url
+    assert (page.ean_published, page.price, page.currency, page.availability) == (
+        target["ean"], 243.5, "EUR", "available")
+    assert classify(target, page.candidate()).status == "exact_match"
+    assert any("Product Id 1907958 resuelto" in note for note in page.notes)
+
+
+def test_edel_variant_selection_conflicts_remain_ambiguous_without_offer_facts():
+    base = "https://www.edel-optics.es/PR-27ZS-16K08Z-de-Prada.html"
+    nodes = {
+        "@context": "https://schema.org",
+        "@graph": [
+            _edel_variant_node("1907958", "8056597875349", 243.5, "InStock"),
+            _edel_variant_node("1907959", "8056597875226", 250, "OutOfStock"),
+        ],
+    }
+    conflicting = (
+        '<input type="radio" id="prd1907958" checked>'
+        '<script type="application/ld+json">' + json.dumps(nodes) + "</script>"
+    )
+    page = extract_product(conflicting, base + "?selectedSize=1907959")
+    assert page is not None and page.ambiguous
+    assert page.price is None and page.availability == "unknown"
+    assert any("se contradicen" in note for note in page.notes)
+
+    multiple = (
+        '<input type="radio" id="prd1907958" checked>'
+        '<input type="radio" id="prd1907959" checked>'
+        '<script type="application/ld+json">' + json.dumps(nodes) + "</script>"
+    )
+    page = extract_product(multiple, base)
+    assert page is not None and page.ambiguous
+    assert page.price is None and page.availability == "unknown"
+    assert any("más de una opción" in note for note in page.notes)
 
 
 def test_url_slug_alone_proves_nothing():
@@ -60,8 +133,12 @@ def test_mia_burton_url_is_the_pr26zs_reference():
 
 
 def test_edel_optics_uses_sale_price_not_recommended_price():
-    page = load("edel_optics", "https://www.edel-optics.es/PR-27ZS-16K08Z-de-Prada.html")
+    url = "https://www.edel-optics.es/PR-27ZS-16K08Z-de-Prada.html"
+    page = load("edel_optics", url)
     assert page.price == 243.5 and page.price != 390.0
+    assert page.ambiguous and page.variant_id == ""
+    assert page.availability == "unknown"
+    assert classify(PR27, page.candidate()).status == PROBABLE
 
 
 def test_universitaria_without_static_price_is_not_an_offer():
