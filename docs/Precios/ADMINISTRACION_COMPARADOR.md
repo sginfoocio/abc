@@ -70,6 +70,13 @@ activa el interruptor del servidor.
 
 ## Estados y exportaciones
 
+En **Resumen**, los KPI **Igual o más barato** y **Más caro** expresan porcentajes
+sobre los productos con comparación válida; sin muestra muestran **Sin datos**.
+Las cinco tarjetas de posición usan etiquetas **Productos · …** para identificar
+recuentos, no porcentajes: más barato, mismo precio, más caro, sin precio Vytria
+y sin oferta comparable. Sus grupos son excluyentes y respetan los filtros generales;
+**Ver productos** solo cambia la selección local, sin actualizar precios ni colas.
+
 **Sin localizar**, **ficha localizada pendiente de precio**, **sin precio**, **sin stock**,
 **precio caducado**, **sin autorización**, **bloqueado**, **retirada** y **revisión** son estados
 distintos. Un precio observado no comparable puede mostrarse como evidencia, pero no

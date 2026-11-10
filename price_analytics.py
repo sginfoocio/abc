@@ -278,6 +278,113 @@ def comparison_coverage(summary: pd.DataFrame) -> dict[str, int | float | None]:
     }
 
 
+SUMMARY_SEGMENTS = {
+    "cheaper": "Más barato",
+    "equal": "Mismo precio",
+    "higher": "Más caro",
+    "missing_own": "Sin precio Vytria",
+    "missing_competitor": "Sin oferta comparable",
+}
+
+
+def summary_segment(summary: pd.DataFrame, segment: str) -> pd.DataFrame:
+    """Mutually exclusive product groups; missing own prices never imply no rival exists."""
+    if segment not in SUMMARY_SEGMENTS:
+        raise ValueError("Grupo del resumen no reconocido")
+    if summary.empty:
+        return summary.copy()
+    own = summary["own_price_eur"].notna()
+    valid = own & summary["difference_eur"].notna()
+    masks = {
+        "cheaper": valid & summary["difference_eur"].lt(0),
+        "equal": valid & summary["difference_eur"].eq(0),
+        "higher": valid & summary["difference_eur"].gt(0),
+        "missing_own": ~own,
+        "missing_competitor": own & ~valid,
+    }
+    return summary.loc[masks[segment]].copy()
+
+
+def price_gap_distribution(summary: pd.DataFrame) -> pd.DataFrame:
+    """One current best-price gap per product; ties form their own bin, missing gaps are excluded."""
+    values = pd.to_numeric(summary.get("difference_vs_competitor_pct", pd.Series(dtype=float)), errors="coerce")
+    valid = summary.get("difference_eur", pd.Series(index=summary.index, dtype=float)).notna()
+    values = values.loc[valid & values.notna()]
+    groups = [
+        ("< −15 %", values.lt(-15), BRAND_GREEN),
+        ("−15 a −5 %", values.ge(-15) & values.lt(-5), BRAND_GREEN),
+        ("−5 a 0 %", values.ge(-5) & values.lt(0), BRAND_GREEN),
+        ("0 %", values.eq(0), "#0072B2"),
+        ("0 a +5 %", values.gt(0) & values.le(5), "#C2410C"),
+        ("+5 a +15 %", values.gt(5) & values.le(15), "#C2410C"),
+        ("> +15 %", values.gt(15), "#C2410C"),
+    ]
+    return pd.DataFrame([
+        {"range": label, "count": int(mask.sum()), "share_pct": mask.sum() / len(values) * 100 if len(values) else 0,
+         "color": color}
+        for label, mask, color in groups
+    ])
+
+
+def price_gap_figure(summary: pd.DataFrame):
+    import plotly.graph_objects as go
+
+    data = price_gap_distribution(summary)
+    figure = go.Figure(go.Bar(
+        x=data["range"], y=data["count"], marker_color=data["color"],
+        text=data["count"], textposition="outside", cliponaxis=False,
+        customdata=data["share_pct"],
+        hovertemplate="%{x}: %{y} productos (%{customdata:.1f} %)<extra></extra>",
+    ))
+    figure.update_layout(height=290, margin={"l": 12, "r": 12, "t": 25, "b": 50}, showlegend=False)
+    figure.update_xaxes(title="Diferencia de Vytria frente al mejor precio", fixedrange=True)
+    figure.update_yaxes(title="Productos", rangemode="tozero", dtick=1 if data["count"].max() < 10 else None,
+                        fixedrange=True)
+    return figure
+
+
+def summary_ranking(summary: pd.DataFrame, offers: pd.DataFrame, *, by: str = "brand") -> pd.DataFrame:
+    """Current product counts, never offer counts. Brand uses best rival; competitor uses each rival itself."""
+    columns = ["name", "catalog_products", "compared", "cheaper", "equal", "higher", "competitive_pct",
+               "mean_gap_pct", "last_checked_at"]
+    if by not in {"brand", "competitor"}:
+        raise ValueError("Agrupación no reconocida")
+    if summary.empty:
+        return pd.DataFrame(columns=columns)
+    if by == "brand":
+        groups = summary.groupby("brand", dropna=False)
+    else:
+        pairs = comparable_pairs(summary, offers)
+        groups = pairs.groupby("competitor")
+    rows = []
+    for name, group in groups:
+        if by == "brand":
+            valid = group[group["difference_eur"].notna()]
+            differences = valid["difference_eur"]
+            gaps = valid["difference_vs_competitor_pct"]
+            checked = valid["last_checked_at"]
+            total = group["ean"].nunique()
+        else:
+            valid = group
+            differences = valid["own_eur"] - valid["competitor_eur"]
+            gaps = differences / valid["competitor_eur"] * 100
+            checked = valid["checked_at"]
+            total = summary["ean"].nunique()
+        compared = valid["ean"].nunique()
+        cheaper, equal, higher = (int(compare.sum()) for compare in
+                                  (differences.lt(0), differences.eq(0), differences.gt(0)))
+        last = iso_datetimes(checked, "checked_at").max() if len(checked) else pd.NaT
+        rows.append({
+            "name": name if pd.notna(name) and name else "Sin marca", "catalog_products": int(total),
+            "compared": int(compared), "cheaper": cheaper, "equal": equal, "higher": higher,
+            "competitive_pct": (cheaper + equal) / compared * 100 if compared else None,
+            "mean_gap_pct": float(gaps.mean()) if compared else None,
+            "last_checked_at": last.isoformat() if pd.notna(last) else None,
+        })
+    return pd.DataFrame(rows, columns=columns).sort_values(["compared", "name"], ascending=[False, True],
+                                                         ignore_index=True)
+
+
 def competitive_position_counts(summary: pd.DataFrame) -> pd.DataFrame:
     """Current position counts, with percentages based only on valid comparisons."""
     differences = summary["difference_eur"].dropna()
