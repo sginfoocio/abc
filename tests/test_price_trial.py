@@ -644,6 +644,122 @@ def test_restricted_pair_reevaluation_is_audited_and_never_queries_or_rewrites_h
             .fetchone()[0] == 1
 
 
+def _restricted_pair_reevaluation_app(service, store, clock, cid, monkeypatch, *, eligible_on_apply=True):
+    import pandas as pd
+    from streamlit.testing.v1 import AppTest
+
+    active = _activate_continuity(service, clock)
+    ean = manifest()["eans"][0]
+    with store._connect() as con, con:
+        con.execute("""UPDATE price_continuity_pairs SET state='restricted',defer_reason='Regla anterior'
+            WHERE continuity_id=? AND competitor_id=? AND ean=?""", (active["id"], cid, ean))
+
+    class Batch:
+        def __init__(self):
+            self.calls = 0
+
+        def preview(self, eans, competitors):
+            self.calls += 1
+            ready = eligible_on_apply or self.calls == 1
+            return pd.DataFrame([{
+                "ready": ready, "candidate_count": int(ready), "candidate_reason": "",
+                "defer_reason": "" if ready else "La elegibilidad cambió",
+                "access": "Autorizado" if ready else "Bloqueado",
+                "local_candidates": [{"url": "https://www.amevista.com/es/gucci-gg1660s-001"}] if ready else [],
+                "next_check_at": None,
+            }])
+
+    batch = Batch()
+    service._batch = batch
+    monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
+    monkeypatch.setattr(price_trial, "PriceTrial", lambda _store: service)
+    app = AppTest.from_string(
+        "from price_comparator import PriceComparatorStore\n"
+        "from app_pages.price_watch import _render_continuity\n"
+        "_render_continuity(PriceComparatorStore())").run(timeout=30)
+    assert not app.exception
+    form_key = f"continuity_reevaluation_{active['id']}"
+    app.button(key=form_key + "_preview").click().run(timeout=30)
+    assert not app.exception
+    return app, form_key, active["id"], cid, ean, batch
+
+
+def test_restricted_pair_reevaluation_form_submits_after_confirmation(trial, monkeypatch):
+    service, store, _, _, _, clock, cid, _, _ = trial
+    app, form_key, continuity_id, cid, ean, batch = _restricted_pair_reevaluation_app(
+        service, store, clock, cid, monkeypatch)
+    submit = app.button(key=form_key + "_submit")
+    assert not submit.disabled
+
+    app.text_input(key=form_key + "_actor").set_value("operator")
+    app.text_input(key=form_key + "_note").set_value("Regla de cobertura corregida")
+    app.checkbox(key=form_key + "_confirm").set_value(True)
+    app.button(key=form_key + "_submit").click().run(timeout=30)
+
+    assert not app.exception
+    with store._connect() as con:
+        pair = con.execute("""SELECT state FROM price_continuity_pairs
+            WHERE continuity_id=? AND competitor_id=? AND ean=?""",
+                           (continuity_id, cid, ean)).fetchone()
+        audit_count = con.execute("""SELECT COUNT(*) FROM access_audit
+            WHERE action='reevaluate_restricted_pairs'""").fetchone()[0]
+    assert pair["state"] == "pending"
+    assert audit_count == 1 and batch.calls == 2
+
+
+@pytest.mark.parametrize(
+    ("actor", "note", "confirmed", "warning"),
+    [
+        ("operator", "Motivo", False, "Confirma"),
+        ("", "Motivo", True, "responsable"),
+        ("operator", "", True, "motivo"),
+    ],
+)
+def test_restricted_pair_reevaluation_form_rejects_missing_confirmation_fields(
+        trial, monkeypatch, actor, note, confirmed, warning):
+    service, store, _, _, _, clock, cid, _, _ = trial
+    app, form_key, continuity_id, cid, ean, batch = _restricted_pair_reevaluation_app(
+        service, store, clock, cid, monkeypatch)
+    assert not app.button(key=form_key + "_submit").disabled
+
+    app.text_input(key=form_key + "_actor").set_value(actor)
+    app.text_input(key=form_key + "_note").set_value(note)
+    app.checkbox(key=form_key + "_confirm").set_value(confirmed)
+    app.button(key=form_key + "_submit").click().run(timeout=30)
+
+    assert not app.exception
+    assert any(warning.casefold() in str(item.value).casefold() for item in app.warning)
+    with store._connect() as con:
+        pair = con.execute("""SELECT state FROM price_continuity_pairs
+            WHERE continuity_id=? AND competitor_id=? AND ean=?""",
+                           (continuity_id, cid, ean)).fetchone()
+        audit_count = con.execute("""SELECT COUNT(*) FROM access_audit
+            WHERE action='reevaluate_restricted_pairs'""").fetchone()[0]
+    assert pair["state"] == "restricted"
+    assert audit_count == 0 and batch.calls == 1
+
+
+def test_restricted_pair_reevaluation_form_rechecks_current_eligibility(trial, monkeypatch):
+    service, store, _, _, _, clock, cid, _, _ = trial
+    app, form_key, continuity_id, cid, ean, batch = _restricted_pair_reevaluation_app(
+        service, store, clock, cid, monkeypatch, eligible_on_apply=False)
+    app.text_input(key=form_key + "_actor").set_value("operator")
+    app.text_input(key=form_key + "_note").set_value("Comprobar elegibilidad vigente")
+    app.checkbox(key=form_key + "_confirm").set_value(True)
+    app.button(key=form_key + "_submit").click().run(timeout=30)
+
+    assert not app.exception
+    assert any("elegibles actualmente" in str(item.value) for item in app.warning)
+    with store._connect() as con:
+        pair = con.execute("""SELECT state FROM price_continuity_pairs
+            WHERE continuity_id=? AND competitor_id=? AND ean=?""",
+                           (continuity_id, cid, ean)).fetchone()
+        audit_count = con.execute("""SELECT COUNT(*) FROM access_audit
+            WHERE action='reevaluate_restricted_pairs'""").fetchone()[0]
+    assert pair["state"] == "restricted"
+    assert audit_count == 0 and batch.calls == 2
+
+
 def test_continuity_due_time_survives_restart_and_rechecks_after_expiry(trial):
     import pandas as pd
 

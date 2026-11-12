@@ -4,6 +4,7 @@ import csv
 import json
 import sqlite3
 from io import StringIO
+from pathlib import Path
 from urllib.parse import urlparse
 
 import pytest
@@ -94,12 +95,93 @@ def test_bridge_is_required_only_to_construct_visio_and_is_not_invented():
     assert len(plan_for({**PRADA, "color": "16K08A", "caliber": "54"}, "bassol").runnable) == 1
 
 
+@pytest.mark.parametrize("product,expected", [
+    ({**PRADA, "brand": "Tom Ford", "model": "FT1044", "color": "01E", "caliber": "60-12"},
+     "https://www.visiofactory.es/gafas-de-sol/todas-las-solares/ft1044-s-01e-60-12.html"),
+    ({**PRADA, "brand": "Tom Ford", "model": "FT1044/S", "color": "01E",
+      "caliber": "60", "bridge": "12"},
+     "https://www.visiofactory.es/gafas-de-sol/todas-las-solares/ft1044-s-01e-60-12.html"),
+    ({**PRADA, "brand": "Miu Miu", "model": "MU 52YS", "color": "ZVN5D1", "caliber": "54-21"},
+     "https://www.visiofactory.es/gafas-de-sol/todas-las-solares/mu-52ys-zvn-5d1-54-21.html"),
+    ({**PRADA, "brand": "Ray Ban", "model": "RB2140", "color": "902", "caliber": "50"},
+     "https://www.visiofactory.es/gafas-de-sol/todas-las-solares/rb2140-902-50.html"),
+    ({**PRADA, "brand": "Ray Ban", "model": "RB2140", "color": "902/58", "caliber": "50-22"},
+     "https://www.visiofactory.es/gafas-de-sol/todas-las-solares/rb2140-902-58-50-22.html"),
+])
+def test_visio_additional_documented_formats_use_explicit_attributes(product, expected):
+    plan = plan_for(product, "visio")
+
+    assert urls(plan) == [expected]
+    candidate = plan.runnable[0]
+    assert candidate.rule == "sample_pattern:visio"
+    assert candidate.evidence == ["user:visio-public-fiche-format-examples"]
+    assert candidate.attributes["ean"] == normalize_gtin(product["ean"])
+    assert candidate.attributes["caliber"] == product["caliber"].split("-")[0]
+    assert candidate.origin.startswith("User-supplied manual observations")
+    assert candidate.review_date == ""
+
+
+@pytest.mark.parametrize("product,reason", [
+    ({**PRADA, "brand": "Tom Ford", "model": "FT1044", "color": "01E", "caliber": "60"},
+     "puente"),
+    ({**PRADA, "brand": "Miu Miu", "model": "MU52YS", "color": "ZVN5D1", "caliber": "54"},
+     "puente"),
+    ({**PRADA, "brand": "Ray Ban", "model": "RB2140", "color": "902/58", "caliber": "50"},
+     "puente"),
+])
+def test_visio_additional_formats_do_not_infer_missing_bridge(product, reason):
+    plan = plan_for(product, "visio")
+
+    assert not plan.runnable
+    assert plan.reason_code == "missing_attribute"
+    assert reason in plan.reason
+
+
+def test_visio_additional_formats_remain_narrow_and_do_not_infer_colour_aliases():
+    unsupported_model = {**PRADA, "brand": "Tom Ford", "model": "FT1045", "color": "01E",
+                         "caliber": "60-12"}
+    unsupported_miu_colour = {**PRADA, "brand": "Miu Miu", "model": "MU52YS", "color": "1AB5S0",
+                              "caliber": "54-21"}
+
+    assert not plan_for(unsupported_model, "visio").runnable
+    unsupported = plan_for(unsupported_miu_colour, "visio")
+    assert not unsupported.runnable and "separador ZVN-5D1" in unsupported.reason
+
+
 def test_only_dimensions_associated_to_exact_gtin_support_new_sized_candidate():
     original = dict(PRADA)
     plan = plan_for(PRADA, "bassol")
     assert urls(plan) == ["https://www.opticabassol.com/products/prada-pr-27zs-16k08z-54"]
     assert plan.runnable[0].attributes["dimension_source"].startswith("E041:")
     assert PRADA == original and "caliber" not in PRADA
+
+
+def test_ean_linked_measurement_evidence_drives_candidates_with_traceable_source():
+    evidence_path = Path(__file__).parents[1] / "docs" / "PRICE_COVERAGE_MEASUREMENT_EVIDENCE.csv"
+    with evidence_path.open(encoding="utf-8-sig", newline="") as stream:
+        evidence = {row["ean"]: row for row in csv.DictReader(stream, delimiter=";")}
+
+    assert len(evidence) == 9
+    assert "8056266001833" not in evidence
+    assert evidence["8056262833902"]["calibre"] == "48"
+    assert evidence["8056262833902"]["puente"] == ""
+
+    def product(ean):
+        row = evidence[ean]
+        return {
+            "ean": row["ean"], "brand": row["marca"], "model": row["modelo"],
+            "color": row["color"], "category": "All / Gafas de Sol",
+            "caliber": row["calibre"], "bridge": row["puente"],
+            "measurement_source": row["fuente_medidas"],
+        }
+
+    domanci = candidate_plan(product("0889652429717"), "domanci.com").runnable[0]
+    assert domanci.url.endswith("/saint-laurent-sl-596-dune-006-58.html")
+    assert domanci.attributes["dimension_source"] == evidence["0889652429717"]["fuente_medidas"]
+
+    visio = candidate_plan(product("8056597886956"), "visiofactory.es").runnable[0]
+    assert visio.url.endswith("/mu-52ys-zvn-5d1-54-21.html")
+    assert visio.attributes["dimension_source"] == evidence["8056597886956"]["fuente_medidas"]
 
 
 @pytest.mark.parametrize("shop,brand,category", [
