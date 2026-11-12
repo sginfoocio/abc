@@ -21,7 +21,7 @@ registran resultado/acceso, no medidas de producto. Las referencias E032-E044
 incluyen medidas de paginas indexadas o candidatas historicas, pero la mayoria
 no publica un GTIN que las vincule a una variante.
 
-Se incorporan nueve registros documentales de medidas en
+El primer corte incorporo nueve registros documentales de medidas en
 [PRICE_COVERAGE_MEASUREMENT_EVIDENCE.csv](PRICE_COVERAGE_MEASUREMENT_EVIDENCE.csv):
 E041 (GTIN exacto); tres ejemplos Visio aportados con EAN (uno sin vinculo
 evidenciado de medidas al GTIN); una variante RB2140
@@ -277,7 +277,7 @@ el estado de revision. Generar una URL no acepta una oferta.
 | Visio Factory | Se conserva Prada PR27ZS y se agregan subreglas limitadas por familia para FT1044, MU52YS y RB2140; no se inserta el puente universalmente ni se separan todos los colores igual. | Prada, FT1044 y MU52YS requieren calibre/puente; RB2140 usa calibre sin puente para color simple y ambos para el color slash. Solo gafas de sol en las subreglas nuevas. | Las tres fichas aportadas y sus atributos EAN-especificos permiten dos nuevas candidatas (FT1044 01E y MU52YS ZVN5D1). RB2140 901S31 queda pendiente de asociacion estructurada; E043 conserva dos filas en revision. La busqueda interna esta restringida; no se asignan medidas por orden. |
 | Edel-Optics | `/{modelo}-{color}-de-{marca}.html` solo en familias/categorias documentadas; conserva `DUNE` y `ERIN`. No fija `selectedSize`. | El identificador se resuelve desde el control seleccionado de la ficha; EAN, precio y disponibilidad tienen que pertenecer a la misma variante. Sol y montura se mantienen distintas. | Se usa el sitemap y los resolutores ya existentes. IDs opacos, handles y UPC indexados no se convierten en hechos actuales ni se calculan. |
 | Domanci | `/es/{gafas-de-sol|monturas}/{marca}-{modelo}-{color}-{calibre}.html`, con calibre del EAN objetivo. | La categoria determina la seccion; la talla de la URL no determina un precio diferente. | E032/E033 y el patron aportado sustentan hipotesis de URL, no fichas verificadas. Nueve EAN tienen ahora calibre con procedencia documentada y producen candidatas; 89 siguen sin calibre asociado y dos pares historicos se mantienen en revision. Se evita busqueda interna y no se alteran historicos/revisiones. |
-| ConGafasDeSol | Para Prada/sol se conservan unicamente las dos grafias acreditadas del prefijo de modelo. FT0711 Fausto sigue limitado a las fichas historicas exactas; su posicion en el slug varia. | No requiere calibre en el patron Prada; no se generaliza a monturas, otras marcas ni nombres comerciales desconocidos. | Se priorizan ficha/sitemap y fuentes ya configuradas; `robots.txt` restringe `/catalogsearch/`. No se intenta la busqueda bloqueada ni se aceptan tarjetas/categorias como fichas. |
+| ConGafasDeSol | No se generan slugs. Se conservan solo las URL exactas E037-E038 y U009-U010; FAUSTO sigue vinculado a FT0711/01A por su referencia concreta. | Las medidas no forman parte de estas rutas y las fichas siguen sin verificarse en esta ampliacion. | No hay entrypoint ejecutable nuevo; persiste el 403. No se prueba otra grafia, se evita la busqueda bloqueada y no se aceptan tarjetas/categorias como fichas. |
 
 Donde no se puede generar una URL fiable, el flujo puede recurrir solo a las
 fuentes autorizadas que ya esten configuradas (fichas enlazadas, feeds,
@@ -731,3 +731,92 @@ La ejecucion CI/build/smoke del nuevo commit se enlaza en la PR.
 No se modifican produccion, vigilancia, manifiestos, permisos, robots,
 bloqueos, presupuestos, historicos o revisiones. Sin sincronizacion
 Vytria/Odoo, aceptacion automatica, merge, despliegue o activacion.
+
+## Continuidad local de patrones para los mismos 100 EAN (evidencia 12-13/11/2026)
+
+Esta seccion actualiza la matriz de patrones despues del corte anterior; no
+reescribe sus resultados historicos. Se conservaron los mismos 100 EAN
+(incluidos ceros iniciales), seis competidores y 600 pares unicos. El origen
+es el paquete local `Patrones_100_EAN_6_competidores_Copilot`, en particular
+`Especificacion_100_EAN_6_competidores.json`; no se consulto a tiendas ni se
+leyeron datos actuales de produccion.
+
+### Atributos, procedencia y limites
+
+El registro conserva los nueve registros dimensionales iniciales y anade seis
+asociaciones EAN/variante de entradas indexadas N006-N011. Los seis publican
+UPC/EAN y medidas en el mismo resultado del indice; no son HTML original,
+respuestas HTTP del motor, disponibilidad actual ni prueba de oferta:
+
+| EAN | Modelo-color | Medidas publicadas | Evidencia |
+|---|---|---:|---|
+| `0889652651774` | Saint Laurent SL M160 001 | 53-19 | N006 |
+| `0889652359700` | Saint Laurent SL M94 001 | 53-20 | N007 |
+| `8056597669016` | Miu Miu MU 04UV 1AB1O1 | 52-19 | N008 |
+| `8056597981361` | Miu Miu MU 01XV VAU1O1 | 50-18 | N009 |
+| `8056262600078` | Miu Miu MU 01YV 14L1O1 | 51-16 | N010 |
+| `8056262410929` | Miu Miu MU 53WV ZVN1O1 | 53-20 | N011 |
+
+Cada fila en el registro identifica fuente, fecha del paquete, tipo de
+asociacion y limitacion. El enlace Domanci MU 53WV `...-51.html` (U005) se
+mantiene como dato de ruta distinto: el EAN tiene 53-20, la talla 51 no se
+transfiere al EAN ni a su stock y esa candidata queda en revision. N012
+conserva una URL Tiffany de indice sin EAN contrastado, por lo que su ruta
+no aporta calibre/puente al producto. N013 permite proponer la ruta Edel
+RB4441D sin `selectedSize`; la variante sigue pendiente de resolucion en ficha.
+
+El generador combina los ejemplos documentales y suplementarios exactos.
+Compara modelo/color y, cuando se publico un GTIN, lo normaliza antes de
+asociarlo; una contradiccion mantiene la candidata en revision. Las medidas
+de `route_attributes` se guardan separadas de los atributos del EAN, y una
+talla/puente distinto o no vinculado no acredita disponibilidad. El plan de
+descubrimiento compartido es solo metadata: no se ejecuta en vista previa ni
+crea autorizaciones. `PriceLocator` persiste el plan y sus candidatos en la
+auditoria local existente.
+
+ConGafasDeSol deja de generar slugs Prada para EAN sin enlace exacto aportado.
+Se retienen las referencias concretas E037-E038 y U009-U010, pero no se
+fabrican URL probando grafias; se conserva el bloqueo 403 y la ausencia de
+entrypoints ejecutables. En el manifiesto actual queda una candidata
+comprobable en esa tienda, FT0711/01A; esto no altera el acceso ni la
+comprobacion contra robots.
+
+### Matriz recalculada
+
+La regeneracion local comprobo las 600 filas y 100 EAN, sin HTTP. La
+clasificacion historica de origen sigue siendo 138 pares con enlace
+historico, 153 con URL candidata guardada, 3 solo en revision y 306 sin URL
+guardada. El plan local pasa de 239 a 245 pares con candidata y de 236 a
+239 pares elegibles localmente; estos estados solo permiten una futura
+comprobacion por el flujo gobernado, no significan ficha ni oferta.
+
+| Competidor | Candidatas antes | Elegibles antes | Rutas/metodos ahora | Candidatas ahora | Elegibles ahora | En revision ahora |
+|---|---:|---:|---:|---:|---:|---:|
+| Optica Optima | 47 | 47 | 56 | 49 | 49 | 0 |
+| Amevista | 84 | 84 | 88 | 87 | 86 | 1 |
+| Visio Factory | 7 | 6 | 36 | 14 | 12 | 2 |
+| Edel-Optics | 77 | 77 | 83 | 78 | 78 | 0 |
+| Domanci | 10 | 8 | 100 | 16 | 13 | 3 |
+| ConGafasDeSol | 14 | 14 | 36 | 1 | 1 | 0 |
+| **Total** | **239** | **236** | **399** | **245** | **239** | **6** |
+
+Se incorporan 19 pares candidatos y se retiran 13 pares ConGafasDeSol que
+procedian de slugs genericos no respaldados; el neto es +6. Las 245 candidatas
+incluyen URLs en revision; de ellas, 239 son elegibles
+localmente para evaluacion gobernada. Los 100 EAN tienen al menos una URL en
+un plan local y 99 tienen alguna candidata local elegible. El unico EAN sin
+una candidata elegible es `0889652543574` (Chloe CH0289S 003): Amevista solo
+tiene un href sin EAN contrastado y Domanci conserva una ruta historica cuya
+talla 58 no esta asociada a este EAN. Ningun par se eleva a ficha verificada
+ni a oferta comparable por esta regeneracion.
+
+La vista matricial registra por par `plan_descubrimiento_catalogo`,
+candidatas, elegibilidad, atributos y pendientes concretos. Los motivos y
+las URL exactas restantes se conservan en
+[PRICE_COVERAGE_100_EAN_6_STORES.csv](PRICE_COVERAGE_100_EAN_6_STORES.csv);
+el resumen por producto permanece en
+[PRICE_COVERAGE_EAN_SUMMARY_100.csv](PRICE_COVERAGE_EAN_SUMMARY_100.csv).
+El smoke Docker actualizado carga las 15 asociaciones y resuelve E041, y
+comprueba con red deshabilitada que la ruta Domanci de talla 51 no reemplaza
+las medidas 53-20 del EAN. Las respuestas/URLs indexadas siguen siendo
+candidatas, no fichas actuales.

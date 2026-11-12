@@ -88,13 +88,20 @@ def test_provider_page_imports_with_only_the_files_the_image_copies(tmp_path):
         "marcolin_images, safilo_images, nuorder_images\n"
         "from app_pages.image_library_page import _visible_previews\n"
         "from image_thumbnails import validate_visible\n"
-        "from price_url_candidates import documented_measurement_records, resolve_product_attributes\n"
-        "assert len(documented_measurement_records()) == 9\n"
+        "from price_url_candidates import candidate_plan, documented_measurement_records, resolve_product_attributes\n"
+        "assert len(documented_measurement_records()) == 15\n"
         "result = resolve_product_attributes({'ean': '8056597875349', 'brand': 'Prada', "
         "'model': 'PR 27ZS', 'color': '16K08Z'})\n"
         "assert not result.conflict\n"
         "assert (result.product['caliber'], result.product['bridge']) == ('54', '21')\n"
         "assert result.evidence['fuente_medidas'] == 'E041'\n"
+        "plan = candidate_plan({'ean': '8056262410929', 'brand': 'Miu Miu', 'model': 'MU 53WV', "
+        "'color': 'ZVN1O1', 'category': 'montura'}, 'domanci.com')\n"
+        "assert len(plan.candidates) == 1 and not plan.runnable\n"
+        "assert plan.candidates[0].attributes['caliber'] == '53'\n"
+        "assert plan.candidates[0].attributes['bridge'] == '20'\n"
+        "assert plan.candidates[0].attributes['route_attributes'] == {'caliber': '51'}\n"
+        "assert plan.candidates[0].state == 'probable'\n"
     )
     run = subprocess.run([sys.executable, "-c", code], cwd=tmp_path, capture_output=True, text=True,
                          env={**__import__("os").environ, "PYTHONPATH": str(image),

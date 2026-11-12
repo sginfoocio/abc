@@ -908,9 +908,9 @@ class _Session:
             "reason_code": plan.reason_code,
             "reason": plan.reason,
             "candidates": [candidate.provenance() for candidate in plan.candidates],
+            "discovery_plan": plan.discovery_plan,
         }
-        if plan.candidates:
-            self._record_candidate_plan(job, plan)
+        self._record_candidate_plan(job, plan)
         self._local_candidates(product, plan.runnable, excluded)
         if plan.runnable:
             result = self._match(product, excluded)
@@ -943,7 +943,8 @@ class _Session:
 
     def _record_candidate_plan(self, job: dict, plan: CandidatePlan) -> None:
         detail = json.dumps({"reason_code": plan.reason_code, "reason": plan.reason,
-                             "candidates": [candidate.provenance() for candidate in plan.candidates]},
+                             "candidates": [candidate.provenance() for candidate in plan.candidates],
+                             "discovery_plan": plan.discovery_plan},
                             ensure_ascii=False)
         # Keep the entire documentary plan, including non-runnable parents/conflicts, in the existing audit log.
         with self.store._connect() as connection, connection:
