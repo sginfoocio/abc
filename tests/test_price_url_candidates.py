@@ -4,6 +4,7 @@ import csv
 import json
 import sqlite3
 from io import StringIO
+from pathlib import Path
 from urllib.parse import urlparse
 
 import pytest
@@ -153,6 +154,34 @@ def test_only_dimensions_associated_to_exact_gtin_support_new_sized_candidate():
     assert urls(plan) == ["https://www.opticabassol.com/products/prada-pr-27zs-16k08z-54"]
     assert plan.runnable[0].attributes["dimension_source"].startswith("E041:")
     assert PRADA == original and "caliber" not in PRADA
+
+
+def test_ean_linked_measurement_evidence_drives_candidates_with_traceable_source():
+    evidence_path = Path(__file__).parents[1] / "docs" / "PRICE_COVERAGE_MEASUREMENT_EVIDENCE.csv"
+    with evidence_path.open(encoding="utf-8-sig", newline="") as stream:
+        evidence = {row["ean"]: row for row in csv.DictReader(stream, delimiter=";")}
+
+    assert len(evidence) == 9
+    assert "8056266001833" not in evidence
+    assert evidence["8056262833902"]["calibre"] == "48"
+    assert evidence["8056262833902"]["puente"] == ""
+
+    def product(ean):
+        row = evidence[ean]
+        return {
+            "ean": row["ean"], "brand": row["marca"], "model": row["modelo"],
+            "color": row["color"], "category": "All / Gafas de Sol",
+            "caliber": row["calibre"], "bridge": row["puente"],
+            "measurement_source": row["fuente_medidas"],
+        }
+
+    domanci = candidate_plan(product("0889652429717"), "domanci.com").runnable[0]
+    assert domanci.url.endswith("/saint-laurent-sl-596-dune-006-58.html")
+    assert domanci.attributes["dimension_source"] == evidence["0889652429717"]["fuente_medidas"]
+
+    visio = candidate_plan(product("8056597886956"), "visiofactory.es").runnable[0]
+    assert visio.url.endswith("/mu-52ys-zvn-5d1-54-21.html")
+    assert visio.attributes["dimension_source"] == evidence["8056597886956"]["fuente_medidas"]
 
 
 @pytest.mark.parametrize("shop,brand,category", [

@@ -14,10 +14,12 @@ from price_url_candidates import (  # noqa: E402
     VISIO_FORMAT_EVIDENCE,
     candidate_plan,
 )
+from price_comparator import normalize_gtin  # noqa: E402
 from price_references import model_key  # noqa: E402
 
 MATRIX = ROOT / "docs" / "PRICE_COVERAGE_100_EAN_6_STORES.csv"
 EAN_SUMMARY = ROOT / "docs" / "PRICE_COVERAGE_EAN_SUMMARY_100.csv"
+MEASUREMENT_EVIDENCE = ROOT / "docs" / "PRICE_COVERAGE_MEASUREMENT_EVIDENCE.csv"
 DOMAINS = {
     "optica-optima-com": "optica-optima.com",
     "amevista-com": "amevista.com",
@@ -38,6 +40,8 @@ VISIO_FAMILIES = {("TOMFORD", "FT1044"), ("MIUMIU", "MU52YS"), ("RAYBAN", "RB214
 NEW_FIELDS = (
     "calibre",
     "puente",
+    "fuente_medidas",
+    "asociacion_medidas",
     "atributos_disponibles",
     "metodo_descubrimiento",
     "fuente_evidencia_patron",
@@ -70,6 +74,7 @@ def _route_metadata(row: dict[str, str]) -> dict[str, str]:
         "category": row["categoria"],
         "caliber": row.get("calibre", ""),
         "bridge": row.get("puente", ""),
+        "measurement_source": row.get("fuente_medidas", ""),
     }
     plan = candidate_plan(product, DOMAINS[row["competidor_id"]])
     candidates = plan.candidates
@@ -150,6 +155,8 @@ def _route_metadata(row: dict[str, str]) -> dict[str, str]:
         "puente": row.get("puente", "") or "not_provided_in_matrix_source",
     }
     return {
+        "fuente_medidas": row.get("fuente_medidas", ""),
+        "asociacion_medidas": row.get("asociacion_medidas", ""),
         "atributos_disponibles": _json(attributes),
         "metodo_descubrimiento": method,
         "fuente_evidencia_patron": "; ".join(evidence),
@@ -177,6 +184,41 @@ def main() -> None:
             or stores != EXPECTED_STORES
             or any(sum(row["competidor"] == store for row in rows) != 100 for store in stores)):
         raise ValueError("La matriz debe conservar exactamente 100 EAN x seis tiendas sin pares duplicados.")
+
+    with MEASUREMENT_EVIDENCE.open(encoding="utf-8-sig", newline="") as stream:
+        measurement_rows = list(csv.DictReader(stream, delimiter=";"))
+    measurements = {}
+    products_by_ean = {}
+    for row in rows:
+        products_by_ean.setdefault(row["ean"], set()).add(
+            (row["marca"], row["modelo"], row["color"], row["categoria"])
+        )
+    for evidence in measurement_rows:
+        ean = normalize_gtin(evidence["ean"])
+        if ean != evidence["ean"] or ean in measurements:
+            raise ValueError(f"EAN de evidencia de medidas no canónico o duplicado: {evidence['ean']}")
+        if ean not in products_by_ean:
+            raise ValueError(f"EAN de evidencia de medidas fuera del manifiesto: {ean}")
+        expected = (evidence["marca"], evidence["modelo"], evidence["color"])
+        actual = {(brand, model, color) for brand, model, color, _ in products_by_ean[ean]}
+        if actual != {expected}:
+            raise ValueError(f"Los atributos de evidencia de medidas no corresponden al EAN {ean}.")
+        if not evidence["fuente_medidas"] or not evidence["asociacion_medidas"]:
+            raise ValueError(f"Falta procedencia de calibre/puente para el EAN {ean}.")
+        measurements[ean] = evidence
+    for row in rows:
+        evidence = measurements.get(row["ean"])
+        if evidence:
+            for field in ("calibre", "puente"):
+                source_value = evidence[field]
+                if row.get(field) and row[field] != source_value:
+                    raise ValueError(f"Medida existente contradictoria para {row['ean']}: {field}")
+                row[field] = source_value
+            row["fuente_medidas"] = evidence["fuente_medidas"]
+            row["asociacion_medidas"] = evidence["asociacion_medidas"]
+        else:
+            row.setdefault("fuente_medidas", "")
+            row.setdefault("asociacion_medidas", "")
 
     fields = [field for field in original_fields if field not in DEPRECATED_FIELDS]
     fields += [field for field in NEW_FIELDS if field not in fields]

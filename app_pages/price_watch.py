@@ -956,14 +956,27 @@ def _render_continuity(store: PriceComparatorStore, service=None) -> None:
                         confirmed = st.checkbox("Confirmo reprogramar solo los pares elegibles",
                                                 key=key + "_confirm")
                         submitted = st.form_submit_button(
-                            "Aplicar reevaluación auditada", disabled=not eligible or not confirmed)
+                            "Aplicar reevaluación auditada", disabled=not eligible, key=key + "_submit")
                     if submitted:
-                        try:
-                            service.reevaluate_restricted_pairs(actor=actor, note=note, apply=True)
-                            st.session_state.pop(key, None)
-                            _refresh("Reevaluación auditada; ningún par fue consultado durante la acción.")
-                        except (ValueError, RuntimeError, Timeout) as exc:
-                            st.error(str(exc))
+                        if not confirmed:
+                            st.warning("Confirma la reevaluación antes de aplicar cambios.")
+                        elif not actor.strip():
+                            st.warning("Indica un responsable para la reevaluación.")
+                        elif not note.strip():
+                            st.warning("Indica el motivo de la reevaluación.")
+                        else:
+                            try:
+                                result = service.reevaluate_restricted_pairs(
+                                    actor=actor, note=note, apply=True)
+                                if any(item.get("applied", False) for item in result):
+                                    st.session_state.pop(key, None)
+                                    _refresh(
+                                        "Reevaluación auditada; ningún par fue consultado durante la acción.")
+                                else:
+                                    st.warning(
+                                        "No hay pares elegibles actualmente; no se aplicaron cambios.")
+                            except (ValueError, RuntimeError, Timeout) as exc:
+                                st.error(str(exc))
         if report["pairs"]:
             st.dataframe(pd.DataFrame(report["pairs"]), width="stretch", hide_index=True)
 

@@ -228,7 +228,9 @@ def _supplied_pattern_plan(product: dict, shop: str, category: str, attributes: 
             return CandidatePlan(reason_code="missing_attribute",
                                  reason="Falta calibre asociado al EAN para construir la URL Domanci; no se infiere")
         used["caliber"] = lens
-        used["dimension_source"] = "Explicit caliber on the target product record"
+        used["dimension_source"] = (
+            product.get("measurement_source") or "Explicit caliber on the target product record"
+        )
         section = "gafas-de-sol" if category == "sol" else "monturas"
         urls = [f"https://domanci.com/es/{section}/{brand_slug}-{model_slug}-{color}-{lens}.html"]
         evidence = ["user:domanci-route-2026-11-06", "E032", "E033"]
@@ -300,6 +302,8 @@ def _visio_format_plan(product: dict, brand: str, model: str) -> CandidatePlan |
     attributes["caliber"] = lens
     if bridge:
         attributes["bridge"] = bridge
+    if product.get("measurement_source"):
+        attributes["dimension_source"] = str(product["measurement_source"])
     attributes["variant_resolution"] = (
         "URL format only; ficha identity, EAN, selected variant, price and availability remain unverified"
     )

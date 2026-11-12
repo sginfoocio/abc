@@ -13,8 +13,26 @@ Se leyeron los siete documentos de `Precios/Diagonal_evidencia_Copilot`:
 Se cotejaron 47 ejemplos, 100 productos, 100 enriquecimientos y 280 grupos
 marca/categoria contra el JSON. La muestra representa 29 grupos documentados,
 dos solo historicos y 249 sin muestra; esto no demuestra ausencia comercial.
-Solo un GTIN tiene medidas asociadas explicitamente en la investigacion;
-otras 11 referencias tienen medidas observadas por modelo/color, no por GTIN.
+`Productos_100.csv` no contiene calibre ni puente para ninguno de sus 100 EAN.
+`Enriquecimiento_referencias.csv` registra 12 medidas: una asociada a un GTIN
+exacto y otras 11 solo a modelo/color. Los CSV de exportacion 2026-11-05
+registran resultado/acceso, no medidas de producto. Las referencias E032-E044
+incluyen medidas de paginas indexadas o candidatas historicas, pero la mayoria
+no publica un GTIN que las vincule a una variante.
+
+Se incorporan nueve asociaciones de medidas en
+[PRICE_COVERAGE_MEASUREMENT_EVIDENCE.csv](PRICE_COVERAGE_MEASUREMENT_EVIDENCE.csv):
+E041 (GTIN exacto); tres ejemplos Visio aportados con EAN; una variante RB2140
+corroborada por la referencia 5418; el calibre 48 de RB4472, sin puente
+acreditado; y los calibres seleccionados para tres EAN Saint Laurent mediante
+UPC indexado normalizado y controles `selectedSize`. Estos son datos de
+planificacion para construir candidatas, no validacion actual del motor. No se
+rellena el catalogo maestro ni se derivan valores por el orden de listas.
+El RB2140 901S31 conserva pendiente la asociacion estructurada EAN/medida.
+E043 sigue sin GTIN y contradice la medida 50-22 atribuida al EAN 0805289126577;
+E031 tambien contiene una contradiccion de titulo/contenido para FT1044 01E.
+La candidata FT1044 continua sin identidad verificada; los pares RB2140
+afectados por E043 permanecen en revision.
 
 El registro [EXAMPLES](../price_url_candidates.py) conserva los 47 IDs E001-E047,
 URLs originales (incluidos locale y query), marca, modelo, color, categoria,
@@ -231,11 +249,14 @@ registran en la descripcion de la PR, distinguiendo local y remoto.
 ## Ampliacion conjunta de los seis competidores
 
 Se conserva el manifiesto sin cambios: 100 EAN, seis competidores y 600 pares
-unicos. La fuente de atributos es la matriz versionada junto con la exportacion
-local `Productos_100.csv` de la auditoria existente. Esta ultima contiene 100
-EAN distintos, pero no publica calibre ni puente para ninguno; no se copian
-medidas de otro color/EAN ni se completa el catalogo. Los EAN se mantienen como
-cadenas, incluidos sus ceros iniciales.
+unicos. La fuente de atributos es la matriz versionada, `Productos_100.csv`,
+las asociaciones auditadas y las nueve entradas trazables de
+`PRICE_COVERAGE_MEASUREMENT_EVIDENCE.csv`. La exportacion de productos contiene
+100 EAN distintos, pero no publica medidas para ninguno. Los atributos
+recuperados se limitan a asociaciones exactas por GTIN/EAN o selector de
+variante; las medidas solo de modelo/color, las listas sin vinculo estructurado
+y las URL historicas no se propagan a los EAN. El resto queda vacio, sin valores
+por defecto. Los EAN se mantienen como cadenas, incluidos sus ceros iniciales.
 
 La regla comercial sigue siendo que el calibre no cambia el precio. Si una
 ficha publica un precio comun para el modelo/color, puede servir a calibres
@@ -249,9 +270,9 @@ el estado de revision. Generar una URL no acepta una oferta.
 |---|---|---|---|
 | Optica Optima | Categoria en la ruta y slug marca-modelo-color; `FT5634B -> FT5634-B` solo para la referencia documentada. | Distingue `/gafas-de-sol/` y `/gafas-graduadas/`; no usa calibre ni puente. | Se reutilizan fichas/sitemap o fuentes existentes autorizadas. `robots.txt` restringe los endpoints de busqueda interna; no se generan consultas de busqueda. |
 | Amevista | `/es/{marca}-{modelo}-{color}` dentro de las familias documentadas. Mantiene alias Prada, Tiffany, Miu Miu, Bottega y Ray-Ban acotados; RB2140 conserva `wayfarer`, RB4472 1359/2 conserva el separador `1359-2`. | Sol y montura se tratan por separado. Los Product/Offer compartidos se vinculan por GTIN normalizado y variante estructurada, no por el orden de listas. UPC de 12 digitos se normaliza con cero inicial. | Se conserva el locale ES y las fuentes de catalogo/sitemap ya existentes; se respetan restricciones de filtros y endpoints de variante/personalizacion. No se inventan aliases para otras marcas. |
-| Visio Factory | Se conserva Prada PR27ZS y se agregan subreglas limitadas por familia para FT1044, MU52YS y RB2140; no se inserta el puente universalmente ni se separan todos los colores igual. | Prada, FT1044 y MU52YS requieren calibre/puente; RB2140 usa calibre sin puente para color simple y ambos para el color slash. Solo gafas de sol en las subreglas nuevas. | Las tres fichas aportadas muestran: [Tom Ford FT1044/S](https://www.visiofactory.es/gafas-de-sol/todas-las-solares/ft1044-s-01e-60-12.html), [Miu Miu MU52YS](https://www.visiofactory.es/gafas-de-sol/todas-las-solares/mu-52ys-zvn-5d1-54-21.html) y [Ray-Ban RB2140 901](https://www.visiofactory.es/gafas-de-sol/todas-las-solares/rb2140-901-50.html). La busqueda interna esta restringida; se conservan sitemap/fuentes autorizadas y no se asigna calibre por orden. |
+| Visio Factory | Se conserva Prada PR27ZS y se agregan subreglas limitadas por familia para FT1044, MU52YS y RB2140; no se inserta el puente universalmente ni se separan todos los colores igual. | Prada, FT1044 y MU52YS requieren calibre/puente; RB2140 usa calibre sin puente para color simple y ambos para el color slash. Solo gafas de sol en las subreglas nuevas. | Las tres fichas aportadas y sus atributos EAN-especificos permiten dos nuevas candidatas (FT1044 01E y MU52YS ZVN5D1). RB2140 901S31 queda pendiente de asociacion estructurada; E043 conserva dos filas en revision. La busqueda interna esta restringida; no se asignan medidas por orden. |
 | Edel-Optics | `/{modelo}-{color}-de-{marca}.html` solo en familias/categorias documentadas; conserva `DUNE` y `ERIN`. No fija `selectedSize`. | El identificador se resuelve desde el control seleccionado de la ficha; EAN, precio y disponibilidad tienen que pertenecer a la misma variante. Sol y montura se mantienen distintas. | Se usa el sitemap y los resolutores ya existentes. IDs opacos, handles y UPC indexados no se convierten en hechos actuales ni se calculan. |
-| Domanci | `/es/{gafas-de-sol|monturas}/{marca}-{modelo}-{color}-{calibre}.html`, con calibre del EAN objetivo. | La categoria determina la seccion; la talla de la URL no determina un precio diferente. | E032/E033 y el patron aportado sustentan una hipotesis de URL, no 100 fichas verificadas. El calibre falta en los 100 registros. Se evita busqueda interna y se conservan historicos/revisiones. |
+| Domanci | `/es/{gafas-de-sol|monturas}/{marca}-{modelo}-{color}-{calibre}.html`, con calibre del EAN objetivo. | La categoria determina la seccion; la talla de la URL no determina un precio diferente. | E032/E033 y el patron aportado sustentan hipotesis de URL, no fichas verificadas. Nueve EAN tienen ahora calibre con procedencia documentada y producen candidatas; 89 siguen sin calibre asociado y dos pares historicos se mantienen en revision. Se evita busqueda interna y no se alteran historicos/revisiones. |
 | ConGafasDeSol | Para Prada/sol se conservan unicamente las dos grafias acreditadas del prefijo de modelo. FT0711 Fausto sigue limitado a las fichas historicas exactas; su posicion en el slug varia. | No requiere calibre en el patron Prada; no se generaliza a monturas, otras marcas ni nombres comerciales desconocidos. | Se priorizan ficha/sitemap y fuentes ya configuradas; `robots.txt` restringe `/catalogsearch/`. No se intenta la busqueda bloqueada ni se aceptan tarjetas/categorias como fichas. |
 
 Donde no se puede generar una URL fiable, el flujo puede recurrir solo a las
@@ -299,22 +320,31 @@ ficha, oferta y resultado.
 |---|---:|---:|---:|---:|---:|---:|---:|
 | Optica Optima | 24 | 30 | 0 | 46 | 54 | 47 | 47 |
 | Amevista | 33 | 52 | 0 | 15 | 85 | 84 | 84 |
-| Visio Factory | 12 | 1 | 2 | 85 | 29 | 5 | 3 |
+| Visio Factory | 12 | 1 | 2 | 85 | 29 | 7 | 5 |
 | Edel-Optics | 12 | 70 | 0 | 18 | 82 | 77 | 77 |
-| Domanci | 21 | 0 | 1 | 78 | 100 | 2 | 0 |
+| Domanci | 21 | 0 | 1 | 78 | 100 | 11 | 9 |
 | ConGafasDeSol | 36 | 0 | 0 | 64 | 36 | 14 | 14 |
-| **Total** | **138** | **153** | **3** | **306** | **386** | **229** | **225** |
+| **Total** | **138** | **153** | **3** | **306** | **386** | **240** | **236** |
 
 Los cuatro primeros estados son la clasificacion previa de las 600 filas y no
 se alteraron. Los pares con metodo despues incluyen URLs historicas conservadas
 y patrones condicionales; no significan que haya 386 candidatas, fichas o
-permisos. En particular, Domanci tiene el formato para los 100 registros, pero
-98 no se pueden construir porque falta el calibre asociado al EAN; dos filas
-siguen siendo historicas/en revision. Visio conserva dos pares en revision y
-15 metodos parciales nuevos sin dimensiones publicadas en el catalogo. El
-plan local contiene 229 pares con URL candidata, ejecutable o no; 225 pares son
+permisos. En particular, Domanci tiene nueve candidatas construidas con
+calibres trazables, 89 filas sin calibre y dos pares historicos/en revision.
+Visio conserva dos pares en revision, dos candidatas nuevas con medidas
+asociadas al EAN y 13 pares parciales sin medidas suficientes. El plan local
+contiene 240 pares con URL candidata, ejecutable o no; 236 pares son
 elegibles localmente para una comprobacion gobernada, no hay una
 consulta aprobada por el mero hecho de ser elegible.
+
+En Visio siguen sin calibre/puente seis FT1044, seis MU52YS y el RB2140 901S31
+`8056266001833`; para este ultimo la lista de EAN y tallas de la evidencia #124
+no ofrece una asociacion estructurada. En Domanci, los 89 pares restantes
+carecen de calibre enlazado al EAN. E032/E033 siguen en revision: sus URL y
+medidas historicas no identifican un GTIN actual. El indice autorizado del
+localizador puede usar feeds/sitemaps ya configurados, pero los archivos
+auditados no contienen una fuente sin medidas vinculada a estos pares; no se
+ejecuto ni se altero ninguna fuente.
 
 Por producto, los 100 EAN tenian al menos un enlace historico/candidato antes
 de esta ampliacion, y los 100 mantienen al menos un enlace o metodo de
@@ -322,7 +352,9 @@ descubrimiento documentado despues; ninguno queda clasificado como producto
 inexistente. La distribucion del numero de tiendas con enlace previo es
 15/21/29/27/6/2 EAN con 1/2/3/4/5/6 tiendas, respectivamente. Despues, contando
 enlaces o metodos condicionales, es 4/14/21/23/29/9 EAN con 1/2/3/4/5/6 tiendas.
-Hay 95 EAN con al menos una candidata local elegible; cinco aun no tienen
+Hay 95 EAN con al menos una candidata local elegible, igual que antes: los once
+nuevos pares elegibles corresponden a EAN que ya tenian otra ruta elegible.
+Cinco aun no tienen
 ninguna candidata local elegible:
 
 - `0889652543574` Chloe CH0289S 003
