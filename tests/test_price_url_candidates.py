@@ -509,11 +509,11 @@ def test_amevista_gucci_candidate_flows_through_preview_prepare_and_verified_ide
     assert _urls(store, cid)["url"].tolist() == [url]
     with store._connect() as con:
         assert con.execute("SELECT COUNT(*) FROM offers").fetchone()[0] == 0
-        recorded_plan = con.execute("""SELECT e.detail FROM locate_events e
+        recorded_plan = con.execute("""SELECT e.metadata FROM locate_events e
             JOIN locate_jobs j ON j.id=e.job_id
-            WHERE j.ean=? AND j.competitor_id=? AND e.method='local_candidates'
+            WHERE j.ean=? AND j.competitor_id=?
             ORDER BY e.rowid DESC LIMIT 1""", (ean, cid)).fetchone()
-    persisted_plan = json.loads(recorded_plan["detail"])
+    persisted_plan = json.loads(recorded_plan["metadata"])["candidate_plan"]
     assert persisted_plan["discovery_plan"]["automatic_execution"] is False
     assert site.calls == ["https://www.amevista.com/robots.txt", url]
 
@@ -763,7 +763,7 @@ def test_preview_is_read_only_and_later_authorized_run_preserves_provenance(tmp_
         assert evidence["rule"] == "sample_pattern:optima" and evidence["evidence"] == ["E001"]
         assert evidence["attributes"]["color"] == "16K08Z"
         audit = json.loads(con.execute(
-            "SELECT detail FROM locate_events WHERE method='local_candidates'").fetchone()[0])
+            "SELECT metadata FROM locate_events ORDER BY id DESC LIMIT 1").fetchone()[0])["candidate_plan"]
         assert audit["candidates"][0]["attributes"]["ean"] == PRADA["ean"]
         assert con.execute("SELECT COUNT(*) FROM offers").fetchone()[0] == 0
     after = dump(store)
@@ -898,7 +898,7 @@ def test_verified_and_previously_rejected_links_are_not_overwritten_or_retried(t
     assert not site.calls and _urls(store, cid)["status"].tolist() == ["rejected"]
 
 
-def test_legacy_index_gets_only_additive_metadata_migration(tmp_path):
+def test_legacy_tables_get_only_additive_metadata_migrations(tmp_path):
     path = tmp_path / "legacy.sqlite3"
     with sqlite3.connect(path) as con:
         con.execute("""CREATE TABLE discovery_index(competitor_id TEXT,url TEXT,label TEXT NOT NULL DEFAULT '',
@@ -907,9 +907,15 @@ def test_legacy_index_gets_only_additive_metadata_migration(tmp_path):
             facts TEXT NOT NULL DEFAULT '',PRIMARY KEY(competitor_id,url))""")
         con.execute("""INSERT INTO discovery_index(competitor_id,url,signature,method,first_seen,last_seen,facts)
             VALUES('old','https://legacy.example/p','PR 27ZS 16K08Z','catalog','2026-11-01','2026-11-01','{}')""")
+        con.execute("""CREATE TABLE locate_events (
+            id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL, at TEXT NOT NULL, state TEXT NOT NULL,
+            method TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '', detail TEXT NOT NULL DEFAULT '',
+            requests INTEGER NOT NULL DEFAULT 0)""")
+        con.execute("""INSERT INTO locate_events(id,job_id,at,state) VALUES(1,1,'2026-11-01','done')""")
     store = PriceComparatorStore(path)
     with store._connect() as con:
         assert tuple(con.execute("SELECT candidate_evidence,facts,label FROM discovery_index").fetchone()) == ("{}", "{}", "")
+        assert con.execute("SELECT metadata FROM locate_events WHERE id=1").fetchone()[0] == "{}"
     before = dump(store)
     PriceComparatorStore(path)
     assert dump(store) == before
@@ -930,12 +936,13 @@ def test_nonrunnable_documentary_plan_is_audited_without_fetching_or_linking(tmp
     locator.run([cid])
     assert not site.calls and _urls(store, cid).empty
     with store._connect() as con:
-        detail = json.loads(con.execute(
-            "SELECT detail FROM locate_events WHERE method='local_candidates'").fetchone()[0])
-        assert detail["reason_code"] == "needs_authorized_discovery"
-        assert detail["candidates"] and all(candidate["state"] == "probable" for candidate in detail["candidates"])
-        assert all(candidate["attributes"]["ean"] == ean for candidate in detail["candidates"])
-        assert all(candidate["evidence"] and candidate["reason"] for candidate in detail["candidates"])
+        metadata = json.loads(con.execute(
+            "SELECT metadata FROM locate_events ORDER BY id DESC LIMIT 1").fetchone()[0])
+        plan = metadata["candidate_plan"]
+        assert plan["reason_code"] == "needs_authorized_discovery"
+        assert plan["candidates"] and all(candidate["state"] == "probable" for candidate in plan["candidates"])
+        assert all(candidate["attributes"]["ean"] == ean for candidate in plan["candidates"])
+        assert all(candidate["evidence"] and candidate["reason"] for candidate in plan["candidates"])
 
 
 def test_batch_ui_shows_local_candidates_without_preparing_jobs_or_http(tmp_path, monkeypatch):

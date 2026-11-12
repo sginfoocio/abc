@@ -53,7 +53,7 @@ from price_web import (_LOC, _PRODUCT_SITEMAP, Outcome, WebPriceSearch, WebSearc
 from price_web_extract import (ProductPage, extract_product, parse_html, product_page_rejection,
                                select_product_variant)
 from price_web_fetch import MAX_SITEMAP_BYTES, PageGone, RobotsDenied, _requests_transport
-from price_url_candidates import CandidatePlan, UrlCandidate, candidate_plan
+from price_url_candidates import UrlCandidate, candidate_plan
 
 JOB_STATES = {
     "pending": "Pendiente",
@@ -418,7 +418,7 @@ class PriceLocator:
                 raise
 
     def _finish(self, job: dict, result: _Result, *, requests: int = 0, not_before: datetime | None = None,
-                refund: bool = False) -> None:
+                refund: bool = False, metadata: dict | None = None) -> None:
         now = self._now()
         if not_before is None:
             not_before = {"not_found": now + RETRY_NOT_FOUND, "unavailable": now + RETRY_UNAVAILABLE,
@@ -429,11 +429,14 @@ class PriceLocator:
                                (result.state, result.url, result.method, result.detail[:1000],
                                 _iso(not_before) if not_before else None, int(refund),
                                 int(result.state in SETTLED), _iso(now), job["id"]))
-            self._event(connection, job["id"], result.state, result.method, result.url, result.detail, requests)
+            self._event(connection, job["id"], result.state, result.method, result.url, result.detail, requests, metadata)
 
-    def _event(self, connection, job_id: int, state: str, method: str, url: str, detail: str, requests: int) -> None:
-        connection.execute("""INSERT INTO locate_events(job_id,at,state,method,url,detail,requests)
-            VALUES(?,?,?,?,?,?,?)""", (job_id, _iso(self._now()), state, method, url[:500], detail[:1000], requests))
+    def _event(self, connection, job_id: int, state: str, method: str, url: str, detail: str, requests: int,
+               metadata: dict | None = None) -> None:
+        connection.execute("""INSERT INTO locate_events(job_id,at,state,method,url,detail,requests,metadata)
+            VALUES(?,?,?,?,?,?,?,?)""",
+                           (job_id, _iso(self._now()), state, method, url[:500], detail[:1000], requests,
+                            json.dumps(metadata or {}, ensure_ascii=False)))
 
     def _settle_all(self, competitor_id: str, state: str, detail: str, not_before: datetime | None,
                     pilot: set[str], eans: list[str] | None = None) -> int:
@@ -539,11 +542,15 @@ class PriceLocator:
                 try:
                     result = (_Result("pilot", detail="Par incluido en el piloto supervisado: se gestiona allí")
                               if job["ean"] in pilot else session.process(job))
-                    self._finish(job, result, requests=session.requests - before)
+                    metadata = ({"candidate_plan": session._job_candidate_plan}
+                                if session._job_candidate_plan else None)
+                    self._finish(job, result, requests=session.requests - before, metadata=metadata)
                     report.states[result.state] += 1
                 except _Stop as stop:
+                    metadata = ({"candidate_plan": session._job_candidate_plan}
+                                if session._job_candidate_plan else None)
                     self._finish(job, _Result(stop.state, detail=stop.detail), requests=session.requests - before,
-                                 not_before=stop.retry_at, refund=True)
+                                 not_before=stop.retry_at, refund=True, metadata=metadata)
                     report.states[stop.state] += 1
                     # The whole competitor is suspended, not just this job: no request is attempted for the rest.
                     report.states[stop.state] += self._settle_all(competitor_id, stop.state, stop.detail,
@@ -551,8 +558,10 @@ class PriceLocator:
                     report.stopped[competitor_id] = stop.detail
                     break
                 except (ConnectorError, WebSearchError, ValueError) as exc:
+                    metadata = ({"candidate_plan": session._job_candidate_plan}
+                                if session._job_candidate_plan else None)
                     self._finish(job, _Result("pending", detail=f"Error temporal: {exc}"),
-                                 requests=session.requests - before)
+                                 requests=session.requests - before, metadata=metadata)
                     report.states["pending"] += 1
                 finally:
                     with self.store._connect() as connection:
@@ -910,7 +919,6 @@ class _Session:
             "candidates": [candidate.provenance() for candidate in plan.candidates],
             "discovery_plan": plan.discovery_plan,
         }
-        self._record_candidate_plan(job, plan)
         self._local_candidates(product, plan.runnable, excluded)
         if plan.runnable:
             result = self._match(product, excluded)
@@ -940,16 +948,6 @@ class _Session:
         return _Result("not_found", detail=f"Sin ficha de {product['brand']} {product['model']} {product['color']} en: "
                                            f"{', '.join(executed)}. No implica que el producto no exista; "
                                            "se reintentará cuando caduquen las fuentes")
-
-    def _record_candidate_plan(self, job: dict, plan: CandidatePlan) -> None:
-        detail = json.dumps({"reason_code": plan.reason_code, "reason": plan.reason,
-                             "candidates": [candidate.provenance() for candidate in plan.candidates],
-                             "discovery_plan": plan.discovery_plan},
-                            ensure_ascii=False)
-        # Keep the entire documentary plan, including non-runnable parents/conflicts, in the existing audit log.
-        with self.store._connect() as connection, connection:
-            connection.execute("""INSERT INTO locate_events(job_id,at,state,method,url,detail,requests)
-                VALUES(?,?,'pending','local_candidates','',?,0)""", (job["id"], _iso(self._now()), detail))
 
     def _local_candidates(self, product: dict, candidates: list[UrlCandidate], excluded: set[str]) -> None:
         """Only during an approved, governed run. No verified URL or offer is created by generation."""

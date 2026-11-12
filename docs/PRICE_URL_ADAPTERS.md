@@ -68,8 +68,10 @@ no acredita automatizacion para ninguna tienda.
   usados y referencias E###. Es la unica columna nueva, con valor por defecto
   `{}` y migracion aditiva para SQLite existente.
 - El plan completo, incluidas fichas padre, conflictos e historicas no
-  ejecutables, se conserva en `locate_events.detail` como JSON, metodo
-  `local_candidates`, cero peticiones. El resumen humano mantiene sus limites.
+  ejecutables, se conserva como JSON en `locate_events.metadata` dentro del
+  evento del resultado real. No crea una transicion `pending` ficticia ni otra
+  fila de auditoria. El estado, metodo, resumen y peticiones siguen describiendo
+  el resultado real del trabajo.
 - Cada ficha pasa por el mismo `GovernedFetcher` y clasificador. Las notas del
   vinculo resultante citan la regla y referencias; la evidencia completa queda
   en el indice y los eventos. No se crean ofertas durante la localizacion.
