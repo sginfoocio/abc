@@ -23,6 +23,10 @@ _CALIBER = re.compile(r"(?<!\d)(\d{2})\s*(?:[-/x×□]|\s)\s*(\d{1,2})(?:mm)?(?!
 _LENS_ONLY = re.compile(r"^\d{2}$")
 _LENS_TOKEN = re.compile(r"(?<![\dA-Za-z])C(\d{2})(?![\dA-Za-z])|\s(\d{2})\s*$")
 _CODE_CALIBER = re.compile(r"^0?[A-Z]{1,4}_[A-Z0-9]+?(\d{2})(\d{2})$")
+_COMMERCIAL_NAMES = {
+    ("RAYBAN", "RB2140"): {"WAYFARER"},
+    ("TOMFORD", "FT0711"): {"FAUSTO"},
+}
 
 
 def _ascii(value: Any) -> str:
@@ -144,16 +148,23 @@ def parse_reference(text: str, *, brands: Iterable[str] = (), models: Iterable[s
         raw = _CALIBER.sub(" ", raw) if "-" in caliber else _LENS_TOKEN.sub(" ", raw)
     brand, rest = strip_brand(raw, brand_list)
     parts = tokens(rest)
-    parts = [part for part in parts if key(part) not in {"COLECCION", "COLLECTION"}]
-    if key(brand) == "RAYBAN" and not any("WAYFARER" in key(model) for model in model_list):
-        parts = [part for part in parts if key(part) != "WAYFARER"]
-        if len(parts) == 1 and re.fullmatch(r"\d{3,4}", parts[0]):
-            return Reference(brand=brand, color=parts[0], caliber=caliber)
+    if parts and parts[0] in {"COLECCION", "COLLECTION"}:
+        parts = parts[1:]
+    for model in model_list:
+        aliases = _COMMERCIAL_NAMES.get((key(brand), model_key(model)), set())
+        if aliases and model_key(model) in key(" ".join(parts)):
+            parts = [part for part in parts if part not in aliases]
     matches: list[Reference] = []
     for model in sorted(set(model_list), key=lambda m: -len(key(m))):
         expected_model = model_key(model)
         if not expected_model:
             continue
+        code = re.fullmatch(r"(RB|FT)\d+[A-Z]*", expected_model)
+        if code:
+            published_codes = {model_key(value) for value in re.findall(
+                rf"\b{code[1]}\s*\d+[A-Z]*\b", " ".join(parts))}
+            if expected_model in published_codes and published_codes != {expected_model}:
+                return Reference(brand=brand, caliber=caliber, ambiguous=True)
         commercial = re.fullmatch(r"(SL\d+)(DUNE|ERIN)", expected_model)
         if commercial:
             code = re.fullmatch(r"([A-Z]+)(\d+)", commercial[1])
@@ -282,7 +293,10 @@ def classify(product: Mapping[str, Any], candidate: Mapping[str, Any]) -> MatchR
               if ref.model_key == own_model or any(char.isdigit() for char in ref.model)}
     colors = {ref.color_key for ref in relevant if any(char.isdigit() for char in ref.color)}
     if candidate.get("model"):
-        models.add(model_key(candidate["model"]))
+        declared_model = model_key(candidate["model"])
+        commercial_names = _COMMERCIAL_NAMES.get((own_brand, own_model), set())
+        if declared_model not in commercial_names or own_model not in models:
+            models.add(declared_model)
     if any(char.isdigit() for char in str(candidate.get("color") or "")):
         colors.add(key(candidate["color"]))
     brands = {key(ref.brand) for ref in references if ref.brand}

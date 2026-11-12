@@ -86,3 +86,8 @@ image-thumbnails/
 *.sqlite3-shm
 *.enc
 *.key
+
+# The only documentation resource required by the runtime.
+!docs/
+docs/**
+!docs/PRICE_COVERAGE_MEASUREMENT_EVIDENCE.csv

@@ -123,6 +123,12 @@ jobs:
           assert footer_text(info) == 'Cloud v%s \u00b7 commit %s' % (os.environ['EXPECTED_VERSION'], os.environ['EXPECTED_COMMIT'][:7])
           assert cloud_dashboard.LOGO.is_file()
           assert len(price_url_candidates.documented_measurement_records()) == 9
+          product = {'ean': '8056597875349', 'brand': 'Prada', 'model': 'PR 27ZS', 'color': '16K08Z'}
+          resolved = price_url_candidates.resolve_product_attributes(product)
+          assert not resolved.conflict
+          assert (resolved.product['caliber'], resolved.product['bridge']) == ('54', '21')
+          assert resolved.evidence['fuente_medidas'] == 'E041'
+          assert 'caliber' not in product
           print('Artifact identity and runtime imports verified; network disabled')
           "
           VOLUME="cloud-identity-smoke-${{ github.run_id }}-${{ github.run_attempt }}"

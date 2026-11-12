@@ -45,6 +45,7 @@ class ProductPage:
     currency: str = ""
     availability: str = "unknown"
     includes_tax: bool | None = None
+    configured_tax_policy: str = "unknown"
     vat_rate: float | None = None
     market: str = ""
     market_source: str = ""
@@ -435,6 +436,7 @@ def select_product_variant(page: ProductPage | None, product: dict[str, Any]) ->
         selected.structured_variants = page.structured_variants
         selected.variant_scoped = True
         selected.url_trace = page.url_trace
+        _apply_tax_policy(selected, page.configured_tax_policy)
     target_caliber = normalize_caliber(product.get("caliber"))
     published_caliber = normalize_caliber(selected.caliber)
     if selected_from_group and target_caliber and published_caliber \
@@ -543,14 +545,16 @@ class _Collector(HTMLParser):
             self.canonicals.append(attrs["href"])
         if tag == "a" and attrs.get("href"):
             self._link = [attrs["href"], ""]
+        element = {"tag": tag, "attrs": attrs, "text": "",
+                   "parent": self._stack[-1]["index"] if self._stack else None,
+                   "index": len(self.elements)}
+        self.elements.append(element)
         if tag in _VOID:
             if attrs.get("itemprop") and "content" in attrs:
                 self.meta.setdefault(attrs["itemprop"].lower(), attrs["content"])
             elif attrs.get("itemprop") and attrs.get("href"):
                 self.meta.setdefault(attrs["itemprop"].lower(), attrs["href"])
             return
-        element = {"tag": tag, "attrs": attrs, "text": ""}
-        self.elements.append(element)
         self._stack.append(element)
         if attrs.get("itemprop") and "content" in attrs:
             self.meta.setdefault(attrs["itemprop"].lower(), attrs["content"])
@@ -607,6 +611,97 @@ def parse_html(html: str) -> _Collector:
     parsed.feed(html.replace("--!>", "-->"))  # HTML5 closes a comment with --!>; the stdlib parser would swallow the page
     parsed.close()
     return parsed
+
+
+def _edel_microdata_page(parsed: _Collector, url: str, selected_id: str,
+                         ids: set[str], selected_ean: str) -> ProductPage | None:
+    """Only the main price widget, with EAN and Offer tied to the selected variant."""
+    if not selected_ean:
+        return None
+
+    def ancestors(element: dict) -> list[dict]:
+        parents = []
+        index = element["parent"]
+        while index is not None:
+            parent = parsed.elements[index]
+            parents.append(parent)
+            index = parent["parent"]
+        return parents
+
+    def product_scope(element: dict) -> int | None:
+        return next((parent["index"] for parent in ancestors(element)
+                     if parent["attrs"].get("itemtype", "").rsplit("/", 1)[-1]
+                     in {"Product", "ProductGroup"}), None)
+
+    def related(element: dict) -> bool:
+        return any(parent["tag"] == "aside"
+                   or "eoViewsListviewItemClassic" in parent["attrs"].get("class", "").split()
+                   for parent in [element, *ancestors(element)])
+
+    def properties(root: dict) -> dict[str, Any]:
+        facts: dict[str, Any] = {}
+        for element in parsed.elements[root["index"] + 1:]:
+            parents = ancestors(element)
+            scope = next((parent for parent in parents if "itemscope" in parent["attrs"]), None)
+            if scope is not root or "itemscope" in element["attrs"]:
+                continue
+            attrs = element["attrs"]
+            value = attrs.get("content") or attrs.get("href") or attrs.get("value") or element["text"].strip()
+            for name in attrs.get("itemprop", "").split():
+                if name in {"name", "brand", "model", "color", "gtin12", "gtin13", "url",
+                            "price", "priceCurrency", "availability", "valueAddedTaxIncluded"} and value:
+                    old = facts.get(name)
+                    if old is not None and old != value:
+                        facts[name] = list(dict.fromkeys([*_as_list(old), value]))
+                    else:
+                        facts[name] = value
+        return facts
+
+    widgets = [element for element in parsed.elements
+               if element["attrs"].get("itemtype", "").rsplit("/", 1)[-1] == "Offer"
+               and any("eoProductPrice" in parent["attrs"].get("class", "").split()
+                       for parent in ancestors(element))
+               and not related(element)]
+    if len(widgets) != 1:
+        return None
+    widget = widgets[0]
+    root_index = product_scope(widget)
+    tiles = [element for element in parsed.elements
+             if (match := _EDEL_SIZE_CLASS.search(element["attrs"].get("class", "")))
+             and match[1] == selected_id and product_scope(element) == root_index and not related(element)]
+    if not any(selected_ean in _gtins({"gtin": re.findall(
+            r"\bEAN\b\s*:?\s*(\d{12,13})(?!\d)", tile["text"], re.I)}) for tile in tiles):
+        return None
+    offer = properties(widget)
+    if any(isinstance(value, list) for value in offer.values()):
+        return _ambiguous_edel_page(url, selected_id, "Microdatos de oferta contradictorios")
+    offer_url = offer.get("url")
+    scoped_ids = {match[1] for parent in [widget, *ancestors(widget)]
+                  if (match := _EDEL_SIZE_CLASS.search(parent["attrs"].get("class", "")))}
+    if scoped_ids and scoped_ids != {selected_id}:
+        return _ambiguous_edel_page(url, selected_id, "La oferta pertenece a otro Product Id")
+    if offer_url:
+        if not isinstance(offer_url, str) or _url_key(urljoin(url, offer_url)) != _url_key(url):
+            return _ambiguous_edel_page(url, selected_id, "La URL de la oferta contradice selectedSize")
+    elif ids != {selected_id} and scoped_ids != {selected_id}:
+        return _ambiguous_edel_page(
+            url, selected_id, "EAN vinculado, pero la oferta/stock no se vincula al Product Id seleccionado")
+    node = properties(parsed.elements[root_index]) if root_index is not None else {}
+    if any(isinstance(value, list) for value in node.values()):
+        return _ambiguous_edel_page(url, selected_id, "Microdatos de producto contradictorios")
+    node.setdefault("name", parsed.meta.get("og:title") or " ".join(parsed.title.split()))
+    node.setdefault("url", url)
+    if any(name in node for name in ("gtin12", "gtin13")):
+        if len(_gtins(node)) != 1:
+            return _ambiguous_edel_page(url, selected_id, "EAN de producto no válido o contradictorio")
+    else:
+        node["gtin13"] = selected_ean
+    node.update({"@type": "Product", "offers": {"@type": "Offer", **offer}})
+    page = _from_json_ld('<script type="application/ld+json">' + json.dumps(node) + "</script>", url)
+    if page is not None:
+        page.method = "edel-microdata"
+        page.notes.append("Microdatos del precio principal vinculados al EAN y Product Id seleccionado")
+    return page
 
 
 class _EdelSearchCards(HTMLParser):
@@ -768,9 +863,13 @@ def extract_product(html: str, url: str, *, price_selector: str = "", availabili
         page.url_trace = {**(url_trace or {}), "final_url": requested_url}
         return page
     page = _from_json_ld(html, url)
-    if page is None and selected_size and (radio_selected or not edel_ids):
+    if page is None and selected_size:
+        page = _edel_microdata_page(parsed, url, selected_size, edel_ids, selected_ean)
+    if page is None and selected_size:
         page = _ambiguous_edel_page(
-            url, selected_size, "No hay datos de variante vinculados al Product Id seleccionado")
+            url, selected_size,
+            "EAN vinculado, pero faltan datos de oferta/stock vinculados al Product Id seleccionado"
+            if selected_ean else "No hay datos de variante vinculados al Product Id seleccionado")
     meta = parsed.meta
     if page is None:
         title = meta.get("og:title") or " ".join(parsed.title.split())
@@ -795,14 +894,19 @@ def extract_product(html: str, url: str, *, price_selector: str = "", availabili
     if selected_size and page is not None:
         page.variant_id = selected_size
         page.variant_scoped = True
-        if selected_ean and not page.ean_published:
+        selected_identity_conflict = bool(selected_ean and page.ean_published
+                                          and selected_ean != page.ean_published)
+        if selected_ean and not page.ean_published and not page.ambiguous:
             page.ean_published = selected_ean
-        elif selected_ean and page.ean_published and selected_ean != page.ean_published:
+        elif selected_identity_conflict:
             page.ambiguous = True
-            page.notes.append("El EAN JSON-LD contradice el EAN vinculado al selectedSize")
+            page.notes.append("El EAN del producto contradice el EAN vinculado al selectedSize")
         if ean_conflict:
             page.ambiguous = True
             page.notes.append("El selectedSize tiene varios EAN publicados: revisión obligatoria")
+        if selected_identity_conflict or ean_conflict:
+            page.ean_published = ""
+            page.price, page.currency, page.availability = None, "", "unknown"
         if selected_ean:
             page.notes.append(f"EAN vinculado a selectedSize={selected_size} en datos de variante")
         if radio_selected:
@@ -823,9 +927,7 @@ def extract_product(html: str, url: str, *, price_selector: str = "", availabili
             page.notes.append("Selector con precio recomendado, histórico o condicionado: no se usa como venta")
     if availability_selector and not page.variant_scoped:
         _selector_stock(page, css_text(parsed, availability_selector))
-    if page.includes_tax is None and tax_policy in {"included", "excluded"}:
-        page.includes_tax = tax_policy == "included"
-        page.notes.append(f"IVA según la política verificada del competidor ({tax_policy})")
+    _apply_tax_policy(page, tax_policy)
     if not page.variant_scoped:
         _infer_tax_from_pretax(page, meta)
         _enrich(page, html, url)
@@ -840,6 +942,13 @@ def extract_product(html: str, url: str, *, price_selector: str = "", availabili
                       "canonical_urls": list(dict.fromkeys(urljoin(requested_url, href)
                                                            for href in parsed.canonicals))}
     return page
+
+
+def _apply_tax_policy(page: ProductPage, tax_policy: str) -> None:
+    page.configured_tax_policy = tax_policy
+    if page.includes_tax is None and tax_policy in {"included", "excluded"}:
+        page.includes_tax = tax_policy == "included"
+        page.notes.append(f"IVA según la política verificada del competidor ({tax_policy})")
 
 
 def _selector_stock(page: ProductPage, text: str) -> None:
