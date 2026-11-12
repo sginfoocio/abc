@@ -620,6 +620,12 @@ ofertas/recibos anteriores, ni necesita una escritura directa en produccion.
 El panel muestra la politica efectiva y su origen, diferenciada de la
 configuracion fiscal antigua. No es una autorizacion de acceso.
 
+La misma normalizacion se aplica antes de validar la admision local de una
+observacion y antes de generar su fila de importacion. Asi, un hecho
+recuperado sin IVA no queda rechazado por la validacion y aceptado despues
+por el importador con otra politica; los conflictos explicitos siguen
+rechazados en ambos pasos. No se toca el estado de ningun piloto real.
+
 La ausencia de una declaracion fiscal por ficha deja de generar
 `vat_unconfirmed` en esas 14 tiendas. Una declaracion explicita de IVA
 excluido no se sobrescribe: queda en `manual_review`/`tax_conflict`, sin

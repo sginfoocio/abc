@@ -912,6 +912,10 @@ class WebPriceSearch:
     def frame_row(product: dict, config: dict, outcome: Outcome, stamp: str) -> dict[str, Any]:
         """Row for ``import_offers``; the importer enforces market, currency, domain and VAT rules."""
         page = outcome.page
+        if page:
+            from price_web_extract import apply_tax_policy
+
+            apply_tax_policy(page, page.configured_tax_policy)
         status = {"exact": "exact_match", "probable": "probable_match", "rejected": "rejected"}.get(
             outcome.state, outcome.match_status or "manual_review")
         if outcome.match_status == "manual_review":

@@ -446,7 +446,7 @@ def select_product_variant(page: ProductPage | None, product: dict[str, Any]) ->
         selected.structured_variants = page.structured_variants
         selected.variant_scoped = True
         selected.url_trace = page.url_trace
-    _apply_tax_policy(selected, page.configured_tax_policy)
+    apply_tax_policy(selected, page.configured_tax_policy)
     target_caliber = normalize_caliber(product.get("caliber"))
     published_caliber = normalize_caliber(selected.caliber)
     if selected_from_group and target_caliber and published_caliber \
@@ -858,7 +858,7 @@ def extract_edel_search_cards(html: str, search_url: str, product: dict, *,
                    if card["availability"] == "unknown" else "Datos extraídos de esta tarjeta"])
         if card.get("availability"):
             page.notes = ["Datos extraídos de esta tarjeta"]
-        _apply_tax_policy(page, tax_policy)
+        apply_tax_policy(page, tax_policy)
         if not page.ean_published:
             page.notes.append("La tarjeta no publica EAN; identidad basada en referencia")
         pages.append(page)
@@ -904,14 +904,14 @@ def extract_product(html: str, url: str, *, price_selector: str = "", availabili
     if selection_error:
         page = _ambiguous_edel_page(requested_url, selected_size, selection_error)
         page.url_trace = {**(url_trace or {}), "final_url": requested_url}
-        _apply_tax_policy(page, tax_policy)
+        apply_tax_policy(page, tax_policy)
         return page
     edel_ids, selected_ean, ean_conflict = _edel_variant_facts(html, selected_size) if selected_size else (set(), "", False)
     if edel_ids and selected_size not in edel_ids:
         page = _ambiguous_edel_page(requested_url, selected_size,
                                     "selectedSize no coincide con los datos de variante de la ficha")
         page.url_trace = {**(url_trace or {}), "final_url": requested_url}
-        _apply_tax_policy(page, tax_policy)
+        apply_tax_policy(page, tax_policy)
         return page
     page = _from_json_ld(html, url)
     if page is None and selected_size:
@@ -981,7 +981,7 @@ def extract_product(html: str, url: str, *, price_selector: str = "", availabili
     if not page.variant_scoped:
         _infer_tax_from_pretax(page, meta)
         _enrich(page, html, url)
-    _apply_tax_policy(page, tax_policy)
+    apply_tax_policy(page, tax_policy)
     explicit = (meta.get("product:market") or "").upper() if not page.variant_scoped else ""
     if re.fullmatch(r"[A-Z]{2}", explicit):
         if page.market and page.market != explicit:
@@ -995,7 +995,7 @@ def extract_product(html: str, url: str, *, price_selector: str = "", availabili
     return page
 
 
-def _apply_tax_policy(page: ProductPage, tax_policy: str) -> None:
+def apply_tax_policy(page: ProductPage, tax_policy: str) -> None:
     from competitor_requirements import business_tax_evidence, business_tax_policy_for
 
     page.configured_tax_policy = tax_policy

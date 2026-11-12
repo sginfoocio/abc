@@ -110,19 +110,20 @@ def test_prada_five_tabs_render_with_real_values(prada):
     assert len(states) == 14  # the selected-competitor UI keeps all 14 status rows visible
 
 
-def test_unconfirmed_vat_is_stored_but_never_compared(prada):
+def test_new_registered_offer_without_tax_statement_uses_business_policy(prada):
     legacy = pd.DataFrame([{**_offer("Edel-Optics", price=150, domain="edel-optics.es"),
                             "EAN": "8056597875349", "Fecha consulta": "2026-10-30T14:00:00Z", "IVA incluido": ""}])
     assert not prada.import_offers(legacy).rejected
     stored = prada.offer_history("8056597875349")
-    assert stored["price_includes_tax"].isna().sum() == 1 and len(stored) == 2  # kept for consultation
+    assert stored["price_includes_tax"].eq(1).all() and len(stored) == 2
+    assert "business-vat-included-14-2026-11-12" in stored.iloc[0]["evidence"]
     summary, _ = prada.dashboard(30)
-    assert summary.set_index("ean").loc["8056597875349", "competitor_min_eur"] == pytest.approx(239)
+    assert summary.set_index("ean").loc["8056597875349", "competitor_min_eur"] == pytest.approx(150)
     offers = prada.current_offers(30)
-    assert "Edel-Optics" not in set(pa.comparable_pairs(summary, offers)["competitor"])
-    assert "Edel-Optics" not in set(pa.price_series(prada, "8056597875349", 30)["series"])
+    assert "Edel-Optics" in set(pa.comparable_pairs(summary, offers)["competitor"])
+    assert "Edel-Optics" in set(pa.price_series(prada, "8056597875349", 30)["series"])
     row = offers[offers["competitor_name"] == "Edel-Optics"].iloc[0].to_dict()
-    assert exclusion_reason(row) == "IVA no confirmado"
+    assert exclusion_reason(row) == ""
 
 
 def test_pre_existing_null_vat_offers_survive_and_are_excluded(tmp_path):

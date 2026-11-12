@@ -140,7 +140,9 @@ def test_web_config_is_persisted_and_validated(ui):
     app = _run()
     key = f"web_{cid}"
     app.number_input(key=f"{key}_pause").set_value(7.0)
-    app.selectbox(key=f"{key}_tax").set_value("included")
+    assert app.selectbox(key=f"{key}_tax").disabled
+    assert app.selectbox(key=f"{key}_tax").value == "included"
+    assert any("responsable de negocio" in caption.value for caption in app.caption)
     app.button(key=f"{key}_save").click()
     app = app.run(timeout=90)
     assert not app.exception and not app.error
