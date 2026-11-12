@@ -133,6 +133,7 @@ def parse_reference(text: str, *, brands: Iterable[str] = (), models: Iterable[s
     the last token is the colour (catalogue-reference lookup, not free page prose).
     """
     brand_list = list(brands)
+    model_list = list(models)
     raw = str(text or "")
     # Observed Optima identifier grammar only; "53" remains opaque, not an inferred calibre.
     identifier = re.fullmatch(r"(FT5634)-B@53([0-9]{3})#", raw.strip(), re.IGNORECASE)
@@ -143,11 +144,37 @@ def parse_reference(text: str, *, brands: Iterable[str] = (), models: Iterable[s
         raw = _CALIBER.sub(" ", raw) if "-" in caliber else _LENS_TOKEN.sub(" ", raw)
     brand, rest = strip_brand(raw, brand_list)
     parts = tokens(rest)
+    parts = [part for part in parts if key(part) not in {"COLECCION", "COLLECTION"}]
+    if key(brand) == "RAYBAN" and not any("WAYFARER" in key(model) for model in model_list):
+        parts = [part for part in parts if key(part) != "WAYFARER"]
+        if len(parts) == 1 and re.fullmatch(r"\d{3,4}", parts[0]):
+            return Reference(brand=brand, color=parts[0], caliber=caliber)
     matches: list[Reference] = []
-    for model in sorted(set(models), key=lambda m: -len(key(m))):
+    for model in sorted(set(model_list), key=lambda m: -len(key(m))):
         expected_model = model_key(model)
         if not expected_model:
             continue
+        commercial = re.fullmatch(r"(SL\d+)(DUNE|ERIN)", expected_model)
+        if commercial:
+            code = re.fullmatch(r"([A-Z]+)(\d+)", commercial[1])
+            if code:
+                code_parts = [code[1], code[2]]
+                descriptor = commercial[2]
+                for start in range(len(parts)):
+                    for sequence in ([descriptor, *code_parts], [*code_parts, descriptor]):
+                        if parts[start:start + len(sequence)] != sequence:
+                            continue
+                        color_start = start + len(sequence)
+                        matched_model = model
+                        if color_start < len(parts) and parts[color_start] == "OPT":
+                            matched_model += " OPT"
+                            color_start += 1
+                        color_parts = []
+                        for part in parts[color_start:]:
+                            if not re.search(r"\d", part):
+                                break
+                            color_parts.append(part)
+                        matches.append(Reference(brand, matched_model, " ".join(color_parts), caliber))
         for start in range(len(parts)):
             for end in range(start + 1, len(parts) + 1):
                 if model_key("".join(parts[start:end])) != expected_model:

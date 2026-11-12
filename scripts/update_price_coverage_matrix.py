@@ -13,13 +13,13 @@ from price_url_candidates import (  # noqa: E402
     MANUAL_COVERAGE_EVIDENCE,
     VISIO_FORMAT_EVIDENCE,
     candidate_plan,
+    documented_measurement_records,
+    resolve_product_attributes,
 )
-from price_comparator import normalize_gtin  # noqa: E402
 from price_references import model_key  # noqa: E402
 
 MATRIX = ROOT / "docs" / "PRICE_COVERAGE_100_EAN_6_STORES.csv"
 EAN_SUMMARY = ROOT / "docs" / "PRICE_COVERAGE_EAN_SUMMARY_100.csv"
-MEASUREMENT_EVIDENCE = ROOT / "docs" / "PRICE_COVERAGE_MEASUREMENT_EVIDENCE.csv"
 DOMAINS = {
     "optica-optima-com": "optica-optima.com",
     "amevista-com": "amevista.com",
@@ -42,6 +42,7 @@ NEW_FIELDS = (
     "puente",
     "fuente_medidas",
     "asociacion_medidas",
+    "limitacion_medidas",
     "atributos_disponibles",
     "metodo_descubrimiento",
     "fuente_evidencia_patron",
@@ -75,6 +76,8 @@ def _route_metadata(row: dict[str, str]) -> dict[str, str]:
         "caliber": row.get("calibre", ""),
         "bridge": row.get("puente", ""),
         "measurement_source": row.get("fuente_medidas", ""),
+        "measurement_association": row.get("asociacion_medidas", ""),
+        "measurement_limitation": row.get("limitacion_medidas", ""),
     }
     plan = candidate_plan(product, DOMAINS[row["competidor_id"]])
     candidates = plan.candidates
@@ -109,6 +112,13 @@ def _route_metadata(row: dict[str, str]) -> dict[str, str]:
             or any(candidate.rule.startswith("documented_url:") for candidate in candidates)
             else "confirmed_within_scope"
         )
+    elif plan.reason_code == "measurement_conflict":
+        method = "measurement_evidence_conflict"
+        evidence = [row["fuente_medidas"]] if row.get("fuente_medidas") else []
+        pattern_state = "partial"
+        eligibility = "review_required"
+        reason = plan.reason
+        pending = "Resolver la contradicción de identidad o medidas antes de usar esta ruta."
     elif shop == "domanci-com" and plan.reason_code == "missing_attribute":
         method = "supplied_pattern:domanci"
         evidence = ["user:domanci-route-2026-11-06", "E032", "E033"]
@@ -185,40 +195,40 @@ def main() -> None:
             or any(sum(row["competidor"] == store for row in rows) != 100 for store in stores)):
         raise ValueError("La matriz debe conservar exactamente 100 EAN x seis tiendas sin pares duplicados.")
 
-    with MEASUREMENT_EVIDENCE.open(encoding="utf-8-sig", newline="") as stream:
-        measurement_rows = list(csv.DictReader(stream, delimiter=";"))
-    measurements = {}
-    products_by_ean = {}
-    for row in rows:
-        products_by_ean.setdefault(row["ean"], set()).add(
-            (row["marca"], row["modelo"], row["color"], row["categoria"])
-        )
-    for evidence in measurement_rows:
-        ean = normalize_gtin(evidence["ean"])
-        if ean != evidence["ean"] or ean in measurements:
-            raise ValueError(f"EAN de evidencia de medidas no canónico o duplicado: {evidence['ean']}")
-        if ean not in products_by_ean:
-            raise ValueError(f"EAN de evidencia de medidas fuera del manifiesto: {ean}")
-        expected = (evidence["marca"], evidence["modelo"], evidence["color"])
-        actual = {(brand, model, color) for brand, model, color, _ in products_by_ean[ean]}
-        if actual != {expected}:
-            raise ValueError(f"Los atributos de evidencia de medidas no corresponden al EAN {ean}.")
-        if not evidence["fuente_medidas"] or not evidence["asociacion_medidas"]:
-            raise ValueError(f"Falta procedencia de calibre/puente para el EAN {ean}.")
-        measurements[ean] = evidence
+    measurements = documented_measurement_records()
+    if not set(measurements) <= eans:
+        raise ValueError("La evidencia de medidas contiene EAN fuera del manifiesto.")
     for row in rows:
         evidence = measurements.get(row["ean"])
-        if evidence:
-            for field in ("calibre", "puente"):
-                source_value = evidence[field]
-                if row.get(field) and row[field] != source_value:
-                    raise ValueError(f"Medida existente contradictoria para {row['ean']}: {field}")
-                row[field] = source_value
-            row["fuente_medidas"] = evidence["fuente_medidas"]
-            row["asociacion_medidas"] = evidence["asociacion_medidas"]
+        previously_enriched = bool(
+            evidence
+            and row.get("fuente_medidas") == evidence["fuente_medidas"]
+            and row.get("asociacion_medidas") == evidence["asociacion_medidas"]
+        )
+        product = {
+            "ean": row["ean"],
+            "brand": row["marca"],
+            "model": row["modelo"],
+            "color": row["color"],
+            "category": row["categoria"],
+            "caliber": "" if previously_enriched else row.get("calibre", ""),
+            "bridge": "" if previously_enriched else row.get("puente", ""),
+            "measurement_source": row.get("fuente_medidas", ""),
+            "measurement_association": row.get("asociacion_medidas", ""),
+            "measurement_limitation": row.get("limitacion_medidas", ""),
+        }
+        resolution = resolve_product_attributes(product)
+        if resolution.conflict and previously_enriched:
+            row["calibre"] = ""
+            row["puente"] = ""
         else:
-            row.setdefault("fuente_medidas", "")
-            row.setdefault("asociacion_medidas", "")
+            row["calibre"] = str(resolution.product.get("caliber", "") or "")
+            row["puente"] = str(resolution.product.get("bridge", "") or "")
+        row["fuente_medidas"] = evidence["fuente_medidas"] if evidence else ""
+        row["asociacion_medidas"] = evidence["asociacion_medidas"] if evidence else ""
+        row["limitacion_medidas"] = evidence["limitacion"] if evidence else ""
+        if resolution.conflict:
+            row["motivo_pendiente"] = resolution.conflict
 
     fields = [field for field in original_fields if field not in DEPRECATED_FIELDS]
     fields += [field for field in NEW_FIELDS if field not in fields]

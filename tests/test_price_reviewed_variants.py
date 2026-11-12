@@ -110,6 +110,38 @@ def test_dune_opt_is_not_the_sunglasses_model_even_with_target_ean(title):
     assert classify(DUNE, {"title": title, "ean_published": DUNE["ean"]}).status != EXACT
 
 
+@pytest.mark.parametrize("title", [
+    "Saint Laurent DUNE SL 596 003",
+    "Saint Laurent SL 596 DUNE 003",
+])
+def test_saint_laurent_commercial_name_before_or_after_model_is_the_same_reference(title):
+    result = classify(DUNE, {"title": title, "ean_published": DUNE["ean"]})
+
+    assert result.status == EXACT
+
+
+@pytest.mark.parametrize("title", [
+    "Ray-Ban WAYFARER RB2140 901",
+    "Ray-Ban RB2140 WAYFARER 901",
+])
+def test_ray_ban_wayfarer_collection_name_does_not_conflict_with_model(title):
+    result = classify(
+        {"ean": "0805289126577", "brand": "Ray-Ban", "model": "RB2140", "color": "901"},
+        {"title": title, "ean_published": "805289126577"},
+    )
+
+    assert result.status == EXACT
+
+
+def test_ray_ban_collection_name_does_not_hide_a_different_model():
+    result = classify(
+        {"ean": "0805289126577", "brand": "Ray-Ban", "model": "RB2140", "color": "901"},
+        {"title": "Ray-Ban WAYFARER RB4472 1359/2", "ean_published": "805289126577"},
+    )
+
+    assert result.status != EXACT
+
+
 @pytest.mark.parametrize("text", ["Añadir al carrito", "Disponible bajo pedido", "Entrega en 6-8 días"])
 def test_cart_order_and_delivery_are_not_physical_stock(text):
     node = product(availability="")

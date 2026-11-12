@@ -91,6 +91,43 @@ def test_edel_selected_radio_resolves_variant_id_and_scopes_offer_facts():
     assert any("Product Id 1907958 resuelto" in note for note in page.notes)
 
 
+def test_edel_selected_variant_uses_common_model_color_price_and_its_own_stock():
+    base = "https://www.edel-optics.es/PR-27ZS-16K08Z-de-Prada.html"
+    variants = []
+    for variant_id, ean, size, availability in [
+        ("111", "8056597875226", "55-16", "OutOfStock"),
+        ("222", "8056597875349", "54-21", "InStock"),
+    ]:
+        variant_url = f"{base}?selectedSize={variant_id}"
+        variants.append({
+            "@type": "Product", "url": variant_url, "name": f"Prada PR 27ZS 16K08Z {size}",
+            "brand": {"@type": "Brand", "name": "Prada"}, "model": "PR 27ZS", "color": "16K08Z",
+            "size": size, "gtin13": ean,
+            "offers": {"@type": "Offer", "url": variant_url,
+                       "availability": f"https://schema.org/{availability}"},
+        })
+    html = (
+        '<input type="radio" id="prd222" checked>'
+        '<script type="application/ld+json">' + json.dumps({
+            "@context": "https://schema.org", "@type": "ProductGroup", "url": base,
+            "offers": {"@type": "Offer", "price": "243.50", "priceCurrency": "EUR"},
+            "hasVariant": variants,
+        }) + "</script>"
+    )
+
+    page = extract_product(html, base)
+
+    assert page is not None and not page.ambiguous
+    assert page.variant_id == "222"
+    assert (page.ean_published, page.caliber, page.price, page.currency, page.availability) == (
+        "8056597875349", "54-21", 243.5, "EUR", "available")
+    assert classify(
+        {"ean": "8056597875349", "brand": "Prada", "model": "PR 27ZS",
+         "color": "16K08Z", "caliber": "54-21"},
+        page.candidate(),
+    ).status == "exact_match"
+
+
 def test_edel_variant_selection_conflicts_remain_ambiguous_without_offer_facts():
     base = "https://www.edel-optics.es/PR-27ZS-16K08Z-de-Prada.html"
     nodes = {

@@ -49,8 +49,12 @@ def test_provider_page_imports_with_only_the_files_the_image_copies(tmp_path):
             if origin.is_dir():
                 shutil.copytree(origin, target, dirs_exist_ok=True)
             elif origin.exists():
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy(origin, target if not str(destination).endswith("/") else target / origin.name)
+                if str(destination).endswith("/"):
+                    target.mkdir(parents=True, exist_ok=True)
+                    target = target / origin.name
+                else:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(origin, target)
     code = (
         "import provider_images_ui, provider_odoo_orders, repository_catalog_readonly, "
         "marcolin_images, safilo_images, nuorder_images\n"

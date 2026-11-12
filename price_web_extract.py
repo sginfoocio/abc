@@ -207,12 +207,18 @@ def _offer_facts(node: dict, url: str) -> dict[str, Any]:
     if variant_offers and (len(variant_offers) > 1 or any(
             key in {"variant", "selectedSize"}
             for o, _ in variant_offers for key, _ in parse_qsl(urlparse(o["url"]).query))):
-        offers = [(o, restrictions) for o, restrictions in variant_offers
-                  if _url_key(urljoin(url, o["url"])) == _url_key(url)]
-        if not offers:
+        selected_offers = [(o, restrictions) for o, restrictions in variant_offers
+                           if _url_key(urljoin(url, o["url"])) == _url_key(url)]
+        if not selected_offers:
             facts["ambiguous"] = True
             facts["variant_conflict"] = True
             facts["notes"].append("Ninguna oferta corresponde a la URL de variante solicitada")
+            offers = []
+        else:
+            variant_offer_ids = {id(offer) for offer, _ in variant_offers}
+            shared_offers = [(offer, restrictions) for offer, restrictions in offers
+                             if id(offer) not in variant_offer_ids]
+            offers = [*shared_offers, *selected_offers]
     markets: set[str] = set()
     seen = []
     for offer, inherited_restrictions in offers:
@@ -439,7 +445,7 @@ def select_product_variant(page: ProductPage | None, product: dict[str, Any]) ->
         selected.currency = ""
         selected.availability = "unknown"
         selected.notes.append("El calibre de la variante estructurada contradice el producto objetivo")
-    else:
+    elif selected_from_group:
         selected.notes.append("Variante ProductGroup vinculada por EAN normalizado, no por orden de listas")
     return selected
 
