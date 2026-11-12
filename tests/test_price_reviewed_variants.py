@@ -440,7 +440,7 @@ def test_search_itemlist_and_nested_related_product_are_not_a_product_page():
 
 
 @pytest.mark.parametrize("fields", [
-    {"includes_tax": None}, {"availability": "unknown"}, {"availability": "unavailable"},
+    {"includes_tax": False}, {"availability": "unknown"}, {"availability": "unavailable"},
     {"market": ""}, {"market": "AT"},
 ])
 def test_exact_identity_does_not_bypass_commercial_validation(pilot, fields):

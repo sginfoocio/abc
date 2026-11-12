@@ -6,6 +6,8 @@ an authorisation for automated queries.
 """
 from __future__ import annotations
 
+from urllib.parse import urlparse
+
 CHECKED_ON = "2026-10-30"
 
 COMPETITORS = (
@@ -24,6 +26,35 @@ COMPETITORS = (
     ("Visio Factory", "https://www.visiofactory.es/"),
     ("Otticait Eyewear", "https://www.otticait.com/es/"),
 )
+
+BUSINESS_TAX_DECISION = {
+    "id": "business-vat-included-14-2026-11-12",
+    "recorded_on": "2026-11-12",
+    "includes_tax": True,
+    "vat_rate": None,
+    "source": "Confirmación expresa del responsable de negocio en esta conversación (PR #126)",
+    "statement": "Los precios de los 14 competidores incluyen IVA.",
+    "scope": "Precios publicados por los 14 competidores registrados; no acredita mercado, stock ni acceso.",
+}
+
+
+def business_tax_policy_for(url: str) -> dict | None:
+    """Explicit business decision, not an inference from domain, language or currency."""
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or parsed.username is not None or parsed.password is not None \
+            or parsed.port not in (None, 443):
+        return None
+    host = (parsed.hostname or "").lower().removeprefix("www.")
+    for name, site in COMPETITORS:
+        domain = (urlparse(site).hostname or "").lower().removeprefix("www.")
+        if host == domain:
+            return {**BUSINESS_TAX_DECISION, "competitor": name, "domain": domain}
+    return None
+
+
+def business_tax_evidence(policy: dict) -> str:
+    return f"{policy['id']}: {policy['source']}; {policy['recorded_on']}; {policy['statement']}"
+
 
 _ROBOTS = ("robots.txt prohíbe la búsqueda interna; sin buscador no se pueden localizar fichas.")
 _FEED = ("Autorización escrita del competidor y, si existe, la URL de su feed/API/CSV (con credenciales "

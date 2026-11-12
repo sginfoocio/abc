@@ -1202,6 +1202,19 @@ class PriceComparatorStore:
 
                     validation: dict = {}
                     identity = self._offer_identity(row, ean, product, match_status, validation=validation)
+                    from competitor_requirements import business_tax_evidence, business_tax_policy_for
+
+                    policy = business_tax_policy_for(url or competitor["url"])
+                    if policy:
+                        policy_note = business_tax_evidence(policy)
+                        if policy_note not in evidence:
+                            evidence += " | " + policy_note
+                        if identity[5] is None:
+                            identity = (*identity[:5], 1, identity[6])
+                        elif identity[5] == 0 and match_status in {
+                                "exact_match", "probable_match", "manual_review"}:
+                            match_status = "manual_review"
+                            evidence += " | IVA excluido contradice la política de negocio: revisión obligatoria"
                     if validation:
                         evidence += " | Validación identidad: " + json.dumps(validation, ensure_ascii=False)
 
@@ -1244,7 +1257,6 @@ class PriceComparatorStore:
                         fx = 1.0
                     elif fx is not None and fx <= 0:
                         raise ValueError("Tipo cambio EUR debe ser mayor que cero")
-                    tax_included, vat_rate = identity[5], identity[6]
                     content = (price, promo, previous, shipping, currency, fx, availability, url, match_status,
                                *identity)
                     latest = connection.execute("""

@@ -45,11 +45,12 @@ def test_json_ld_extraction_with_vat_proved_by_pretax_price():
 
 def test_vat_stays_unknown_without_evidence():
     html = page(name="Prada PR 27ZS 16K08Z 54-21", price=239, gtin="8056597875349")
-    found = extract_product(html, url_of("x.html"))
+    url = "https://unregistered.example/x.html"
+    found = extract_product(html, url)
     assert found.includes_tax is None
-    assert extract_product(html, url_of("x.html"), tax_policy="included").includes_tax is True
+    assert extract_product(html, url, tax_policy="included").includes_tax is True
     unrelated = page(name="Prada PR 27ZS 16K08Z 54-21", price=239, pretax=200)  # ratio 1.195: not a VAT rate
-    assert extract_product(unrelated, url_of("x.html")).includes_tax is None
+    assert extract_product(unrelated, url).includes_tax is None
 
 
 def test_market_comes_from_the_page_never_from_the_domain():
@@ -119,7 +120,7 @@ def test_price_and_availability_changes_create_history_points(pilot):
     assert pd.isna(summary.set_index("ean").loc[ean, "competitor_min_eur"])  # no fallback to the older price
 
 
-def test_unknown_vat_is_stored_but_not_comparable(tmp_path):
+def test_registered_business_vat_is_stored_without_a_per_page_statement(tmp_path):
     site = FakeSite()
     store, search = make_search(tmp_path, site)
     cid = competitor_id(store)
@@ -128,11 +129,12 @@ def test_unknown_vat_is_stored_but_not_comparable(tmp_path):
     index_url(store, cid, ean, url_of(PRADA[ean]["slug"]))
     _open_access(search, cid)
     outcome = search.run([ean], [cid])[0]
-    assert outcome.state == "exact" and outcome.page.includes_tax is None
+    assert outcome.state == "exact" and outcome.page.includes_tax is True
+    assert outcome.page.vat_rate is None and outcome.page.tax_policy_evidence
     summary, _ = store.dashboard(30)
-    assert pd.isna(summary.set_index("ean").loc[ean, "competitor_min_eur"])
+    assert summary.set_index("ean").loc[ean, "competitor_min_eur"] == 239
     _, frame = search.stored_results(ean)
-    assert "IVA sin confirmar (no comparable)" in set(frame["Estado"])
+    assert "IVA sin confirmar (no comparable)" not in set(frame["Estado"])
 
 
 def test_market_not_verified_on_page_means_stored_noncomparable(tmp_path):

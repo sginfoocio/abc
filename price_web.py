@@ -92,6 +92,8 @@ FAILURES: dict[str, tuple[str, str]] = {
     "vat_unconfirmed": ("Ficha y precio localizados, pero el IVA no está confirmado: la oferta se guarda sin entrar "
                         "en las comparativas. Compruebe en la web si el precio incluye IVA y configúrelo en el "
                         "competidor.", "review"),
+    "tax_conflict": ("La oferta declara IVA excluido y contradice la política fiscal de negocio registrada. "
+                     "Se conserva la declaración y requiere revisión; no es comparable.", "review"),
     "market_currency": ("El precio no es comparable todavía: moneda o mercado no verificados, o distintos de EUR/ES. "
                         "La oferta no entra en las comparativas; confirme mercado y moneda del competidor.", "review"),
     "redirect": ("La URL redirige fuera del dominio del competidor y no se sigue. Facilite la URL definitiva.", "url"),
@@ -137,6 +139,8 @@ def mismatch_reason(status: str, reasons: list[str]) -> str:
 
 def comparability_gap(page: ProductPage, config: dict) -> str:
     """First reason why an exact page does not yield a comparable offer (empty when it does)."""
+    if page.tax_conflict:
+        return "tax_conflict"
     if not page.has_price:
         return "no_price"
     market, _, conflict = resolve_market(page, config)
@@ -837,6 +841,8 @@ class WebPriceSearch:
         page = select_product_variant(page, product)
         match = classify(product, page.candidate())
         status = match.status
+        if page.tax_conflict and status != REJECTED:
+            status = "manual_review"
         if page.ambiguous and status == EXACT:
             status = "manual_review"
             match.reasons.append("Ficha ambigua (varias variantes u ofertas): revisión manual")
@@ -853,6 +859,8 @@ class WebPriceSearch:
         outcome.detail = "; ".join(outcome.notes)
         outcome.reason = comparability_gap(page, config) if outcome.state == "exact" else (
             "ambiguous" if status == "manual_review" else mismatch_reason(status, match.reasons))
+        if page.tax_conflict and outcome.state != "rejected":
+            outcome.reason = "tax_conflict"
         if persist_index and outcome.state in {"exact", "probable", "rejected"}:
             self._upsert_index(product, config, outcome)
         return outcome
@@ -909,7 +917,7 @@ class WebPriceSearch:
         if outcome.match_status == "manual_review":
             status = "manual_review"
         market, market_note, conflict = resolve_market(page, config) if page else ("", "", False)
-        if conflict:
+        if conflict or (page and page.tax_conflict):
             status = "manual_review"
         priced = page is not None and page.has_price and status != "rejected"
         tax = "" if page is None or page.includes_tax is None else ("sí" if page.includes_tax else "no")

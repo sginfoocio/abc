@@ -113,6 +113,17 @@ jobs:
           import provider_images, provider_images_ui, provider_odoo_orders, repository_catalog_readonly, marcolin_images, safilo_images, nuorder_images
           import cloud_dashboard, kering_images_ui, kering_portal, kering_jobs, graph_mail_downloader, abcd_snapshots, image_exports, luxoptica_auto_upload, repository_storage, market_publication
           import price_pilot, price_scheduler, price_web, price_monitor, price_url_candidates, app_pages.price_comparator
+          from competitor_requirements import COMPETITORS, business_tax_policy_for
+          policies = [business_tax_policy_for(url) for _, url in COMPETITORS]
+          assert len(policies) == 14 and all(p['includes_tax'] and p['vat_rate'] is None for p in policies)
+          assert business_tax_policy_for('https://unregistered.example/es/') is None
+          import json
+          from price_web_extract import extract_product, select_product_variant
+          probe = {'@type': 'ProductGroup', 'hasVariant': [{'@type': 'Product', 'gtin13': '0805289126577'}]}
+          probe_html = '<script type=\\\"application/ld+json\\\">' + json.dumps(probe) + '</script>'
+          probe_page = select_product_variant(extract_product(probe_html, 'https://www.amevista.com/es/probe'),
+                                              {'ean': '0805289126577'})
+          assert probe_page.includes_tax is True and probe_page.vat_rate is None and probe_page.tax_policy_evidence
           from build_info import load_build_info
           info = load_build_info()
           assert info['commit'] == os.environ['EXPECTED_COMMIT']

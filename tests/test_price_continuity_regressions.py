@@ -25,7 +25,7 @@ def _ld(node):
     return '<script type="application/ld+json">' + json.dumps(node) + "</script>"
 
 
-def _visit(tmp_path, target, url, body, tax="included"):
+def _visit(tmp_path, target, url, body, tax="included", at=NOW):
     site = FakeSite()
     origin = f"{urlparse(url).scheme}://{urlparse(url).netloc}"
     site.add(origin + "/robots.txt", "User-agent: *\nDisallow:\n")
@@ -36,7 +36,7 @@ def _visit(tmp_path, target, url, body, tax="included"):
         "COLOR": target["color"], "CALIBRE": target.get("caliber", ""),
     }]))
     store.import_competitors(pd.DataFrame([{"Competidor": "Synthetic shop", "Página web": origin}]))
-    search = WebPriceSearch(store, fetcher_factory=site.factory, clock=lambda: NOW)
+    search = WebPriceSearch(store, fetcher_factory=site.factory, clock=lambda: at)
     cid = store.competitors().iloc[0]["id"]
     search.update_config(cid, tax_policy=tax, sales_market="ES", market_verified=True,
                          market_evidence_url=origin + "/terms", market_note="Synthetic verified ES policy")
@@ -111,7 +111,7 @@ def test_commercial_alias_never_hides_another_model(title, model):
 
 
 @pytest.mark.parametrize("policy,published,expected", [
-    ("included", None, True), ("unknown", None, None),
+    ("included", None, True), ("unknown", None, True),
     ("included", False, False), ("excluded", True, True),
 ])
 def test_product_group_preserves_policy_but_never_overrides_offer_tax(policy, published, expected):
@@ -123,7 +123,7 @@ def test_product_group_preserves_policy_but_never_overrides_offer_tax(policy, pu
 
 
 @pytest.mark.parametrize("policy,reason,tax", [
-    ("included", "", True), ("unknown", "vat_unconfirmed", None),
+    ("included", "", True), ("unknown", "", True),
 ])
 def test_saved_rb4472_variant_facts_with_synthetic_transport(tmp_path, policy, reason, tax):
     """Reduced extracted facts from report (2), check 1025; this is not its original HTTP body."""
@@ -280,3 +280,222 @@ def test_selected_group_variant_keeps_future_delivery_as_unknown_stock():
                                   {"ean": "8056266001833"})
     assert page.availability == "unknown"
     assert "2026-12-09" in str(page.delivery_evidence)
+
+
+def test_business_tax_decision_is_explicit_auditable_and_bounded_to_14_competitors():
+    from competitor_requirements import BUSINESS_TAX_DECISION, COMPETITORS, business_tax_policy_for
+
+    policies = [business_tax_policy_for(url) for _, url in COMPETITORS]
+    assert len(policies) == len({policy["domain"] for policy in policies}) == 14
+    assert all(policy["includes_tax"] is True and policy["vat_rate"] is None for policy in policies)
+    assert "responsable de negocio" in BUSINESS_TAX_DECISION["source"]
+    assert BUSINESS_TAX_DECISION["recorded_on"] == "2026-11-12"
+    for url in ("https://unregistered.es/es/", "https://amevista.com.evil.example/es/",
+                "https://unregistered.amevista.com/es/", "http://www.amevista.com/es/",
+                "https://www.amevista.com:8443/es/", "https://user@www.amevista.com/es/"):
+        assert business_tax_policy_for(url) is None
+
+
+@pytest.mark.parametrize("ean,other,size,other_size,brand,model,color,slug,price,check_id", [
+    ("8056262410929", "8056262410912", "53", "51", "Miu Miu", "MU 53WV", "ZVN1O1",
+     "miu-miu-mu-53wv-zvn1o1", 252, 1015),
+    ("8056262600078", "8056262600085", "51", "53", "Miu Miu", "MU 01YV", "14L1O1",
+     "miu-miu-mu-01yv-14l1o1", 224, 1024),
+    ("8056262833902", "8056262833919", "48", "51", "Ray-Ban", "RB4472", "1359/2",
+     "ray-ban-rb4472-1359-2", 89.1, 1025),
+    ("8056597669016", "8056262667484", "52", "50", "Miu Miu", "MU 04UV", "1AB1O1",
+     "miu-miu-mu-04uv-1ab1o1", 224, 1027),
+    ("8056597669023", "8056262667491", "52", "50", "Miu Miu", "MU 04UV", "VAU1O1",
+     "miu-miu-mu-04uv-vau1o1", 224, 1028),
+    ("8056597669047", "8056262667514", "52", "50", "Miu Miu", "MU 04UV", "2AZ1O1",
+     "miu-miu-mu-04uv-2az1o1", 224, 1029),
+])
+def test_six_saved_amevista_vat_cases_reach_selected_offer(
+        tmp_path, ean, other, size, other_size, brand, model, color, slug, price, check_id):
+    """Reduced facts from report (2), cited check IDs; generated HTML is synthetic, never a saved response."""
+    url = f"https://www.amevista.com/es/{slug}"
+    target = {"ean": ean, "brand": brand, "model": model, "color": color, "caliber": size}
+    nodes = [{
+        "@type": "Product", "url": url, "name": f"{brand} {model} {color}", "brand": brand,
+        "gtin13": gtin, "size": caliber,
+        "offers": {"@type": "Offer", "url": url, "price": str(price), "priceCurrency": "EUR",
+                   "availability": "InStock", "shippingDetails": {
+                       "@type": "OfferShippingDetails", "shippingDestination": {
+                           "@type": "DefinedRegion", "addressCountry": "ES"}}},
+    } for gtin, caliber in [(other, other_size), (ean, size)]]
+    outcome, store, site = _visit(tmp_path, target, url, _ld(nodes), tax="unknown")
+    assert outcome.state == "exact" and outcome.reason == "", check_id
+    assert outcome.page.ean_published == ean and outcome.page.includes_tax is True
+    assert outcome.page.vat_rate is None and outcome.page.price == price
+    assert outcome.page.tax_policy_evidence.startswith("business-vat-included-14-2026-11-12")
+    assert len(site.calls) == 2
+    row = store.offer_history(ean).iloc[0]
+    assert row["price_includes_tax"] == 1 and pd.isna(row["vat_rate"])
+    assert "responsable de negocio" in row["evidence"]
+
+
+def test_explicit_tax_exclusion_stays_in_review_through_transport_and_import(tmp_path):
+    from price_web import comparability_gap
+
+    url = "https://www.amevista.com/es/ray-ban-rb2140-901-wayfarer"
+    target = {"ean": "0805289126577", "brand": "Ray-Ban", "model": "RB2140", "color": "901"}
+    outcome, store, _ = _visit(
+        tmp_path, target, url, _ld(_amevista_group(url, tax=False)), tax="unknown")
+    assert outcome.state == "probable" and outcome.match_status == "manual_review"
+    assert outcome.reason == "tax_conflict"
+    assert outcome.page.includes_tax is False and outcome.page.tax_conflict
+    search = WebPriceSearch(store, clock=lambda: NOW)
+    assert comparability_gap(outcome.page, search.config(outcome.competitor_id)) == "tax_conflict"
+    assert search.record(outcome) == ""
+    row = store.offer_history(target["ean"]).iloc[0]
+    assert row["match_status"] == "manual_review" and row["price_includes_tax"] == 0
+    assert store.dashboard(now=NOW)[1]["confirmed"] == 0
+
+
+def test_import_normalization_applies_policy_without_rewriting_history(tmp_path):
+    from price_web import WebPriceSearch
+
+    url = "https://www.amevista.com/es/ray-ban-rb2140-901-wayfarer"
+    target = {"ean": "0805289126577", "brand": "Ray-Ban", "model": "RB2140", "color": "901"}
+    outcome, store, _ = _visit(tmp_path, target, url, _ld(_amevista_group(url)), tax="unknown")
+    search = WebPriceSearch(store, clock=lambda: NOW)
+    row = search.frame_row(target, search.config(outcome.competitor_id), outcome, NOW.isoformat())
+    row["IVA incluido"] = ""
+    assert not store.import_offers(pd.DataFrame([row])).rejected
+    assert len(store.offer_history(target["ean"])) == 1
+    row["IVA incluido"] = "no"
+    assert not store.import_offers(pd.DataFrame([row])).rejected
+    history = store.offer_history(target["ean"])
+    assert len(history) == 2
+    assert set(zip(history["match_status"], history["price_includes_tax"])) == {
+        ("exact_match", 1), ("manual_review", 0)}
+
+
+@pytest.mark.parametrize("defect", ["stock", "market", "currency", "identity", "age"])
+def test_business_tax_never_bypasses_other_comparability_gates(tmp_path, defect):
+    from datetime import timedelta
+
+    url = "https://www.amevista.com/es/ray-ban-rb2140-901-wayfarer"
+    target = {"ean": "0805289126577", "brand": "Ray-Ban", "model": "RB2140", "color": "901"}
+    node = _amevista_group(url, model="RB2140", title="Ray-Ban RB2140 901")
+    if defect == "stock":
+        node["hasVariant"][0]["offers"]["availability"] = "OutOfStock"
+    elif defect == "market":
+        node["hasVariant"][0]["offers"]["eligibleRegion"] = "US"
+    elif defect == "currency":
+        node["offers"]["priceCurrency"] = "USD"
+    elif defect == "identity":
+        node["model"] = "RB4472"
+    outcome, store, _ = _visit(tmp_path, target, url, _ld(node), tax="unknown")
+    assert outcome.page.includes_tax is True
+    assert store.dashboard(1, now=NOW + timedelta(days=2) if defect == "age" else NOW)[1]["confirmed"] == 0
+
+
+def test_common_group_price_does_not_mix_size_stock_or_require_size_prices():
+    url = "https://www.amevista.com/es/ray-ban-rb2140-901-wayfarer"
+    page = extract_product(_ld(_amevista_group(url)), url)
+    available = select_product_variant(page, {"ean": "0805289126577", "caliber": "50"})
+    unavailable = select_product_variant(page, {"ean": "0805289126584", "caliber": "54"})
+    assert available.price == unavailable.price == 200
+    assert (available.availability, unavailable.availability) == ("available", "unavailable")
+    assert available.includes_tax is unavailable.includes_tax is True
+
+
+def _observed_edel_layout(url, ean, product_id, title, second_title, price, *, different_stock=False):
+    """Synthetic reduction of 2026-11-12 public HTML layout, not the original HTTP response."""
+    offer = ('<div class="eoProductPrice"><span itemprop="offers" itemscope '
+             'itemtype="http://schema.org/Offer">'
+             f'<span itemprop="price" content="{price}">{price}</span>'
+             '<meta itemprop="priceCurrency" content="EUR">'
+             '<link itemprop="availability" href="http://schema.org/InStock">'
+             '<span itemprop="shippingDetails" itemscope itemtype="http://schema.org/OfferShippingDetails">'
+             '<span itemprop="shippingDestination" itemscope itemtype="http://schema.org/DefinedRegion">'
+             '<meta itemprop="addressCountry" content="ES"></span></span></span></div>')
+    widgets = "".join(
+        f'<div class="eoProductsPriceBySize eoProductsPriceBySize-{product_id}">'
+        + (offer.replace("InStock", "OutOfStock") if different_stock and index == 2 else offer) + "</div>"
+        for index in range(3))
+    return (
+        f'<div itemscope itemtype="http://schema.org/Product"><meta itemprop="name" content="{title}">'
+        f'<span itemprop="name">{second_title}</span><meta itemprop="sku" content="{product_id}">'
+        f'<meta itemprop="url" content="{url.replace("https:", "http:")}">'
+        f'<!-- FrameId = {ean[1:]}--!><input type="radio" id="prd{product_id}" checked>'
+        f'<div class="eoDetailListTileSize{product_id}">EAN {ean[1:]}</div>'
+        '<div class="eoDetailListTileSize777">EAN 8056597875349</div>'
+        + widgets
+        + '<div class="eoProductsPriceBySize-777">'
+        + offer.replace("InStock", "OutOfStock") + "</div></div>"
+    )
+
+
+@pytest.mark.parametrize("ean,model,color,product_id,title,second_title,price", [
+    ("0889214029614", "FT0711", "01A", "708602",
+     "Tom Ford Fausto FT 0711 01A", "FAUSTO (FT0711 - 01A)", 201.6),
+    ("0889214281791", "FT0884", "01E", "1461733",
+     "Tom Ford Falconer-02 FT 0884 01E", "FALCONER-02 (FT0884 - 01E)", 201.6),
+    ("0889652429717", "SL 596 DUNE", "006", "1971610",
+     "Saint Laurent SL 596 DUNE 006", "SL 596 DUNE (006)", 216),
+    ("0889652650838", "SL 872 ERIN", "001", "2352387",
+     "Saint Laurent SL 872 ERIN 001", "SL 872 ERIN (001)", 174),
+    ("0889652675602", "SL 908", "002", "2423524",
+     "Saint Laurent SL 908 002", "SL 908 (002)", 126),
+])
+def test_observed_edel_duplicate_widgets_are_bound_to_selected_product(
+        tmp_path, ean, model, color, product_id, title, second_title, price):
+    brand = "Tom Ford" if model.startswith("FT") else "Saint Laurent"
+    url = f"https://www.edel-optics.es/{model.replace(' ', '-')}-{color}-de-{brand.replace(' ', '-')}.html"
+    target = {"ean": ean, "brand": brand, "model": model, "color": color}
+    body = _observed_edel_layout(url, ean, product_id, title, second_title, price)
+    outcome, store, _ = _visit(tmp_path, target, url, body, tax="unknown")
+    assert outcome.state == "exact" and outcome.reason == ""
+    assert outcome.page.ean_published == ean and outcome.page.price == price
+    assert outcome.page.variant_id == product_id and outcome.page.availability == "available"
+    assert outcome.page.market == "ES" and outcome.page.includes_tax is True
+    assert len(store.offer_history(ean)) == 1
+
+
+def test_edel_duplicate_widgets_with_contradictory_stock_remain_blocked():
+    url = "https://www.edel-optics.es/FT0711-01A-de-Tom-Ford.html"
+    page = extract_product(_observed_edel_layout(
+        url, "0889214029614", "708602", "Tom Ford FT0711 01A", "FT0711 01A", 201.6,
+        different_stock=True), url)
+    assert page.ambiguous and page.price is None and page.ean_published == ""
+    assert page.availability == "unknown"
+    assert any("contradictorias" in note for note in page.notes)
+
+
+def test_edel_duplicate_titles_do_not_hide_a_contradictory_model(tmp_path):
+    url = "https://www.edel-optics.es/FT0711-01A-de-Tom-Ford.html"
+    target = {"ean": "0889214029614", "brand": "Tom Ford", "model": "FT0711", "color": "01A"}
+    body = _observed_edel_layout(
+        url, target["ean"], "708602", "Tom Ford FT0711 01A", "FT0884 01A", 201.6)
+    outcome, store, _ = _visit(tmp_path, target, url, body, tax="unknown")
+    assert outcome.state != "exact" and store.offer_history(target["ean"]).empty
+
+
+def test_sale_price_specification_cannot_hide_a_contradictory_tax_statement(tmp_path):
+    url = "https://www.amevista.com/es/ray-ban-rb2140-901-wayfarer"
+    target = {"ean": "0805289126577", "brand": "Ray-Ban", "model": "RB2140", "color": "901"}
+    group = _amevista_group(url, tax=True)
+    group["offers"]["priceSpecification"] = {
+        "@type": "UnitPriceSpecification", "priceType": "SalePrice",
+        "price": "200", "valueAddedTaxIncluded": False}
+    outcome, store, _ = _visit(tmp_path, target, url, _ld(group), tax="unknown")
+    assert outcome.state == "probable" and outcome.reason == "tax_conflict"
+    assert outcome.page.tax_conflict
+    assert store.dashboard(now=NOW)[1]["confirmed"] == 0
+
+
+@pytest.mark.parametrize("extra", [
+    '<meta itemprop="sku" content="999">',
+    '<meta itemprop="gtin12" content="889214281791">',
+])
+def test_edel_offer_identity_cannot_contradict_its_selected_container(extra):
+    url = "https://www.edel-optics.es/FT0711-01A-de-Tom-Ford.html"
+    body = _observed_edel_layout(
+        url, "0889214029614", "708602", "Tom Ford FT0711 01A", "FT0711 01A", 201.6)
+    body = body.replace('<meta itemprop="priceCurrency" content="EUR">', extra
+                        + '<meta itemprop="priceCurrency" content="EUR">')
+    page = extract_product(body, url)
+    assert page.ambiguous and page.price is None and page.ean_published == ""
+    assert page.availability == "unknown"

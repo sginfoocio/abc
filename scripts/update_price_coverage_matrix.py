@@ -17,6 +17,7 @@ from price_url_candidates import (  # noqa: E402
     resolve_product_attributes,
 )
 from price_references import model_key  # noqa: E402
+from competitor_requirements import business_tax_evidence, business_tax_policy_for  # noqa: E402
 
 MATRIX = ROOT / "docs" / "PRICE_COVERAGE_100_EAN_6_STORES.csv"
 EAN_SUMMARY = ROOT / "docs" / "PRICE_COVERAGE_EAN_SUMMARY_100.csv"
@@ -55,6 +56,7 @@ NEW_FIELDS = (
     "elegibilidad_local",
     "motivo_exclusion_o_pendiente",
     "datos_pendientes",
+    "politica_fiscal_registrada",
 )
 DEPRECATED_FIELDS = {
     "candidata_generada_esta_revision",
@@ -67,6 +69,7 @@ def _json(value: object) -> str:
 
 
 def _route_metadata(row: dict[str, str]) -> dict[str, str]:
+    fiscal = business_tax_policy_for("https://" + DOMAINS[row["competidor_id"]])
     product = {
         "ean": row["ean"],
         "brand": row["marca"],
@@ -103,7 +106,9 @@ def _route_metadata(row: dict[str, str]) -> dict[str, str]:
         if runnable:
             eligibility = "candidate_for_governed_ficha_check"
             reason = "Candidata local; no es autorización, ficha verificada ni oferta comparable."
-            pending = "Identidad/EAN/variante, precio, mercado, IVA, disponibilidad, acceso y vigencia."
+            pending = ("Identidad/EAN/variante, precio, mercado, disponibilidad, acceso y vigencia. "
+                       "Declaraciones fiscales contradictorias requieren revisión." if fiscal else
+                       "Identidad/EAN/variante, precio, mercado, IVA, disponibilidad, acceso y vigencia.")
         else:
             eligibility = "review_required"
             pending = "Resolver la contradicción o cautela documentada antes de cualquier consulta."
@@ -179,6 +184,7 @@ def _route_metadata(row: dict[str, str]) -> dict[str, str]:
         "elegibilidad_local": eligibility,
         "motivo_exclusion_o_pendiente": reason,
         "datos_pendientes": pending,
+        "politica_fiscal_registrada": business_tax_evidence(fiscal) if fiscal else "",
     }
 
 
