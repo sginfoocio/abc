@@ -366,7 +366,6 @@ def test_product_detail_starts_only_explicitly_selected_price_refresh(pilot, mon
 
 @pytest.mark.parametrize("override,reason", [
     ({"stock": False}, "stock"),
-    ({"pretax": None}, "IVA"),
     ({"market": None}, "Mercado"),
     ({"currency": "USD"}, "Moneda"),
     ({"name": "Prada PR 27ZS ZVN09T 54-21"}, "Color"),
@@ -383,6 +382,19 @@ def test_noncomparable_observations_visible(pilot, override, reason):
     assert reason.lower() in row.detail.lower(), row.detail
     assert json.loads(row.observation)["page"]
     assert store.dashboard()[1]["confirmed"] == 0
+
+
+def test_registered_business_tax_does_not_require_per_page_pretax(pilot):
+    service, store, search, site, cid, extras = pilot
+    known(pilot, pretax=None)
+    service.enable()
+    service.run(search=search)
+    frame, _ = service.results()
+    row = frame.loc[(frame.ean == REQUIRED_EANS[0]) & (frame.competitor_id == cid)].iloc[0]
+    assert row.comparable == 1
+    page = json.loads(row.observation)["page"]
+    assert page["includes_tax"] is True and page["vat_rate"] is None
+    assert page["tax_policy_evidence"]
 
 
 def test_reference_match_without_published_ean_remains_comparable_in_pilot(pilot):

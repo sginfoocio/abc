@@ -2,8 +2,9 @@
 
 ## Evidencia y base
 
-Base investigada y `origin/main` al comenzar:
-`92243628b4e925ba9d549b076580726c383a43ac`; no hay commits posteriores.
+Base de la auditoria documental original:
+`92243628b4e925ba9d549b076580726c383a43ac`; no confundir con la base actual
+de esta ampliacion, que incluye la PR #125 integrada.
 Esta rama parte de main y no incluye la auditoria aparcada de las 51 confirmaciones.
 
 Se leyeron los siete documentos de `Precios/Diagonal_evidencia_Copilot`:
@@ -20,19 +21,22 @@ registran resultado/acceso, no medidas de producto. Las referencias E032-E044
 incluyen medidas de paginas indexadas o candidatas historicas, pero la mayoria
 no publica un GTIN que las vincule a una variante.
 
-Se incorporan nueve asociaciones de medidas en
+Se incorporan nueve registros documentales de medidas en
 [PRICE_COVERAGE_MEASUREMENT_EVIDENCE.csv](PRICE_COVERAGE_MEASUREMENT_EVIDENCE.csv):
-E041 (GTIN exacto); tres ejemplos Visio aportados con EAN; una variante RB2140
+E041 (GTIN exacto); tres ejemplos Visio aportados con EAN (uno sin vinculo
+evidenciado de medidas al GTIN); una variante RB2140
 corroborada por la referencia 5418; el calibre 48 de RB4472, sin puente
 acreditado; y los calibres seleccionados para tres EAN Saint Laurent mediante
-UPC indexado normalizado y controles `selectedSize`. Estos son datos de
-planificacion para construir candidatas, no validacion actual del motor. No se
-rellena el catalogo maestro ni se derivan valores por el orden de listas.
-El RB2140 901S31 conserva pendiente la asociacion estructurada EAN/medida.
-E043 sigue sin GTIN y contradice la medida 50-22 atribuida al EAN 0805289126577;
-E031 tambien contiene una contradiccion de titulo/contenido para FT1044 01E.
-La candidata FT1044 continua sin identidad verificada; los pares RB2140
-afectados por E043 permanecen en revision.
+UPC indexado normalizado y controles `selectedSize`. El registro RB2140
+0805289126577 se conserva como `model_color_only`: E043 no vincula sus medidas
+al UPC, por lo que el runtime lo registra como limitacion pero no rellena
+calibre ni puente. En cambio, la asociacion externa EAN/54-18 de
+0805289126584 permite generar la candidata E043 para ese tamaño; sigue siendo
+una candidata, no una ficha verificada. Estos datos no se escriben en el
+catalogo maestro ni se derivan por el orden de listas. El RB2140 901S31 conserva
+pendiente la asociacion estructurada EAN/medida. E031 tambien contiene una
+contradiccion de titulo/contenido para FT1044 01E; su candidata sigue sin
+identidad verificada.
 
 El registro [EXAMPLES](../price_url_candidates.py) conserva los 47 IDs E001-E047,
 URLs originales (incluidos locale y query), marca, modelo, color, categoria,
@@ -102,7 +106,7 @@ extraccion de ofertas ni precios comparables.
 | Optica Universitaria | Parcial | URLs por variante E034-E035; padre E036 pendiente | 2 | 1 | REF/handles descubiertos, numericos o alfanumericos. Un padre sin color no es la variante. |
 | ConGafasDeSol | Parcial | Handles concretos E037-E038 | 1 | 0 | Fausto antes/despues de FT0711 segun producto; otras marcas/categorias requieren evidencia. |
 | Celine Opticien Lunetier | Parcial | Padres E039-E040, sin atribuirlos a colores | 0 | 3 | Falta URL/ID de variante actual. Fuente autorizada debe vincular URL completa, identidad, precio y stock. No inventar `variant`. |
-| Visio Factory | Parcial | Subregla Prada PR27ZS; mappings E041-E044 | 3 | 2 | Nuevas rutas Prada requieren calibre y puente. Cartier tiene handle propio. Los dos RB2140 901 conservan UPC distintos y E043 pendiente, sin asignar talla; 901/58 mantiene su identidad. |
+| Visio Factory | Parcial | Subregla Prada PR27ZS; mappings E041-E044 | 3 | 2 | Nuevas rutas Prada requieren calibre y puente. Cartier tiene handle propio. E043 queda pendiente para el UPC 0805289126577; el UPC 0805289126584 usa su asociación 54-18 para una candidata aún no verificada. 901/58 conserva su identidad. |
 | Otticait Eyewear | Confirmado en muestra | Marca/modelo/color y alias FT5634-B, E045-E047 | 18 | 0 | Prada sol y Tom Ford montura. 16 hipotesis y dos mappings; seleccion de talla y oferta requieren comprobacion posterior. |
 | **Total (100 x 14)** | | **63 hipotesis generadas + 20 pares con URL documental comprobable** | **83** | **9** | **92 pares tienen alguna candidata; no son 92 verificaciones.** |
 
@@ -369,3 +373,361 @@ falta de producto. Las 600 filas no elevaron ningun estado a ficha verificada u
 oferta comparable vigente. No se cambio el manifiesto, la vigilancia, los
 presupuestos, permisos, recibos ni revisiones; la regeneracion de la matriz y
 las pruebas automatizadas no consultaron tiendas ni ejecutaron Vytria/Odoo.
+
+## Evidencia conectada al runtime y corte local (2026-11-12)
+
+La ampliacion parte de `d0b08ea5366ae6fede8884bff44f8d5f4bce2b20`, que ya
+incluye la PR #125. Se inventariaron los cuatro ficheros locales siguientes;
+se leyeron sin editarlos ni copiarlos al repositorio:
+
+| Fichero | Fecha local | Bytes | SHA-256 |
+|---|---|---:|---|
+| `evidencia_7_ean_pendientes_20261110.json` | 2026-11-10 12:40:27 +01:00 | 6,418 | `09E310C225D30A5660D1AE98FD57577FE96D2BF73DB22744DD529C33C7C79FC1` |
+| `piloto-72h-historial (2).json` | 2026-11-09 19:08:51 +01:00 | 9,689,886 | `E4B99D23F2A6F0AD31800F7777E93678CE23F7D0AF45CA7B69817C94A2035BF1` |
+| `price-watch-continuity-report (1).json` | 2026-11-12 12:01:16 +01:00 | 13,424,820 | `F68E29D384988A230434FDE692F7D89D309D0437E6437934622DAA901A2D3F8B` |
+| `price-watch-continuity-report (2).json` | 2026-11-12 12:39:49 +01:00 | 15,655,838 | `7FED7EEF40D719247963254586D20B523E897ABB92DC5AA7E45F1CB768D7090B` |
+
+El corte mas reciente es el informe `(2)`, cuyo latido interno es
+`2026-11-12 12:00:42 +01:00` y cuyo build registrado es
+`ee110d085b11c5316bf6f1d7351492d81a049e4e`. Su estado `active` describe esa
+instantanea; no demuestra que Cloud siga activo ni sano ahora. El piloto de 72
+horas es un historial separado y conserva su expiracion del 2026-11-09 a las
+16:26. El informe `(1)` es un corte anterior, con latido a las 11:46:07.
+
+En el informe `(2)`, el manifiesto declara 100 EAN y seis competidores. El
+resumen contiene 221 pares con HTTP real, 476 comprobaciones con HTTP, 311
+aplazados, 175 restringidos, 114 en revision, cero ofertas reutilizadas, 106
+ofertas comparables vigentes y una caducada. Los 529 recibos HTTP unicos se
+desglosan en 511 comerciales y 18 de `robots.txt`. Al deduplicar por ID, son
+tres recibos robots por dominio, uno en cada ciclo diario del 10, 11 y 12 de
+noviembre; los 18 son HTTP 200 y no hay repeticiones del mismo origen/agente
+dentro de esos ciclos. El cache sigue vigente por origen y agente, con TTL de
+24 horas; no se omiten comprobaciones robots ni se modifican permisos. Estas
+metricas son solo las del informe guardado, no un diagnostico en vivo.
+
+### Resolucion unica de atributos
+
+`resolve_product_attributes()` valida el CSV de medidas al cargarlo: columnas,
+GTIN canonicos y unicos, identidad marca/modelo/color, calibre, puente,
+asociacion y limitacion. Enriquece una copia efimera del producto solo para el
+mismo GTIN; no escribe en el catalogo. Medidas, identidad o procedencia
+contradictorias producen `measurement_conflict` y no una candidata ejecutable.
+La matriz, la vista previa de `WatchBatch`, la reevaluacion local y
+`PriceLocator` usan `candidate_plan()` y, por tanto, el mismo resolver. El
+Dockerfile incluye el CSV requerido por ese flujo.
+
+Los nueve registros de evidencia preservan fuente, tipo de asociacion y
+limitacion por separado. Los UPC de 12 digitos se validan y normalizan a GTIN
+de 13 digitos, conservando el cero inicial. Los IDs Edel siguen resolviendose
+desde la ficha, no desde estos ejemplos indexados. Para una variante de
+`ProductGroup`, un precio comun del grupo se conserva al filtrar la `Offer`
+de `selectedSize`; precio discrepante sigue siendo ambiguo y el stock se toma
+de la oferta de la variante seleccionada. Si la URL de una `Offer` contradice
+el `selectedSize` seleccionado, sus datos de precio y stock se descartan y la
+ficha queda ambigua. No se convierte una entrega futura en stock. Una
+asociacion `model_color_only` se mantiene para trazabilidad, pero no aporta
+calibre ni puente a un EAN.
+
+La normalizacion de referencia conserva `DUNE`/`ERIN` aunque aparezcan antes
+del codigo Saint Laurent; `OPT` sigue siendo una contradiccion para la familia
+de sol. `Coleccion`/`Collection` no contaminan el modelo y `WAYFARER` se trata
+como alias de RB2140 solo cuando no forma parte del modelo objetivo; otro
+codigo RB continua siendo contradictorio. Las pruebas mantienen los casos de
+control de identidad y stock.
+
+### Matriz tras conectar el resolver
+
+La matriz regenerada mantiene exactamente 600 pares unicos, 100 EAN y seis
+tiendas. No modifica la clasificacion previa de historicas/candidatas (138 /
+153 / 3 / 306). El plan local contiene 239 URLs candidatas; 236 son
+localmente elegibles para una comprobacion gobernada. Los 100 EAN tienen un
+metodo, enlace historico o ruta documentada; 96 tienen al menos una URL en el
+plan local y 95 al menos una candidata elegible. Nada de ello equivale a una
+ficha verificada o a una oferta comparable.
+
+| Competidor | Rutas o metodos | URLs en plan local | Elegibles localmente |
+|---|---:|---:|---:|
+| Optica Optima | 54 | 47 | 47 |
+| Amevista | 85 | 84 | 84 |
+| Visio Factory | 29 | 7 | 6 |
+| Edel-Optics | 82 | 77 | 77 |
+| Domanci | 100 | 10 | 8 |
+| ConGafasDeSol | 36 | 14 | 14 |
+| **Total** | **386** | **239** | **236** |
+
+Cinco EAN no tienen candidata local elegible: Chloe CH0289S 003
+(`0889652543574`), Chloe CH0347S 001 (`0889652630922`), Ray-Ban RB4441D
+667787 (`8056262268902`), Saint Laurent SL M160 001 (`0889652651774`) y
+Saint Laurent SL M94 001 (`0889652359700`). Cuatro no tienen ninguna URL
+candidata en el plan; la candidata restante es historica y no se eleva a ficha
+verificada. Los motivos y atributos faltantes por cada uno de los 600 pares
+constan en la matriz, incluida la limitacion de la evidencia de medidas.
+
+La actualizacion de matriz es local y no genera peticiones. No se altera
+vigilancia, manifiesto, permisos, presupuestos, recibos, revisiones ni
+sincronizacion Vytria/Odoo; tampoco se ejecutan lotes comerciales.
+
+## Correcciones de la PR #126: contexto Docker, identidad e IVA (12/11/2026)
+
+El HEAD inicial comprobado fue `baf44ff8d349ee36ff34b38818847bdd14e7a9d8`,
+sin avances remotos posteriores. En la ejecucion
+[43224679620](https://github.com/sginfoocio/abc/actions/runs/43224679620)
+las pruebas, lint y sintaxis pasaron; Docker fallo antes del smoke: el `COPY`
+del CSV de medidas no podia leer un recurso excluido por `.dockerignore`.
+Se conserva `docs/PRICE_COVERAGE_MEASUREMENT_EVIDENCE.csv` como ubicacion
+estable del motor. El contexto permite unicamente ese fichero de `docs`;
+los demas documentos, informes y CSV locales siguen excluidos. El contrato
+se comprueba junto con Dockerfile y una importacion/resolucion en una copia
+aislada. El smoke real ejecuta con `--network none`: carga nueve registros,
+resuelve E041 para Prada PR27ZS 16K08Z a calibre 54/puente 21, comprueba la
+procedencia y que el producto original no se modifica. La ausencia del
+recurso causa un error explicito, nunca cobertura vacia.
+
+### Amevista: hechos conservados y causa reproducida
+
+El informe `(2)` registra la misma contradiccion `RB2140, WAYFARER` para
+`0805289126577`, `0805289126584` y `8056266001833` (checks 1006, 1007 y
+1026). La correccion anterior del titulo no bastaba: `Product.model`
+tambien puede contener el nombre comercial. Ahora WAYFARER solo se reconoce
+como nombre comercial de Ray-Ban RB2140 y FAUSTO de Tom Ford FT0711, con el
+codigo de modelo acreditado en la misma referencia. No se eliminan nombres
+desconocidos ni otros codigos RB/FT. Un segundo codigo contradictorio, aunque
+aparezca despues del color, sigue bloqueando la identidad. El historial del
+piloto conserva `Tom Ford FT0711 01A Fausto` y su URL Amevista, pero no es
+una comprobacion vigente.
+
+Se reprodujo ademas la perdida de IVA al seleccionar por EAN un ProductGroup:
+la extraccion aplicaba la politica configurada, pero la segunda extraccion de
+la variante olvidaba esa politica. La politica ya suministrada al extractor
+se conserva como procedencia y se aplica a la variante elegida solo si su
+oferta no publica tratamiento fiscal propio. Una declaracion explicita de
+esa oferta tiene prioridad. La seleccion sigue siendo por GTIN normalizado,
+no por orden, y no hereda stock de otra talla. Las comprobaciones de mercado
+verificado y sus conflictos siguen impidiendo ofertas comparables fuera del
+mercado configurado.
+
+Los seis `vat_unconfirmed` del informe `(2)` son:
+
+| EAN | URL conservada | Dato fiscal guardado |
+|---|---|---|
+| 8056262410929 | https://www.amevista.com/es/miu-miu-mu-53wv-zvn1o1 | `includes_tax=null`; destino ES |
+| 8056262600078 | https://www.amevista.com/es/miu-miu-mu-01yv-14l1o1 | `includes_tax=null`; destino ES |
+| 8056262833902 | https://www.amevista.com/es/ray-ban-rb4472-1359-2 | `includes_tax=null`; destino ES |
+| 8056597669016 | https://www.amevista.com/es/miu-miu-mu-04uv-1ab1o1 | `includes_tax=null`; destino ES |
+| 8056597669023 | https://www.amevista.com/es/miu-miu-mu-04uv-vau1o1 | `includes_tax=null`; destino ES |
+| 8056597669047 | https://www.amevista.com/es/miu-miu-mu-04uv-2az1o1 | `includes_tax=null`; destino ES |
+
+Sus hechos estructurados no publican `valueAddedTaxIncluded` ni precio sin
+IVA. El informe no exporta `competitor_web_config`, de modo que no acredita
+cual era la politica efectiva en ese momento. La perdida de politica es
+reproducible, pero no prueba por si sola que los seis precios incluyeran IVA.
+La nota de politica incluida en recibos anteriores tampoco certifica su
+vigencia o alcance actual. Esa era la limitacion fiscal del corte anterior;
+queda resuelta por la confirmacion expresa del responsable de negocio del
+12/11/2026, registrada mas abajo para los 14 competidores. Idioma, EUR y
+dominio siguen sin servir como prueba fiscal. Los seis checks se reproducen
+ahora con hechos reducidos y transporte **sintetico**: la politica registrada
+llega a la oferta seleccionada aunque la configuracion antigua sea `unknown`.
+No son los cuerpos HTTP originales ni se convierten en ofertas vigentes.
+
+### Edel: fuentes de variante, oferta y mensajes
+
+Los checks 1038 (FT0711 01A, `0889214029614`, radio observado 708602),
+1040 (FT0884 01E, `0889214281791`, 1461733), 1067/1069/1070 (los tres
+Saint Laurent) conservan la secuencia contradictoria de mensajes indicada.
+La causa reproducida no es un cambio de IDs: cuando falta JSON-LD,
+`radio_selected=True` creaba inmediatamente una pagina ambigua, incluso
+habiendo EAN asociado al ID en `eoDetailListTileSize...`. Se anadian despues
+mensajes positivos sobre esa asociacion, sin volver a resolver la oferta.
+
+Ahora se intentan los microdatos del widget principal `eoProductPrice`
+antes de declarar datos insuficientes. El EAN del bloque de variante y la
+Offer deben pertenecer al mismo ambito Product; no se usan tarjetas ni
+`aside`/productos relacionados. Con varias variantes, la oferta/stock
+necesita URL `selectedSize` coincidente o un contenedor de ese ID. Solo una
+variante documentada permite usar su unica oferta principal sin URL
+independiente. El radio por si solo no aporta EAN, precio o stock.
+Identificadores Product/Offer/radio contradictorios y UPC/EAN discrepantes
+siguen bloqueados, sin precio, disponibilidad ni EAN aceptables.
+El precio comun de ProductGroup sigue siendo reutilizable para el mismo
+modelo/color; nunca se exige precio distinto por talla.
+
+Los cinco ejemplos se prueban de extremo a extremo con transporte
+simulado, incluidos IDs arbitrarios en las regresiones de variante ya
+existentes. Los valores observados son datos de test, no constantes del
+adaptador. Si la oferta no tiene vinculo suficiente, el motivo distingue
+`EAN vinculado, pero ... oferta/stock ...` de ausencia de datos de identidad.
+Los mensajes no afirman simultaneamente que falta la asociacion EAN y que
+esta existe.
+
+### Limites del corte anterior y comprobaciones posteriormente resueltas
+
+Los informes guardados contienen hechos extraidos, muestras serializadas y
+trazas, **no los cuerpos HTML originales**. La fixture historica reducida de
+Prada/Edel acredita la gramatica de microdatos, no el HTML actual de FT0711,
+FT0884 ni Saint Laurent. Los nuevos tests son reconstrucciones sinteticas
+explicitamente rotuladas; no acreditan que las cinco fichas actuales tengan
+ya la vinculacion exigida. En aquel corte no se hicieron nuevas consultas
+comerciales. La comprobacion publica posterior del 12/11 queda separada
+en la seccion final y en su registro de procedencia.
+
+Estos eran los ejemplos representativos pendientes. La politica fiscal
+ya no requiere confirmacion adicional y los otros seis casos tienen ahora
+HTML publico real contrastado (no el HTML de los informes historicos):
+
+| EAN / tienda | URL exacta | Dato a comprobar y decision que desbloquea |
+|---|---|---|
+| 8056262833902 / Amevista | https://www.amevista.com/es/ray-ban-rb4472-1359-2 | Resuelto fiscalmente por la decision de negocio para los 14 competidores. Replay de los seis checks, sin inferir porcentaje ni renovar su vigencia. |
+| 0889214029614 / Amevista | https://www.amevista.com/es/tom-ford-ft0711-01a-fausto | Resuelto mediante HTML real del 12/11: Product model Fausto, FT0711/01A, GTIN y Offer. No se convierte el recibo historico en oferta vigente. |
+| 0889214029614 y 0889214281791 / Edel | https://www.edel-optics.es/FT0711-01A-de-Tom-Ford.html ; https://www.edel-optics.es/FT0884-01E-de-Tom-Ford.html | Resuelto en HTML real del 12/11: radio, EAN/UPC y Offer/stock del mismo Product Id; replay completo offline documentado mas abajo. |
+| 0889652429717, 0889652650838 y 0889652675602 / Edel | https://www.edel-optics.es/SL-596-DUNE-006-de-Saint-Laurent.html ; https://www.edel-optics.es/SL-872-ERIN-001-de-Saint-Laurent.html ; https://www.edel-optics.es/SL-908-002-de-Saint-Laurent.html | Resuelto con sus tres respuestas HTML reales actuales y cadena UPC/EAN-control-Offer/stock; no se usan UPC indexados como sustituto. |
+
+### Matriz y controles de esta correccion
+
+La regeneracion local conserva **600 filas unicas, 100 EAN y seis tiendas**.
+No cambia ninguna fila respecto al HEAD de partida: 386 pares con ruta/metodo,
+239 candidatas, 236 elegibles localmente; 96 EAN con candidata y 95 con alguna
+elegible. No se elevan candidatas a fichas verificadas ni ofertas comparables.
+El resolver compartido de atributos y las reglas de las otras cuatro tiendas
+se conservan. Los controles focalizados incluyen extraccion-identidad-oferta
+con transporte simulado, IVA desconocido/explicito/politica, mercado
+contradictorio, stock/entrega futura, contradicciones de variante y contrato
+Docker. La validacion completa y el build/smoke de la imagen del commit
+final se registran en la PR; no se sustituyen por la ejecucion anterior.
+
+No se modificaron los originales inventariados, produccion, vigilancia,
+manifiesto, permisos, robots, bloqueos, presupuestos, historicos, revisiones
+ni sincronizacion. No se fusiona ni despliega esta PR.
+
+## Cierre fiscal y contraste publico de la PR #126 (12/11/2026)
+
+### Decision de negocio, no revision individual de webs
+
+Se registra en [competitor_requirements.py](../competitor_requirements.py)
+la decision versionada `business-vat-included-14-2026-11-12`:
+**«Los precios de los 14 competidores incluyen IVA»**. Procedencia:
+confirmacion expresa del responsable de negocio en esta conversacion.
+La fecha es la de registro de esta decision, no una fecha de revision de
+condiciones de cada tienda. No acredita un porcentaje de IVA.
+
+El ambito es la lista explicita de los 14 competidores registrados, por
+origen HTTPS exacto (con/sin `www`), no dominios desconocidos o subdominios
+arbitrarios. Se aplica como politica de codigo de solo lectura al extraer
+y seleccionar variantes, recuperar hechos cacheados y normalizar nuevas
+importaciones. Identificador, fuente y fecha se guardan en la evidencia de
+la pagina y de cada nueva observacion. No migra, reescribe o rejuvenece
+ofertas/recibos anteriores, ni necesita una escritura directa en produccion.
+El panel muestra la politica efectiva y su origen, diferenciada de la
+configuracion fiscal antigua. No es una autorizacion de acceso.
+
+La misma normalizacion se aplica antes de validar la admision local de una
+observacion y antes de generar su fila de importacion. Asi, un hecho
+recuperado sin IVA no queda rechazado por la validacion y aceptado despues
+por el importador con otra politica; los conflictos explicitos siguen
+rechazados en ambos pasos. No se toca el estado de ningun piloto real.
+
+La ausencia de una declaracion fiscal por ficha deja de generar
+`vat_unconfirmed` en esas 14 tiendas. Una declaracion explicita de IVA
+excluido no se sobrescribe: queda en `manual_review`/`tax_conflict`, sin
+oferta comparable. Las contradicciones Offer/precio de venta tambien se
+conservan, incluso cuando el precio procede de ProductGroup.
+Fuera del registro sigue siendo necesaria evidencia fiscal aplicable.
+Mercado, moneda, identidad, disponibilidad y vigencia mantienen sus vetos.
+
+Los checks Amevista 1015, 1024, 1025, 1027, 1028 y 1029 del informe `(2)`
+se reproducen con sus EAN, variantes y precios guardados, en transporte
+simulado. Los seis conservan IVA incluido hasta la fila normalizada, sin
+inventar tipo: `8056262410929`, `8056262600078`, `8056262833902`,
+`8056597669016`, `8056597669023`, `8056597669047`.
+Esto resuelve su bloqueo fiscal, no acredita seis ofertas actuales.
+El precio comun de modelo/color no exige precio independiente por calibre;
+el stock se toma exclusivamente de la variante seleccionada por EAN.
+
+### HTML real contrastado, separado de las reconstrucciones de test
+
+El [registro factual de comprobacion](PRICE_CONTINUITY_PUBLIC_CHECKS_20261112.json)
+incluye URL solicitada/final, fecha UTC, estado HTTP, SHA-256 del cuerpo
+original, hechos extraidos y resultado del replay local. Los cuerpos
+completos se conservan localmente, no se incorporan a la imagen ni se
+presenta una fixture sintetica como respuesta original.
+
+Se consultaron exactamente **seis fichas y dos robots.txt** entre
+16:39:13 y 16:39:50 UTC (17:39 en Madrid): cinco Edel y una Amevista.
+Ocho HTTP en total, cero redirecciones, cero reintentos, pausas de 6 s
+por competidor, agente `Cloud-PriceComparator`. Se evaluaron las rutas
+contra los robots recibidos antes de consultarlas. Sin busquedas, lotes,
+trabajos de produccion, CAPTCHA, bloqueos ni cambios de permisos/limites.
+El replay posterior reutiliza esos cuerpos con red real deshabilitada
+y SQLite desechable; no consulta otra vez las tiendas.
+
+| Tienda / EAN | Modelo-color | Product Id observado | Precio EUR publicado |
+|---|---|---|---|
+| Edel / 0889214029614 | FT0711 01A | 708602 | 201,60 |
+| Edel / 0889214281791 | FT0884 01E | 1461733 | 201,60 |
+| Edel / 0889652429717 | SL 596 DUNE 006 | 1971610 | 216,00 |
+| Edel / 0889652650838 | SL 872 ERIN 001 | 2352387 | 174,00 |
+| Edel / 0889652675602 | SL 908 002 | 2423524 | 126,00 |
+| Amevista / 0889214029614 | FT0711 01A FAUSTO | No aplica | 240,00 |
+
+En Edel el HTML real explica otros dos rechazos: el parser de radios no
+aplicaba la compatibilidad `--!>` que ya usaba el de microdatos, por lo
+que perdia controles posteriores; y hay tres widgets equivalentes
+(escritorio, cesta y movil) dentro de `eoProductsPriceBySize-<id>`.
+Se conservan solo los widgets del ID seleccionado, en el mismo Product
+que el bloque EAN; duplicados identicos son una oferta, diferencias
+de precio, fiscalidad o stock siguen siendo ambiguas. Los nombres
+duplicados del Product se clasifican por separado, sin concatenar
+referencias ni ocultar otro codigo de modelo.
+
+Se comprueba tambien Product URL/SKU, Offer URL/SKU/GTIN cuando existen,
+el control marcado y UPC normalizado con cero inicial. Ningun ID observado
+esta codificado en el adaptador. Las tarjetas y otras variantes no aportan
+stock ni identidad. La Offer de los cinco ejemplos publica `InStock`,
+EUR y destino ES; se conservan handling/transit time sin prometer entrega
+inmediata a partir de una fecha futura.
+
+FAUSTO publica actualmente Product `model=Fausto`, titulo FT0711 01A,
+GTIN `889214029614`, Offer EUR, `InStock` y envio ES: el alias acotado
+a FT0711/01A pasa extraccion, normalizacion, identidad e importacion.
+No se ha usado el recibo historico como prueba de esa respuesta actual.
+Los seis cuerpos reales pasan el recorrido completo offline con las
+correcciones. No queda evidencia manual pendiente para estos ejemplos;
+no se extrapola este resultado a los otros 36 casos Edel no consultados.
+
+### Matriz final y limites operativos
+
+La matriz regenerada mantiene **100 EAN, seis tiendas y 600 pares unicos**
+(incluidos ceros iniciales). Anade la procedencia fiscal registrada y no
+la pide de nuevo como dato ausente. No cambia ninguna ruta, candidata,
+medida ni elegibilidad local respecto a `cf2b006`.
+
+| Competidor | Ruta/metodo | Candidata local | Elegible local |
+|---|---:|---:|---:|
+| Optica Optima | 54 | 47 | 47 |
+| Amevista | 85 | 84 | 84 |
+| Visio Factory | 29 | 7 | 6 |
+| Edel-Optics | 82 | 77 | 77 |
+| Domanci | 100 | 10 | 8 |
+| ConGafasDeSol | 36 | 14 | 14 |
+| Total | 386 | 239 | 236 |
+
+**96 EAN** con alguna candidata y **95** con alguna elegible localmente.
+Recuperacion de candidatas/elegibilidad en esta ultima correccion: **0**
+en cada tienda; bloqueo fiscal resuelto en los seis casos Amevista
+reproducidos. Las seis comprobaciones publicas son evidencia puntual
+separada, no promocion automatica de candidatas o revisiones.
+La matriz sigue siendo un plan local, no un inventario del estado actual
+de produccion ni de ofertas comparables vigentes.
+
+Las regresiones incluyen las seis ofertas, alcance de 14 tiendas,
+herencia fiscal ProductGroup, ausencia de porcentaje, contradicciones
+fiscales, precio comun y stock separado, cinco estructuras Edel observadas
+y sus variantes contradictorias, ademas de los controles existentes.
+El smoke Docker conserva la carga real de nueve evidencias de medidas y
+la resolucion E041 con `--network none`; comprueba ademas el registro
+fiscal de 14 tiendas y su herencia en una variante sintetica.
+La ejecucion CI/build/smoke del nuevo commit se enlaza en la PR.
+
+No se modifican produccion, vigilancia, manifiestos, permisos, robots,
+bloqueos, presupuestos, historicos o revisiones. Sin sincronizacion
+Vytria/Odoo, aceptacion automatica, merge, despliegue o activacion.

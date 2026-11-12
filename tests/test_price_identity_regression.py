@@ -107,7 +107,7 @@ def test_production_values_missing_caliber_comparable_by_exact_ean(pilot):
     ({"identifiers": ["PR26ZS 16K08Z 54-21"]}, "Modelo"),
     ({"brand": "Gucci"}, "Marca"),
     ({"market": ""}, "Mercado"),
-    ({"includes_tax": None}, "IVA"),
+    ({"includes_tax": False}, "IVA"),
     ({"availability": "unknown"}, "Stock"),
     ({"availability": "unavailable"}, "stock"),
     ({"currency": "USD"}, "Moneda"),
@@ -118,6 +118,16 @@ def test_strict_identity_and_commercial_rejections(pilot, fields, reason):
     assert any(reason.lower() in item.lower() for item in reasons), reasons
     assert not validation["accepted"]
     assert pilot[1].dashboard()[1]["confirmed"] == 0
+    assert pilot[3].calls == []
+
+
+def test_business_tax_is_applied_before_both_admission_and_import(pilot):
+    empty_caliber(pilot)
+    page = exact_production_page(pilot, includes_tax=None)
+    reasons, validation = check(pilot, page)
+    assert reasons == [] and validation["accepted"]
+    assert page.includes_tax is True and page.tax_policy_evidence
+    assert pilot[1].dashboard()[1]["confirmed"] == 1
     assert pilot[3].calls == []
 
 

@@ -1077,10 +1077,20 @@ def _render_web_settings(search: WebPriceSearch, row: dict) -> None:
                "si falta el mercado comercial explícito de la ficha; contradicciones requieren revisión. "
                f"Última confirmación: {row['market_verified_at'] or 'pendiente'}.")
     policies = ["unknown", "included", "excluded"]
-    tax = st.selectbox("IVA de los precios publicados", policies, index=policies.index(row["tax_policy"]),
+    from competitor_requirements import business_tax_evidence, business_tax_policy_for
+
+    business_tax = business_tax_policy_for(row["site_url"])
+    if business_tax:
+        st.caption("Política fiscal efectiva: IVA incluido, sin tipo acreditado. "
+                   + business_tax_evidence(business_tax)
+                   + ". No es una revisión individual de las condiciones de la web. "
+                   "Una declaración fiscal contradictoria requiere revisión.")
+    tax = st.selectbox("IVA de los precios publicados", policies,
+                       index=policies.index("included" if business_tax else row["tax_policy"]),
                        format_func=WEB_TAX_TEXT.get, key=f"{key}_tax",
-                       help="Solo «incluido» si se ha comprobado en la web. Sin comprobar, el IVA se "
-                            "toma de cada ficha y, si no consta, la oferta no es comparable.")
+                       disabled=business_tax is not None,
+                       help="La política de negocio registrada prevalece para los 14 competidores. "
+                            "Fuera de ese registro se necesita evidencia fiscal de la ficha o configuración.")
     st.markdown("**Límites HTTP**")
     n1, n2, n3, n4 = st.columns(4)
     pause = n1.number_input("Pausa (s)", 1.0, 3600.0, float(row["pause_seconds"]), 1.0, key=f"{key}_pause")

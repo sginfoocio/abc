@@ -14,12 +14,13 @@ from streamlit.testing.v1 import AppTest
 from price_batch import WatchBatch, batch_pairs_export
 from price_comparator import PriceComparatorStore, normalize_gtin
 from price_monitor import PriceMonitor
-from price_url_candidates import EXAMPLES, candidate_plan
+from price_url_candidates import EXAMPLES, candidate_plan, resolve_product_attributes
 from tests.test_price_locator import Site, _env, _jobs, _urls, _watch
 from tests.web_fixtures import page
 
 PRADA = {"ean": "8056597875349", "brand": "Prada", "model": "PR 27ZS", "color": "16K08Z",
          "category": "All / Gafas de Sol"}
+ROUTE_PRADA = {**PRADA, "ean": "2000000000008"}
 FORD = {"ean": "889214042422", "brand": "Tom Ford", "model": "FT5634B", "color": "001",
         "category": "All / Monturas"}
 GUCCI = {"ean": "0889652494821", "brand": "Gucci", "model": "GG1660S", "color": "001",
@@ -60,11 +61,11 @@ def test_documentary_registry_is_complete_and_contains_no_offers_or_permissions(
     ("optima", PRADA, "/gafas-de-sol/prada-pr-27zs-16k08z.html"),
     ("optima", FORD, "/gafas-graduadas/tom-ford-ft5634-b-001.html"),
     ("otticait", FORD, "/tom-ford-ft5634-b-001"),
-    ("bassol", {**PRADA, "color": "16K08A", "caliber": "54-21"},
+    ("bassol", {**ROUTE_PRADA, "color": "16K08A", "caliber": "54-21"},
      "/products/prada-pr-27zs-16k08a-54"),
-    ("visual", {**PRADA, "color": "16K08A", "caliber": "54"},
+    ("visual", {**ROUTE_PRADA, "color": "16K08A", "caliber": "54"},
      "/products/prada-pr-27zs-16k08a-54"),
-    ("visio", {**PRADA, "color": "16K08A", "caliber": "54-21"},
+    ("visio", {**ROUTE_PRADA, "color": "16K08A", "caliber": "54-21"},
      "/gafas-de-sol/todas-las-solares/pr27zs-16k08a-54-21.html"),
 ])
 def test_bounded_generation_and_specific_aliases(shop, product, expected):
@@ -80,32 +81,32 @@ def test_bounded_generation_and_specific_aliases(shop, product, expected):
 
 @pytest.mark.parametrize("shop", ["bassol", "visual", "visio"])
 def test_no_measurement_guesses_from_other_colour_or_gtin(shop):
-    plan = plan_for({**PRADA, "color": "16K08A"}, shop)
+    plan = plan_for({**ROUTE_PRADA, "color": "16K08A"}, shop)
     assert not plan.runnable
     assert plan.reason_code == "missing_attribute" and "calibre" in plan.reason
     if shop == "visio":
         assert "puente" in plan.reason
-    other_ean = plan_for({**PRADA, "ean": "8056597875226", "color": "16K08A"}, shop)
+    other_ean = plan_for({**ROUTE_PRADA, "ean": "8056597875226", "color": "16K08A"}, shop)
     assert not other_ean.runnable
 
 
 def test_bridge_is_required_only_to_construct_visio_and_is_not_invented():
-    plan = plan_for({**PRADA, "color": "16K08A", "caliber": "54"}, "visio")
+    plan = plan_for({**ROUTE_PRADA, "color": "16K08A", "caliber": "54"}, "visio")
     assert not plan.runnable and "puente" in plan.reason and "calibre" not in plan.reason
-    assert len(plan_for({**PRADA, "color": "16K08A", "caliber": "54"}, "bassol").runnable) == 1
+    assert len(plan_for({**ROUTE_PRADA, "color": "16K08A", "caliber": "54"}, "bassol").runnable) == 1
 
 
 @pytest.mark.parametrize("product,expected", [
-    ({**PRADA, "brand": "Tom Ford", "model": "FT1044", "color": "01E", "caliber": "60-12"},
+    ({**ROUTE_PRADA, "brand": "Tom Ford", "model": "FT1044", "color": "01E", "caliber": "60-12"},
      "https://www.visiofactory.es/gafas-de-sol/todas-las-solares/ft1044-s-01e-60-12.html"),
-    ({**PRADA, "brand": "Tom Ford", "model": "FT1044/S", "color": "01E",
+    ({**ROUTE_PRADA, "brand": "Tom Ford", "model": "FT1044/S", "color": "01E",
       "caliber": "60", "bridge": "12"},
      "https://www.visiofactory.es/gafas-de-sol/todas-las-solares/ft1044-s-01e-60-12.html"),
-    ({**PRADA, "brand": "Miu Miu", "model": "MU 52YS", "color": "ZVN5D1", "caliber": "54-21"},
+    ({**ROUTE_PRADA, "brand": "Miu Miu", "model": "MU 52YS", "color": "ZVN5D1", "caliber": "54-21"},
      "https://www.visiofactory.es/gafas-de-sol/todas-las-solares/mu-52ys-zvn-5d1-54-21.html"),
-    ({**PRADA, "brand": "Ray Ban", "model": "RB2140", "color": "902", "caliber": "50"},
+    ({**ROUTE_PRADA, "brand": "Ray Ban", "model": "RB2140", "color": "902", "caliber": "50"},
      "https://www.visiofactory.es/gafas-de-sol/todas-las-solares/rb2140-902-50.html"),
-    ({**PRADA, "brand": "Ray Ban", "model": "RB2140", "color": "902/58", "caliber": "50-22"},
+    ({**ROUTE_PRADA, "brand": "Ray Ban", "model": "RB2140", "color": "902/58", "caliber": "50-22"},
      "https://www.visiofactory.es/gafas-de-sol/todas-las-solares/rb2140-902-58-50-22.html"),
 ])
 def test_visio_additional_documented_formats_use_explicit_attributes(product, expected):
@@ -122,11 +123,11 @@ def test_visio_additional_documented_formats_use_explicit_attributes(product, ex
 
 
 @pytest.mark.parametrize("product,reason", [
-    ({**PRADA, "brand": "Tom Ford", "model": "FT1044", "color": "01E", "caliber": "60"},
+    ({**ROUTE_PRADA, "brand": "Tom Ford", "model": "FT1044", "color": "01E", "caliber": "60"},
      "puente"),
-    ({**PRADA, "brand": "Miu Miu", "model": "MU52YS", "color": "ZVN5D1", "caliber": "54"},
+    ({**ROUTE_PRADA, "brand": "Miu Miu", "model": "MU52YS", "color": "ZVN5D1", "caliber": "54"},
      "puente"),
-    ({**PRADA, "brand": "Ray Ban", "model": "RB2140", "color": "902/58", "caliber": "50"},
+    ({**ROUTE_PRADA, "brand": "Ray Ban", "model": "RB2140", "color": "902/58", "caliber": "50"},
      "puente"),
 ])
 def test_visio_additional_formats_do_not_infer_missing_bridge(product, reason):
@@ -138,9 +139,9 @@ def test_visio_additional_formats_do_not_infer_missing_bridge(product, reason):
 
 
 def test_visio_additional_formats_remain_narrow_and_do_not_infer_colour_aliases():
-    unsupported_model = {**PRADA, "brand": "Tom Ford", "model": "FT1045", "color": "01E",
+    unsupported_model = {**ROUTE_PRADA, "brand": "Tom Ford", "model": "FT1045", "color": "01E",
                          "caliber": "60-12"}
-    unsupported_miu_colour = {**PRADA, "brand": "Miu Miu", "model": "MU52YS", "color": "1AB5S0",
+    unsupported_miu_colour = {**ROUTE_PRADA, "brand": "Miu Miu", "model": "MU52YS", "color": "1AB5S0",
                               "caliber": "54-21"}
 
     assert not plan_for(unsupported_model, "visio").runnable
@@ -152,7 +153,7 @@ def test_only_dimensions_associated_to_exact_gtin_support_new_sized_candidate():
     original = dict(PRADA)
     plan = plan_for(PRADA, "bassol")
     assert urls(plan) == ["https://www.opticabassol.com/products/prada-pr-27zs-16k08z-54"]
-    assert plan.runnable[0].attributes["dimension_source"].startswith("E041:")
+    assert plan.runnable[0].attributes["dimension_source"] == "E041"
     assert PRADA == original and "caliber" not in PRADA
 
 
@@ -184,6 +185,79 @@ def test_ean_linked_measurement_evidence_drives_candidates_with_traceable_source
     assert visio.attributes["dimension_source"] == evidence["8056597886956"]["fuente_medidas"]
 
 
+def test_documented_measurements_reach_preview_and_synthetic_locator_from_sqlite(tmp_path):
+    ean = "0889652429717"
+    expected_url = "https://domanci.com/es/gafas-de-sol/saint-laurent-sl-596-dune-006-58.html"
+    product = {"ean": ean, "brand": "Saint Laurent", "model": "SL 596 DUNE",
+               "color": "006", "category": "Sol"}
+    resolved = resolve_product_attributes(product)
+    assert not resolved.conflict
+    assert (resolved.product["caliber"], resolved.product["measurement_source"]) == (
+        "58", "evidencia_7_ean_pendientes_20261110.json: UPC indexado 889652429717, "
+        "control prd1971610 y selectedSize 58")
+
+    plan = candidate_plan(product, "domanci.com")
+    assert [candidate.url for candidate in plan.runnable] == [expected_url]
+
+    site = Site(base="https://domanci.com")
+    site.pages[expected_url] = page(
+        name="Saint Laurent SL 596 DUNE 006 58", brand="Saint Laurent", gtin=ean, price=216,
+    )
+    store, _, locator, _, cid = _env(
+        tmp_path, site, name="Domanci", methods=("ficha",), template=None,
+    )
+    _watch(store, [(ean, "Saint Laurent", "SL 596 DUNE", "006", "")])
+    preview = WatchBatch(store, locator=locator).preview([ean], [cid])
+    assert len(preview) == 1 and bool(preview.iloc[0]["ready"])
+
+    report = locator.run([cid], max_jobs=1)
+
+    assert report.states["done"] == 1
+    assert site.calls.count(expected_url) == 1
+    with store._connect() as connection:
+        recorded = connection.execute(
+            "SELECT candidate_evidence FROM discovery_index WHERE competitor_id=? AND url=?",
+            (cid, expected_url),
+        ).fetchone()
+    evidence = json.loads(recorded["candidate_evidence"])[ean]
+    assert evidence["attributes"]["caliber"] == "58"
+    assert evidence["attributes"]["measurement_association"] == "indexed_upc_selected_size"
+
+
+def test_measurement_evidence_cannot_override_contradictory_catalogue_identity():
+    product = {"ean": "0889652429717", "brand": "Saint Laurent",
+               "model": "SL 908", "color": "002", "category": "Sol"}
+
+    resolution = resolve_product_attributes(product)
+    plan = candidate_plan(product, "domanci.com")
+
+    assert resolution.conflict
+    assert plan.reason_code == "measurement_conflict"
+    assert not plan.candidates
+
+
+def test_model_color_only_measurements_do_not_fill_an_unlinked_ean():
+    product = {"ean": "0805289126577", "brand": "Ray Ban", "model": "RB2140",
+               "color": "901", "category": "Sol"}
+    previously_enriched = {
+        **product,
+        "caliber": "50",
+        "bridge": "22",
+        "measurement_source": "Ejemplo Visio aportado en la solicitud #125",
+        "measurement_association": "ean_specific_manual",
+    }
+
+    resolved = resolve_product_attributes(previously_enriched)
+    plan = candidate_plan(product, "visiofactory.es")
+
+    assert not resolved.conflict
+    assert "caliber" not in resolved.product and "bridge" not in resolved.product
+    assert resolved.product["measurement_association"] == "model_color_only"
+    assert "no a GTIN" in resolved.product["measurement_limitation"]
+    assert plan.reason_code == "needs_authorized_discovery" and not plan.runnable
+    assert "Medidas no asociadas al UPC" in plan.reason
+
+
 @pytest.mark.parametrize("shop,brand,category", [
     ("optima", "Gucci", "sol"), ("optima", "Prada", "montura"),
     ("bassol", "Tom Ford", "sol"), ("visual", "Gucci", "sol"),
@@ -191,18 +265,18 @@ def test_ean_linked_measurement_evidence_drives_candidates_with_traceable_source
     ("visio", "Ray Ban", "sol"), ("visio", "Prada", "montura"),
 ])
 def test_no_generation_outside_demonstrated_brand_category(shop, brand, category):
-    plan = plan_for({**PRADA, "brand": brand, "category": category, "model": "NEW123", "caliber": "54-21"}, shop)
+    plan = plan_for({**ROUTE_PRADA, "brand": brand, "category": category, "model": "NEW123", "caliber": "54-21"}, shop)
     assert not plan.runnable and plan.reason_code == "needs_authorized_discovery"
 
 
 def test_aliases_do_not_expand_to_other_products():
     assert urls(plan_for(PRADA, "amevista")) == ["https://www.amevista.com/es/prada-0pr-27zs-16k08z"]
-    documented_pr = plan_for({**PRADA, "color": "19J09Z"}, "amevista")
+    documented_pr = plan_for({**ROUTE_PRADA, "color": "19J09Z"}, "amevista")
     assert urls(documented_pr) == ["https://www.amevista.com/es/prada-pr-27zs-19j09z"]
-    generated_pr = plan_for({**PRADA, "model": "PR 65ZS", "color": "ZVN09T"}, "amevista")
+    generated_pr = plan_for({**ROUTE_PRADA, "model": "PR 65ZS", "color": "ZVN09T"}, "amevista")
     assert urls(generated_pr) == ["https://www.amevista.com/es/prada-pr-65zs-zvn09t"]
     assert generated_pr.runnable[0].attributes["model_alias_rule"].startswith("Observed PR model prefix")
-    tiffany = {**PRADA, "brand": "Tiffany & Co.", "model": "TF3104D", "color": "6216S4",
+    tiffany = {**ROUTE_PRADA, "brand": "Tiffany & Co.", "model": "TF3104D", "color": "6216S4",
                "ean": "8056262010730"}
     assert urls(plan_for(tiffany, "amevista")) == [
         "https://www.amevista.com/es/tiffany-tf3104d-6216s4"
@@ -215,7 +289,7 @@ def test_aliases_do_not_expand_to_other_products():
 
 
 @pytest.mark.parametrize("product,expected,evidence", [
-    ({**PRADA, "model": "PR 15WS", "color": "01R0A6"},
+    ({**ROUTE_PRADA, "model": "PR 15WS", "color": "01R0A6"},
      "https://www.amevista.com/es/prada-pr-15ws-01r0a6", ["E017", "E018"]),
     ({**FORD, "brand": "Tom Ford", "model": "FT0711", "color": "01A",
       "category": "All / Gafas de Sol"},
@@ -234,7 +308,7 @@ def test_amevista_uses_documented_brand_model_color_patterns(product, expected, 
     ("Tom Ford", "montura"), ("Bottega Veneta", "montura"), ("Ray Ban", "montura"),
 ])
 def test_amevista_excludes_undocumented_brand_category_combinations(brand, category):
-    product = {**PRADA, "brand": brand, "category": category, "model": "MODEL123", "color": "001"}
+    product = {**ROUTE_PRADA, "brand": brand, "category": category, "model": "MODEL123", "color": "001"}
 
     plan = plan_for(product, "amevista")
 
@@ -280,9 +354,9 @@ def test_seven_pending_products_get_only_documented_manual_routes(product, expec
 
 
 def test_rayban_route_aliases_do_not_generalize_to_other_models_or_colors():
-    unknown_model = {**PRADA, "brand": "Ray Ban", "model": "RB4441D", "color": "667787"}
-    unknown_color = {**PRADA, "brand": "Ray Ban", "model": "RB4472", "color": "002"}
-    unobserved_rb2140_color = {**PRADA, "brand": "Ray Ban", "model": "RB2140", "color": "90158"}
+    unknown_model = {**ROUTE_PRADA, "brand": "Ray Ban", "model": "RB4441D", "color": "667787"}
+    unknown_color = {**ROUTE_PRADA, "brand": "Ray Ban", "model": "RB4472", "color": "002"}
+    unobserved_rb2140_color = {**ROUTE_PRADA, "brand": "Ray Ban", "model": "RB2140", "color": "90158"}
 
     assert not plan_for(unknown_model, "amevista").runnable
     assert not plan_for(unknown_color, "amevista").runnable
@@ -290,7 +364,7 @@ def test_rayban_route_aliases_do_not_generalize_to_other_models_or_colors():
 
 
 def test_edel_saint_laurent_route_preserves_commercial_model_names_and_scope():
-    dune = {**PRADA, "brand": "Saint Laurent", "model": "SL 596 DUNE", "color": "003"}
+    dune = {**ROUTE_PRADA, "brand": "Saint Laurent", "model": "SL 596 DUNE", "color": "003"}
     unknown = {**dune, "model": "SL 999"}
 
     assert urls(plan_for(dune, "edel")) == [
@@ -326,7 +400,7 @@ def test_amevista_manual_brand_category_patterns_are_attribute_based(product, ex
 
 
 def test_amevista_miu_miu_pattern_is_category_scoped():
-    sun = {**PRADA, "brand": "Miu Miu", "model": "MU 04ZS", "color": "14L4I0",
+    sun = {**ROUTE_PRADA, "brand": "Miu Miu", "model": "MU 04ZS", "color": "14L4I0",
            "category": "All / Gafas de Sol"}
     frames = {**sun, "model": "MU 01XV", "color": "VAU1O1", "category": "All / Monturas"}
 
@@ -509,18 +583,19 @@ def test_opaque_ids_are_mapped_not_calculated_and_locales_are_not_rewritten():
     assert len(blickers.runnable) == 1
     assert "/en-gb/" in urls(blickers)[0] and "5649966192263168" in urls(blickers)[0]
     assert "5313688741478400" not in urls(blickers)[0]
-    other = plan_for({**PRADA, "color": "11L08Z"}, "blickers")
+    other = plan_for({**ROUTE_PRADA, "color": "11L08Z"}, "blickers")
     assert "5313688741478400" in urls(other)[0]
-    assert not plan_for({**PRADA, "color": "002"}, "blickers").runnable
+    assert not plan_for({**ROUTE_PRADA, "color": "002"}, "blickers").runnable
     edel = plan_for(PRADA, "edel")
     assert urls(edel)[0].endswith("?selectedSize=1907958")
-    assert "caliber" not in edel.runnable[0].attributes
-    unobserved_variant = plan_for({**PRADA, "color": "002", "caliber": "54"}, "edel")
+    assert edel.runnable[0].attributes["measurement_source"] == "E041"
+    assert edel.runnable[0].attributes["selectedSize_product_id"] == "1907958"
+    unobserved_variant = plan_for({**ROUTE_PRADA, "color": "002", "caliber": "54"}, "edel")
     assert urls(unobserved_variant) == [
         "https://www.edel-optics.es/PR-27ZS-002-de-Prada.html"
     ]
     assert "selectedSize" not in unobserved_variant.runnable[0].url
-    assert "caliber" not in unobserved_variant.runnable[0].attributes
+    assert unobserved_variant.runnable[0].attributes["caliber"] == "54"
 
 
 def test_commercial_names_and_dune_opt_remain_distinct():
@@ -540,7 +615,7 @@ def test_commercial_names_and_dune_opt_remain_distinct():
     ("Miu Miu", "sol"), ("Bottega Veneta", "sol"), ("Prada", "montura"),
 ])
 def test_congafas_supplied_pattern_is_limited_to_documented_prada_sunglasses(brand, category):
-    product = {**PRADA, "brand": brand, "model": "MODEL123", "color": "001",
+    product = {**ROUTE_PRADA, "brand": brand, "model": "MODEL123", "color": "001",
                "category": category}
 
     plan = plan_for(product, "congafas")
@@ -551,7 +626,7 @@ def test_congafas_supplied_pattern_is_limited_to_documented_prada_sunglasses(bra
 
 
 def test_congafas_supplied_pattern_remains_available_for_prada_sunglasses():
-    product = {**PRADA, "model": "PR 99ZS", "color": "01A"}
+    product = {**ROUTE_PRADA, "model": "PR 99ZS", "color": "01A"}
 
     plan = plan_for(product, "congafas")
 
@@ -573,7 +648,7 @@ def test_conflicting_documentary_identifiers_and_content_never_become_runnable()
 
 def test_parent_handles_and_historical_urls_are_pending_not_product_absence():
     for shop in ("celine", "universitaria"):
-        plan = plan_for({**PRADA, "model": "PR 65ZS", "color": "ZVN09T"}, shop)
+        plan = plan_for({**ROUTE_PRADA, "model": "PR 65ZS", "color": "ZVN09T"}, shop)
         if shop == "universitaria":
             assert any("PRADA-65ZS.html" in candidate.url and not candidate.runnable for candidate in plan.candidates)
         assert plan.reason_code == "needs_authorized_discovery"
@@ -585,13 +660,18 @@ def test_parent_handles_and_historical_urls_are_pending_not_product_absence():
     assert "histórica" in domanci.reason and "no demuestra ausencia" in domanci.reason
 
 
-def test_two_rb2140_upcs_are_kept_separate_without_assigning_dimensions():
+def test_rb2140_measurements_are_scoped_to_the_corroborated_upc():
     products = [{**PRADA, "ean": ean, "brand": "Ray Ban", "model": "RB2140", "color": "901"}
                 for ean in ("805289126577", "805289126584")]
     plans = [plan_for(product, "visio") for product in products]
-    assert all(not plan.runnable for plan in plans)
     assert len({plan.candidates[0].attributes["ean"] for plan in plans}) == 2
-    assert all("caliber" not in plan.candidates[0].attributes for plan in plans)
+    assert not plans[0].runnable and plans[0].reason_code == "needs_authorized_discovery"
+    assert "caliber" not in plans[0].candidates[0].attributes
+    assert "model_color_only" in plans[0].candidates[0].attributes["measurement_association"]
+    assert plans[1].runnable
+    assert plans[1].runnable[0].attributes["caliber"] == "54"
+    assert plans[1].runnable[0].attributes["bridge"] == "18"
+    assert plans[1].runnable[0].attributes["measurement_association"] == "ean_variant_corroborated"
 
 
 @pytest.mark.parametrize("shop,brand,model,color,ean,category", [

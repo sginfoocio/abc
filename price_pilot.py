@@ -791,9 +791,12 @@ class PricePilot:
             raise PilotError("Ya hay otra ejecución del piloto") from exc
 
     def _record(self, search, config: dict, outcome, *, validation: dict | None = None) -> list[str]:
+        from price_web_extract import apply_tax_policy, resolve_market
+
         page = outcome.page
         if page is None:
             return [outcome.reason or outcome.state]
+        apply_tax_policy(page, page.configured_tax_policy)
         product = search._product(outcome.ean)
         match = classify(product, page.candidate())
         normalized = match.normalized
@@ -805,7 +808,6 @@ class PricePilot:
             reasons.append("Sin stock" if page.availability == "unavailable" else "Stock desconocido")
         if page.includes_tax is not True:
             reasons.append("IVA sin confirmar" if page.includes_tax is None else "Precio sin IVA")
-        from price_web_extract import resolve_market
         market, market_note, conflict = resolve_market(page, config)
         market_valid = market == "ES" and not conflict
         currency_valid = page.currency == "EUR" and config["currency"] in ("", "EUR")

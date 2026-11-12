@@ -112,7 +112,18 @@ jobs:
           import app_exports, app_navigation, app_pages.alerts, app_pages.luxoptica
           import provider_images, provider_images_ui, provider_odoo_orders, repository_catalog_readonly, marcolin_images, safilo_images, nuorder_images
           import cloud_dashboard, kering_images_ui, kering_portal, kering_jobs, graph_mail_downloader, abcd_snapshots, image_exports, luxoptica_auto_upload, repository_storage, market_publication
-          import price_pilot, price_scheduler, price_web, price_monitor, app_pages.price_comparator
+          import price_pilot, price_scheduler, price_web, price_monitor, price_url_candidates, app_pages.price_comparator
+          from competitor_requirements import COMPETITORS, business_tax_policy_for
+          policies = [business_tax_policy_for(url) for _, url in COMPETITORS]
+          assert len(policies) == 14 and all(p['includes_tax'] and p['vat_rate'] is None for p in policies)
+          assert business_tax_policy_for('https://unregistered.example/es/') is None
+          import json
+          from price_web_extract import extract_product, select_product_variant
+          probe = {'@type': 'ProductGroup', 'hasVariant': [{'@type': 'Product', 'gtin13': '0805289126577'}]}
+          probe_html = '<script type=\\\"application/ld+json\\\">' + json.dumps(probe) + '</script>'
+          probe_page = select_product_variant(extract_product(probe_html, 'https://www.amevista.com/es/probe'),
+                                              {'ean': '0805289126577'})
+          assert probe_page.includes_tax is True and probe_page.vat_rate is None and probe_page.tax_policy_evidence
           from build_info import load_build_info
           info = load_build_info()
           assert info['commit'] == os.environ['EXPECTED_COMMIT']
@@ -122,6 +133,13 @@ jobs:
           from build_info import footer_text
           assert footer_text(info) == 'Cloud v%s \u00b7 commit %s' % (os.environ['EXPECTED_VERSION'], os.environ['EXPECTED_COMMIT'][:7])
           assert cloud_dashboard.LOGO.is_file()
+          assert len(price_url_candidates.documented_measurement_records()) == 9
+          product = {'ean': '8056597875349', 'brand': 'Prada', 'model': 'PR 27ZS', 'color': '16K08Z'}
+          resolved = price_url_candidates.resolve_product_attributes(product)
+          assert not resolved.conflict
+          assert (resolved.product['caliber'], resolved.product['bridge']) == ('54', '21')
+          assert resolved.evidence['fuente_medidas'] == 'E041'
+          assert 'caliber' not in product
           print('Artifact identity and runtime imports verified; network disabled')
           "
           VOLUME="cloud-identity-smoke-${{ github.run_id }}-${{ github.run_attempt }}"

@@ -9,7 +9,7 @@ from tests.test_price_locator import Site, _env, _jobs, _urls, _watch
 from tests.web_fixtures import page
 
 
-PRODUCT = {"ean": "8056597875349", "brand": "Miu Miu", "model": "MU 11ZS", "color": "16K5S0",
+PRODUCT = {"ean": "2000000000008", "brand": "Miu Miu", "model": "MU 11ZS", "color": "16K5S0",
            "category": "sol", "caliber": "51-21"}
 
 

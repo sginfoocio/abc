@@ -2,7 +2,7 @@ ean;marca;modelo;color;calibre;puente;fuente_medidas;asociacion_medidas;limitaci
 8056597875349;Prada;PR 27ZS;16K08Z;54;21;E041;gtin_exact_match;Contenido indexado, no consulta HTTP vigente.
 0889214402530;Tom Ford;FT1044;01E;60;12;Ejemplo Visio aportado en la solicitud #125;ean_specific_manual;E031 contiene contradicción entre título y contenido indexado; solo sustenta la hipótesis de ruta, no identidad verificada.
 8056597886956;Miu Miu;MU 52YS;ZVN5D1;54;21;Ejemplo Visio aportado en la solicitud #125;ean_specific_manual;Candidata documental, pendiente de validación del motor.
-0805289126577;Ray Ban;RB2140;901;50;22;Ejemplo Visio aportado en la solicitud #125;ean_specific_manual;E043 solo asocia medidas a modelo/color y no a GTIN; conservar ese conflicto como pendiente de revisión.
+0805289126577;Ray Ban;RB2140;901;50;22;Ejemplo Visio aportado en la solicitud #125;model_color_only;E043 solo asocia medidas a modelo/color y no a GTIN; conservar ese conflicto como pendiente de revisión.
 0805289126584;Ray Ban;RB2140;901;54;18;evidencia_7_ean_pendientes_20261110.json + https://www.afflelou.es/gafas-de-sol/ray-ban/wayfarer-0rb2140-901-5418-negro.html;ean_variant_corroborated;La asociación sigue pendiente de validación estructurada en la ficha competidora.
 8056262833902;Ray Ban;RB4472;13592;48;;evidencia_7_ean_pendientes_20261110.json + https://www.tusgafasdesol.com/gafas-de-sol/ray-ban/ray-ban-rb4472-1359-2-48.html;ean_caliber_corroborated;No se recupera puente: la fuente no lo vincula al EAN.
 0889652429717;Saint Laurent;SL 596 DUNE;006;58;;evidencia_7_ean_pendientes_20261110.json: UPC indexado 889652429717, control prd1971610 y selectedSize 58;indexed_upc_selected_size;UPC de página indexada, no visible en la lectura actual; puente no acreditado.

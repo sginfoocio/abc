@@ -74,7 +74,7 @@ def test_same_ean_with_other_caliber_is_informational(tmp_path):
     site, store, search, cid = _setup(tmp_path)
     site.add(GOOD, page(name="Prada PR 27ZS 16K08Z 52-20", price=239, gtin=EAN))
     sub = search.submit_url(EAN, cid, GOOD)
-    assert (sub.state, sub.reason) == ("verified", "vat_unconfirmed")
+    assert (sub.state, sub.reason) == ("verified", "")
     assert "Calibre informativo" in sub.outcome.detail
     assert _offers(store) == 1
 
@@ -107,13 +107,13 @@ def test_page_without_price_keeps_the_url_and_asks_for_extractor_review(tmp_path
     assert not search.needs_url(EAN, cid)
 
 
-def test_unconfirmed_vat_is_stored_but_never_comparable(tmp_path):
+def test_business_vat_applies_to_verified_page_without_per_page_tax(tmp_path):
     site, store, search, cid = _setup(tmp_path)
     site.add(GOOD, prada_page(EAN, pretax=None))
     sub = search.submit_url(EAN, cid, GOOD)
-    assert (sub.reason, sub.action) == ("vat_unconfirmed", "review")
-    assert "IVA no está confirmado" in sub.message
-    assert _comparable(store, search) == {}
+    assert (sub.reason, sub.action) == ("", "none")
+    assert sub.outcome.page.tax_policy_evidence and sub.outcome.page.vat_rate is None
+    assert _comparable(store, search)
 
 
 @pytest.mark.parametrize("overrides", [{"market": None}, {"currency": "USD"}])
@@ -332,9 +332,9 @@ def test_ui_extraction_problem_does_not_ask_for_another_url(ui):
     assert not [t for t in app.text_input if t.key == f"web_url_{EAN}_{cid}"]
 
 
-def test_ui_verified_page_with_unconfirmed_vat_is_a_warning_not_success(ui):
+def test_ui_verified_page_uses_registered_business_tax_evidence(ui):
     site, store, search, cid = ui
     site.add(GOOD, prada_page(EAN, pretax=None))
     app = _submit(_find(AppTest.from_string(SCRIPT).run(timeout=90)), cid, GOOD)
-    assert any("IVA no está confirmado" in w.value for w in app.warning)
-    assert not any("URL verificada y guardada" in s.value for s in app.success)
+    assert not any("IVA no está confirmado" in w.value for w in app.warning)
+    assert any("URL verificada y guardada" in s.value for s in app.success)

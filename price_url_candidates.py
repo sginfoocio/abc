@@ -6,11 +6,15 @@ Only the existing governed ficha reader and commercial classifier may do that in
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+import csv
+from functools import lru_cache
+from pathlib import Path
 import re
+from typing import Any, Mapping
 from urllib.parse import parse_qs, urlparse
 
 from price_comparator import normalize_gtin
-from price_references import key, model_key, normalize_caliber, tokens
+from price_references import compare_calibers, extract_caliber, key, model_key, normalize_caliber, tokens
 
 REVIEW_DATE = "2026-11-04"
 REVIEW_BASE = "92243628b4e925ba9d549b076580726c383a43ac"
@@ -25,6 +29,15 @@ AMEVISTA_MANUAL_EVIDENCE = {
 AMEVISTA_RAYBAN_EVIDENCE = "manual:amevista-ray-ban-rb2140-rb4472-routes"
 EDEL_MANUAL_EVIDENCE = "manual:edel-selected-variant-observations"
 VISIO_FORMAT_EVIDENCE = "user:visio-public-fiche-format-examples"
+MEASUREMENT_EVIDENCE_PATH = Path(__file__).resolve().parent / "docs" / "PRICE_COVERAGE_MEASUREMENT_EVIDENCE.csv"
+MEASUREMENT_ASSOCIATIONS = {
+    "gtin_exact_match",
+    "ean_specific_manual",
+    "ean_variant_corroborated",
+    "ean_caliber_corroborated",
+    "indexed_upc_selected_size",
+    "model_color_only",
+}
 SUPPLIED_PATTERNS = {
     "domanci": (
         "https://domanci.com/es/gafas-de-sol/miu-miu-mu-11zs-16k5s0-51.html",
@@ -47,6 +60,101 @@ class Example:
     url: str
     gtins: tuple[str, ...] = ()
     caution: str = ""
+
+
+@dataclass(frozen=True)
+class AttributeResolution:
+    product: dict[str, Any]
+    evidence: dict[str, str] | None = None
+    conflict: str = ""
+
+
+@lru_cache(maxsize=1)
+def _measurement_evidence() -> dict[str, dict[str, str]]:
+    required = {"ean", "marca", "modelo", "color", "calibre", "puente",
+                "fuente_medidas", "asociacion_medidas", "limitacion"}
+    records: dict[str, dict[str, str]] = {}
+    with MEASUREMENT_EVIDENCE_PATH.open(encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream, delimiter=";")
+        if not required <= set(reader.fieldnames or ()):
+            raise ValueError("El CSV de medidas no cumple el contrato de columnas.")
+        for line, row in enumerate(reader, 2):
+            ean = normalize_gtin(row["ean"])
+            if ean != row["ean"].strip() or ean in records:
+                raise ValueError(f"EAN de medidas no canónico o duplicado en fila {line}: {row['ean']}")
+            caliber = normalize_caliber(row["calibre"])
+            bridge = row["puente"].strip()
+            if not all(row[name].strip() for name in
+                       ("marca", "modelo", "color", "fuente_medidas", "asociacion_medidas", "limitacion")):
+                raise ValueError(f"Falta identidad o procedencia de medidas en fila {line}.")
+            if not caliber or row["asociacion_medidas"].strip() not in MEASUREMENT_ASSOCIATIONS:
+                raise ValueError(f"Calibre o asociación de medidas no reconocidos en fila {line}.")
+            if bridge and (not re.fullmatch(r"\d{1,2}", bridge)
+                           or (caliber.partition("-")[2] and caliber.partition("-")[2] != bridge)):
+                raise ValueError(f"Puente no válido o contradictorio en fila {line}.")
+            records[ean] = {name: value.strip() for name, value in row.items() if name and value is not None}
+    return records
+
+
+def documented_measurement_records() -> dict[str, dict[str, str]]:
+    """Return a copy of the validated, EAN-scoped measurement evidence registry."""
+    return {ean: dict(record) for ean, record in _measurement_evidence().items()}
+
+
+def resolve_product_attributes(product: Mapping[str, Any]) -> AttributeResolution:
+    """Overlay only validated dimensions documented for this exact EAN and catalogue identity."""
+    resolved = dict(product)
+    ean = normalize_gtin(resolved.get("ean"))
+    evidence = _measurement_evidence().get(ean)
+    if evidence is None:
+        return AttributeResolution(resolved)
+    if evidence["asociacion_medidas"] == "model_color_only":
+        if resolved.get("measurement_source") == evidence["fuente_medidas"]:
+            resolved.pop("caliber", None)
+            resolved.pop("bridge", None)
+        resolved["measurement_source"] = evidence["fuente_medidas"]
+        resolved["measurement_association"] = evidence["asociacion_medidas"]
+        resolved["measurement_limitation"] = evidence["limitacion"]
+        return AttributeResolution(resolved, dict(evidence))
+
+    identity_matches = (
+        key(resolved.get("brand")) == key(evidence["marca"])
+        and model_key(resolved.get("model")) == model_key(evidence["modelo"])
+        and key(resolved.get("color")) == key(evidence["color"])
+    )
+    if not identity_matches:
+        return AttributeResolution(
+            resolved, dict(evidence),
+            f"La evidencia de medidas para {ean} contradice marca, modelo o color del catálogo.",
+        )
+
+    existing_caliber = normalize_caliber(resolved.get("caliber"))
+    evidence_caliber = normalize_caliber(evidence["calibre"])
+    if resolved.get("caliber") and not existing_caliber:
+        return AttributeResolution(resolved, dict(evidence), f"Calibre de catálogo no reconocido para {ean}.")
+    if existing_caliber and compare_calibers(existing_caliber, evidence_caliber) == "different":
+        return AttributeResolution(resolved, dict(evidence), f"Calibre de catálogo contradictorio para {ean}.")
+
+    existing_bridge = str(resolved.get("bridge") or "").strip()
+    evidence_bridge = evidence["puente"]
+    if existing_bridge and not re.fullmatch(r"\d{1,2}", existing_bridge):
+        return AttributeResolution(resolved, dict(evidence), f"Puente de catálogo no reconocido para {ean}.")
+    if existing_bridge and evidence_bridge and existing_bridge != evidence_bridge:
+        return AttributeResolution(resolved, dict(evidence), f"Puente de catálogo contradictorio para {ean}.")
+    if resolved.get("measurement_source") and resolved["measurement_source"] != evidence["fuente_medidas"]:
+        return AttributeResolution(resolved, dict(evidence), f"Procedencia de medidas contradictoria para {ean}.")
+    if (resolved.get("measurement_association")
+            and resolved["measurement_association"] != evidence["asociacion_medidas"]):
+        return AttributeResolution(resolved, dict(evidence), f"Asociación de medidas contradictoria para {ean}.")
+
+    if not existing_caliber or (existing_caliber.isdigit() and "-" in evidence_caliber):
+        resolved["caliber"] = evidence_caliber
+    if not existing_bridge and evidence_bridge:
+        resolved["bridge"] = evidence_bridge
+    resolved["measurement_source"] = evidence["fuente_medidas"]
+    resolved["measurement_association"] = evidence["asociacion_medidas"]
+    resolved["measurement_limitation"] = evidence["limitacion"]
+    return AttributeResolution(resolved, dict(evidence))
 
 
 # Transcribed documentary URLs, not fixtures purporting to be captured shop responses.
@@ -304,6 +412,10 @@ def _visio_format_plan(product: dict, brand: str, model: str) -> CandidatePlan |
         attributes["bridge"] = bridge
     if product.get("measurement_source"):
         attributes["dimension_source"] = str(product["measurement_source"])
+    if product.get("measurement_association"):
+        attributes["dimension_association"] = str(product["measurement_association"])
+    if product.get("measurement_limitation"):
+        attributes["dimension_limitation"] = str(product["measurement_limitation"])
     attributes["variant_resolution"] = (
         "URL format only; ficha identity, EAN, selected variant, price and availability remain unverified"
     )
@@ -330,6 +442,10 @@ def candidate_plan(product: dict, domain: str) -> CandidatePlan:
     missing = [name for name in ("ean", "brand", "model", "color", "category") if not product.get(name)]
     if missing:
         return CandidatePlan(reason_code="missing_attribute", reason="Falta: " + ", ".join(missing))
+    resolution = resolve_product_attributes(product)
+    if resolution.conflict:
+        return CandidatePlan(reason_code="measurement_conflict", reason=resolution.conflict)
+    product = resolution.product
     ean = normalize_gtin(product["ean"])
     category = _category(product["category"])
     if not category:
@@ -337,6 +453,11 @@ def candidate_plan(product: dict, domain: str) -> CandidatePlan:
     brand, model, color = key(product["brand"]), model_key(product["model"]), key(product["color"])
     attributes = {name: str(product[name]) for name in ("ean", "brand", "model", "color", "category")}
     attributes["ean"] = ean
+    for name in ("caliber", "bridge", "measurement_source", "measurement_association", "measurement_limitation"):
+        if product.get(name):
+            attributes[name] = str(product[name])
+    if product.get("measurement_source"):
+        attributes["dimension_source"] = str(product["measurement_source"])
     # An explicitly sized target can use the supplied Domanci route without treating
     # an old historical URL (which did not associate its size to this EAN) as verified.
     if shop == "domanci" and normalize_caliber(product.get("caliber", "")):
@@ -351,6 +472,15 @@ def candidate_plan(product: dict, domain: str) -> CandidatePlan:
         if example.color and key(example.color) != color:
             continue
         reason = example.caution
+        if reason and "medidas no asociadas al upc" in reason.casefold():
+            target_caliber = normalize_caliber(product.get("caliber"))
+            route_caliber = extract_caliber(urlparse(example.url).path)
+            has_ean_measurement = product.get("measurement_association") in (
+                MEASUREMENT_ASSOCIATIONS - {"model_color_only"}
+            )
+            if (has_ean_measurement and target_caliber and route_caliber
+                    and compare_calibers(target_caliber, route_caliber) == "equal"):
+                reason = ""
         if not example.color:
             reason = "Ficha padre sin color: resolver URL completa de variante, identidad, precio y stock"
         gtins = {normalize_gtin(value) for value in example.gtins}
@@ -479,12 +609,6 @@ def candidate_plan(product: dict, domain: str) -> CandidatePlan:
                 "Browser evidence records selected control and offer facts; UPC identity was recovered from "
                 "indexed pages and is not asserted as visible in the current browser read."
             )
-    # Only this GTIN has dimensions explicitly associated in the package. Do not enrich the product record.
-    if shop in {"bassol", "visual", "visio"} and ean == "8056597875349" \
-            and (brand, model, color) == ("PRADA", "PR27ZS", "16K08Z") and not lens:
-        lens, bridge = "54", "21"
-        refs.append("E041")
-        used["dimension_source"] = "E041: medidas asociadas al GTIN en muestra indexada"
     if shop in {"bassol", "visual", "visio"}:
         absent = (["calibre"] if not lens else []) + (["puente"] if shop == "visio" and not bridge else [])
         if absent:
