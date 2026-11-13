@@ -385,6 +385,43 @@ def test_catalog_plan_prioritizes_matching_active_source_and_discovers_shared_li
     assert _urls(store, cid).query("ean == @ean")["status"].tolist() == ["verified"]
 
 
+def test_catalog_continues_to_another_source_when_first_candidate_is_rejected(tmp_path):
+    site = Site()
+    store, _, locator, _, cid = _env(tmp_path, site, template=None)
+    ean = _gtin("840000000001")
+    first = site.product("Alpha", "AL1001", "10A", slug="first-al1001-10a.html",
+                         html=page(name="Alpha AL1009 10A", brand="Alpha", price=100))
+    second = site.product("Alpha", "AL1001", "10A", slug="second-al1001-10a.html",
+                          html=page(name="Alpha AL1001 10A", brand="Alpha", gtin=ean, price=100))
+    site.brands["alpha-one"] = [(first, "Alpha AL1001 10A")]
+    site.brands["alpha-two"] = [(second, "Alpha AL1001 10A")]
+    locator.save_source(cid, "catalog", f"{BASE}/marca/{{brand}}-one", actor="ana", note="Primera fuente")
+    locator.save_source(cid, "catalog", f"{BASE}/marca/{{brand}}-two", actor="ana", note="Segunda fuente")
+    _watch(store, [(ean, "Alpha", "AL1001", "10A", "")])
+
+    report = locator.run([cid], eans=[ean])
+
+    assert report.states == {"done": 1}
+    assert f"{BASE}/marca/alpha-two" in site.calls
+    assert _urls(store, cid).query("status == 'verified'")["url"].tolist() == [second]
+
+
+def test_shared_robots_denial_does_not_turn_other_pairs_into_not_found(tmp_path):
+    site = Site(robots="User-agent: *\nDisallow: /marca/\n")
+    store, _, locator, clock, cid = _env(tmp_path, site)
+    eans = [_gtin("840000000001"), _gtin("840000000002"), _gtin("840000000003")]
+    _watch(store, [(ean, "Alpha", "AL1001", color, "")
+                   for ean, color in zip(eans, ("10A", "20B", "30C"))])
+
+    report = locator.run([cid], eans=eans[:2])
+
+    assert report.states == {"unavailable": 2}
+    restored = PriceLocator(store, transport=site, clock=clock,
+                            sleep=lambda seconds: clock.advance(seconds=seconds))
+    assert restored.run([cid], eans=eans[2:]).states == {"unavailable": 1}
+    assert not any("/marca/" in url for url in site.calls)
+
+
 @pytest.mark.parametrize("case,html_kwargs,expected_state,url_status", [
     ("sin EAN publicado", {}, "done", "verified"),
     ("EAN publicado idéntico", {"gtin": "self"}, "done", "verified"),

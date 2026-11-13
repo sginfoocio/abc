@@ -854,6 +854,11 @@ autorizado y prioriza las plantillas coincidentes con los entrypoints o
 enlaces observados. Robots, bloqueos, presupuestos, metodos autorizados y
 `GovernedFetcher` siguen controlando cada URL; canonical se registra sin
 seguirse automaticamente. La paginacion se limita a enlaces publicados.
+El localizador comprueba las candidatas de cada fuente antes de decidir si
+continua con otras fuentes activas: una ficha rechazada no impide buscar en
+la siguiente fuente, y un caso en revision no se acepta automaticamente.
+Una denegacion robots de la fuente inicial conserva su motivo al reutilizarse
+en el mismo lote o desde la cache persistida; no se transforma en ausencia.
 `discovery_pages` reutiliza las lecturas vigentes y `discovery_index` persiste
 los href y hechos publicados (identidad, referencias y medidas con
 procedencia) entre lotes. La tarjeta del catalogo solo permite hallar una

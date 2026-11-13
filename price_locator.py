@@ -926,6 +926,7 @@ class _Session:
         self._robots_state: dict = {}
         self._blocked: dict = {}
         self._visited: set[str] = set()
+        self._robots_denied_sources: set[str] = set()
         self._brands: list[set[str]] | None = None
         self._sitemaps_done = False
         with self.store._connect() as connection:
@@ -1035,13 +1036,12 @@ class _Session:
                 if method != "external":
                     restrictions.append(f"{METHODS[method]}: sin autorizar")
                 continue
-            outcome = self._discover(
+            outcome, result = self._discover(
                 method, product, excluded,
                 discovery_plan=plan.discovery_plan if method == "catalog" else None,
             )
             if outcome == "ran":
                 executed.append(METHODS[method])
-                result = self._match(product, excluded)
                 if result:
                     return result
             else:
@@ -1212,18 +1212,21 @@ class _Session:
         return page, 1
 
     # discovery --------------------------------------------------------------------------------
-    def _discover(self, method: str, product: dict, excluded: set[str] = frozenset(),
-                  *, discovery_plan: dict | None = None) -> str:
+    def _discover(self, method: str, product: dict, excluded: set[str],
+                  *, discovery_plan: dict | None = None) -> tuple[str, _Result | None]:
         """Refresh the authorised sources whose copy expired. Returns 'ran' or why they could not be used.
 
-        Listings go from the most targeted to the broadest (brand → collection → category): a broader tier is
-        only read when the narrower ones left no candidate for this product."""
+        Listings go from the most targeted to the broadest (brand → collection → category).
+        A source stops discovery only after its candidates have been checked or require review."""
         if method == "sitemap":
-            return self._sitemaps()
+            outcome = self._sitemaps()
+            return outcome, self._match(product, excluded) if outcome == "ran" else None
         if method == "site_search":
-            return self._site_search(product)
+            outcome = self._site_search(product)
+            return outcome, self._match(product, excluded) if outcome == "ran" else None
         if method == "external":
-            return self._external(product)
+            outcome = self._external(product)
+            return outcome, self._match(product, excluded) if outcome == "ran" else None
         if method == "catalog":
             sources = self._catalog_sources
         else:
@@ -1232,7 +1235,7 @@ class _Session:
                     WHERE competitor_id=? AND method=? AND active=1 ORDER BY id""",
                                                                     (self.competitor_id, method))]
         if not sources:
-            return "sin fuentes configuradas"
+            return "sin fuentes configuradas", None
         brand_slug = "-".join(tokens(product["brand"])).lower()
         brand_words = set(tokens(product["brand"]))
         preferred = set((discovery_plan or {}).get("entrypoints", ()))
@@ -1253,32 +1256,13 @@ class _Session:
                     continue
                 outcome = self._crawl(method, start, source)
                 outcomes.append(outcome)
-                if outcome == "ran" and self._has_candidate(product, excluded):
-                    break
-            if "ran" in outcomes and self._has_candidate(product, excluded):
-                break
+                if outcome == "ran":
+                    result = self._match(product, excluded)
+                    if result:
+                        return "ran", result
         if not outcomes:
-            return "ninguna fuente aplicable a la marca"
-        return "ran" if "ran" in outcomes else outcomes[0]
-
-    def _has_candidate(self, product: dict, excluded: set[str]) -> bool:
-        wanted_model, wanted_color = model_key(product["model"]), key(product["color"])
-        if not wanted_model or not wanted_color:
-            return False
-        model_parts = list(dict.fromkeys(key(word) for word in tokens(product["model"]) if key(word)))
-        model_predicate = "instr(replace(signature,' ',''),?)>0"
-        model_parameters = [wanted_model]
-        if model_parts:
-            parts_predicate = " AND ".join("instr(replace(signature,' ',''),?)>0" for _ in model_parts)
-            model_predicate = f"({model_predicate} OR ({parts_predicate}))"
-            model_parameters.extend(model_parts)
-        with self.store._connect() as connection:
-            rows = connection.execute(f"""SELECT url,signature FROM discovery_index WHERE competitor_id=?
-                AND check_state NOT IN ('gone','no_product','robots')
-                AND instr(replace(signature,' ',''),?)>0 AND {model_predicate}""",
-                                      (self.competitor_id, wanted_color, *model_parameters)).fetchall()
-        return any(row["url"] not in excluded and link_matches(row["signature"], product["model"], product["color"])
-                   for row in rows)
+            return "ninguna fuente aplicable a la marca", None
+        return ("ran" if "ran" in outcomes else outcomes[0]), None
 
     def _watched_brands(self) -> list[set[str]]:
         if self._brands is None:
@@ -1422,12 +1406,18 @@ class _Session:
         while queue and pages < int(source["max_pages"]):
             url, depth = queue.popleft()
             if url in self._visited:
+                if url == first and url in self._robots_denied_sources:
+                    return "robots.txt no lo permite"
                 self._job_current_source |= url in self._fresh_sources
                 continue
             self._visited.add(url)
             pages += 1
             cached = self._page(url, refresh)
             if cached is not None:
+                if cached["status"] == "robots":
+                    self._robots_denied_sources.add(url)
+                    if url == first:
+                        return "robots.txt no lo permite"
                 following = cached["next_url"] if cached["status"] == "ok" else ""
                 children = json.loads(cached["children"] or "[]") if cached["status"] == "ok" else []
             else:
@@ -1435,6 +1425,7 @@ class _Session:
                     fetched = self._get(method, url)
                 except RobotsDenied:
                     self._record_page(url, method, "robots", detail="robots.txt no permite esta página")
+                    self._robots_denied_sources.add(url)
                     if url == first:
                         return "robots.txt no lo permite"
                     continue
