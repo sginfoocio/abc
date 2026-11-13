@@ -1041,6 +1041,37 @@ def _render_batch(store: PriceComparatorStore, names: dict[str, str]) -> None:
     with st.expander("Detalle de permisos, consumo y frecuencias"):
         st.dataframe(display[["EAN", "Competidor", "Frecuencia efectiva (h)", "Acceso", "HTTP base",
                               "HTTP restantes hoy", "Previsión"]], hide_index=True, width="stretch")
+    with st.expander("Descubrimiento por catálogo: propuesta y estado local (sin HTTP)"):
+        st.caption("Las URL documentales no se activan ni autorizan por aparecer en el plan. Solo se usan para "
+                   "priorizar fuentes ya activas; ficha, robots, redirecciones y presupuesto se comprueban "
+                   "de nuevo mediante el lector gobernado.")
+        catalog_rows = []
+        for row in preview.to_dict("records"):
+            plan = row["catalog_discovery_plan"]
+            state = row["catalog_execution"]
+            if not plan:
+                continue
+            proposed = plan.get("entrypoints", [])
+            observed = plan.get("observed_links", [])
+            configured = state.get("configured_sources", [])
+            catalog_rows.append({
+                "EAN": row["ean"],
+                "Competidor": row["competitor"],
+                "Categoría": plan.get("category", ""),
+                "Fuentes propuestas": " | ".join(proposed),
+                "Enlaces observados (no activados)": " | ".join(observed),
+                "Fuentes activas": " | ".join(
+                    f"{source['url_template']} ({source['kind']}/{source['adapter']})"
+                    for source in configured
+                ),
+                "Estado local": state.get("execution_state", ""),
+                "Precomprobación": state.get("preflight_passed", False),
+                "Motivo": state.get("reason", ""),
+            })
+        if catalog_rows:
+            st.dataframe(pd.DataFrame(catalog_rows), hide_index=True, width="stretch")
+        else:
+            st.info("No se requiere descubrimiento por catálogo para esta selección.")
     with st.expander("Candidatas locales y requisitos pendientes (sin HTTP)"):
         st.caption("Hipótesis de la investigación del 04/11/2026, no fichas verificadas ni ofertas. "
                    "La generación no autoriza consultas ni acredita mercado, IVA o stock. "

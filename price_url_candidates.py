@@ -479,9 +479,14 @@ def _catalog_discovery_plan(shop: str, category: str) -> dict[str, Any]:
         "observed_links": list(source.get("observed_links", ())),
         "method": source["method"],
         "evidence": list(source.get("evidence", ())),
+        "evidence_source": ("Especificacion_100_EAN_6_competidores.json; paquete local preparado "
+                           "2026-11-13; evidencia documental/indexada, no respuesta HTTP actual"),
+        "source_role": "documentary_proposal",
         "requires_existing_authorization": True,
         "access_state": "not_assessed",
         "automatic_execution": False,
+        "execution_source": "active_discovery_sources_only",
+        "configured_source_priority": True,
         "halted_after_403": bool(source.get("halted_after_403", False)),
     }
 
@@ -923,7 +928,7 @@ def _candidate_plan(product: dict, domain: str) -> CandidatePlan:
 
 
 def candidate_plan(product: dict, domain: str) -> CandidatePlan:
-    """Return candidate URLs alongside a non-executable shared discovery plan."""
+    """Return URL hypotheses and a documentary source plan; only configured sources may execute."""
     plan = _candidate_plan(product, domain)
     host = urlparse(domain if "://" in domain else "https://" + domain).hostname or ""
     shop = DOMAINS.get(host.removeprefix("www.").lower())

@@ -58,7 +58,7 @@ no acredita automatizacion para ninguna tienda.
   sus medidas en atributos del producto. El alias FT5634B -> FT5634-B se limita
   a Tom Ford 001 en Optima/Otticait. Los aliases 0PR, Tiffany, regard, dune y
   Fausto se resuelven mediante los ejemplos concretos, no con reglas universales.
-- La medida 54-21 asociada al GTIN 8056597875349 en E041 puede sustentar una
+-   La medida 54-21 asociada al GTIN 8056597875349 en E041 puede sustentar una
   **hipotesis de URL** Bassol. No se escribe en el catalogo ni acredita stock.
   Un calibre explicitamente aportado en `products.caliber` sirve para construir
   otras rutas acotadas; puente se lee del formato existente `54-21`.
@@ -70,8 +70,10 @@ no acredita automatizacion para ninguna tienda.
 - El plan completo, incluidas fichas padre, conflictos e historicas no
   ejecutables, se conserva como JSON en `locate_events.metadata` dentro del
   evento del resultado real. No crea una transicion `pending` ficticia ni otra
-  fila de auditoria. El estado, metodo, resumen y peticiones siguen describiendo
-  el resultado real del trabajo.
+  fila de auditoria. Al localizar, el plan se pasa al descubrimiento solo para
+  priorizar `discovery_sources` ya activos que coincidan con los entrypoints;
+  no crea ni activa fuentes. El estado, metodo, resumen y peticiones siguen
+  describiendo el resultado real del trabajo.
 - Cada ficha pasa por el mismo `GovernedFetcher` y clasificador. Las notas del
   vinculo resultante citan la regla y referencias; la evidencia completa queda
   en el indice y los eventos. No se crean ofertas durante la localizacion.
@@ -771,10 +773,14 @@ El generador combina los ejemplos documentales y suplementarios exactos.
 Compara modelo/color y, cuando se publico un GTIN, lo normaliza antes de
 asociarlo; una contradiccion mantiene la candidata en revision. Las medidas
 de `route_attributes` se guardan separadas de los atributos del EAN, y una
-talla/puente distinto o no vinculado no acredita disponibilidad. El plan de
-descubrimiento compartido es solo metadata: no se ejecuta en vista previa ni
-crea autorizaciones. `PriceLocator` persiste el plan y sus candidatos en la
-auditoria local existente.
+talla/puente distinto o no vinculado no acredita disponibilidad. El plan de descubrimiento compartido es documental: no se ejecuta en vista
+previa ni crea autorizaciones. Durante una ejecucion gobernada,
+`PriceLocator` solo consulta fuentes ya activas y autorizadas; da prioridad
+a una plantilla activa que coincida con los entrypoints del plan. Las paginas
+y enlaces resultantes se reutilizan desde `discovery_pages` y
+`discovery_index`, sujetos a caducidad; la configuracion local y el permiso
+real no se infieren del plan ni de la matriz. `PriceLocator` persiste el plan
+y sus candidatos en la auditoria local existente.
 
 ConGafasDeSol deja de generar slugs Prada para EAN sin enlace exacto aportado.
 Se retienen las referencias concretas E037-E038 y U009-U010, pero no se
@@ -788,29 +794,37 @@ comprobacion contra robots.
 La regeneracion local comprobo las 600 filas y 100 EAN, sin HTTP. La
 clasificacion historica de origen sigue siendo 138 pares con enlace
 historico, 153 con URL candidata guardada, 3 solo en revision y 306 sin URL
-guardada. El plan local pasa de 239 a 245 pares con candidata y de 236 a
-239 pares elegibles localmente; estos estados solo permiten una futura
-comprobacion por el flujo gobernado, no significan ficha ni oferta.
+guardada. Frente al HEAD previo, el plan local pasa de 239 a 245 pares con
+candidata y de 236 a 239 elegibles localmente. Los estados son independientes:
+una ruta/metodo documentado no equivale a candidata, y ninguna candidata
+acredita ficha ni oferta.
 
-| Competidor | Candidatas antes | Elegibles antes | Rutas/metodos ahora | Candidatas ahora | Elegibles ahora | En revision ahora |
-|---|---:|---:|---:|---:|---:|---:|
-| Optica Optima | 47 | 47 | 56 | 49 | 49 | 0 |
-| Amevista | 84 | 84 | 88 | 87 | 86 | 1 |
-| Visio Factory | 7 | 6 | 36 | 14 | 12 | 2 |
-| Edel-Optics | 77 | 77 | 83 | 78 | 78 | 0 |
-| Domanci | 10 | 8 | 100 | 16 | 13 | 3 |
-| ConGafasDeSol | 14 | 14 | 36 | 1 | 1 | 0 |
-| **Total** | **239** | **236** | **399** | **245** | **239** | **6** |
+| Competidor | Enlaces historicos | Candidatas antes | Candidatas ahora | Elegibles ahora | En revision | Rutas/metodos ahora | Plan de catalogo | Entry point propuesto | Fuente default en codigo |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Optica Optima | 24 | 47 | 49 | 49 | 0 | 56 | 100 | 100 | 0 |
+| Amevista | 33 | 84 | 87 | 86 | 1 | 88 | 100 | 100 | 0 |
+| Visio Factory | 12 | 7 | 14 | 12 | 2 | 36 | 100 | 100 | 0 |
+| Edel-Optics | 12 | 77 | 78 | 78 | 0 | 83 | 100 | 100 | 0 |
+| Domanci | 21 | 10 | 16 | 13 | 3 | 100 | 100 | 100 | 100 |
+| ConGafasDeSol | 36 | 14 | 1 | 1 | 0 | 36 | 100 | 0 | 0 |
+| **Total (pares)** | **138** | **239** | **245** | **239** | **6** | **399** | **600** | **500** | **100** |
 
-Se incorporan 19 pares candidatos y se retiran 13 pares ConGafasDeSol que
-procedian de slugs genericos no respaldados; el neto es +6. Las 245 candidatas
-incluyen URLs en revision; de ellas, 239 son elegibles
-localmente para evaluacion gobernada. Los 100 EAN tienen al menos una URL en
-un plan local y 99 tienen alguna candidata local elegible. El unico EAN sin
-una candidata elegible es `0889652543574` (Chloe CH0289S 003): Amevista solo
-tiene un href sin EAN contrastado y Domanci conserva una ruta historica cuya
-talla 58 no esta asociada a este EAN. Ningun par se eleva a ficha verificada
-ni a oferta comparable por esta regeneracion.
+Las 245 candidatas incluyen seis casos en revision; las 239 elegibles son
+aptas localmente para una comprobacion gobernada, no autorizaciones ni
+consultas aprobadas. Los 100 EAN tienen al menos una candidata y 99 tienen
+alguna elegible. El unico EAN sin candidata elegible es `0889652543574`
+(Chloe CH0289S 003). No se eleva ningun par a ficha verificada u oferta
+comparable: ambos estados permanecen `not_checked` en las 600 filas.
+
+Los planes de catalogo estan implementados para las seis tiendas (100 filas
+por tienda), pero solo cinco tienen entrypoints documentales; ConGafasDeSol
+no recibe un nuevo entrypoint por el 403 historico. Los 100 renglones
+Domanci de `fuente_catalogo_predeterminada_en_codigo` reflejan un default del
+codigo, no una configuracion activa o permiso vigente de produccion. Para las
+600 filas, el estado de fuentes activas, robots y presupuesto queda
+`not_assessed` porque la matriz se genera offline. Ningun enlace historico,
+URL propuesta, nombre de catalogo o coincidencia de indice se presenta como
+producto inexistente cuando falta.
 
 La vista matricial registra por par `plan_descubrimiento_catalogo`,
 candidatas, elegibilidad, atributos y pendientes concretos. Los motivos y
@@ -822,3 +836,40 @@ El smoke Docker actualizado carga las 15 asociaciones y resuelve E041, y
 comprueba con red deshabilitada que la ruta Domanci de talla 51 no reemplaza
 las medidas 53-20 del EAN. Las respuestas/URLs indexadas siguen siendo
 candidatas, no fichas actuales.
+
+### Integracion del descubrimiento por catalogo
+
+El `discovery_plan` de `candidate_plan()` sigue siendo una propuesta
+documental, tomada de `Especificacion_100_EAN_6_competidores.json` (paquete
+preparado el 12-13/11/2026). Los hashes de algunos ficheros declarados por la
+especificacion no coinciden con la rama actual; por ello se usa como
+procedencia historica, no como copia ejecutable ni prueba de estado actual.
+En la vista previa se muestran por separado la propuesta, las fuentes
+activas encontradas localmente, la precomprobacion de permisos y su motivo,
+sin peticiones ni escrituras.
+
+En una pasada aprobada, `PriceLocator` entrega el plan al descubrimiento
+existente. Este solamente lee `discovery_sources` activos para el metodo
+autorizado y prioriza las plantillas coincidentes con los entrypoints o
+enlaces observados. Robots, bloqueos, presupuestos, metodos autorizados y
+`GovernedFetcher` siguen controlando cada URL; canonical se registra sin
+seguirse automaticamente. La paginacion se limita a enlaces publicados.
+`discovery_pages` reutiliza las lecturas vigentes y `discovery_index` persiste
+los href y hechos publicados (identidad, referencias y medidas con
+procedencia) entre lotes. La tarjeta del catalogo solo permite hallar una
+ficha: su precio/stock no se usa como oferta. No se recorre el inventario
+600 veces ni se activa automaticamente una propuesta documental.
+
+ConGafasDeSol conserva su estado detenido: no se añade fuente, no se reintenta
+el 403 y solo puede reutilizarse el indice historico dentro del acceso ya
+permitido. Domanci aparece como default del codigo, pero no se infiere que
+estuviera configurado o autorizado localmente en la fecha del corte. Optima,
+Amevista, Visio y Edel requieren que sus fuentes ya existan activas y tengan
+permiso; la matriz no afirma lo contrario.
+
+Las regresiones sinteticas cubren prioridad de una fuente activa coincidente
+frente a otra fuera del plan, recorrido de catalogo a ficha verificada y
+monitorizada, reutilizacion del indice y la pagina compartidos, reinicio,
+paginacion publicada, caducidad, robots/permisos/bloqueos/presupuesto,
+redirecciones/canonical y no uso de precio/stock de tarjetas. No se hacen
+consultas comerciales en la generacion de la matriz ni en la vista previa.

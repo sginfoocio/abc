@@ -1,4 +1,8 @@
 """Supplied URL hypotheses and synthetic governed reads; never live shop requests."""
+import csv
+import json
+from pathlib import Path
+
 import pytest
 import requests
 
@@ -11,6 +15,7 @@ from tests.web_fixtures import page
 
 PRODUCT = {"ean": "2000000000008", "brand": "Miu Miu", "model": "MU 11ZS", "color": "16K5S0",
            "category": "sol", "caliber": "51-21"}
+ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture(autouse=True)
@@ -235,6 +240,46 @@ def test_congafas_does_not_generate_unobserved_prada_slugs():
     assert plan.reason_code == "needs_authorized_discovery"
     assert "historial" in plan.reason.lower() and "403" in plan.reason
     assert plan.discovery_plan["entrypoints"] == []
+
+
+@pytest.mark.parametrize(("domain", "category"), [
+    ("optica-optima.com", "sol"),
+    ("amevista.com", "sol"),
+    ("visiofactory.es", "montura"),
+    ("edel-optics.es", "sol"),
+    ("domanci.com", "sol"),
+    ("congafasdesol.com", "sol"),
+])
+def test_catalog_plans_are_documentary_and_require_existing_active_sources(domain, category):
+    plan = candidate_plan({**PRODUCT, "category": category}, domain)
+
+    assert plan.discovery_plan["source_role"] == "documentary_proposal"
+    assert plan.discovery_plan["execution_source"] == "active_discovery_sources_only"
+    assert plan.discovery_plan["automatic_execution"] is False
+    assert plan.discovery_plan["requires_existing_authorization"] is True
+    assert "Especificacion_100_EAN_6_competidores.json" in plan.discovery_plan["evidence_source"]
+    assert "2026-11-13" in plan.discovery_plan["evidence_source"]
+
+
+def test_generated_matrix_preserves_manifest_scope_and_separates_unchecked_results():
+    with (ROOT / "price_trial_manifest.json").open(encoding="utf-8") as stream:
+        manifest = json.load(stream)
+    with (ROOT / "docs" / "PRICE_COVERAGE_100_EAN_6_STORES.csv").open(
+            encoding="utf-8-sig", newline="") as stream:
+        rows = list(csv.DictReader(stream, delimiter=";"))
+
+    expected_pairs = {(ean, competitor_id) for ean in manifest["eans"]
+                      for competitor_id in manifest["competitors"]}
+    actual_pairs = {(row["ean"], row["competidor_id"]) for row in rows}
+
+    assert len(manifest["eans"]) == 100
+    assert len(manifest["competitors"]) == 6
+    assert len(rows) == 600 and len(actual_pairs) == 600
+    assert actual_pairs == expected_pairs
+    assert all(len(row["ean"]) == 13 and row["ean"].isdigit() for row in rows)
+    assert all(row["descubrimiento_catalogo_implementado"] == "true" for row in rows)
+    assert all(row["estado_ficha_en_esta_revision"] == "not_checked" for row in rows)
+    assert all(row["estado_oferta_comparable_en_esta_revision"] == "not_checked" for row in rows)
 
 
 @pytest.mark.parametrize(("shop", "category"), [

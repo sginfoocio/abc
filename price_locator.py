@@ -38,7 +38,7 @@ import json
 import os
 import re
 import time
-from typing import AbstractSet, Callable
+from typing import AbstractSet, Any, Callable
 from urllib.parse import parse_qsl, unquote, urlencode, urljoin, urlparse
 
 from filelock import FileLock, Timeout
@@ -201,9 +201,45 @@ _DATA_NEXT = re.compile(r"\bdata-next(?:-page)?(?:-url)?=[\"']([^\"']+)", re.I)
 _JSONLD = re.compile(r"<script[^>]*application/ld\+json[^>]*>(.*?)</script>", re.I | re.S)
 
 
+def _published_text(value: Any) -> str:
+    if isinstance(value, dict):
+        value = value.get("name") or value.get("value") or value.get("url") or ""
+    if isinstance(value, list):
+        return " ".join(text for item in value if (text := _published_text(item)))
+    return str(value).strip() if value is not None else ""
+
+
+def _item_list_fields(item: dict) -> tuple[str, dict[str, Any]]:
+    fields = {}
+    for name in ("name", "model", "mpn", "sku", "brand", "color", "size", "category"):
+        value = _published_text(item.get(name))
+        if value:
+            fields[name] = value
+    gtins = []
+    for name in ("gtin8", "gtin12", "gtin13", "gtin14", "gtin", "ean"):
+        raw = item.get(name)
+        values = raw if isinstance(raw, list) else [raw]
+        gtins.extend(text for value in values if (text := _published_text(value)))
+    if gtins:
+        fields["gtins"] = list(dict.fromkeys(gtins))
+    measurements = {}
+    properties = item.get("additionalProperty") or []
+    properties = properties if isinstance(properties, list) else [properties]
+    for prop in properties:
+        if not isinstance(prop, dict):
+            continue
+        name, value = _published_text(prop.get("name")), _published_text(prop.get("value"))
+        if name and value and re.search(r"calib|bridge|puente|lens|talla|size", name, re.I):
+            measurements[name] = value
+    if measurements:
+        fields["measurements"] = measurements
+    label = " ".join(fields.get(name, "") for name in ("brand", "name", "model", "mpn", "sku", "color"))
+    return " ".join(label.split()), fields
+
+
 @dataclass
 class Listing:
-    items: list[tuple[str, str]]  # candidate product links (absolute URL, identity text)
+    items: list[tuple[str, str, dict[str, Any]]]  # URL, published identity text and raw listing facts
     next_url: str  # next page of the same listing
     links: list[tuple[str, str]]  # every same-site link, for controlled following of sub-listings
 
@@ -231,40 +267,46 @@ class ListingAdapter:
                     break
         return Listing(self.items(html, url, domain, links), following if following != url else "", links)
 
-    def items(self, html: str, url: str, domain: str, links: list[tuple[str, str]]) -> list[tuple[str, str]]:
-        return links
+    def items(self, html: str, url: str, domain: str,
+              links: list[tuple[str, str]]) -> list[tuple[str, str, dict[str, Any]]]:
+        return [(target, text, {}) for target, text in links]
 
 
 class ItemListAdapter(ListingAdapter):
     """Listings whose cards do not name the product (``/p/123``, «Ver») but publish a schema.org ItemList."""
     name, label = "itemlist", "ItemList JSON-LD (tarjetas sin identidad en el enlace)"
 
-    def items(self, html: str, url: str, domain: str, links: list[tuple[str, str]]) -> list[tuple[str, str]]:
-        found: dict[str, str] = {}
+    def items(self, html: str, url: str, domain: str,
+              links: list[tuple[str, str]]) -> list[tuple[str, str, dict[str, Any]]]:
+        found: dict[str, tuple[str, dict[str, Any]]] = {}
         for block in _JSONLD.findall(html):
             try:
                 data = json.loads(block)
             except ValueError:
                 continue
             for node in _walk(data):
-                if "itemlist" not in str(node.get("@type", "")).lower():
+                types = node.get("@type") or []
+                types = types if isinstance(types, list) else [types]
+                if not any(str(value).rsplit("/", 1)[-1].lower() == "itemlist" for value in types):
                     continue
                 for element in node.get("itemListElement") or []:
+                    if not isinstance(element, dict):
+                        continue
                     item = element.get("item") if isinstance(element.get("item"), dict) else element
                     target = item.get("url") or element.get("url") or (
                         element.get("item") if isinstance(element.get("item"), str) else "")
                     if not target:
                         continue
-                    brand = item.get("brand")
-                    brand = brand.get("name", "") if isinstance(brand, dict) else str(brand or "")
-                    label = " ".join(str(item.get(name) or "") for name in ("name", "model", "mpn", "color"))
                     target = canonical(urljoin(url, str(target)))
                     if _same_site(target, domain):
-                        found[target] = " ".join(f"{brand} {label}".split())
-        merged = dict(links)
-        for target, label in found.items():
-            merged[target] = label or merged.get(target, "")
-        return list(merged.items())
+                        found[target] = _item_list_fields(item)
+        merged: dict[str, tuple[str, dict[str, Any]]] = {
+            target: (text, {}) for target, text in links
+        }
+        for target, (label, fields) in found.items():
+            anchor, previous = merged.get(target, ("", {}))
+            merged[target] = (" ".join((anchor, label)).strip(), {**previous, **fields})
+        return [(target, label, fields) for target, (label, fields) in merged.items()]
 
 
 def _walk(node):
@@ -298,6 +340,55 @@ class RunReport:
     def summary(self) -> str:
         parts = ", ".join(f"{JOB_STATES.get(state, state).lower()}: {count}" for state, count in self.states.items())
         return f"{self.processed} trabajos procesados ({parts or 'ninguno'}); {self.requests} peticiones HTTP"
+
+
+def catalog_plan_assessment(discovery_plan: dict, configured_sources: list[dict], catalog_permission: str,
+                            ficha_permission: str, access_status: str, catalog_gate, ficha_gate) -> dict:
+    """Describe a documentary plan against existing local configuration; never activates a source."""
+    if not discovery_plan:
+        return {"execution_state": "not_applicable", "preflight_passed": False, "reason": ""}
+    proposed = list(discovery_plan.get("entrypoints", ()))
+    observed = list(discovery_plan.get("observed_links", ()))
+    source_urls = set(proposed + observed)
+    configured = [
+        {
+            "url_template": source["url_template"],
+            "kind": source.get("kind") or "brand",
+            "adapter": source.get("adapter") or "generic",
+            "matches_documentary_plan": source["url_template"] in source_urls,
+        }
+        for source in configured_sources
+    ]
+    if access_status in {"blocked", "robots_restricted"}:
+        state, reason = "blocked", f"Acceso local en estado {access_status}; requiere revisión antes de reanudar."
+    elif not configured:
+        state = "documentary_only"
+        reason = "El plan propone fuentes, pero no hay una fuente de catálogo activa configurada."
+    elif catalog_permission != "authorized" or ficha_permission != "authorized":
+        state = "not_authorized"
+        reason = "La fuente activa requiere autorización vigente para catálogo y ficha."
+    elif not catalog_gate.allowed or not ficha_gate.allowed:
+        state = "deferred"
+        denied = [gate.message for gate in (catalog_gate, ficha_gate) if not gate.allowed]
+        reason = "; ".join(dict.fromkeys(denied))
+    else:
+        state = "conditionally_executable"
+        reason = ("La precomprobación local pasa; robots, redirecciones y presupuesto se volverán a validar "
+                  "por URL mediante el lector gobernado.")
+    return {
+        "documentary_entrypoints": proposed,
+        "documentary_observed_links": observed,
+        "configured_sources": configured,
+        "source_active": bool(configured),
+        "source_role": discovery_plan.get("source_role", "documentary_proposal"),
+        "execution_source": discovery_plan.get("execution_source", "active_discovery_sources_only"),
+        "catalog_permission": catalog_permission,
+        "ficha_permission": ficha_permission,
+        "execution_state": state,
+        "preflight_passed": state == "conditionally_executable",
+        "per_url_governance_required": True,
+        "reason": reason,
+    }
 
 
 @dataclass
@@ -819,11 +910,17 @@ class _Session:
             self._pilot_guard, self._pilot_reserved = PricePilot(self.store).watch_check_hooks(
                 pilot_run_id, competitor_id, clock=self.locator._now, sleep=self.locator._sleep)
         self.config = locator.search.config(competitor_id)
-        self.methods = {method for method in METHODS if method != "external"
-                        and locator.access.method_status(competitor_id, method) == "authorized"}
+        self.method_statuses = {method: locator.access.method_status(competitor_id, method) for method in METHODS}
+        self.methods = {method for method, status in self.method_statuses.items()
+                        if method != "external" and status == "authorized"}
         if (external_search_enabled() and locator.external_search is not None
-                and locator.access.method_status(competitor_id, "external") == "authorized"):
+                and self.method_statuses["external"] == "authorized"):
             self.methods.add("external")
+        self._catalog_gate = locator.access.check(competitor_id, "catalog")
+        self._ficha_gate = locator.access.check(competitor_id, "ficha")
+        with self.store._connect() as connection:
+            self._catalog_sources = [dict(row) for row in connection.execute("""SELECT * FROM discovery_sources
+                WHERE competitor_id=? AND method='catalog' AND active=1 ORDER BY id""", (competitor_id,))]
         self._fetchers: dict[str, GovernedFetcher] = {}
         self._robots: dict = {}
         self._robots_state: dict = {}
@@ -918,6 +1015,11 @@ class _Session:
             "reason": plan.reason,
             "candidates": [candidate.provenance() for candidate in plan.candidates],
             "discovery_plan": plan.discovery_plan,
+            "catalog_execution": catalog_plan_assessment(
+                plan.discovery_plan, self._catalog_sources, self.method_statuses["catalog"],
+                self.method_statuses["ficha"], self.config["access_status"],
+                self._catalog_gate, self._ficha_gate,
+            ),
         }
         self._local_candidates(product, plan.runnable, excluded)
         if plan.runnable:
@@ -933,7 +1035,10 @@ class _Session:
                 if method != "external":
                     restrictions.append(f"{METHODS[method]}: sin autorizar")
                 continue
-            outcome = self._discover(method, product, excluded)
+            outcome = self._discover(
+                method, product, excluded,
+                discovery_plan=plan.discovery_plan if method == "catalog" else None,
+            )
             if outcome == "ran":
                 executed.append(METHODS[method])
                 result = self._match(product, excluded)
@@ -1107,7 +1212,8 @@ class _Session:
         return page, 1
 
     # discovery --------------------------------------------------------------------------------
-    def _discover(self, method: str, product: dict, excluded: set[str] = frozenset()) -> str:
+    def _discover(self, method: str, product: dict, excluded: set[str] = frozenset(),
+                  *, discovery_plan: dict | None = None) -> str:
         """Refresh the authorised sources whose copy expired. Returns 'ran' or why they could not be used.
 
         Listings go from the most targeted to the broadest (brand → collection → category): a broader tier is
@@ -1118,23 +1224,37 @@ class _Session:
             return self._site_search(product)
         if method == "external":
             return self._external(product)
-        with self.store._connect() as connection:
-            sources = [dict(row) for row in connection.execute("""SELECT * FROM discovery_sources
-                WHERE competitor_id=? AND method=? AND active=1 ORDER BY id""", (self.competitor_id, method))]
+        if method == "catalog":
+            sources = self._catalog_sources
+        else:
+            with self.store._connect() as connection:
+                sources = [dict(row) for row in connection.execute("""SELECT * FROM discovery_sources
+                    WHERE competitor_id=? AND method=? AND active=1 ORDER BY id""",
+                                                                    (self.competitor_id, method))]
         if not sources:
             return "sin fuentes configuradas"
         brand_slug = "-".join(tokens(product["brand"])).lower()
         brand_words = set(tokens(product["brand"]))
+        preferred = set((discovery_plan or {}).get("entrypoints", ()))
+        preferred.update((discovery_plan or {}).get("observed_links", ()))
         outcomes = []
         for kind in KIND_ORDER:
             tier = [source for source in sources if (source.get("kind") or "brand") == kind]
+            tier.sort(key=lambda source: (
+                (source["url_template"] not in preferred
+                 and source["url_template"].replace("{brand}", brand_slug) not in preferred),
+                source.get("id", 0),
+            ))
             for source in tier:
                 template = source["url_template"]
                 start = template.replace("{brand}", brand_slug)
                 # A fixed brand page only concerns its own brand: never read for another brand's products.
                 if kind == "brand" and "{brand}" not in template and not brand_words <= set(signature(start).split()):
                     continue
-                outcomes.append(self._crawl(method, start, source))
+                outcome = self._crawl(method, start, source)
+                outcomes.append(outcome)
+                if outcome == "ran" and self._has_candidate(product, excluded):
+                    break
             if "ran" in outcomes and self._has_candidate(product, excluded):
                 break
         if not outcomes:
@@ -1143,11 +1263,20 @@ class _Session:
 
     def _has_candidate(self, product: dict, excluded: set[str]) -> bool:
         wanted_model, wanted_color = model_key(product["model"]), key(product["color"])
+        if not wanted_model or not wanted_color:
+            return False
+        model_parts = list(dict.fromkeys(key(word) for word in tokens(product["model"]) if key(word)))
+        model_predicate = "instr(replace(signature,' ',''),?)>0"
+        model_parameters = [wanted_model]
+        if model_parts:
+            parts_predicate = " AND ".join("instr(replace(signature,' ',''),?)>0" for _ in model_parts)
+            model_predicate = f"({model_predicate} OR ({parts_predicate}))"
+            model_parameters.extend(model_parts)
         with self.store._connect() as connection:
-            rows = connection.execute("""SELECT url,signature FROM discovery_index WHERE competitor_id=?
+            rows = connection.execute(f"""SELECT url,signature FROM discovery_index WHERE competitor_id=?
                 AND check_state NOT IN ('gone','no_product','robots')
-                AND instr(replace(signature,' ',''),?)>0 AND instr(replace(signature,' ',''),?)>0""",
-                                      (self.competitor_id, wanted_model, wanted_color)).fetchall()
+                AND instr(replace(signature,' ',''),?)>0 AND {model_predicate}""",
+                                      (self.competitor_id, wanted_color, *model_parameters)).fetchall()
         return any(row["url"] not in excluded and link_matches(row["signature"], product["model"], product["color"])
                    for row in rows)
 
@@ -1177,7 +1306,8 @@ class _Session:
         return row
 
     def _record_page(self, url: str, method: str, status: str, links: int = 0, next_url: str = "",
-                     detail: str = "", content_hash: str = "", children: list[str] | None = None) -> None:
+                     detail: str = "", content_hash: str = "", children: list[str] | None = None,
+                     fetch_trace: dict | None = None) -> None:
         now = _iso(self._now())
         if self.point_check and status == "ok":
             self._fresh_sources.add(url)
@@ -1186,7 +1316,8 @@ class _Session:
                 self._fresh_sitemap = True
         with self.store._connect() as connection, connection:
             connection.execute("""INSERT INTO discovery_pages(competitor_id,url,method,fetched_at,status,links,
-                next_url,detail,content_hash,changed_at,unchanged_runs,children) VALUES(?,?,?,?,?,?,?,?,?,?,0,?)
+                next_url,detail,content_hash,changed_at,unchanged_runs,children,fetch_trace)
+                VALUES(?,?,?,?,?,?,?,?,?,?,0,?,?)
                 ON CONFLICT(competitor_id,url) DO UPDATE SET
                 unchanged_runs=CASE WHEN excluded.content_hash<>''
                     AND discovery_pages.content_hash=excluded.content_hash
@@ -1195,33 +1326,84 @@ class _Session:
                     THEN discovery_pages.changed_at ELSE excluded.changed_at END,
                 method=excluded.method,fetched_at=excluded.fetched_at,status=excluded.status,links=excluded.links,
                 next_url=excluded.next_url,detail=excluded.detail,content_hash=excluded.content_hash,
-                children=excluded.children""",
+                children=excluded.children,fetch_trace=excluded.fetch_trace""",
                                (self.competitor_id, url, method, now, status, links, next_url, detail[:300],
-                                content_hash, now, json.dumps(children or [])))
+                                content_hash, now, json.dumps(children or []),
+                                json.dumps(fetch_trace or {}, ensure_ascii=False)))
 
     def _retire(self, url: str, reason: str) -> int:
         return self.locator.retire(self.competitor_id, url, reason)
 
-    def _index(self, items: list[tuple[str, str]], method: str, source_url: str) -> int:
+    def _index(self, items: list[tuple], method: str, source_url: str, *,
+               adapter_name: str = "generic") -> int:
         now = _iso(self._now())
         rows, seen = [], set()
-        for raw, label in items:
+        for item in items:
+            if len(item) < 2:
+                continue
+            raw, label = item[:2]
+            fields = item[2] if len(item) > 2 and isinstance(item[2], dict) else {}
             try:
                 url = canonical(validate_competitor_url(raw, self.config["domain"]))
             except WebSearchError:
                 continue
-            sig = signature(url, label)
+            identity_text = " ".join(
+                [str(label or "")] + [str(fields.get(name) or "") for name in
+                                      ("brand", "name", "model", "mpn", "sku", "color")]
+            )
+            sig = signature(url, identity_text)
             if url in seen or not any(char.isdigit() for char in sig):
                 continue
             seen.add(url)
-            rows.append((self.competitor_id, url, label[:300], sig, method, source_url, now, now))
+            rows.append((self.competitor_id, url, str(label or "")[:300], sig, method, source_url, now, now,
+                         dict(fields)))
         with self.store._connect() as connection, connection:
+            existing_facts = {}
+            for offset in range(0, len(rows), 900):
+                urls = [row[1] for row in rows[offset:offset + 900]]
+                if not urls:
+                    continue
+                marks = ",".join("?" for _ in urls)
+                existing_facts.update({
+                    row["url"]: row["listing_facts"] for row in connection.execute(
+                        f"""SELECT url,listing_facts FROM discovery_index
+                            WHERE competitor_id=? AND url IN ({marks})""",
+                        (self.competitor_id, *urls),
+                    )
+                })
+            stored_rows = []
+            for row in rows:
+                listing_facts = "{}"
+                if method in {"catalog", "feed"}:
+                    try:
+                        previous = json.loads(existing_facts.get(row[1], "{}") or "{}")
+                    except (TypeError, ValueError):
+                        previous = {}
+                    observations = previous.get("observations", []) if isinstance(previous, dict) else []
+                    observations = [item for item in observations if not (
+                        item.get("method") == method and item.get("source_url") == source_url
+                    )]
+                    published = dict(row[8])
+                    if row[2]:
+                        published["anchor_text"] = row[2]
+                    observations.append({
+                        "method": method,
+                        "source_url": source_url,
+                        "observed_at": now,
+                        "adapter": adapter_name,
+                        "fields": published,
+                    })
+                    listing_facts = json.dumps({"observations": observations}, ensure_ascii=False)
+                stored_rows.append((*row[:8], listing_facts))
             connection.executemany("""INSERT INTO discovery_index(competitor_id,url,label,signature,method,source_url,
-                first_seen,last_seen) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(competitor_id,url) DO UPDATE SET
+                first_seen,last_seen,listing_facts) VALUES(?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(competitor_id,url) DO UPDATE SET
                 last_seen=excluded.last_seen,
                 label=CASE WHEN excluded.label<>'' THEN excluded.label ELSE discovery_index.label END,
-                signature=CASE WHEN excluded.label<>'' THEN excluded.signature ELSE discovery_index.signature END""",
-                                   rows)
+                signature=CASE WHEN excluded.label<>'' THEN excluded.signature ELSE discovery_index.signature END,
+                listing_facts=CASE WHEN excluded.listing_facts<>'{}'
+                    THEN excluded.listing_facts ELSE discovery_index.listing_facts END""",
+                                   stored_rows)
         return len(rows)
 
     def _crawl(self, method: str, start: str, source: dict) -> str:
@@ -1265,10 +1447,22 @@ class _Session:
                     listing = adapter.parse(fetched.text, canonical(fetched.url), self.config["domain"])
                 following = listing.next_url
                 children = self._children(listing.links, pattern) if pattern else []
-                count = self._index(listing.items, method, url)
-                digest = hashlib.sha256(json.dumps([sorted(listing.items), following, children],
-                                                   ensure_ascii=False).encode()).hexdigest()
-                self._record_page(url, method, "ok", count, following, content_hash=digest, children=children)
+                count = self._index(listing.items, method, url, adapter_name=adapter.name)
+                digest_items = [
+                    (item[0], item[1], item[2] if len(item) > 2 else {})
+                    for item in listing.items
+                ]
+                digest_items.sort(key=lambda item: (
+                    item[0], item[1], json.dumps(item[2], ensure_ascii=False, sort_keys=True)
+                ))
+                digest = hashlib.sha256(json.dumps([digest_items, following, children],
+                                                   ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+                canonical_urls = list(dict.fromkeys(
+                    urljoin(fetched.url, href) for href in parse_html(fetched.text).canonicals
+                ))
+                fetch_trace = {**fetched.trace, "canonical_urls": canonical_urls}
+                self._record_page(url, method, "ok", count, following, content_hash=digest, children=children,
+                                  fetch_trace=fetch_trace)
             if following:
                 queue.appendleft((following, depth))
             if depth < depth_limit:
