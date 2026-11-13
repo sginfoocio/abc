@@ -133,7 +133,14 @@ def pair_reason(store, cid: str, ean: str | None, now: datetime) -> str:
             return "La vigilancia de continuidad todavía no ha comenzado"
         return ""
     if execution is None:
-        return "Par reservado al piloto de 72 h; no se ejecuta desde otro disparador" if owned else ""
+        if owned:
+            return "Par reservado al piloto de 72 h; no se ejecuta desde otro disparador"
+        continuity = continuity_row(store)
+        if continuity:
+            selected = json.loads(continuity["manifest"])
+            if cid in selected["competitors"] and (not ean or ean in selected["eans"]):
+                return "Par reservado a la vigilancia de continuidad; no se ejecuta desde otro disparador"
+        return ""
     if (row["status"] != "active" or now < datetime.fromisoformat(row["started_at"])
             or now >= datetime.fromisoformat(row["expires_at"])):
         return "Piloto finalizado o caducado: no se inician nuevas consultas"
@@ -241,6 +248,108 @@ class PriceTrial:
         access = AccessControl(self.store, clock=self.clock)
         limits = {cid: access.budget("competitor", cid) for cid in frozen["competitors"]}
         return {"config": config, "manifest": frozen, "limits": limits}
+
+    def continuity_expansion_preflight(self) -> dict:
+        """Local-only proposal for the explicitly approved 100 EAN x 14 shops.
+
+        The original pilot and its six-shop manifest file remain immutable. The
+        existing worker already reads its persisted continuity selection; no
+        general scheduler or second Vytria synchronizer is enabled here.
+        """
+        from competitor_requirements import COMPETITORS
+        from price_access import AccessControl
+
+        original = manifest()
+        row = continuity_row(self.store)
+        if not row or row["status"] != "active":
+            raise ValueError("La ampliación requiere una continuidad activa")
+        current = json.loads(row["manifest"])
+        if current["eans"] != original["eans"]:
+            raise ValueError("La ampliación solo admite los mismos 100 EAN originales")
+        expected = {name: (urlsplit(url).hostname or "").removeprefix("www.")
+                    for name, url in COMPETITORS}
+        if len(expected) != 14:
+            raise ValueError("La ampliación debe contener exactamente los 14 competidores documentados")
+        with self.store._connect() as con:
+            shops = {r["id"]: r["name"] for r in con.execute("SELECT * FROM competitors WHERE active=1")
+                     if expected.get(r["name"]) == r["domain"]}
+            watched = {r[0] for r in con.execute("SELECT ean FROM watch_products WHERE active=1")}
+            pairs = {(r[0], r[1]) for r in con.execute(
+                "SELECT competitor_id,ean FROM price_continuity_pairs WHERE continuity_id=?", (row["id"],))}
+            beat = con.execute("SELECT value FROM comparator_settings WHERE key=?", (HEARTBEAT_KEY,)).fetchone()
+            original_trial = con.execute("SELECT status FROM price_trial WHERE id=1").fetchone()
+        if not original_trial or original_trial["status"] not in {"expired", "stopped"}:
+            raise ValueError("La ampliación no puede solaparse con el piloto original")
+        if len(shops) != 14 or set(shops.values()) != set(expected):
+            raise ValueError("Faltan competidores activos o su identidad no coincide con los 14 documentados")
+        if not set(original["eans"]) <= watched:
+            raise ValueError("Faltan EAN originales en la vigilancia activa")
+        if not beat or not timedelta(0) <= self.clock() - datetime.fromisoformat(beat[0]) < timedelta(minutes=2):
+            raise ValueError("No hay heartbeat reciente del trabajador de continuidad")
+        if current["competitors"] not in (original["competitors"], shops):
+            raise ValueError("El alcance actual no coincide con la selección original ni con la ampliación")
+        old_pairs = {(cid, ean) for cid in current["competitors"] for ean in original["eans"]}
+        if pairs != old_pairs or {(p["competitor_id"], p["ean"]) for p in current["pairs"]} != old_pairs:
+            raise ValueError("Los pares persistidos no coinciden con el manifiesto actual")
+        access = AccessControl(self.store, clock=self.clock)
+        for cid in shops:
+            if any(access.method_status(cid, method) != "authorized" for method in ("ficha", "sitemap")):
+                raise ValueError(f"Falta autorización de fichas o sitemaps para {shops[cid]}")
+        expanded = {**original, "competitors": shops,
+                    "pairs": [{"competitor_id": cid, "ean": ean} for cid in shops for ean in original["eans"]]}
+        limits = json.loads(row["limits"])
+        if not set(current["competitors"]) <= set(limits):
+            raise ValueError("Faltan presupuestos congelados del alcance actual")
+        for cid in shops.keys() - limits.keys():
+            budget = access.budget("competitor", cid)
+            limits[cid] = {**budget, "daily_limit": min(budget["daily_limit"], 200),
+                           "per_minute_limit": min(budget["per_minute_limit"], 10),
+                           "effective_pause": max(budget["effective_pause"], 3.0)}
+        return {"row": row, "manifest": expanded, "limits": limits,
+                "additional_pairs": len(expanded["pairs"]) - len(old_pairs)}
+
+    def expand_continuity(self, *, actor: str, approved: bool, build_commit: str, note: str) -> dict:
+        """Atomically add only the 800 missing pairs, preserving all existing work.
+
+        This is a separate explicit scope decision, not a restart of the pilot.
+        The audit retains the complete previous manifest and budgets. No HTTP,
+        synchronization, review acceptance, permission or scheduler change occurs.
+        """
+        if not approved or not actor.strip() or not note.strip():
+            raise ValueError("Confirmación explícita, responsable y motivo obligatorios")
+        if len(build_commit) != 40 or any(c not in "0123456789abcdef" for c in build_commit):
+            raise ValueError("Commit desplegado válido requerido")
+        with self.continuity_lock(), ExitStack() as stack:
+            prepared = self.continuity_expansion_preflight()
+            row = prepared["row"]
+            if not prepared["additional_pairs"]:
+                return self.continuity_report()
+            for cid in sorted(prepared["manifest"]["competitors"]):
+                stack.enter_context(FileLock(f"{self.store.database_path}.competitor-{cid}.lock", timeout=0))
+            stack.enter_context(FileLock(f"{self.store.database_path}.vytria-sync.lock", timeout=0))
+            old_manifest = json.loads(row["manifest"])
+            additions = [p for p in prepared["manifest"]["pairs"]
+                         if p["competitor_id"] not in old_manifest["competitors"]]
+            from price_access import AccessControl
+            with self.store._connect() as con, con:
+                changed = con.execute("""UPDATE price_continuity SET manifest=?,limits=?
+                    WHERE id=? AND status='active' AND manifest=? AND limits=?""",
+                                      (json.dumps(prepared["manifest"], ensure_ascii=False),
+                                       json.dumps(prepared["limits"]), row["id"], row["manifest"],
+                                       row["limits"])).rowcount
+                if changed != 1:
+                    raise ValueError("La continuidad cambió antes de aplicar la ampliación")
+                con.executemany("""INSERT INTO price_continuity_pairs
+                    (continuity_id,competitor_id,ean) VALUES(?,?,?)""",
+                                [(row["id"], p["competitor_id"], p["ean"]) for p in additions])
+                AccessControl._audit(
+                    con, "price_continuity", str(row["id"]), "expand_scope", "600", "1400", actor.strip(),
+                    json.dumps({"reason": note.strip(), "build_commit": build_commit,
+                                "previous_manifest": old_manifest, "previous_limits": json.loads(row["limits"]),
+                                "added_competitors": sorted(set(prepared["manifest"]["competitors"])
+                                                            - set(old_manifest["competitors"])),
+                                "added_pairs": len(additions)}, ensure_ascii=False), self.clock().isoformat())
+        return self.continuity_report()
 
     def prepare_continuity(self, *, actor: str) -> dict:
         if not actor.strip():

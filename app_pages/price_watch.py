@@ -845,11 +845,14 @@ def _render_continuity(store: PriceComparatorStore, service=None) -> None:
     service = service or PriceTrial(store)
     with st.expander("Continuidad de vigilancia · misma selección, activación independiente"):
         config = continuity_config()
-        frozen = config["manifest"]
+        report = service.continuity_report()
+        frozen = report["manifest"] if report else config["manifest"]
+        config = {**config, "manifest": frozen}
         st.caption(
-            "Configuración preparada y desactivada. Reutiliza el manifiesto original de 100 EAN × seis tiendas; "
-            "no modifica ni prolonga el piloto expirado. La sincronización Vytria/Odoo es solo de lectura y "
-            "queda limitada a esos 100 EAN."
+            ("Configuración preparada y desactivada. " if report is None else "Selección persistida de continuidad. ")
+            + f"100 EAN × {len(frozen['competitors'])} tiendas. "
+            "No modifica ni prolonga el piloto expirado. La sincronización Vytria/Odoo es solo de lectura y "
+            "queda limitada a esos 100 EAN. El SHA mostrado corresponde al manifiesto original de origen."
         )
         st.write({
             "manifest_sha256": config["manifest_sha256"],
@@ -868,7 +871,6 @@ def _render_continuity(store: PriceComparatorStore, service=None) -> None:
             json.dumps(config, ensure_ascii=False, indent=2).encode("utf-8"),
             "price-watch-continuity.json", "application/json", key="continuity_config_download",
         )
-        report = service.continuity_report()
         if report is None:
             try:
                 prepared = service.continuity_preflight()
@@ -920,6 +922,36 @@ def _render_continuity(store: PriceComparatorStore, service=None) -> None:
             if st.button("Detener continuidad", key="continuity_stop"):
                 service.stop_continuity(actor=actor)
                 _refresh("Continuidad detenida; historial y recibos conservados.")
+            if len(report["manifest"]["competitors"]) == 6:
+                with st.expander("Ampliar a 14 competidores · mismos 100 EAN"):
+                    try:
+                        expansion = service.continuity_expansion_preflight()
+                    except ValueError as exc:
+                        st.warning(str(exc))
+                    else:
+                        st.caption(
+                            "Añade 800 pares a los 600 existentes. Conserva estados, revisiones, recibos y fechas. "
+                            "Usa el trabajador actual, con límites de 200 HTTP/24 h, 10/min y pausa mínima de 3 s. "
+                            "No habilita otros planificadores ni realiza consultas durante la ampliación. "
+                            "Los bloqueos y robots siguen aplicándose por ruta. El calibre no cambia el precio."
+                        )
+                        st.json({"competitors": expansion["manifest"]["competitors"],
+                                 "distinct_eans": 100, "selected_pairs": 1400})
+                        info = load_build_info()
+                        with st.form("continuity_expand_form"):
+                            expansion_actor = st.text_input("Responsable de la ampliación", value=_actor())
+                            expansion_note = st.text_input("Motivo de la ampliación")
+                            expansion_approved = st.checkbox("Autorizo ampliar ahora los mismos 100 EAN a las 14 tiendas")
+                            submitted = st.form_submit_button(
+                                "Activar ampliación a 14 tiendas",
+                                disabled=not info["build"].startswith("actions-"))
+                        if submitted:
+                            try:
+                                service.expand_continuity(actor=expansion_actor, approved=expansion_approved,
+                                                          build_commit=info["commit"], note=expansion_note)
+                                _refresh("Ampliación activada y auditada: 100 EAN × 14 tiendas; trabajador existente.")
+                            except (ValueError, RuntimeError, Timeout) as exc:
+                                st.error(str(exc))
         elif report["status"] == "paused":
             actor = st.text_input("Responsable del control", value=_actor(), key="continuity_resume_actor")
             if st.button("Reanudar continuidad", key="continuity_resume"):

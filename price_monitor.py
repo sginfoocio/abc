@@ -533,7 +533,8 @@ class PriceMonitor:
                          f"{ALERTS.get(row.kind, row.kind)} | {row.old_value} -> {row.new_value}")
         return "\n".join(lines)
 
-    def inventory(self) -> pd.DataFrame:
+    def inventory(self, *, competitor_ids: list[str] | None = None,
+                  eans: list[str] | None = None) -> pd.DataFrame:
         summary, _ = self.store.dashboard(now=self._now())
         own = summary.set_index("ean")["own_price_eur"].to_dict() if not summary.empty else {}
         own_details = summary.set_index("ean").to_dict("index") if not summary.empty else {}
@@ -560,6 +561,12 @@ class PriceMonitor:
                     SELECT x.rowid FROM competitor_product_urls x WHERE x.ean=w.ean AND x.competitor_id=c.id
                     AND x.status='verified' ORDER BY x.verified_at DESC,x.url LIMIT 1)
                 WHERE w.active=1 AND c.active=1 ORDER BY p.brand,p.model,p.color,c.name""", con)
+        # A supervised preview must not evaluate budgets for unrelated shops:
+        # its execution context only authorizes the selected frozen scope.
+        if competitor_ids is not None:
+            rows = rows[rows["competitor_id"].isin(competitor_ids)]
+        if eans is not None:
+            rows = rows[rows["ean"].isin(eans)]
         if rows.empty:
             return rows
         now = _inventory_datetime(self._now())
