@@ -76,7 +76,7 @@ class WatchBatch:
             pilot_active = con.execute("SELECT id FROM pilot_runs WHERE status IN ('running','interrupted')").fetchone()
         if not set(eans) <= watched or not set(competitors) <= active:
             raise ValueError("La selección contiene productos no vigilados o competidores inactivos")
-        frame = self.monitor.inventory()
+        frame = self.monitor.inventory(competitor_ids=competitors, eans=eans)
         frame = frame[frame["ean"].isin(eans) & frame["competitor_id"].isin(competitors)].copy()
         if len(frame) != len(eans) * len(competitors):
             raise ValueError("La vigilancia ha cambiado durante la lectura; vuelva a seleccionar el lote")
