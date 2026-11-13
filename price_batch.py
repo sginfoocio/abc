@@ -9,7 +9,7 @@ import json
 import pandas as pd
 
 from price_comparator import PriceComparatorStore
-from price_locator import PriceLocator, job_deferral, link_matches
+from price_locator import PriceLocator, catalog_plan_assessment, job_deferral, link_matches
 from price_monitor import PriceMonitor, _inventory_datetime
 from price_pilot import PricePilot, pilot_scope, stamp
 from price_url_candidates import CandidatePlan, candidate_plan
@@ -94,15 +94,35 @@ class WatchBatch:
                                      sources["method"].isin(search_methods)].empty
             discovery = bool(search_methods & {"sitemap", "site_search"} or
                              (search_methods & {"feed", "catalog"} and has_source))
+            catalog_gate = self.access.check(cid, "catalog")
+            catalog_sources = sources[(sources["competitor_id"] == cid) & sources["active"].eq(1) &
+                                      sources["method"].eq("catalog")].to_dict("records")
+            competitor_methods = methods[methods["competitor_id"] == cid].set_index("method")["status"]
             budget = self.access.budget("competitor", cid)
             remaining = max(0, budget["daily_limit"] - self.access.usage("competitor", cid))
             signatures = [r["signature"] for r in index if r["competitor_id"] == cid]
-            policies[cid] = gate, discovery, remaining, signatures
+            policies[cid] = {
+                "ficha_gate": gate,
+                "discovery": discovery,
+                "remaining": remaining,
+                "signatures": signatures,
+                "catalog_gate": catalog_gate,
+                "catalog_sources": catalog_sources,
+                "catalog_permission": str(competitor_methods.get("catalog", "pending")),
+                "ficha_permission": str(competitor_methods.get("ficha", "pending")),
+                "access_status": access_states.get(cid, ""),
+            }
         for row in frame.to_dict("records"):
             cid, ean = row["competitor_id"], row["ean"]
-            gate, discovery, remaining, signatures = policies[cid]
+            policy = policies[cid]
+            gate = policy["ficha_gate"]
+            discovery, remaining, signatures = policy["discovery"], policy["remaining"], policy["signatures"]
             indexed = any(link_matches(sig, row["model"], row["color"]) for sig in signatures)
             plan = candidate_plan(products[ean], domains[cid]) if not row["located"] else CandidatePlan()
+            catalog_state = catalog_plan_assessment(
+                plan.discovery_plan, policy["catalog_sources"], policy["catalog_permission"],
+                policy["ficha_permission"], policy["access_status"], policy["catalog_gate"], gate,
+            )
             pilot_member = bool(scope and cid in scope["competitors"] and ean in scope["eans"])
             pilot = pilot_member and not row["located"]
             job = monitor_jobs.get((ean, cid), {})
@@ -172,6 +192,8 @@ class WatchBatch:
                          "candidate_count": len(plan.runnable), "candidate_reason": plan.reason,
                          "candidate_reason_code": plan.reason_code,
                          "local_candidates": [candidate.provenance() for candidate in plan.candidates],
+                         "catalog_discovery_plan": plan.discovery_plan,
+                         "catalog_execution": catalog_state,
                          "remaining_http": remaining, "minimum_http": int(needs_http),
                          "estimate": ("1 ficha + robots si no está en caché" if row["located"] else
                                       "Variable: listados, paginación y ficha; limitado por presupuesto")})

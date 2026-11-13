@@ -16,6 +16,7 @@ from price_url_candidates import (  # noqa: E402
     documented_measurement_records,
     resolve_product_attributes,
 )
+from price_locator import DEFAULT_SOURCES  # noqa: E402
 from price_references import model_key  # noqa: E402
 from competitor_requirements import business_tax_evidence, business_tax_policy_for  # noqa: E402
 
@@ -46,6 +47,7 @@ NEW_FIELDS = (
     "limitacion_medidas",
     "atributos_disponibles",
     "metodo_descubrimiento",
+    "plan_descubrimiento_catalogo",
     "fuente_evidencia_patron",
     "alcance_patron",
     "ruta_o_metodo_disponible",
@@ -57,6 +59,15 @@ NEW_FIELDS = (
     "motivo_exclusion_o_pendiente",
     "datos_pendientes",
     "politica_fiscal_registrada",
+    "descubrimiento_catalogo_implementado",
+    "fuente_catalogo_documental_propuesta",
+    "enlaces_catalogo_observados",
+    "fuente_catalogo_predeterminada_en_codigo",
+    "estado_configuracion_catalogo_local",
+    "estado_ejecucion_catalogo_local",
+    "motivo_estado_catalogo_local",
+    "estado_ficha_en_esta_revision",
+    "estado_oferta_comparable_en_esta_revision",
 )
 DEPRECATED_FIELDS = {
     "candidata_generada_esta_revision",
@@ -83,6 +94,14 @@ def _route_metadata(row: dict[str, str]) -> dict[str, str]:
         "measurement_limitation": row.get("limitacion_medidas", ""),
     }
     plan = candidate_plan(product, DOMAINS[row["competidor_id"]])
+    discovery = plan.discovery_plan
+    proposed_sources = discovery.get("entrypoints", [])
+    observed_sources = discovery.get("observed_links", [])
+    default_sources = [
+        {"template": template, "note": note}
+        for method, template, note in DEFAULT_SOURCES.get(row["competidor"], [])
+        if method == "catalog"
+    ]
     candidates = plan.candidates
     runnable = plan.runnable
     candidate_urls = list(dict.fromkeys(candidate.url for candidate in candidates))
@@ -174,6 +193,7 @@ def _route_metadata(row: dict[str, str]) -> dict[str, str]:
         "asociacion_medidas": row.get("asociacion_medidas", ""),
         "atributos_disponibles": _json(attributes),
         "metodo_descubrimiento": method,
+        "plan_descubrimiento_catalogo": _json(plan.discovery_plan),
         "fuente_evidencia_patron": "; ".join(evidence),
         "alcance_patron": pattern_state,
         "ruta_o_metodo_disponible": str(method_available).lower(),
@@ -185,6 +205,18 @@ def _route_metadata(row: dict[str, str]) -> dict[str, str]:
         "motivo_exclusion_o_pendiente": reason,
         "datos_pendientes": pending,
         "politica_fiscal_registrada": business_tax_evidence(fiscal) if fiscal else "",
+        "descubrimiento_catalogo_implementado": str(bool(discovery)).lower(),
+        "fuente_catalogo_documental_propuesta": _json(proposed_sources),
+        "enlaces_catalogo_observados": _json(observed_sources),
+        "fuente_catalogo_predeterminada_en_codigo": _json(default_sources),
+        "estado_configuracion_catalogo_local": "not_assessed",
+        "estado_ejecucion_catalogo_local": "not_assessed",
+        "motivo_estado_catalogo_local": (
+            "La matriz se genera offline: no inspecciona fuentes activas, permisos, robots ni presupuesto. "
+            "El plan documental nunca activa fuentes; el localizador usa solo discovery_sources activos."
+        ),
+        "estado_ficha_en_esta_revision": "not_checked",
+        "estado_oferta_comparable_en_esta_revision": "not_checked",
     }
 
 
@@ -262,6 +294,10 @@ def main() -> None:
         "competidores_con_ruta_antes",
         "competidores_con_ruta_o_metodo_despues",
         "competidores_con_candidata_en_plan_local",
+        "pares_con_descubrimiento_catalogo_implementado",
+        "pares_con_ejecucion_catalogo_no_evaluada",
+        "pares_con_ficha_verificada_en_esta_revision",
+        "pares_con_oferta_comparable_en_esta_revision",
     )
     grouped: dict[str, list[dict[str, str]]] = {}
     for row in rows:
@@ -281,6 +317,9 @@ def main() -> None:
             row for row in product_rows
             if row["consulta_gobernada_elegible_localmente"] == "true"
         ]
+        catalog_implemented = [
+            row for row in product_rows if row["descubrimiento_catalogo_implementado"] == "true"
+        ]
         first = product_rows[0]
         summary.append({
             "ean": ean,
@@ -297,6 +336,16 @@ def main() -> None:
             "competidores_con_ruta_antes": _json([row["competidor"] for row in before]),
             "competidores_con_ruta_o_metodo_despues": _json([row["competidor"] for row in after]),
             "competidores_con_candidata_en_plan_local": _json([row["competidor"] for row in planned]),
+            "pares_con_descubrimiento_catalogo_implementado": str(len(catalog_implemented)),
+            "pares_con_ejecucion_catalogo_no_evaluada": str(sum(
+                row["estado_ejecucion_catalogo_local"] == "not_assessed" for row in product_rows
+            )),
+            "pares_con_ficha_verificada_en_esta_revision": str(sum(
+                row["estado_ficha_en_esta_revision"] == "verified" for row in product_rows
+            )),
+            "pares_con_oferta_comparable_en_esta_revision": str(sum(
+                row["estado_oferta_comparable_en_esta_revision"] == "comparable" for row in product_rows
+            )),
         })
     if len(summary) != 100:
         raise ValueError("El resumen debe conservar los mismos 100 EAN.")

@@ -42,10 +42,6 @@ SUPPLIED_PATTERNS = {
     "domanci": (
         "https://domanci.com/es/gafas-de-sol/miu-miu-mu-11zs-16k5s0-51.html",
     ),
-    "congafas": (
-        "https://www.congafasdesol.com/prada-pr-d01s-0cd80l.html",
-        "https://www.congafasdesol.com/prada-pr06ys-09q5s0.html",
-    ),
 }
 
 
@@ -60,6 +56,10 @@ class Example:
     url: str
     gtins: tuple[str, ...] = ()
     caution: str = ""
+    source: str = EVIDENCE_SOURCE
+    review_date: str = REVIEW_DATE
+    review_base: str = REVIEW_BASE
+    route_attributes: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -229,10 +229,12 @@ EXAMPLES = (
             caution="Título y contenido indexados contradictorios: requiere revisión"),
     Example("E032", "domanci", "Chloe", "CH0289S", "003", "sol",
             "https://domanci.com/es/gafas-de-sol/chloe-ch0289s-003-58.html",
-            caution="Candidata histórica sin reconfirmación; no demuestra ausencia del producto"),
+            caution="Candidata histórica sin reconfirmación; no demuestra ausencia del producto",
+            route_attributes=(("caliber", "58"),)),
     Example("E033", "domanci", "Miu Miu", "MU 01XV", "VAU1O1", "montura",
             "https://domanci.com/es/monturas/miu-miu-mu-01xv-vau1o1-50.html",
-            caution="Candidata histórica sin reconfirmación; no demuestra ausencia del producto"),
+            caution="Candidata histórica sin reconfirmación; no demuestra ausencia del producto",
+            route_attributes=(("caliber", "50"),)),
     Example("E034", "universitaria", "Prada", "PR 27ZS", "16K08Z", "sol",
             "https://www.opticauniversitaria.es/gafas-de-sol/prada/prada-pr-27zs-16k08z/312245.html"),
     Example("E035", "universitaria", "Prada", "PR 65ZS", "ZVN09T", "sol",
@@ -265,7 +267,228 @@ EXAMPLES = (
             "https://www.otticait.com/tom-ford-ft5634-b-001"),
 )
 
-DOMAINS = {urlparse(example.url).hostname.removeprefix("www."): example.shop for example in EXAMPLES}
+_SPEC_SOURCE = ("Especificacion_100_EAN_6_competidores.json; índice/documentación aportados "
+                "el 2026-11-13; no es una respuesta HTTP actual")
+_HISTORY_SOURCE = "Evidencia_historica_acotada.json; recibo histórico, no verificación actual"
+_SPEC_DATE = "2026-11-13"
+_SPEC_BASE = "a1fef77139b82403387267083f2f6e5fa872c094"
+SUPPLEMENTAL_EXAMPLES = (
+    Example("N001", "amevista", "Chloe", "CH0347S", "001", "sol",
+            "https://www.amevista.com/es/chlo-ch0347s-001", ("889652630922",),
+            source=f"{_SPEC_SOURCE}#N001 (public_indexed_product)", review_date=_SPEC_DATE,
+            review_base=_SPEC_BASE),
+    Example("N002", "amevista", "Chloe", "CH0289S", "003", "sol",
+            "https://www.amevista.com/es/chlo-ch0289s-003",
+            caution="HREF de catálogo observado; ficha y EAN no contrastados.",
+            source=f"{_SPEC_SOURCE}#N002 (public_catalog_href)", review_date=_SPEC_DATE,
+            review_base=_SPEC_BASE),
+    Example("N003", "amevista", "Ray Ban", "RB4441D", "667787", "sol",
+            "https://www.amevista.com/es/ray-ban-rb4441d-667787",
+            source=f"{_SPEC_SOURCE}#N003 (public_indexed_product)", review_date=_SPEC_DATE,
+            review_base=_SPEC_BASE),
+    Example("N004", "optima", "Gucci", "GG1680S", "004", "sol",
+            "https://optica-optima.com/gafas-de-sol/gucci-gg1680s-004.html",
+            source=f"{_SPEC_SOURCE}#N004 (public_indexed_product)", review_date=_SPEC_DATE,
+            review_base=_SPEC_BASE),
+    Example("N005", "optima", "Bottega Veneta", "BV1274S", "005", "sol",
+            "https://optica-optima.com/gafas-de-sol/bottega-veneta-bv1274s-005.html", ("889652637075",),
+            source=f"{_SPEC_SOURCE}#N005 (public_indexed_product)", review_date=_SPEC_DATE,
+            review_base=_SPEC_BASE),
+    Example("N006", "visio", "Saint Laurent", "SL M160", "001", "sol",
+            "https://www.visiofactory.es/gafas-de-sol/todas-las-solares/"
+            "saint-laurent-monogram-sl-m160-001-53-19-negro.html", ("889652651774",),
+            source=f"{_SPEC_SOURCE}#N006 (public_indexed_product)", review_date=_SPEC_DATE,
+            review_base=_SPEC_BASE, route_attributes=(("caliber", "53"), ("bridge", "19"))),
+    Example("N007", "visio", "Saint Laurent", "SL M94", "001", "sol",
+            "https://www.visiofactory.es/gafas-de-sol/todas-las-solares/slm94-001-53-20.html",
+            ("889652359700",), source=f"{_SPEC_SOURCE}#N007 (public_indexed_product)",
+            review_date=_SPEC_DATE, review_base=_SPEC_BASE,
+            route_attributes=(("caliber", "53"), ("bridge", "20"))),
+    Example("N008", "visio", "Miu Miu", "MU 04UV", "1AB1O1", "montura",
+            "https://www.visiofactory.es/gafas-graduadas/todas-las-opticas/mu-04uv-1ab1o1-52-19.html",
+            ("8056597669016",), source=f"{_SPEC_SOURCE}#N008 (public_indexed_product)",
+            review_date=_SPEC_DATE, review_base=_SPEC_BASE,
+            route_attributes=(("caliber", "52"), ("bridge", "19"))),
+    Example("N009", "visio", "Miu Miu", "MU 01XV", "VAU1O1", "montura",
+            "https://www.visiofactory.es/gafas-graduadas/todas-las-opticas/mu-01xv-vau-1o1-50-18.html",
+            ("8056597981361",), source=f"{_SPEC_SOURCE}#N009 (public_indexed_product)",
+            review_date=_SPEC_DATE, review_base=_SPEC_BASE,
+            route_attributes=(("caliber", "50"), ("bridge", "18"))),
+    Example("N010", "visio", "Miu Miu", "MU 01YV", "14L1O1", "montura",
+            "https://www.visiofactory.es/gafas-graduadas/todas-las-opticas/"
+            "miu-miu-mu-01yv-14l1o1-51-16-havana-honey.html", ("8056262600078",),
+            source=f"{_SPEC_SOURCE}#N010 (public_indexed_product)", review_date=_SPEC_DATE,
+            review_base=_SPEC_BASE, route_attributes=(("caliber", "51"), ("bridge", "16"))),
+    Example("N011", "visio", "Miu Miu", "MU 53WV", "ZVN1O1", "montura",
+            "https://www.visiofactory.es/gafas-graduadas/todas-las-opticas/"
+            "miu-miu-0mu-53wv-zvn-1o1-53-20-pale-gold.html", ("8056262410929",),
+            source=f"{_SPEC_SOURCE}#N011 (public_indexed_product)", review_date=_SPEC_DATE,
+            review_base=_SPEC_BASE, route_attributes=(("caliber", "53"), ("bridge", "20"))),
+    Example("N012", "visio", "Tiffany & Co.", "TF3104D", "6216S4", "sol",
+            "https://www.visiofactory.es/gafas-de-sol/todas-las-solares/"
+            "tiffany-co-tf3104d-6216s4-56-18-oro.html",
+            source=f"{_SPEC_SOURCE}#N012 (public_indexed_product)", review_date=_SPEC_DATE,
+            review_base=_SPEC_BASE, route_attributes=(("caliber", "56"), ("bridge", "18"))),
+    Example("N013", "edel", "Ray Ban", "RB4441D", "667787", "sol",
+            "https://www.edel-optics.es/RB4441D-667787-de-Ray-Ban.html",
+            source=f"{_SPEC_SOURCE}#N013 (public_indexed_product)", review_date=_SPEC_DATE,
+            review_base=_SPEC_BASE),
+    Example("U002", "edel", "Tom Ford", "FT1026", "05E", "sol",
+            "https://www.edel-optics.es/FT1026-05E-de-Tom-Ford.html",
+            source=f"{_SPEC_SOURCE}#U002 (user_supplied_product)", review_date=_SPEC_DATE,
+            review_base=_SPEC_BASE),
+    Example("U003", "edel", "Miu Miu", "MU 53WV", "ZVN1O1", "montura",
+            "https://www.edel-optics.es/MU-53WV-ZVN1O1-de-Miu-Miu.html",
+            source=f"{_SPEC_SOURCE}#U003 (user_supplied_product)", review_date=_SPEC_DATE,
+            review_base=_SPEC_BASE),
+    Example("U004", "domanci", "Tom Ford", "FT1026", "05E", "sol",
+            "https://domanci.com/es/gafas-de-sol/tom-ford-bruce-ft1026-05e-61.html",
+            caution="El 61 del enlace aportado no está asociado al EAN; verificar variante en catálogo.",
+            source=f"{_SPEC_SOURCE}#U004 (user_supplied_product)", review_date=_SPEC_DATE,
+            review_base=_SPEC_BASE, route_attributes=(("caliber", "61"),)),
+    Example("U005", "domanci", "Miu Miu", "MU 53WV", "ZVN1O1", "montura",
+            "https://domanci.com/es/monturas/miu-miu-mu-53wv-zvn1o1-51.html",
+            caution="El 51 del enlace no se asigna al EAN, cuya medida publicada por Visio es 53-20.",
+            source=f"{_SPEC_SOURCE}#U005 (user_supplied_product)", review_date=_SPEC_DATE,
+            review_base=_SPEC_BASE, route_attributes=(("caliber", "51"),)),
+    Example("U006", "visio", "Tom Ford", "FT1044", "01E", "sol",
+            "https://www.visiofactory.es/gafas-de-sol/todas-las-solares/ft1044-s-01e-60-12.html",
+            source=f"{_SPEC_SOURCE}#U006 (user_supplied_product)", review_date=_SPEC_DATE,
+            review_base=_SPEC_BASE, route_attributes=(("caliber", "60"), ("bridge", "12"))),
+    Example("U007", "visio", "Miu Miu", "MU 52YS", "ZVN5D1", "sol",
+            "https://www.visiofactory.es/gafas-de-sol/todas-las-solares/mu-52ys-zvn-5d1-54-21.html",
+            source=f"{_SPEC_SOURCE}#U007 (user_supplied_product)", review_date=_SPEC_DATE,
+            review_base=_SPEC_BASE, route_attributes=(("caliber", "54"), ("bridge", "21"))),
+    Example("U008", "visio", "Ray Ban", "RB2140", "901", "sol",
+            "https://www.visiofactory.es/gafas-de-sol/todas-las-solares/rb2140-901-50-22.html",
+            caution="La talla del enlace no acredita asociación con ninguno de los EAN RB2140 901.",
+            source=f"{_SPEC_SOURCE}#U008 (user_supplied_product)", review_date=_SPEC_DATE,
+            review_base=_SPEC_BASE, route_attributes=(("caliber", "50"), ("bridge", "22"))),
+    Example("U009", "congafas", "Prada", "PR D01S", "0CD80L", "sol",
+            "https://www.congafasdesol.com/prada-pr-d01s-0cd80l.html",
+            source=f"{_SPEC_SOURCE}#U009 (user_supplied_product; outside the 100-EAN manifest)",
+            review_date=_SPEC_DATE, review_base=_SPEC_BASE),
+    Example("U010", "congafas", "Prada", "PR06YS", "09Q5S0", "sol",
+            "https://www.congafasdesol.com/prada-pr06ys-09q5s0.html",
+            source=f"{_SPEC_SOURCE}#U010 (user_supplied_product)", review_date=_SPEC_DATE,
+            review_base=_SPEC_BASE),
+    Example("report2-check:601", "amevista", "Tom Ford", "FT0711", "01A", "sol",
+            "https://www.amevista.com/es/tom-ford-ft0711-01a-fausto", ("889214029614",),
+            source=f"{_HISTORY_SOURCE}#report2-check:601", review_date="2026-11-12", review_base=""),
+    Example("report2-check:607", "amevista", "Tom Ford", "FT1301", "52A", "sol",
+            "https://www.amevista.com/es/tom-ford-ft1301-52a-joey-02", ("889214625625",),
+            source=f"{_HISTORY_SOURCE}#report2-check:607", review_date="2026-11-12", review_base=""),
+    Example("report2-check:608", "amevista", "Tom Ford", "FT1310", "52E", "sol",
+            "https://www.amevista.com/es/tom-ford-ft1310-52e-chloe-02", ("889214625991",),
+            source=f"{_HISTORY_SOURCE}#report2-check:608", review_date="2026-11-12", review_base=""),
+    Example("report2-check:609", "amevista", "Tom Ford", "FT1044", "93E", "sol",
+            "https://www.amevista.com/es/tom-ford-ft1044-93e-bronson", ("889214684097",),
+            source=f"{_HISTORY_SOURCE}#report2-check:609", review_date="2026-11-12", review_base=""),
+    Example("report2-check:614", "amevista", "Gucci", "GG1660S", "002", "sol",
+            "https://www.amevista.com/es/gucci-gg1660s-002-gg-logo", ("889652494838",),
+            source=f"{_HISTORY_SOURCE}#report2-check:614", review_date="2026-11-12", review_base=""),
+    Example("report2-check:905", "optima", "Tom Ford", "FT1301", "52A", "sol",
+            "https://optica-optima.com/gafas-de-sol/tom-ford-joey-02-ft1301-52a.html", ("889214625625",),
+            source=f"{_HISTORY_SOURCE}#report2-check:905", review_date="2026-11-12", review_base=""),
+    Example("report2-check:906", "optima", "Tom Ford", "FT1310", "52E", "sol",
+            "https://optica-optima.com/gafas-de-sol/tom-ford-chloe-02-ft1310-52e.html", ("889214625991",),
+            source=f"{_HISTORY_SOURCE}#report2-check:906", review_date="2026-11-12", review_base=""),
+    Example("report2-check:907", "optima", "Tom Ford", "FT1044", "93E", "sol",
+            "https://optica-optima.com/gafas-de-sol/tom-ford-bronson-ft1044-93e.html", ("889214684097",),
+            source=f"{_HISTORY_SOURCE}#report2-check:907", review_date="2026-11-12", review_base=""),
+)
+ALL_EXAMPLES = EXAMPLES + SUPPLEMENTAL_EXAMPLES
+
+DOMAINS = {urlparse(example.url).hostname.removeprefix("www."): example.shop for example in ALL_EXAMPLES}
+
+CATALOG_DISCOVERY_PLANS = {
+    "optima": {
+        "entrypoints": {
+            "sol": ("https://optica-optima.com/gafas-de-sol/",),
+            "montura": ("https://optica-optima.com/gafas-graduadas/",),
+        },
+        "observed_links": ("https://optica-optima.com/gafas-de-sol/gucci/",),
+        "evidence": ("O02", "N004", "N005"),
+        "method": "Indexar href publicados de categoría/marca; resolver alias en el catálogo, no por slug.",
+    },
+    "amevista": {
+        "entrypoints": {
+            "sol": ("https://www.amevista.com/es/gafas-de-sol",),
+            "montura": ("https://www.amevista.com/es/gafas-de-vista",),
+        },
+        "observed_links": ("https://www.amevista.com/es/gafas-de-sol/chloe",),
+        "evidence": ("A02", "N002"),
+        "method": "Usar catálogo español y href publicados; conservar alias exactos por referencia.",
+    },
+    "visio": {
+        "entrypoints": {
+            "sol": ("https://www.visiofactory.es/gafas-de-sol/todas-las-solares/",),
+            "montura": ("https://www.visiofactory.es/gafas-graduadas/todas-las-opticas/",),
+        },
+        "observed_links": (
+            "https://www.visiofactory.es/gafas-de-sol/saint-laurent-hombre/",
+            "https://www.visiofactory.es/gafas-graduadas/tom-ford/",
+            "https://www.visiofactory.es/gafas-graduadas/miu-miu/",
+        ),
+        "evidence": ("V02", "N006", "N008", "N009", "N010", "N011", "N012"),
+        "method": "Indexar href por marca/categoría; conservar handle, medidas y color tal como se publican.",
+    },
+    "edel": {
+        "entrypoints": {"sol": ("https://www.edel-optics.es/",),
+                        "montura": ("https://www.edel-optics.es/",)},
+        "observed_links": ("https://www.edel-optics.es/Gafas-de-sol-Miu-Miu.html",),
+        "evidence": ("E01", "E02", "N013"),
+        "method": "Reutilizar índice; resolver href de marca y después Product/Offer/selectedSize.",
+    },
+    "domanci": {
+        "entrypoints": {
+            "sol": ("https://domanci.com/es/marcas", "https://domanci.com/es/marca/{brand}"),
+            "montura": ("https://domanci.com/es/marcas", "https://domanci.com/es/marca/{brand}"),
+        },
+        "observed_links": (
+            "https://domanci.com/es/marca/tom-ford",
+            "https://domanci.com/es/marca/miu-miu",
+        ),
+        "evidence": ("D01", "D02", "U004", "U005"),
+        "method": "Compartir el índice de href de marca; recuperar nombre, categoría y talla de la ficha fuente.",
+    },
+    "congafas": {
+        "entrypoints": {"sol": (), "montura": ()},
+        "observed_links": ("https://www.congafasdesol.com/sitemaps/es/sitemap.xml",),
+        "evidence": ("C01", "C02"),
+        "method": ("Reutilizar únicamente historial/índice local; no consultar mientras siga el bloqueo. "
+                   "Sitemap solo por el flujo existente, autorizado y sin bloqueo."),
+        "halted_after_403": True,
+    },
+}
+
+
+def _catalog_discovery_plan(shop: str, category: str) -> dict[str, Any]:
+    source = CATALOG_DISCOVERY_PLANS.get(shop)
+    if source is None:
+        return {}
+    entrypoints = source["entrypoints"]
+    urls = list(entrypoints.get(category, ())) if category else [
+        url for paths in entrypoints.values() for url in paths
+    ]
+    return {
+        "shop": shop,
+        "category": category or "all",
+        "shared": True,
+        "entrypoints": list(dict.fromkeys(urls)),
+        "observed_links": list(source.get("observed_links", ())),
+        "method": source["method"],
+        "evidence": list(source.get("evidence", ())),
+        "evidence_source": ("Especificacion_100_EAN_6_competidores.json; paquete local preparado "
+                           "2026-11-13; evidencia documental/indexada, no respuesta HTTP actual"),
+        "source_role": "documentary_proposal",
+        "requires_existing_authorization": True,
+        "access_state": "not_assessed",
+        "automatic_execution": False,
+        "execution_source": "active_discovery_sources_only",
+        "configured_source_priority": True,
+        "halted_after_403": bool(source.get("halted_after_403", False)),
+    }
 
 
 @dataclass
@@ -293,6 +516,7 @@ class CandidatePlan:
     candidates: list[UrlCandidate] = field(default_factory=list)
     reason_code: str = ""
     reason: str = ""
+    discovery_plan: dict[str, Any] = field(default_factory=dict)
 
     @property
     def runnable(self) -> list[UrlCandidate]:
@@ -314,11 +538,9 @@ def _slug(value: str) -> str:
 
 def _supplied_pattern_plan(product: dict, shop: str, category: str, attributes: dict) -> CandidatePlan:
     """User-supplied route hypotheses; page identity and access remain governed by the reader."""
-    if shop == "congafas" and (category != "sol" or key(product["brand"]) != "PRADA"):
-        reason = ("El patrón aportado de ConGafasDeSol solo documenta Prada en gafas de sol"
-                  if category == "sol" else
-                  "El patrón aportado de ConGafasDeSol corresponde a gafas de sol, no monturas")
-        return CandidatePlan(reason_code="needs_authorized_discovery", reason=reason)
+    if shop != "domanci":
+        return CandidatePlan(reason_code="needs_authorized_discovery",
+                             reason="No hay un patrón de URL aportado para esta tienda.")
     used = dict(attributes)
     used["pattern_examples"] = " | ".join(SUPPLIED_PATTERNS[shop])
     used["evidence_note"] = "User-supplied route pattern; not captured HTTP or verified identity"
@@ -330,28 +552,17 @@ def _supplied_pattern_plan(product: dict, shop: str, category: str, attributes: 
     elif re.fullmatch(r"FT\d{4}[A-Z]?", model):
         model_slug = model.lower()
     brand_slug, color = _slug(product["brand"]), key(product["color"]).lower()
-    if shop == "domanci":
-        lens = normalize_caliber(product.get("caliber", "")).partition("-")[0]
-        if not lens:
-            return CandidatePlan(reason_code="missing_attribute",
-                                 reason="Falta calibre asociado al EAN para construir la URL Domanci; no se infiere")
-        used["caliber"] = lens
-        used["dimension_source"] = (
-            product.get("measurement_source") or "Explicit caliber on the target product record"
-        )
-        section = "gafas-de-sol" if category == "sol" else "monturas"
-        urls = [f"https://domanci.com/es/{section}/{brand_slug}-{model_slug}-{color}-{lens}.html"]
-        evidence = ["user:domanci-route-2026-11-06", "E032", "E033"]
-    else:
-        # Two supplied Prada examples demonstrate both PR-06YS and PR06YS spelling.
-        # Try no more than these two deterministic spellings, never a list of colour/size guesses.
-        spellings = [model_slug]
-        if key(product["brand"]) == "PRADA" and prefix and prefix[1] == "PR":
-            compact = model.lower()
-            spellings = [compact, model_slug] if prefix[2][0].isdigit() else [model_slug, compact]
-        urls = [f"https://www.congafasdesol.com/{brand_slug}-{spelling}-{color}.html"
-                for spelling in dict.fromkeys(spellings)]
-        evidence = ["user:congafas-route-2026-11-06"]
+    lens = normalize_caliber(product.get("caliber", "")).partition("-")[0]
+    if not lens:
+        return CandidatePlan(reason_code="missing_attribute",
+                             reason="Falta calibre asociado al EAN para construir la URL Domanci; no se infiere")
+    used["caliber"] = lens
+    used["dimension_source"] = (
+        product.get("measurement_source") or "Explicit caliber on the target product record"
+    )
+    section = "gafas-de-sol" if category == "sol" else "monturas"
+    urls = [f"https://domanci.com/es/{section}/{brand_slug}-{model_slug}-{color}-{lens}.html"]
+    evidence = ["user:domanci-route-2026-11-06", "E032", "E033"]
     return CandidatePlan([
         UrlCandidate(url, f"supplied_pattern:{shop}", used, evidence,
                      origin="User-provided URL patterns, 2026-11-06",
@@ -433,7 +644,7 @@ def _visio_format_plan(product: dict, brand: str, model: str) -> CandidatePlan |
     return CandidatePlan([candidate])
 
 
-def candidate_plan(product: dict, domain: str) -> CandidatePlan:
+def _candidate_plan(product: dict, domain: str) -> CandidatePlan:
     """Pure preview. Missing dimensions/opaque IDs are never enumerated or inferred from another colour."""
     host = urlparse(domain if "://" in domain else "https://" + domain).hostname or ""
     shop = DOMAINS.get(host.removeprefix("www.").lower())
@@ -458,11 +669,7 @@ def candidate_plan(product: dict, domain: str) -> CandidatePlan:
             attributes[name] = str(product[name])
     if product.get("measurement_source"):
         attributes["dimension_source"] = str(product["measurement_source"])
-    # An explicitly sized target can use the supplied Domanci route without treating
-    # an old historical URL (which did not associate its size to this EAN) as verified.
-    if shop == "domanci" and normalize_caliber(product.get("caliber", "")):
-        return _supplied_pattern_plan(product, shop, category, attributes)
-    examples = [example for example in EXAMPLES if example.shop == shop]
+    examples = [example for example in ALL_EXAMPLES if example.shop == shop]
     candidates: dict[str, UrlCandidate] = {}
     for example in examples:
         if shop == "amevista" and not urlparse(example.url).path.startswith("/es/"):
@@ -471,8 +678,8 @@ def candidate_plan(product: dict, domain: str) -> CandidatePlan:
             continue
         if example.color and key(example.color) != color:
             continue
-        reason = example.caution
-        if reason and "medidas no asociadas al upc" in reason.casefold():
+        reasons = [example.caution] if example.caution else []
+        if reasons and "medidas no asociadas al upc" in example.caution.casefold():
             target_caliber = normalize_caliber(product.get("caliber"))
             route_caliber = extract_caliber(urlparse(example.url).path)
             has_ean_measurement = product.get("measurement_association") in (
@@ -480,27 +687,69 @@ def candidate_plan(product: dict, domain: str) -> CandidatePlan:
             )
             if (has_ean_measurement and target_caliber and route_caliber
                     and compare_calibers(target_caliber, route_caliber) == "equal"):
-                reason = ""
+                reasons.remove(example.caution)
         if not example.color:
-            reason = "Ficha padre sin color: resolver URL completa de variante, identidad, precio y stock"
+            reasons.append("Ficha padre sin color: resolver URL completa de variante, identidad, precio y stock")
         gtins = {normalize_gtin(value) for value in example.gtins}
         if gtins and gtins != {ean}:
-            reason = "GTIN documentados contradictorios o distintos del objetivo: requiere revisión"
+            reasons.append("GTIN documentados contradictorios o distintos del objetivo: requiere revisión")
         used = dict(attributes)
+        route_attributes = dict(example.route_attributes)
+        if route_attributes:
+            used["route_attributes"] = route_attributes
+            used["route_attributes_note"] = (
+                "Dimensiones del href, no atributos del EAN; no trasladar disponibilidad entre tallas."
+            )
+            route_measure = normalize_caliber("-".join(
+                value for value in (route_attributes.get("caliber", ""), route_attributes.get("bridge", ""))
+                if value
+            ))
+            target_measure = normalize_caliber(product.get("caliber"))
+            if target_measure and "-" not in target_measure and product.get("bridge"):
+                target_measure += "-" + str(product["bridge"]).strip()
+            has_ean_measurement = product.get("measurement_association") in (
+                MEASUREMENT_ASSOCIATIONS - {"model_color_only"}
+            )
+            route_lens, _, route_bridge = route_measure.partition("-")
+            target_lens, _, target_bridge = target_measure.partition("-")
+            route_matches_target = (
+                route_lens == target_lens and (not route_bridge or not target_bridge
+                                               or route_bridge == target_bridge)
+            )
+            if (shop == "domanci" and reasons and target_measure and route_matches_target
+                    and has_ean_measurement and "candidata histórica" in reasons[0].casefold()):
+                reasons.remove(reasons[0])
+            if route_measure and not target_measure:
+                reasons.append("La talla de la URL no está asociada al EAN; resolver la variante en la ficha.")
+            elif route_measure and route_bridge and not target_bridge:
+                reasons.append("El puente de la URL no está asociado al EAN; resolver la variante en la ficha.")
+            elif route_measure and target_measure:
+                route_lens, _, route_bridge = route_measure.partition("-")
+                target_lens, _, target_bridge = target_measure.partition("-")
+                if route_lens != target_lens or (route_bridge and target_bridge and route_bridge != target_bridge):
+                    reasons.append(
+                        f"La URL indica {route_measure} y el EAN tiene {target_measure}; "
+                        "no asociar stock ni variante por el enlace."
+                    )
         if example.gtins:
             used["documented_gtins"] = ", ".join(example.gtins)
         product_id = parse_qs(urlparse(example.url).query).get("selectedSize")
         if product_id:
             used["selectedSize_product_id"] = product_id[0]
+        reason = "; ".join(dict.fromkeys(reasons))
         candidates[example.url] = UrlCandidate(
             example.url, "documented_url:" + example.id, used, [example.id],
-            state="probable" if reason else "pending_verification", reason=reason)
+            origin=example.source, state="probable" if reason else "pending_verification", reason=reason,
+            review_date=example.review_date, review_base=example.review_base)
 
     if candidates:
         needs_review = any(not candidate.runnable for candidate in candidates.values())
         return CandidatePlan(list(candidates.values()),
                              "needs_authorized_discovery" if needs_review else "",
                              "; ".join(candidate.reason for candidate in candidates.values() if candidate.reason))
+
+    if shop == "domanci" and normalize_caliber(product.get("caliber", "")):
+        return _supplied_pattern_plan(product, shop, category, attributes)
 
     if shop == "visio" and category == "sol":
         format_plan = _visio_format_plan(product, brand, model)
@@ -543,6 +792,10 @@ def candidate_plan(product: dict, domain: str) -> CandidatePlan:
             reason = "La evidencia Amevista respalda rutas marca-modelo-color solo para gafas de sol"
         elif shop == "amevista":
             reason = "Marca fuera de los patrones Amevista documentados; requiere URL/alias acreditado"
+        elif shop == "congafas":
+            reason = ("No se generan slugs genéricos para Prada ni otras marcas: reutilizar historial/índice local. "
+                      "La ruta aportada cubre solo gafas de sol, no monturas. La investigación pública se detuvo "
+                      "tras 403; sitemap solo mediante el flujo existente, autorizado y sin bloqueo.")
         elif shop == "visio" and brand == "PRADA" and category == "sol":
             reason = f"Visio solo documenta la subregla Prada PR27ZS en sol; {model} requiere una fuente autorizada"
         elif shop == "visio":
@@ -566,7 +819,10 @@ def candidate_plan(product: dict, domain: str) -> CandidatePlan:
 
     used = dict(attributes)
     lens, _, bridge = normalize_caliber(product.get("caliber", "")).partition("-")
-    refs = [example.id for example in examples if key(example.brand) == brand and example.category == category]
+    refs = [
+        example.id for example in EXAMPLES
+        if example.shop == shop and key(example.brand) == brand and example.category == category
+    ]
     if shop == "amevista":
         used["locale"] = "es (Spanish-market catalog; E021 documents a separate US URL)"
         if brand == "TIFFANYCO":
@@ -669,3 +925,12 @@ def candidate_plan(product: dict, domain: str) -> CandidatePlan:
                               review_date=review_date, review_base=review_base)
         )
     return CandidatePlan(list(candidates.values()))
+
+
+def candidate_plan(product: dict, domain: str) -> CandidatePlan:
+    """Return URL hypotheses and a documentary source plan; only configured sources may execute."""
+    plan = _candidate_plan(product, domain)
+    host = urlparse(domain if "://" in domain else "https://" + domain).hostname or ""
+    shop = DOMAINS.get(host.removeprefix("www.").lower())
+    plan.discovery_plan = _catalog_discovery_plan(shop or "", _category(product.get("category", "")))
+    return plan

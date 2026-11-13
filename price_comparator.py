@@ -52,6 +52,7 @@ _ADDED_COLUMNS = {
     "pilot_budgets": {"last_http_at": "REAL"},
     "price_pilot": {"last_error": "TEXT NOT NULL DEFAULT ''"},
     "price_trial_pairs": {"next_check_at": "TEXT", "defer_reason": "TEXT NOT NULL DEFAULT ''"},
+    "locate_events": {"metadata": "TEXT NOT NULL DEFAULT '{}'"},
     "offers": {"ean_published": "TEXT NOT NULL DEFAULT ''", "model_code": "TEXT NOT NULL DEFAULT ''",
                "color_code": "TEXT NOT NULL DEFAULT ''", "caliber": "TEXT NOT NULL DEFAULT ''",
                "match_basis": "TEXT NOT NULL DEFAULT ''", "price_includes_tax": "INTEGER",
@@ -63,8 +64,10 @@ _ADDED_COLUMNS = {
     "discovery_sources": {"kind": "TEXT NOT NULL DEFAULT 'brand'", "follow_pattern": "TEXT NOT NULL DEFAULT ''",
                           "max_depth": "INTEGER NOT NULL DEFAULT 0", "adapter": "TEXT NOT NULL DEFAULT 'generic'"},
     "discovery_pages": {"content_hash": "TEXT NOT NULL DEFAULT ''", "changed_at": "TEXT",
-                        "unchanged_runs": "INTEGER NOT NULL DEFAULT 0", "children": "TEXT NOT NULL DEFAULT ''"},
-    "discovery_index": {"gone_at": "TEXT", "candidate_evidence": "TEXT NOT NULL DEFAULT '{}'"},
+                        "unchanged_runs": "INTEGER NOT NULL DEFAULT 0", "children": "TEXT NOT NULL DEFAULT ''",
+                        "fetch_trace": "TEXT NOT NULL DEFAULT '{}'"},
+    "discovery_index": {"gone_at": "TEXT", "candidate_evidence": "TEXT NOT NULL DEFAULT '{}'",
+                        "listing_facts": "TEXT NOT NULL DEFAULT '{}'"},
 }
 AVAILABILITY_STATES = {"available", "unavailable", "unknown"}
 DEFAULT_DB_PATH = Path(__file__).parent / "masterdata_data" / "price_comparator.sqlite3"
@@ -720,7 +723,8 @@ class PriceComparatorStore:
                         method TEXT NOT NULL DEFAULT '',
                         url TEXT NOT NULL DEFAULT '',
                         detail TEXT NOT NULL DEFAULT '',
-                        requests INTEGER NOT NULL DEFAULT 0
+                        requests INTEGER NOT NULL DEFAULT 0,
+                        metadata TEXT NOT NULL DEFAULT '{}'
                     );
                     CREATE TABLE IF NOT EXISTS discovery_sources (
                         id INTEGER PRIMARY KEY,

@@ -133,13 +133,21 @@ jobs:
           from build_info import footer_text
           assert footer_text(info) == 'Cloud v%s \u00b7 commit %s' % (os.environ['EXPECTED_VERSION'], os.environ['EXPECTED_COMMIT'][:7])
           assert cloud_dashboard.LOGO.is_file()
-          assert len(price_url_candidates.documented_measurement_records()) == 9
+          assert len(price_url_candidates.documented_measurement_records()) == 15
           product = {'ean': '8056597875349', 'brand': 'Prada', 'model': 'PR 27ZS', 'color': '16K08Z'}
           resolved = price_url_candidates.resolve_product_attributes(product)
           assert not resolved.conflict
           assert (resolved.product['caliber'], resolved.product['bridge']) == ('54', '21')
           assert resolved.evidence['fuente_medidas'] == 'E041'
           assert 'caliber' not in product
+          plan = price_url_candidates.candidate_plan(
+              {'ean': '8056262410929', 'brand': 'Miu Miu', 'model': 'MU 53WV',
+               'color': 'ZVN1O1', 'category': 'montura'}, 'domanci.com')
+          assert len(plan.candidates) == 1 and not plan.runnable
+          assert plan.candidates[0].attributes['caliber'] == '53'
+          assert plan.candidates[0].attributes['bridge'] == '20'
+          assert plan.candidates[0].attributes['route_attributes'] == {'caliber': '51'}
+          assert plan.candidates[0].state == 'probable'
           print('Artifact identity and runtime imports verified; network disabled')
           "
           VOLUME="cloud-identity-smoke-${{ github.run_id }}-${{ github.run_attempt }}"

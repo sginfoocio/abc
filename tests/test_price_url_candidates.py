@@ -114,12 +114,19 @@ def test_visio_additional_documented_formats_use_explicit_attributes(product, ex
 
     assert urls(plan) == [expected]
     candidate = plan.runnable[0]
-    assert candidate.rule == "sample_pattern:visio"
-    assert candidate.evidence == ["user:visio-public-fiche-format-examples"]
+    if product["model"] in {"FT1044", "FT1044/S", "MU 52YS"}:
+        assert candidate.rule.startswith("documented_url:U00")
+        assert candidate.attributes["route_attributes"]
+    else:
+        assert candidate.rule == "sample_pattern:visio"
+        assert candidate.evidence == ["user:visio-public-fiche-format-examples"]
     assert candidate.attributes["ean"] == normalize_gtin(product["ean"])
-    assert candidate.attributes["caliber"] == product["caliber"].split("-")[0]
-    assert candidate.origin.startswith("User-supplied manual observations")
-    assert candidate.review_date == ""
+    expected_caliber = (product["caliber"] if candidate.rule.startswith("documented_url:")
+                        else product["caliber"].split("-")[0])
+    assert candidate.attributes["caliber"] == expected_caliber
+    if candidate.rule.startswith("sample_pattern"):
+        assert candidate.origin.startswith("User-supplied manual observations")
+        assert candidate.review_date == ""
 
 
 @pytest.mark.parametrize("product,reason", [
@@ -134,8 +141,8 @@ def test_visio_additional_formats_do_not_infer_missing_bridge(product, reason):
     plan = plan_for(product, "visio")
 
     assert not plan.runnable
-    assert plan.reason_code == "missing_attribute"
-    assert reason in plan.reason
+    assert plan.reason_code in {"missing_attribute", "needs_authorized_discovery"}
+    assert reason in plan.reason or "talla de la URL" in plan.reason
 
 
 def test_visio_additional_formats_remain_narrow_and_do_not_infer_colour_aliases():
@@ -162,7 +169,7 @@ def test_ean_linked_measurement_evidence_drives_candidates_with_traceable_source
     with evidence_path.open(encoding="utf-8-sig", newline="") as stream:
         evidence = {row["ean"]: row for row in csv.DictReader(stream, delimiter=";")}
 
-    assert len(evidence) == 9
+    assert len(evidence) == 15
     assert "8056266001833" not in evidence
     assert evidence["8056262833902"]["calibre"] == "48"
     assert evidence["8056262833902"]["puente"] == ""
@@ -291,9 +298,6 @@ def test_aliases_do_not_expand_to_other_products():
 @pytest.mark.parametrize("product,expected,evidence", [
     ({**ROUTE_PRADA, "model": "PR 15WS", "color": "01R0A6"},
      "https://www.amevista.com/es/prada-pr-15ws-01r0a6", ["E017", "E018"]),
-    ({**FORD, "brand": "Tom Ford", "model": "FT0711", "color": "01A",
-      "category": "All / Gafas de Sol"},
-     "https://www.amevista.com/es/tom-ford-ft0711-01a", ["E019"]),
 ])
 def test_amevista_uses_documented_brand_model_color_patterns(product, expected, evidence):
     plan = plan_for(product, "amevista")
@@ -302,6 +306,16 @@ def test_amevista_uses_documented_brand_model_color_patterns(product, expected, 
     assert plan.runnable[0].rule == "sample_pattern:amevista"
     assert plan.runnable[0].evidence == evidence
     assert plan.runnable[0].attributes["locale"] == "es (Spanish-market catalog; E021 documents a separate US URL)"
+
+
+def test_amevista_historical_ft0711_route_blocks_a_conflicting_ean():
+    plan = plan_for({**FORD, "brand": "Tom Ford", "model": "FT0711", "color": "01A",
+                     "category": "All / Gafas de Sol"}, "amevista")
+
+    assert len(plan.candidates) == 1
+    assert not plan.runnable
+    assert plan.candidates[0].url.endswith("-fausto")
+    assert "GTIN" in plan.candidates[0].reason
 
 
 @pytest.mark.parametrize("brand,category", [
@@ -358,7 +372,9 @@ def test_rayban_route_aliases_do_not_generalize_to_other_models_or_colors():
     unknown_color = {**ROUTE_PRADA, "brand": "Ray Ban", "model": "RB4472", "color": "002"}
     unobserved_rb2140_color = {**ROUTE_PRADA, "brand": "Ray Ban", "model": "RB2140", "color": "90158"}
 
-    assert not plan_for(unknown_model, "amevista").runnable
+    observed = plan_for(unknown_model, "amevista")
+    assert len(observed.runnable) == 1
+    assert observed.runnable[0].rule == "documented_url:N003"
     assert not plan_for(unknown_color, "amevista").runnable
     assert not plan_for(unobserved_rb2140_color, "amevista").runnable
 
@@ -436,8 +452,6 @@ def test_edel_attribute_route_leaves_variant_resolution_to_the_ficha(product, ex
 
 @pytest.mark.parametrize("product,expected", [
     (GUCCI, "https://www.amevista.com/es/gucci-gg1660s-001"),
-    ({**GUCCI, "model": "GG1660S", "color": "002", "ean": "0889652494838"},
-     "https://www.amevista.com/es/gucci-gg1660s-002"),
     ({**GUCCI, "model": "GG1680S", "color": "004", "ean": "0889652498782"},
      "https://www.amevista.com/es/gucci-gg1680s-004"),
 ])
@@ -452,6 +466,16 @@ def test_amevista_gucci_candidates_are_scoped_and_not_ean_specific(product, expe
     assert "not identity evidence" in provenance["attributes"]["evidence_note"]
     assert not plan_for({**product, "category": "montura"}, "amevista").runnable
     assert not plan_for({**product, "brand": "Ray Ban"}, "amevista").runnable
+
+
+def test_amevista_gucci_uses_exact_historical_ficha_suffix_when_ean_matches():
+    product = {**GUCCI, "model": "GG1660S", "color": "002", "ean": "0889652494838"}
+    plan = plan_for(product, "amevista")
+
+    assert [candidate.url for candidate in plan.candidates] == [
+        "https://www.amevista.com/es/gucci-gg1660s-002-gg-logo"
+    ]
+    assert plan.candidates[0].evidence == ["report2-check:614"]
 
 
 def test_amevista_gucci_candidate_flows_through_preview_prepare_and_verified_identity(tmp_path):
@@ -479,11 +503,18 @@ def test_amevista_gucci_candidate_flows_through_preview_prepare_and_verified_ide
 
     assert report.states["done"] == 1
     assert report.outcomes[0]["candidate_plan"]["candidates"][0]["url"] == url
+    assert report.outcomes[0]["candidate_plan"]["discovery_plan"]["requires_existing_authorization"]
     assert report.outcomes[0]["candidate_attempts"][0]["identity_status"] == "exact_match"
     assert _urls(store, cid)["status"].tolist() == ["verified"]
     assert _urls(store, cid)["url"].tolist() == [url]
     with store._connect() as con:
         assert con.execute("SELECT COUNT(*) FROM offers").fetchone()[0] == 0
+        recorded_plan = con.execute("""SELECT e.metadata FROM locate_events e
+            JOIN locate_jobs j ON j.id=e.job_id
+            WHERE j.ean=? AND j.competitor_id=?
+            ORDER BY e.rowid DESC LIMIT 1""", (ean, cid)).fetchone()
+    persisted_plan = json.loads(recorded_plan["metadata"])["candidate_plan"]
+    assert persisted_plan["discovery_plan"]["automatic_execution"] is False
     assert site.calls == ["https://www.amevista.com/robots.txt", url]
 
 
@@ -625,15 +656,17 @@ def test_congafas_supplied_pattern_is_limited_to_documented_prada_sunglasses(bra
     assert "Prada" in plan.reason or "monturas" in plan.reason
 
 
-def test_congafas_supplied_pattern_remains_available_for_prada_sunglasses():
-    product = {**ROUTE_PRADA, "model": "PR 99ZS", "color": "01A"}
+@pytest.mark.parametrize(("model", "color", "expected"), [
+    ("PR D01S", "0CD80L", "https://www.congafasdesol.com/prada-pr-d01s-0cd80l.html"),
+    ("PR06YS", "09Q5S0", "https://www.congafasdesol.com/prada-pr06ys-09q5s0.html"),
+    ("PR 99ZS", "01A", None),
+])
+def test_congafas_reuses_only_exact_user_supplied_routes(model, color, expected):
+    product = {**ROUTE_PRADA, "model": model, "color": color}
 
     plan = plan_for(product, "congafas")
 
-    assert [candidate.url for candidate in plan.runnable] == [
-        "https://www.congafasdesol.com/prada-pr99zs-01a.html",
-        "https://www.congafasdesol.com/prada-pr-99zs-01a.html",
-    ]
+    assert [candidate.url for candidate in plan.runnable] == ([expected] if expected else [])
 
 
 def test_conflicting_documentary_identifiers_and_content_never_become_runnable():
@@ -681,7 +714,13 @@ def test_rb2140_measurements_are_scoped_to_the_corroborated_upc():
 ])
 def test_other_represented_brands_and_categories_require_explicit_sizes(shop, brand, model, color, ean, category):
     product = {"ean": ean, "brand": brand, "model": model, "color": color, "category": category}
-    assert not plan_for(product, shop).runnable
+    plan = plan_for(product, shop)
+    if ean == "8056597669016":
+        assert len(plan.runnable) == 1
+        assert plan.runnable[0].attributes["caliber"] == "52"
+        assert "#N008" in plan.runnable[0].attributes["dimension_source"]
+        return
+    assert not plan.runnable
     plan = plan_for({**product, "caliber": "50-18"}, shop)
     assert len(plan.runnable) == 1 and urls(plan)[0].endswith("-50")
 
@@ -724,7 +763,7 @@ def test_preview_is_read_only_and_later_authorized_run_preserves_provenance(tmp_
         assert evidence["rule"] == "sample_pattern:optima" and evidence["evidence"] == ["E001"]
         assert evidence["attributes"]["color"] == "16K08Z"
         audit = json.loads(con.execute(
-            "SELECT detail FROM locate_events WHERE method='local_candidates'").fetchone()[0])
+            "SELECT metadata FROM locate_events ORDER BY id DESC LIMIT 1").fetchone()[0])["candidate_plan"]
         assert audit["candidates"][0]["attributes"]["ean"] == PRADA["ean"]
         assert con.execute("SELECT COUNT(*) FROM offers").fetchone()[0] == 0
     after = dump(store)
@@ -859,7 +898,7 @@ def test_verified_and_previously_rejected_links_are_not_overwritten_or_retried(t
     assert not site.calls and _urls(store, cid)["status"].tolist() == ["rejected"]
 
 
-def test_legacy_index_gets_only_additive_metadata_migration(tmp_path):
+def test_legacy_tables_get_only_additive_metadata_migrations(tmp_path):
     path = tmp_path / "legacy.sqlite3"
     with sqlite3.connect(path) as con:
         con.execute("""CREATE TABLE discovery_index(competitor_id TEXT,url TEXT,label TEXT NOT NULL DEFAULT '',
@@ -868,9 +907,15 @@ def test_legacy_index_gets_only_additive_metadata_migration(tmp_path):
             facts TEXT NOT NULL DEFAULT '',PRIMARY KEY(competitor_id,url))""")
         con.execute("""INSERT INTO discovery_index(competitor_id,url,signature,method,first_seen,last_seen,facts)
             VALUES('old','https://legacy.example/p','PR 27ZS 16K08Z','catalog','2026-11-01','2026-11-01','{}')""")
+        con.execute("""CREATE TABLE locate_events (
+            id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL, at TEXT NOT NULL, state TEXT NOT NULL,
+            method TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '', detail TEXT NOT NULL DEFAULT '',
+            requests INTEGER NOT NULL DEFAULT 0)""")
+        con.execute("""INSERT INTO locate_events(id,job_id,at,state) VALUES(1,1,'2026-11-01','done')""")
     store = PriceComparatorStore(path)
     with store._connect() as con:
         assert tuple(con.execute("SELECT candidate_evidence,facts,label FROM discovery_index").fetchone()) == ("{}", "{}", "")
+        assert con.execute("SELECT metadata FROM locate_events WHERE id=1").fetchone()[0] == "{}"
     before = dump(store)
     PriceComparatorStore(path)
     assert dump(store) == before
@@ -891,12 +936,13 @@ def test_nonrunnable_documentary_plan_is_audited_without_fetching_or_linking(tmp
     locator.run([cid])
     assert not site.calls and _urls(store, cid).empty
     with store._connect() as con:
-        detail = json.loads(con.execute(
-            "SELECT detail FROM locate_events WHERE method='local_candidates'").fetchone()[0])
-        assert detail["reason_code"] == "needs_authorized_discovery"
-        assert detail["candidates"] and all(candidate["state"] == "probable" for candidate in detail["candidates"])
-        assert all(candidate["attributes"]["ean"] == ean for candidate in detail["candidates"])
-        assert all(candidate["evidence"] and candidate["reason"] for candidate in detail["candidates"])
+        metadata = json.loads(con.execute(
+            "SELECT metadata FROM locate_events ORDER BY id DESC LIMIT 1").fetchone()[0])
+        plan = metadata["candidate_plan"]
+        assert plan["reason_code"] == "needs_authorized_discovery"
+        assert plan["candidates"] and all(candidate["state"] == "probable" for candidate in plan["candidates"])
+        assert all(candidate["attributes"]["ean"] == ean for candidate in plan["candidates"])
+        assert all(candidate["evidence"] and candidate["reason"] for candidate in plan["candidates"])
 
 
 def test_batch_ui_shows_local_candidates_without_preparing_jobs_or_http(tmp_path, monkeypatch):

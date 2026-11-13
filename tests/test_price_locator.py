@@ -12,7 +12,9 @@ import pandas as pd
 import pytest
 
 from price_access import AccessControl
+from price_batch import WatchBatch
 from price_locator import LEASE, UNAVAILABLE_TEXT, PriceLocator, link_matches, signature
+from price_monitor import PriceMonitor
 from price_watch import PriceWatch
 from tests.test_price_comparator import _store
 from tests.test_price_watch import _gtin
@@ -225,8 +227,10 @@ def test_index_is_reused_between_products_and_runs_without_new_requests(tmp_path
     locator.run([cid])
     calls = len(site.calls)
     _watch(store, rows[1:])
-    locator.enqueue()
-    report = locator.run([cid])
+    restored = PriceLocator(store, transport=site, clock=clock,
+                            sleep=lambda seconds: clock.advance(seconds=seconds))
+    restored.enqueue()
+    report = restored.run([cid])
     assert report.states["done"] == 1 and report.requests == 0 and len(site.calls) == calls
     verified = _urls(store, cid).set_index("ean")
     assert verified.loc[rows[1][0], "url"] == first and verified.loc[rows[1][0], "status"] == "verified"
@@ -235,11 +239,187 @@ def test_index_is_reused_between_products_and_runs_without_new_requests(tmp_path
     third = (_gtin("840000000003"), "Alpha", "AL1002", "002", "")
     site.product("Alpha", "AL1002", "002")
     _watch(store, [third])
-    locator.enqueue()
+    restored.enqueue()
     clock.advance(hours=1)
-    assert locator.run([cid]).states["not_found"] == 1  # the new page is not in the fresh copy of the listing
+    assert restored.run([cid]).states["not_found"] == 1  # the new page is not in the fresh copy of the listing
     clock.advance(days=8)
-    assert locator.run([cid]).states["done"] == 1
+    restarted = PriceLocator(store, transport=site, clock=clock,
+                             sleep=lambda seconds: clock.advance(seconds=seconds))
+    assert restarted.run([cid]).states["done"] == 1
+
+
+class RedirectedItemListSite(Site):
+    def __init__(self, *, product_url: str, ean: str):
+        super().__init__()
+        self.product_url = product_url
+        self.ean = ean
+
+    def __call__(self, url, headers, timeout):
+        if self.crash_after is not None and len(self.calls) >= self.crash_after:
+            raise Crash()
+        if url == f"{self.base}/marca/alpha":
+            self.calls.append(url)
+            return 302, {"Location": "/marca/alpha-final"}, b""
+        if url == f"{self.base}/marca/alpha-final":
+            self.calls.append(url)
+            product = {
+                "@type": "Product",
+                "url": self.product_url,
+                "brand": {"@type": "Brand", "name": "Alpha"},
+                "name": "Alpha AL1001 10A",
+                "model": "AL1001",
+                "sku": "AL1001-10A",
+                "color": "10A",
+                "size": "54-18",
+                "gtin13": self.ean,
+                "additionalProperty": [
+                    {"@type": "PropertyValue", "name": "Calibre", "value": "54"},
+                    {"@type": "PropertyValue", "name": "Puente", "value": "18"},
+                ],
+                "offers": {"price": "1.00", "priceCurrency": "EUR", "availability": "OutOfStock"},
+            }
+            body = ('<link rel="canonical" href="/not-followed">'
+                    '<script type="application/ld+json">' + json.dumps({
+                        "@type": "ItemList",
+                        "itemListElement": [{"@type": "ListItem", "item": product}],
+                    }) + "</script>")
+            return 200, {"Content-Type": "text/html"}, body.encode()
+        return super().__call__(url, headers, timeout)
+
+
+def test_catalog_itemlist_trace_and_monitoring_flow_uses_only_governed_facts(tmp_path):
+    ean = _gtin("840000000001")
+    site = RedirectedItemListSite(product_url=f"{BASE}/gafas/p-123.html", ean=ean)
+    site.pages[site.product_url] = page(name="Alpha AL1001 10A 54-18", price=120, brand="Alpha", gtin=ean)
+    store, _, locator, clock, cid = _env(tmp_path, site)
+    with store._connect() as connection, connection:
+        connection.execute("UPDATE discovery_sources SET adapter='itemlist' WHERE competitor_id=?", (cid,))
+        connection.execute("UPDATE competitor_web_config SET tax_policy='included' WHERE competitor_id=?", (cid,))
+    _watch(store, [(ean, "Alpha", "AL1001", "10A", "54-18")])
+
+    report = locator.run([cid])
+
+    assert report.states["done"] == 1
+    assert site.product_url in site.calls and f"{BASE}/not-followed" not in site.calls
+    with store._connect() as connection:
+        page_row = connection.execute("""SELECT fetch_trace FROM discovery_pages
+            WHERE competitor_id=? AND url=?""", (cid, f"{BASE}/marca/alpha")).fetchone()
+        index_row = connection.execute("""SELECT listing_facts,signature FROM discovery_index
+            WHERE competitor_id=? AND url=?""", (cid, site.product_url)).fetchone()
+    trace = json.loads(page_row["fetch_trace"])
+    assert trace["requested_url"] == f"{BASE}/marca/alpha"
+    assert trace["final_url"] == f"{BASE}/marca/alpha-final"
+    assert trace["redirects"][0]["location"] == f"{BASE}/marca/alpha-final"
+    assert trace["canonical_urls"] == [f"{BASE}/not-followed"]
+    facts = json.loads(index_row["listing_facts"])["observations"][0]["fields"]
+    assert facts["gtins"] == [ean] and facts["measurements"] == {"Calibre": "54", "Puente": "18"}
+    assert {"price", "availability"}.isdisjoint(facts)
+    assert link_matches(index_row["signature"], "AL1001", "10A")
+
+    monitor = PriceMonitor(store, transport=site, clock=clock,
+                           sleep=lambda seconds: clock.advance(seconds=seconds))
+    assert monitor.run([cid]).states == {"done": 1}
+    monitored = monitor.inventory().query("competitor_id == @cid").iloc[0]
+    assert monitored["comparable"] and monitored["availability"] == "available"
+
+
+def test_catalog_preview_distinguishes_documentary_plan_from_active_source_without_http(tmp_path):
+    site = Site(base="https://domanci.com", robots=DOMANCI_ROBOTS)
+    store, access, locator, clock, cid = _env(
+        tmp_path, site, name="Domanci", methods=("ficha", "catalog"), template=None,
+    )
+    ean = _gtin("840000000001")
+    _watch(store, [(ean, "Prada", "PR 27ZS", "16K08Z", "")])
+    batch = WatchBatch(store, locator=locator, monitor=PriceMonitor(store, transport=site, clock=clock))
+
+    documentary = batch.preview([ean], [cid]).iloc[0]["catalog_execution"]
+    assert documentary["execution_state"] == "documentary_only"
+    assert documentary["execution_source"] == "active_discovery_sources_only"
+    assert not documentary["preflight_passed"] and documentary["configured_sources"] == []
+    assert not site.calls
+
+    locator.save_source(cid, "catalog", "https://domanci.com/es/marca/{brand}", actor="ana",
+                        note="Fuente simulada autorizada")
+    configured = batch.preview([ean], [cid]).iloc[0]["catalog_execution"]
+    assert configured["execution_state"] == "conditionally_executable"
+    assert configured["preflight_passed"]
+    assert configured["configured_sources"][0]["matches_documentary_plan"]
+    assert not site.calls
+
+    access.set_method(cid, "catalog", "denied", actor="ana", note="Prueba de restricción")
+    denied = batch.preview([ean], [cid]).iloc[0]["catalog_execution"]
+    assert denied["execution_state"] == "not_authorized"
+    assert not denied["preflight_passed"] and not site.calls
+
+
+def test_catalog_plan_prioritizes_matching_active_source_and_discovers_shared_listing(tmp_path):
+    site = Site(base="https://domanci.com", robots=DOMANCI_ROBOTS)
+    store, _, locator, _, cid = _env(
+        tmp_path, site, name="Domanci", methods=("ficha", "catalog"), template=None,
+    )
+    ean = _gtin("840000000001")
+    product_url = site.product(
+        "Prada", "PR 27ZS", "16K08Z", slug="es/gafas-de-sol/prada-pr-27zs-16k08z-54.html",
+    )
+    localized_url = product_url.replace("/gafas/es/", "/es/")
+    site.pages[localized_url] = site.pages.pop(product_url)
+    site.brands["prada"] = [(localized_url, "Prada PR 27ZS 16K08Z")]
+    _watch(store, [(ean, "Prada", "PR 27ZS", "16K08Z", "")])
+    batch = WatchBatch(store, locator=locator, monitor=PriceMonitor(store, transport=site))
+
+    locator.save_source(cid, "catalog", "https://domanci.com/es/marca/{brand}-out-of-plan",
+                        actor="ana", note="Fuente activa fuera del plan documental")
+    locator.save_source(cid, "catalog", "https://domanci.com/es/marca/{brand}",
+                        actor="ana", note="Fuente activa coincidente con el plan")
+    preview = batch.preview([ean], [cid]).iloc[0]["catalog_execution"]
+    assert preview["execution_state"] == "conditionally_executable"
+    assert [source["matches_documentary_plan"] for source in preview["configured_sources"]] == [False, True]
+    assert not site.calls
+
+    locator.enqueue()
+    report = locator.run([cid], eans=[ean])
+
+    assert report.states == {"done": 1}
+    assert f"{site.base}/es/marca/prada" in site.calls
+    assert not any("-out-of-plan" in url for url in site.calls)
+    assert _urls(store, cid).query("ean == @ean")["status"].tolist() == ["verified"]
+
+
+def test_catalog_continues_to_another_source_when_first_candidate_is_rejected(tmp_path):
+    site = Site()
+    store, _, locator, _, cid = _env(tmp_path, site, template=None)
+    ean = _gtin("840000000001")
+    first = site.product("Alpha", "AL1001", "10A", slug="first-al1001-10a.html",
+                         html=page(name="Alpha AL1009 10A", brand="Alpha", price=100))
+    second = site.product("Alpha", "AL1001", "10A", slug="second-al1001-10a.html",
+                          html=page(name="Alpha AL1001 10A", brand="Alpha", gtin=ean, price=100))
+    site.brands["alpha-one"] = [(first, "Alpha AL1001 10A")]
+    site.brands["alpha-two"] = [(second, "Alpha AL1001 10A")]
+    locator.save_source(cid, "catalog", f"{BASE}/marca/{{brand}}-one", actor="ana", note="Primera fuente")
+    locator.save_source(cid, "catalog", f"{BASE}/marca/{{brand}}-two", actor="ana", note="Segunda fuente")
+    _watch(store, [(ean, "Alpha", "AL1001", "10A", "")])
+
+    report = locator.run([cid], eans=[ean])
+
+    assert report.states == {"done": 1}
+    assert f"{BASE}/marca/alpha-two" in site.calls
+    assert _urls(store, cid).query("status == 'verified'")["url"].tolist() == [second]
+
+
+def test_shared_robots_denial_does_not_turn_other_pairs_into_not_found(tmp_path):
+    site = Site(robots="User-agent: *\nDisallow: /marca/\n")
+    store, _, locator, clock, cid = _env(tmp_path, site)
+    eans = [_gtin("840000000001"), _gtin("840000000002"), _gtin("840000000003")]
+    _watch(store, [(ean, "Alpha", "AL1001", color, "")
+                   for ean, color in zip(eans, ("10A", "20B", "30C"))])
+
+    report = locator.run([cid], eans=eans[:2])
+
+    assert report.states == {"unavailable": 2}
+    restored = PriceLocator(store, transport=site, clock=clock,
+                            sleep=lambda seconds: clock.advance(seconds=seconds))
+    assert restored.run([cid], eans=eans[2:]).states == {"unavailable": 1}
+    assert not any("/marca/" in url for url in site.calls)
 
 
 @pytest.mark.parametrize("case,html_kwargs,expected_state,url_status", [
