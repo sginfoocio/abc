@@ -67,6 +67,15 @@ def test_admin_navigation_keeps_all_existing_page_groups() -> None:
     assert streamlit.groups["Análisis comercial"] == ["price_comparator"]
 
 
+def test_bulk_image_search_is_in_admin_repository_only() -> None:
+    pages = {**_pages(), "bulk_image_search": "bulk_image_search"}
+    admin, masterdata = FakeStreamlit(), FakeStreamlit()
+    build_navigation(admin, "admin", pages)
+    build_navigation(masterdata, "masterdata", pages)
+    assert "bulk_image_search" in admin.groups["Repositorio de imágenes"]
+    assert "bulk_image_search" not in masterdata.groups["Repositorio de imagenes"]
+
+
 def test_streamlit_navigation_smoke_for_admin_and_masterdata() -> None:
     script = """
 import streamlit as st
