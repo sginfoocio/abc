@@ -21,7 +21,7 @@ from cryptography.fernet import Fernet
 from filelock import FileLock, Timeout
 from PIL import Image
 from sqlalchemy import bindparam, text
-from image_repository import ImageRepository, image_fingerprint
+from image_repository import ImageRepository, image_fingerprint, validate_ean
 from image_naming import kering_filename, classified_view
 from kering_media import REVIEW_CONFLICT
 
@@ -34,8 +34,11 @@ BEGIN_WRITE = "BEGIN IMMEDIATE"
 STATES = ("Pendiente", IN_PROGRESS, "Completo", "Parcial", "Error", "Interrumpido")
 DEFAULT_SETTINGS = {
     "cutoff_date": "2026-09-01", "auto_enabled": False, "auto_interval_hours": 6.0,
+    "auto_max_technical_attempts": 3, "auto_retry_interval_hours": 24.0,
     "test_mode": True, "test_order_ids": [], "full_lot_validated": False,
 }
+NON_TECHNICAL_REASONS = {"", "vistas_no_disponibles", "vistas_sin_identificar", "revision_vistas"}
+LOGGER = logging.getLogger(__name__)
 
 
 class PortalUnavailable(Exception):
@@ -72,6 +75,11 @@ class PortalTimeout(PortalFailure):
 
 class ProductNotFound(PortalFailure):
     code = "producto_no_encontrado"
+    retryable = False
+
+
+class AlternateCodeHasImages(PortalFailure):
+    code = "codigo_alternativo_con_imagenes"
     retryable = False
 
 
@@ -185,12 +193,46 @@ def kering_zip_name(view: str, content: bytes) -> str:
     return f"{view}.{extension}"
 
 
+class KeringImageRepository(ImageRepository):
+    def __init__(self, store):
+        self.store = store
+        super().__init__()
+
+    def alternate_code(self, ean):
+        validate_ean(ean)
+        with self.store.connect() as connection:
+            row = connection.execute(
+                "SELECT code_a,code_b FROM kering_code_links WHERE active=1 AND (code_a=? OR code_b=?)",
+                (ean, ean),
+            ).fetchone()
+        return (row["code_b"] if row["code_a"] == ean else row["code_a"]) if row else None
+
+    def kering_code_linked(self, first, second):
+        return self.alternate_code(first) == second
+
+    def records(self, ean=None):
+        records = super().records(ean)
+        other = self.alternate_code(ean) if ean is not None else None
+        if other:
+            records.extend(record for record in super().records(other) if record.provider == "Kering")
+        return records
+
+    def catalog_records(self, ean=None, *, record_id=None, record_ids=None):
+        records = super().catalog_records(ean, record_id=record_id, record_ids=record_ids)
+        other = self.alternate_code(ean) if ean is not None else None
+        if other:
+            records.extend(record for record in super().catalog_records(other, record_id=record_id,
+                                                                         record_ids=record_ids)
+                           if record.provider == "Kering")
+        return records
+
+
 class ImageStore:
     def __init__(self, root: Path):
         self.root = root
-        self.repository = ImageRepository()
         root.mkdir(parents=True, exist_ok=True)
         self.database = root / "history.sqlite3"
+        self.repository = KeringImageRepository(self)
         with FileLock(root / "schema.lock", timeout=30), self.connect() as connection:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.executescript("""
@@ -214,10 +256,75 @@ class ImageStore:
                 CREATE TABLE IF NOT EXISTS view_reviews (
                     ean TEXT PRIMARY KEY, review TEXT NOT NULL, created TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS batch_failure_reviews (
+                    run_id TEXT PRIMARY KEY REFERENCES runs(id),
+                    reviewer TEXT NOT NULL, reason TEXT NOT NULL, created REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS kering_code_links (
+                    code_a TEXT NOT NULL, code_b TEXT NOT NULL, reviewer TEXT NOT NULL,
+                    reason TEXT NOT NULL, created REAL NOT NULL, active INTEGER NOT NULL DEFAULT 1,
+                    PRIMARY KEY(code_a,code_b)
+                );
+                CREATE TABLE IF NOT EXISTS kering_code_link_events (
+                    code_a TEXT NOT NULL, code_b TEXT NOT NULL, action TEXT NOT NULL,
+                    reviewer TEXT NOT NULL, reason TEXT NOT NULL, created REAL NOT NULL
+                );
             """)
             columns = {row["name"] for row in connection.execute("PRAGMA table_info(runs)")}
             if "origin" not in columns:
                 connection.execute("ALTER TABLE runs ADD COLUMN origin TEXT NOT NULL DEFAULT 'Manual'")
+
+    def link_kering_codes(self, first, second, *, role, reviewer, reason):
+        if role != "admin" or not isinstance(reviewer, str) or not reviewer.strip():
+            raise PermissionError("La asociación requiere un administrador")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("Indique la evidencia de la asociación")
+        validate_ean(first)
+        validate_ean(second)
+        if first == second:
+            raise ValueError("Los códigos deben ser distintos")
+        code_a, code_b = sorted((first, second))
+        with batch_lock(self), self.connect() as connection:
+            connection.execute(BEGIN_WRITE)
+            existing = connection.execute(
+                "SELECT code_a,code_b FROM kering_code_links WHERE active=1 AND "
+                "(code_a IN (?,?) OR code_b IN (?,?))",
+                (code_a, code_b, code_a, code_b),
+            ).fetchall()
+            if existing:
+                if len(existing) == 1 and (existing[0]["code_a"], existing[0]["code_b"]) == (code_a, code_b):
+                    return
+                raise ValueError("Uno de los códigos ya está asociado a otro producto")
+            if not any(record.provider == "Kering" for code in (code_a, code_b)
+                       for record in ImageRepository.records(self.repository, code)):
+                raise ValueError("No hay imágenes Kering para los códigos indicados")
+            now = clock.time()
+            connection.execute(
+                "INSERT INTO kering_code_links(code_a,code_b,reviewer,reason,created,active) VALUES(?,?,?,?,?,1) "
+                "ON CONFLICT(code_a,code_b) DO UPDATE SET active=1",
+                (code_a, code_b, reviewer.strip(), reason.strip(), now),
+            )
+            connection.execute("INSERT INTO kering_code_link_events VALUES(?,?,?,?,?,?)",
+                               (code_a, code_b, "asociacion", reviewer.strip(), reason.strip(), now))
+
+    def unlink_kering_codes(self, ean, *, role, reviewer, reason):
+        if role != "admin" or not isinstance(reviewer, str) or not reviewer.strip():
+            raise PermissionError("La retirada requiere un administrador")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("Indique el motivo de la retirada")
+        validate_ean(ean)
+        with batch_lock(self), self.connect() as connection:
+            connection.execute(BEGIN_WRITE)
+            row = connection.execute(
+                "SELECT code_a,code_b FROM kering_code_links WHERE active=1 AND (code_a=? OR code_b=?)",
+                (ean, ean),
+            ).fetchone()
+            if not row:
+                raise ValueError("No hay una asociación activa")
+            connection.execute("UPDATE kering_code_links SET active=0 WHERE code_a=? AND code_b=?",
+                               (row["code_a"], row["code_b"]))
+            connection.execute("INSERT INTO kering_code_link_events VALUES(?,?,?,?,?,?)",
+                               (row["code_a"], row["code_b"], "retirada", reviewer.strip(), reason.strip(), clock.time()))
 
     @contextmanager
     def connect(self):
@@ -264,18 +371,27 @@ class ImageStore:
 
     def blocking_view_review(self, ean: str) -> dict | None:
         """Contradicted viewer labels block completeness until a person reviews every contradicted image."""
+        codes = [ean]
+        alternate = self.repository.alternate_code(ean)
+        if alternate:
+            codes.append(alternate)
         with self.connect() as connection:
-            row = connection.execute("SELECT review, created FROM view_reviews WHERE ean=?", (ean,)).fetchone()
-        if not row:
-            return None
-        review = json.loads(row["review"])
-        if REVIEW_CONFLICT not in review.get("reasons", []):
-            return None
-        reviewed = {record.origin for record in self.repository.records(ean)
-                    if (record.metadata.get("view_review") or {}).get("reviewer") not in {None, "kering-adapter"}
-                    and record.metadata["view_review"].get("date", "") >= row["created"]}
-        pending = [item for item in review.get("contradictions", []) if item["url"] not in reviewed]
-        return {**review, "created": row["created"]} if pending or not review.get("contradictions") else None
+            rows = connection.execute(
+                "SELECT review,created FROM view_reviews WHERE ean IN (" + ",".join("?" for _ in codes) + ")",
+                codes,
+            ).fetchall()
+        records = self.repository.records(ean) if rows else []
+        for row in rows:
+            review = json.loads(row["review"])
+            if REVIEW_CONFLICT not in review.get("reasons", []):
+                continue
+            reviewed = {record.origin for record in records
+                        if (record.metadata.get("view_review") or {}).get("reviewer") not in {None, "kering-adapter"}
+                        and record.metadata["view_review"].get("date", "") >= row["created"]}
+            pending = [item for item in review.get("contradictions", []) if item["url"] not in reviewed]
+            if pending or not review.get("contradictions"):
+                return {**review, "created": row["created"]}
+        return None
 
     def available_image_count(self, ean: str) -> int:
         checksums = set()
@@ -624,7 +740,8 @@ def process_ean(store: ImageStore, portal, ean: str) -> dict:
             review = getattr(portal, "view_reviews", {}).get(ean) or blocking
             return {
                 "views": results,
-                "reason": "revision_vistas" if blocking else reason if "Pendiente" in results.values() else "",
+                "reason": (reason if reason not in NON_TECHNICAL_REASONS else
+                           "revision_vistas" if blocking else reason if "Pendiente" in results.values() else ""),
                 "tries": tries,
                 "identity": getattr(portal, "identities", {}).get(ean, {}),
                 "acquisition": {"available_files": available, "downloaded_files": downloaded,
@@ -642,7 +759,9 @@ def fetch_pending(portal, ean, pending):
     reason = "fallo_portal"
     for tries in range(1, 4):
         try:
-            return portal.fetch(ean, pending), "vistas_no_disponibles", tries
+            images = portal.fetch(ean, pending)
+            partial_failure = getattr(portal, "partial_failure", None)
+            return images, partial_failure if isinstance(partial_failure, str) and partial_failure else "vistas_no_disponibles", tries
         except InterventionRequired:
             return {}, "intervencion_captcha_o_mfa", tries
         except PortalUnavailable:
@@ -651,8 +770,9 @@ def fetch_pending(portal, ean, pending):
             reason = error.code
             if not error.retryable or getattr(portal, "access_failure", None):
                 return {}, reason, tries
-        except Exception:
-            pass
+        except Exception as error:
+            LOGGER.error("kering_fetch code=fallo_portal exception_type=%s", type(error).__name__)
+            reason = "fallo_portal"
     return {}, reason, 3
 
 
@@ -665,6 +785,11 @@ def save_pending(store, ean, pending, images, results, reason, portal=None):
         try:
             if view in media:
                 info = media[view]
+                checksum = hashlib.sha256(content).hexdigest()
+                existing = next((record for record in store.repository.records(ean)
+                                 if record.provider == "Kering" and record.checksum == checksum), None)
+                if existing:
+                    continue
                 record, _ = store.repository.save(
                     ean, info["name"], content, provider="Kering", origin=info["url"],
                     view=info["view"], metadata={"modelo": identity.get("model", ""),
@@ -694,6 +819,8 @@ def order_status(order: dict, results: dict) -> str:
     available = False
     for line in order["lines"]:
         result = results.get(line["ean"], {})
+        if result.get("reason", "") not in NON_TECHNICAL_REASONS:
+            return "Error"
         views = result.get("views", {})
         complete = complete and bool(line["ean"]) and not result.get("review_blocking") and all(
             views.get(view, "Pendiente") != "Pendiente" for view in VIEWS)
@@ -914,6 +1041,12 @@ class ConfigStore:
         interval = float(config["auto_interval_hours"])
         if not math.isfinite(interval) or interval <= 0:
             raise ValueError("El intervalo debe ser mayor que cero")
+        retries = config["auto_max_technical_attempts"]
+        retry_interval = float(config["auto_retry_interval_hours"])
+        if isinstance(retries, bool) or not isinstance(retries, int) or retries < 1:
+            raise ValueError("El limite de intentos tecnicos debe ser un entero positivo")
+        if not math.isfinite(retry_interval) or retry_interval <= 0:
+            raise ValueError("El intervalo de reintento debe ser mayor que cero")
         ids = list(dict.fromkeys(int(value) for value in config["test_order_ids"]))
         if len(ids) > 2 or any(value <= 0 for value in ids):
             raise ValueError("Autorice uno o dos pedidos de prueba")

@@ -15,7 +15,7 @@ from playwright.sync_api import sync_playwright, TimeoutError as BrowserTimeout,
 
 from kering_images import (
     PORTAL_URL, InterventionRequired, LoginFailed, PortalFailure, PortalTimeout,
-    ProductNotFound, SessionExpired,
+    ProductNotFound, SessionExpired, AlternateCodeHasImages,
 )
 
 
@@ -68,10 +68,11 @@ class KeringPortal:
         self.view_reviews = {}
         self.access_events = []
         self.access_failure = None
+        self.partial_failure = None
         self._access_deadline = None
         self._phase_deadline = None
         self._phase = None
-        self._navigation_network_failed = False
+        self._navigation_error = None
 
     def __repr__(self):
         return "<KeringPortal>"
@@ -81,7 +82,7 @@ class KeringPortal:
             return
         self.access_events = []
         self.access_failure = None
-        self._navigation_network_failed = False
+        self._navigation_error = None
         self._access_deadline = time.monotonic() + ACCESS_TOTAL_MS / 1000
         try:
             with self._access_phase("configuracion"):
@@ -102,9 +103,9 @@ class KeringPortal:
             with self._access_phase("apertura_portal"):
                 response = self._page.goto(url, wait_until="domcontentloaded", timeout=self._remaining_ms())
                 if response is not None and response.status >= 400:
-                    raise PortalFailure("fallo_red") from None
+                    raise PortalFailure("portal_no_disponible" if response.status >= 500 else "fallo_http_portal") from None
                 if not allowed_url(self._page.url):
-                    raise LoginFailed() from None
+                    raise PortalFailure("redireccion_inesperada") from None
             self._login()
         finally:
             self._access_deadline = self._phase_deadline = None
@@ -126,26 +127,30 @@ class KeringPortal:
         self._phase = phase
         self._phase_deadline = started + ACCESS_PHASE_MS[phase] / 1000
         code = "ok"
+        failed_ms = None
         try:
             self._remaining_ms()
             yield
             self._remaining_ms()
         except Exception as error:
+            failed_ms = round((time.monotonic() - started) * 1000)
             if isinstance(error, BrowserTimeout):
                 try:
                     self._intervention_if_open()
                 except InterventionRequired:
                     code = "intervencion_captcha_o_mfa"
                 except BrowserError:
-                    code = "fallo_red"
+                    code = "fallo_chromium"
                 else:
-                    code = "timeout_portal"
+                    code = self._navigation_error or "timeout_portal"
             elif isinstance(error, BrowserError):
-                code = "fallo_chromium" if phase == "chromium" else "fallo_red"
+                code = self._navigation_error or (
+                    "fallo_red" if "net::ERR_" in str(error) else "fallo_chromium")
             elif isinstance(error, InterventionRequired):
                 code = "intervencion_captcha_o_mfa"
             elif isinstance(error, PortalFailure):
-                code = "fallo_red" if error.args == ("fallo_red",) else error.code
+                known_codes = {"fallo_red", "portal_no_disponible", "fallo_http_portal", "redireccion_inesperada"}
+                code = error.args[0] if type(error) is PortalFailure and error.args and error.args[0] in known_codes else error.code
             else:
                 code = "fallo_portal"
             if code == "intervencion_captcha_o_mfa":
@@ -156,9 +161,12 @@ class KeringPortal:
             raise failure from None
         finally:
             event = {"phase": phase, "duration_ms": round((time.monotonic() - started) * 1000), "code": code}
+            if failed_ms is not None:
+                event.update(budget_ms=ACCESS_PHASE_MS[phase], failure_elapsed_ms=failed_ms)
             self.access_events.append(event)
-            LOGGER.info("kering_access phase=%s duration_ms=%s code=%s",
-                        phase, event["duration_ms"], code)
+            LOGGER.log(logging.WARNING if code != "ok" else logging.INFO,
+                       "kering_access phase=%s duration_ms=%s budget_ms=%s failure_elapsed_ms=%s code=%s",
+                       phase, event["duration_ms"], ACCESS_PHASE_MS[phase], failed_ms, code)
             if code != "ok":
                 self.access_failure = event
             self._phase_deadline = None
@@ -166,9 +174,11 @@ class KeringPortal:
     def _wait_access_state(self, predicate):
         while True:
             self._remaining_ms()
+            if self._navigation_error:
+                raise PortalFailure(self._navigation_error) from None
+            if not allowed_url(self._page.url):
+                raise PortalFailure("redireccion_inesperada") from None
             self._intervention()
-            if self._navigation_network_failed:
-                raise PortalFailure("fallo_red") from None
             rejection = self._page.get_by_role("alert").filter(has_text=re.compile(
                 r"(credenciales.*(incorrect|invalid)|contrase[nñ]a.*incorrect|"
                 r"invalid.*(credentials|password)|incorrect.*password)", re.I))
@@ -180,11 +190,13 @@ class KeringPortal:
 
     def _navigation_failed(self, request):
         if request.is_navigation_request() and request.frame == self._page.main_frame:
-            self._navigation_network_failed = True
+            self._navigation_error = "fallo_red"
 
     def _navigation_response(self, response):
         if response.status >= 400:
-            self._navigation_failed(response.request)
+            request = response.request
+            if request.is_navigation_request() and request.frame == self._page.main_frame:
+                self._navigation_error = "portal_no_disponible" if response.status >= 500 else "fallo_http_portal"
 
     def _intervention(self):
         selectors = 'input[autocomplete="one-time-code"], iframe[src*="recaptcha"], iframe[src*="hcaptcha"]'
@@ -219,7 +231,7 @@ class KeringPortal:
         with self._access_phase("comprobacion_sesion"):
             self._wait_access_state(self._authenticated)
             if not allowed_url(self._page.url):
-                raise LoginFailed() from None
+                raise PortalFailure("redireccion_inesperada") from None
 
     def _check_session(self):
         if not self._authenticated():
@@ -251,6 +263,12 @@ class KeringPortal:
     def _download(self, snapshot, pending, collected):
         repository = self.repository or ImageRepository()
         ean = getattr(self, "_ean", snapshot["ean"])
+        if all(key in snapshot for key in ("ean", "upc", "reference", "size")) and exact_product(snapshot, ean):
+            for other in (snapshot["ean"], snapshot["upc"]):
+                if (isinstance(other, str) and other != ean and other.isascii() and other.isdigit() and len(other) <= 20
+                        and not getattr(repository, "kering_code_linked", lambda *_: False)(ean, other)
+                        and any(record.provider == "Kering" for record in repository.records(other))):
+                    raise AlternateCodeHasImages() from None
         records = repository.records(ean)
         reference, color = snapshot["reference"].rsplit("-", 1)
         viewer = [image for image in snapshot["images"]
@@ -322,6 +340,7 @@ class KeringPortal:
     def fetch(self, ean: str, pending: tuple[str, ...]) -> dict[str, bytes]:
         self._ean = ean
         self.media = {}
+        self.partial_failure = None
         self.view_reviews.pop(ean, None)
         collected = {}
         try:
@@ -338,14 +357,29 @@ class KeringPortal:
         except BrowserTimeout:
             self._intervention_if_open()
             if collected:
+                self.partial_failure = "timeout_portal"
                 return collected
             raise PortalTimeout() from None
+        except BrowserError as error:
+            code = "fallo_red" if "net::ERR_" in str(error) else "fallo_chromium"
+            LOGGER.warning("kering_browser code=%s", code)
+            if collected:
+                self.partial_failure = code
+                self.close()
+                return collected
+            failure = PortalFailure()
+            failure.code = code
+            raise failure from None
         except (PortalFailure, InterventionRequired) as error:
             if isinstance(error, SessionExpired):
                 self.access_failure = {"phase": "comprobacion_sesion", "duration_ms": 0, "code": error.code}
                 error.retryable = False
                 LOGGER.info("kering_access phase=comprobacion_sesion duration_ms=0 code=%s", error.code)
             self.close()
+            if collected:
+                self.partial_failure = ("intervencion_captcha_o_mfa"
+                                        if isinstance(error, InterventionRequired) else error.code)
+                return collected
             raise
         except Exception:
             raise PortalFailure() from None

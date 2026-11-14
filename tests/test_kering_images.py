@@ -288,6 +288,283 @@ def test_scheduler_error_backoff_and_configuration_gate(tmp_path, monkeypatch):
             config_store.save({**config, "auto_interval_hours": value})
     with pytest.raises(ValueError):
         config_store.save({**config, "test_mode": False})
+    for value in (0, -1, 1.5, True):
+        with pytest.raises(ValueError):
+            config_store.save({**config, "auto_max_technical_attempts": value})
+    for value in (0, -1, float("inf"), float("nan")):
+        with pytest.raises(ValueError):
+            config_store.save({**config, "auto_retry_interval_hours": value})
+
+
+def test_scheduler_logs_sanitized_order_query_failure_without_attempts(tmp_path, monkeypatch, caplog):
+    import kering_jobs as jobs
+    store = ImageStore(tmp_path)
+    config_store = ConfigStore(tmp_path)
+    pilot_config(config_store, test_order_ids=[1])
+    monkeypatch.setattr(jobs, "configured_orders", Mock(side_effect=RuntimeError("secret-in-exception")))
+    now = datetime.now(timezone.utc).timestamp()
+    scheduler = jobs.KeringScheduler(store, config_store, lambda: None, FakePortal, lambda: now)
+    assert scheduler.tick()["result"] == "Error"
+    assert not store.history()
+    assert "stage=lectura_pedidos" in caplog.text and "RuntimeError" in caplog.text
+    assert "secret-in-exception" not in caplog.text
+
+
+def test_scheduler_bounds_failures_before_order_attempts_and_requires_review(tmp_path, monkeypatch):
+    import kering_jobs as jobs
+    store = ImageStore(tmp_path)
+    config_store = ConfigStore(tmp_path)
+    pilot_config(config_store, test_order_ids=[1], auto_interval_hours=0.01,
+                 auto_max_technical_attempts=3, auto_retry_interval_hours=24)
+    query = Mock(side_effect=RuntimeError("secret"))
+    monkeypatch.setattr(jobs, "configured_orders", query)
+    now = [datetime.now(timezone.utc).timestamp()]
+    scheduler = jobs.KeringScheduler(store, config_store, lambda: None, FakePortal, lambda: now[0])
+
+    for count in range(1, 4):
+        status = scheduler.tick()
+        assert query.call_count == count
+        assert not store.history()
+        if count < 3:
+            assert status["next_run"] == now[0] + 86400
+            now[0] += 86400 - 1
+            scheduler.tick()
+            assert query.call_count == count
+            now[0] += 1
+    assert status["result"] == "Revisión requerida: error de lote"
+    assert status["next_run"] is None
+    now[0] += 7 * 86400
+    assert scheduler.tick()["next_run"] is None
+    assert query.call_count == 3
+    runs_before = store.executions()
+
+    with pytest.raises(PermissionError):
+        jobs.review_batch_failure(store, config_store.load(), role="masterdata", reviewer="operator", reason="Revisado")
+    jobs.review_batch_failure(store, config_store.load(), role="admin", reviewer="operator", reason="Incidencia investigada")
+    query.side_effect = None
+    query.return_value = []
+    assert scheduler.tick()["result"] == "Sin pendientes"
+    assert len(store.executions()) == len(runs_before) + 1
+    assert sum(row["status"] == "Error" for row in store.executions()) == 3
+
+
+def test_scheduler_batch_failure_counter_resets_after_success(tmp_path, monkeypatch):
+    import kering_jobs as jobs
+    store = ImageStore(tmp_path)
+    config_store = ConfigStore(tmp_path)
+    pilot_config(config_store, test_order_ids=[1], auto_interval_hours=0.01,
+                 auto_max_technical_attempts=2, auto_retry_interval_hours=24)
+    query = Mock(side_effect=[RuntimeError("temporary"), [], RuntimeError("new")])
+    monkeypatch.setattr(jobs, "configured_orders", query)
+    now = [datetime.now(timezone.utc).timestamp()]
+    scheduler = jobs.KeringScheduler(store, config_store, lambda: None, FakePortal, lambda: now[0])
+    assert scheduler.tick()["result"] == "Error"
+    now[0] += 86400
+    assert scheduler.tick()["result"] == "Sin pendientes"
+    now[0] += 300
+    status = scheduler.tick()
+    assert status["result"] == "Error" and status["next_run"] == now[0] + 86400
+
+
+def test_scheduler_stops_retrying_partial_missing_views_until_manual_review(tmp_path, monkeypatch):
+    import kering_jobs as jobs
+    store = ImageStore(tmp_path)
+    config_store = ConfigStore(tmp_path)
+    pilot_config(config_store, test_order_ids=[1])
+    now = [datetime(2026, 10, 9, 10, tzinfo=timezone.utc).timestamp()]
+    current = pilot_order()
+    monkeypatch.setattr(jobs, "configured_orders", lambda *args: [current])
+    portal = FakePortal(("frontal", "lateral"))
+    scheduler = jobs.KeringScheduler(store, config_store, lambda: None, lambda _: portal, lambda: now[0])
+
+    assert scheduler.tick()["result"] == "Parcial"
+    first = store.history()[0]
+    assert json.loads(first["results"])[current["lines"][0]["ean"]]["reason"] == "vistas_no_disponibles"
+    now[0] += 86400
+    assert scheduler.tick()["result"] == "Sin pendientes"
+    assert len(store.history()) == 1 and len(portal.calls) == 1
+    assert purchase_status(store, current, first)["needs_processing"]
+
+
+def test_scheduler_requires_review_for_existing_images_under_alternate_code(tmp_path, monkeypatch):
+    import kering_jobs as jobs
+    from kering_images import AlternateCodeHasImages
+    store = ImageStore(tmp_path)
+    config_store = ConfigStore(tmp_path)
+    pilot_config(config_store, test_order_ids=[1])
+    current = pilot_order()
+    monkeypatch.setattr(jobs, "configured_orders", lambda *args: [current])
+    class Portal:
+        def fetch(self, ean, pending):
+            raise AlternateCodeHasImages()
+    factory = Mock(return_value=Portal())
+    now = [datetime.now(timezone.utc).timestamp()]
+    scheduler = jobs.KeringScheduler(store, config_store, lambda: None, factory, lambda: now[0])
+    assert scheduler.tick()["result"] == "Error"
+    history = store.history()
+    assert jobs.automatic_decision(current, purchase_status(store, current, history[0]),
+                                   history, config_store.load(), now[0]) == "revision_codigo_alternativo"
+    now[0] += 7 * 86400
+    assert scheduler.tick()["result"] == "Sin pendientes"
+    assert factory.call_count == 1 and len(store.history()) == 1
+
+
+def test_scheduler_bounds_technical_retries_and_preserves_history(tmp_path, monkeypatch):
+    import kering_jobs as jobs
+    from kering_images import PortalTimeout
+    store = ImageStore(tmp_path)
+    config_store = ConfigStore(tmp_path)
+    pilot_config(config_store, test_order_ids=[1])
+    now = [datetime.now(timezone.utc).timestamp() + 10]
+    current = pilot_order()
+    monkeypatch.setattr(jobs, "configured_orders", lambda *args: [current])
+    class FailingPortal:
+        def fetch(self, ean, pending):
+            raise PortalTimeout()
+    portal = FailingPortal()
+    scheduler = jobs.KeringScheduler(store, config_store, lambda: None, lambda _: portal, lambda: now[0])
+
+    for attempt in range(3):
+        assert scheduler.tick()["result"] == "Error"
+        assert len(store.history()) == attempt + 1
+        with store.connect() as connection:
+            connection.execute("UPDATE runs SET started=?, ended=? WHERE id=?",
+                               (now[0], now[0], store.history()[0]["run_id"]))
+        now[0] += 3600
+        assert scheduler.tick()["result"] == "Sin pendientes"
+        assert len(store.history()) == attempt + 1
+        now[0] += 23 * 3600
+    assert scheduler.tick()["result"] == "Sin pendientes"
+    assert len(store.history()) == 3
+    assert all(row["status"] == "Error" for row in store.history())
+
+
+def test_technical_error_with_reused_photos_is_not_partial(tmp_path):
+    from kering_images import PortalTimeout, order_status
+    store = ImageStore(tmp_path)
+    current = pilot_order()
+    ean = current["lines"][0]["ean"]
+    process_ean(store, FakePortal(("frontal", "lateral")), ean)
+    class FailingPortal:
+        def fetch(self, ean, pending):
+            raise PortalTimeout()
+    failing = FailingPortal()
+    result = process_ean(store, failing, ean)
+    assert result["reason"] == "timeout_portal"
+    assert result["acquisition"]["reused_files"] == 2
+    assert order_status(current, {ean: result}) == "Error"
+
+
+def test_unexpected_fetch_error_does_not_reuse_previous_timeout_code(caplog):
+    from kering_images import PortalTimeout, fetch_pending
+    portal = Mock()
+    portal.access_failure = None
+    portal.fetch.side_effect = [PortalTimeout(), RuntimeError("sensitive"), RuntimeError("sensitive")]
+    _, reason, tries = fetch_pending(portal, "123", ["perspectiva"])
+    assert (reason, tries) == ("fallo_portal", 3)
+    assert "sensitive" not in caplog.text
+
+
+def test_timeout_after_downloading_one_image_preserves_file_and_is_technical_error(tmp_path, monkeypatch):
+    from playwright.sync_api import TimeoutError as BrowserTimeout
+    from kering_portal import KeringPortal
+    from kering_images import order_status
+    store = ImageStore(tmp_path)
+    current = pilot_order()
+    ean = current["lines"][0]["ean"]
+    portal = KeringPortal({})
+    monkeypatch.setattr(portal, "_start", lambda: None)
+    monkeypatch.setattr(portal, "_find_product", lambda _: {})
+    def interrupted_download(snapshot, pending, collected):
+        collected["frontal"] = photo("red")
+        raise BrowserTimeout("timeout")
+    monkeypatch.setattr(portal, "_download", interrupted_download)
+    result = process_ean(store, portal, ean)
+    assert result["reason"] == "timeout_portal"
+    assert result["views"]["frontal"] == "Descargada"
+    assert store.valid_views(ean).keys() == {"frontal"}
+    assert order_status(current, {ean: result}) == "Error"
+
+
+def test_scheduler_honors_historical_errors_and_allows_manual_recovery(tmp_path, monkeypatch):
+    import kering_jobs as jobs
+    store = ImageStore(tmp_path)
+    config_store = ConfigStore(tmp_path)
+    pilot_config(config_store, test_order_ids=[1])
+    current = pilot_order()
+    monkeypatch.setattr(jobs, "configured_orders", lambda *args: [current])
+    run_ids = []
+    for attempt in range(6):
+        run = store.create_run([current], "programador", 7, date(2026, 9, 1), date(2026, 10, 9), jobs.AUTO_ORIGIN)
+        with store.connect() as connection:
+            connection.execute("UPDATE runs SET started=?, ended=?, status='Interrumpido' WHERE id=?",
+                               (1000 + attempt, 1000 + attempt, run))
+            connection.execute("UPDATE attempts SET status='Error',error='timeout_portal' WHERE run_id=?", (run,))
+        run_ids.append(run)
+    now = datetime.now(timezone.utc).timestamp()
+    factory = Mock(return_value=FakePortal())
+    scheduler = jobs.KeringScheduler(store, config_store, lambda: None, factory, lambda: now)
+    assert scheduler.tick()["result"] == "Sin pendientes"
+    factory.assert_not_called()
+    assert len(store.history()) == 6
+    manual = store.create_run([current], "operator", 7, date(2026, 9, 1), date(2026, 10, 9))
+    execute_run(store, manual, lambda _: current, FakePortal())
+    assert store.history()[0]["status"] == "Completo"
+    assert {row["run_id"] for row in store.history()} == set(run_ids + [manual])
+    assert purchase_status(store, current, store.history()[0])["status"] == "Procesado"
+
+
+def test_scheduler_does_not_ignore_history_when_interrupted_batch_left_order_queued(tmp_path):
+    import kering_jobs as jobs
+    store = ImageStore(tmp_path)
+    current = pilot_order()
+    for attempt in range(3):
+        run = store.create_run([current], "programador", 7, date(2026, 9, 1), date(2026, 10, 9), jobs.AUTO_ORIGIN)
+        with store.connect() as connection:
+            connection.execute("UPDATE runs SET started=?,ended=? WHERE id=?", (1000 + attempt, 1000 + attempt, run))
+            connection.execute("UPDATE attempts SET status='Error',error='timeout_portal' WHERE run_id=?", (run,))
+    queued = store.create_run([current], "programador", 7, date(2026, 9, 1), date(2026, 10, 9), jobs.AUTO_ORIGIN)
+    with store.connect() as connection:
+        connection.execute("UPDATE runs SET status='Interrumpido',ended=started WHERE id=?", (queued,))
+    history = store.history()
+    status = purchase_status(store, current, history[0])
+    assert jobs.automatic_decision(current, status, history, DEFAULT_SETTINGS, datetime.now(timezone.utc).timestamp()) == "revision_limite_tecnico"
+
+
+def test_scheduler_can_repair_missing_file_after_completed_order(tmp_path):
+    import kering_jobs as jobs
+    store = ImageStore(tmp_path)
+    current = pilot_order()
+    run = store.create_run([current], "operator", 7, date(2026, 9, 1), date(2026, 10, 9))
+    execute_run(store, run, lambda _: current, FakePortal())
+    store.path(current["lines"][0]["ean"], "frontal").unlink()
+    history = store.history()
+    status = purchase_status(store, current, history[0])
+    assert jobs.automatic_decision(current, status, history, DEFAULT_SETTINGS, datetime.now(timezone.utc).timestamp()) == "elegible"
+
+
+def test_scheduler_recovers_from_transient_error_within_retry_budget(tmp_path, monkeypatch):
+    import kering_jobs as jobs
+    from kering_images import PortalTimeout
+    store = ImageStore(tmp_path)
+    config_store = ConfigStore(tmp_path)
+    pilot_config(config_store, test_order_ids=[1], auto_max_technical_attempts=3, auto_retry_interval_hours=24)
+    current = pilot_order()
+    monkeypatch.setattr(jobs, "configured_orders", lambda *args: [current])
+    class TemporaryFailure:
+        def fetch(self, ean, pending):
+            raise PortalTimeout()
+    factory = Mock(side_effect=[TemporaryFailure(), FakePortal()])
+    now = [datetime.now(timezone.utc).timestamp() + 10]
+    scheduler = jobs.KeringScheduler(store, config_store, lambda: None, factory, lambda: now[0])
+    assert scheduler.tick()["result"] == "Error"
+    failed = store.history()[0]
+    with store.connect() as connection:
+        connection.execute("UPDATE runs SET started=?,ended=? WHERE id=?", (now[0], now[0], failed["run_id"]))
+    now[0] += 86400
+    assert scheduler.tick()["result"] == "Completado"
+    assert len(store.history()) == 2
+    assert any(row["status"] == "Error" for row in store.history())
 
 
 def test_cutoff_sql_boundary_and_manual_loader(tmp_path):
@@ -936,7 +1213,13 @@ def simulated_access(monkeypatch, scenario="success"):
             request = Mock(frame=page.main_frame)
             request.is_navigation_request.return_value = scenario == "redirect_network"
             handlers["requestfailed"](request)
-        if scenario not in {"redireccion", "captcha", "rejected", "same_url"}:
+        if scenario == "server_unavailable":
+            request = Mock(frame=page.main_frame)
+            request.is_navigation_request.return_value = True
+            handlers["response"](Mock(status=503, request=request))
+        if scenario == "unexpected_redirect":
+            page.url = "https://unexpected.invalid/"
+        if scenario not in {"redireccion", "captcha", "rejected", "same_url", "unexpected_redirect"}:
             page.url = "https://my.keringeyewear.com/es/"
     button.click.side_effect = click
     empty = MagicMock()
@@ -991,6 +1274,8 @@ def simulated_access(monkeypatch, scenario="success"):
     ("comprobacion_sesion", "comprobacion_sesion", "timeout_portal"),
     ("network", "apertura_portal", "fallo_red"),
     ("redirect_network", "redireccion", "fallo_red"),
+    ("server_unavailable", "redireccion", "portal_no_disponible"),
+    ("unexpected_redirect", "redireccion", "redireccion_inesperada"),
     ("captcha", "redireccion", "intervencion_captcha_o_mfa"),
     ("mfa", "redireccion", "intervencion_captcha_o_mfa"),
     ("rejected", "redireccion", "login_fallido"),
@@ -1004,7 +1289,7 @@ def test_access_reports_exact_failing_phase_without_secrets(monkeypatch, caplog,
     assert result["phase"] == phase
     assert result["phases"][-1]["code"] == code
     assert result["duration_ms"] <= 60001
-    assert set(result["phases"][-1]) == {"phase", "duration_ms", "code"}
+    assert set(result["phases"][-1]) == {"phase", "duration_ms", "code", "budget_ms", "failure_elapsed_ms"}
     assert "offline-secret" not in json.dumps(result) + caplog.text
     assert "offline-user" not in json.dumps(result) + caplog.text
     assert portal._page is None

@@ -232,6 +232,10 @@ Se aplica en `kering_media.classify_viewer` sobre el orden del visor (DOM de
   declara completo.
 - Solo afecta a descargas nuevas: registros historicos (incluido unknown
   reutilizado por URL) no se reclasifican ni se renombran por posicion.
+- Una fotografia de modelo puede revisarse individualmente como `lifestyle`
+  en la galeria Kering, con revisor y motivo. Se conserva el archivo, su
+  deteccion y procedencia; lifestyle no acredita V1, V2 ni V3. La posicion 4
+  no es evidencia suficiente y los demas `unknown` no se modifican.
 
 ### Pantalla, consultas y exportacion
 
@@ -794,10 +798,57 @@ es obligatorio auto_enabled en la configuracion. No se ha desplegado en esta PR.
 
 Cada vencimiento consulta desde corte hasta el dia actual completo de Madrid;
 en piloto consulta solo los IDs autorizados. Compara lineas/fotos/historial y
-procesa nuevos, incompletos o cambiados. Pedidos completos sin cambios se omiten;
+procesa los elegibles segun la politica siguiente. Pedidos completos sin cambios se omiten;
 un EAN completo reutilizado no provoca busqueda ni descarga. Cada pedido se relee
 antes de ejecutarlo y se revalida proveedor/corte/alcance. Origen **Manual** o
 **Automatico** en runs/historial (la interfaz muestra el acento).
+
+### Politica de revision y reintentos por pedido
+
+- `Completo` exige todas las vistas requeridas; un parcial por vistas no
+  disponibles conserva las imagenes y queda pendiente de revision o reproceso
+  manual, sin reintentos automaticos. No se convierte en completo.
+- Un error tecnico, incluso si hay imagenes reutilizadas, queda `Error`. Se
+  permiten por defecto tres intentos tecnicos consecutivos por pedido, con al
+  menos 24 horas desde el ultimo; ambos valores se configuran en la pantalla de
+  procesamiento. Al alcanzar el limite requiere revision o reproceso manual.
+  Los intentos manuales tambien forman parte del historial consecutivo. Las
+  llamadas internas del adaptador dentro de un intento no son intentos de pedido.
+- La decision se calcula con el historial y la firma de lineas, sin migrar ni
+  alterar intentos anteriores. Un cambio de lineas vuelve a habilitar el pedido;
+  un pedido antes completo con archivos ausentes sigue siendo reparable.
+  La columna de procesamiento automatico explica espera y revision.
+- Fallos o interrupciones consecutivos del lote antes de crear intentos se
+  contabilizan por separado usando las ejecuciones automaticas historicas.
+  Se aplican el mismo limite y la misma espera configurables; al agotarse no
+  se programan nuevos lotes hasta que un administrador registre la revision y
+  su motivo. La revision no borra ni modifica ejecuciones anteriores. Errores
+  que impidan abrir la configuracion o la base de datos no pueden registrarse
+  como ejecucion; requieren vigilancia de los logs del servicio.
+- Los fallos de lectura se registran con identificador de ejecucion, etapa y
+  clase de excepcion sin su mensaje. Un fallo historico sin intentos no permite
+  demostrar su causa. Un error tecnico despues de obtener algunas fotos conserva
+  los archivos y sigue siendo error, no `vistas_no_disponibles`.
+
+Los eventos de acceso registran fase, codigo, duracion, presupuesto y tiempo
+hasta el fallo cuando procede, sin URL, cookies, tokens ni credenciales. Se
+distinguen `timeout_portal`, `login_fallido`, `redireccion_inesperada`,
+`fallo_red`, `portal_no_disponible`, `fallo_http_portal` y `fallo_chromium`;
+la expiracion de sesion se informa como `sesion_caducada`. Un timeout durante
+redireccion no demuestra por si solo su causa ni implica cambiar los limites.
+
+Cuando una ficha Kering identifica exactamente el codigo consultado y otro
+codigo ya tiene fotos Kering, se detiene antes de descargarlas como
+`codigo_alternativo_con_imagenes` y el pedido queda para revision manual, sin
+reintentos automaticos. Un administrador puede asociar expresamente
+ambos codigos desde la biblioteca Kering, aportando evidencia de producto y
+variante; la asociacion se puede retirar y ambas acciones quedan auditadas. La
+asociacion es uno a uno y no se infiere por posicion ni por modelo similar.
+Las vistas Kering del codigo alternativo se reutilizan sin copiar originales;
+las revisiones bloqueantes de ambos codigos se respetan. La biblioteca y
+procesos de otros proveedores mantienen su busqueda normal por codigo.
+Tras asociarlos, el pedido puede reprocesarse manualmente cuando corresponda.
+No se modifica ninguna imagen historica sin revision explicita.
 
 SQLite conserva ultima/proxima ejecucion, ID y resultado. `batch.lock` se adquiere
 antes de leer decisiones de programacion; no se solapan procesos automaticos
@@ -849,6 +900,25 @@ desactivacion, modo piloto, bloqueos manual/auto, decisiones dentro del bloqueo,
 reinicio/interrupcion, errores de consulta persistidos y espera acotada.
 No se ejecuta Kering/Odoo real en CI; las validaciones reales autorizadas se
 describen aparte. Build Docker local no disponible: validar build remoto de PR.
+
+### Despliegue y verificacion posterior
+
+Solo tras revision, CI y autorizacion expresa: preparar copia de seguridad
+verificada de la configuracion y SQLite persistentes, y desplegar la imagen
+aprobada en la aplicacion y el scheduler con el volumen y secretos existentes.
+El arranque agrega las tablas `batch_failure_reviews`, `kering_code_links` y
+`kering_code_link_events` a `history.sqlite3`; no modifica historicos y los
+binarios anteriores ignoran esas tablas (y por tanto las asociaciones). Verificar la
+copia de seguridad antes del despliegue. Para volver atras, usar la imagen anterior;
+no restaurar una copia antigua sobre datos nuevos sin reconciliar el historial.
+Sin iniciar procesamientos, comprobar que ambos servicios arrancan, que el historial
+y las cuatro imagenes siguen presentes, que V2 permanece pendiente y que la
+columna automatica indica revision o espera segun corresponda. Tras verificar la
+identidad de ambos codigos, un administrador puede asociarlos con evidencia y
+revisar la imagen lifestyle concreta con revisor y motivo. Esas acciones son
+manuales y no deben ejecutarse durante una vigilancia que prohíba cambios.
+Comprobar configuracion y logs saneados. Una prueba contra el portal o un
+reproceso manual necesita autorizacion separada y su alcance debe acordarse antes.
 
 ## Diagnostico del listado
 

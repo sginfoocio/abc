@@ -336,6 +336,29 @@ def test_search_leading_zeros_and_zip_cache_invalidation(monkeypatch, tmp_path):
     assert not app.get("download_button")
 
 
+def test_admin_can_link_codes_and_view_existing_photos_without_copy(tmp_path):
+    alternate = "123456789012"
+    store = ImageStore(tmp_path / "kering")
+    for index, view in enumerate(("lateral", "frontal", "detalle", "unknown"), 1):
+        store.repository.save(alternate, f"photo{index}.png", photo(index), provider="Kering",
+                              origin=f"offline-{index}", view=view)
+    app = AppTest.from_string(
+        "import streamlit as st\n"
+        "from kering_images import ImageStore, data_root\n"
+        "from kering_images_ui import render_product_library\n"
+        "st.session_state['auth_role']='admin'\n"
+        "st.session_state['auth_user']='operator'\n"
+        f"render_product_library(ImageStore(data_root()), '{EAN}')"
+    ).run()
+    app.text_input(key=f"kering-other-code-{EAN}").set_value(alternate)
+    app.text_input(key=f"kering-link-evidence-{EAN}").set_value("Ficha de producto comprobada")
+    next(button for button in app.button if button.label == "Confirmar asociación").click().run()
+    assert not app.exception
+    assert len(store.repository.catalog_records(EAN)) == 4
+    assert any("Perspectiva" in item.value for item in app.caption)
+    assert not (store.repository.root / EAN).exists()
+
+
 def test_local_library_search_and_download_permissions(tmp_path, monkeypatch):
     monkeypatch.setenv(
         "IMAGE_THUMBNAIL_CACHE_ROOT",
