@@ -34,8 +34,11 @@ BEGIN_WRITE = "BEGIN IMMEDIATE"
 STATES = ("Pendiente", IN_PROGRESS, "Completo", "Parcial", "Error", "Interrumpido")
 DEFAULT_SETTINGS = {
     "cutoff_date": "2026-09-01", "auto_enabled": False, "auto_interval_hours": 6.0,
+    "auto_max_technical_attempts": 3, "auto_retry_interval_hours": 24.0,
     "test_mode": True, "test_order_ids": [], "full_lot_validated": False,
 }
+NON_TECHNICAL_REASONS = {"", "vistas_no_disponibles", "vistas_sin_identificar", "revision_vistas"}
+LOGGER = logging.getLogger(__name__)
 
 
 class PortalUnavailable(Exception):
@@ -651,8 +654,9 @@ def fetch_pending(portal, ean, pending):
             reason = error.code
             if not error.retryable or getattr(portal, "access_failure", None):
                 return {}, reason, tries
-        except Exception:
-            pass
+        except Exception as error:
+            LOGGER.error("kering_fetch code=fallo_portal exception_type=%s", type(error).__name__)
+            reason = "fallo_portal"
     return {}, reason, 3
 
 
@@ -694,6 +698,8 @@ def order_status(order: dict, results: dict) -> str:
     available = False
     for line in order["lines"]:
         result = results.get(line["ean"], {})
+        if result.get("reason", "") not in NON_TECHNICAL_REASONS:
+            return "Error"
         views = result.get("views", {})
         complete = complete and bool(line["ean"]) and not result.get("review_blocking") and all(
             views.get(view, "Pendiente") != "Pendiente" for view in VIEWS)
@@ -914,6 +920,12 @@ class ConfigStore:
         interval = float(config["auto_interval_hours"])
         if not math.isfinite(interval) or interval <= 0:
             raise ValueError("El intervalo debe ser mayor que cero")
+        retries = config["auto_max_technical_attempts"]
+        retry_interval = float(config["auto_retry_interval_hours"])
+        if isinstance(retries, bool) or not isinstance(retries, int) or retries < 1:
+            raise ValueError("El limite de intentos tecnicos debe ser un entero positivo")
+        if not math.isfinite(retry_interval) or retry_interval <= 0:
+            raise ValueError("El intervalo de reintento debe ser mayor que cero")
         ids = list(dict.fromkeys(int(value) for value in config["test_order_ids"]))
         if len(ids) > 2 or any(value <= 0 for value in ids):
             raise ValueError("Autorice uno o dos pedidos de prueba")

@@ -452,12 +452,14 @@ class ImageRepository:
 
     def review_view(self, record_id: int, view: str, *, reviewer: str, reason: str,
                     evidence: dict | None = None) -> None:
-        if view not in {*IMAGE_VIEWS, "unknown"} or not reviewer.strip() or not reason.strip():
+        if view not in {*IMAGE_VIEWS, "unknown", "lifestyle"} or not reviewer.strip() or not reason.strip():
             raise ValueError("La revision requiere vista, revisor y motivo")
         records = [record for record in self.records() if record.id == record_id]
         if not records:
             raise ValueError("Imagen no encontrada para revisar")
         record = records[0]
+        if view == "lifestyle" and record.provider != "Kering":
+            raise ValueError("La clasificación lifestyle solo está disponible para Kering")
         with self.lock(record.ean), self.maintenance_lock(), self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             current = connection.execute(

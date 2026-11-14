@@ -16,7 +16,7 @@ from kering_images import (
     read_supplier_contacts, displayed_views, purchase_status, latest_attempts, trial_validated, batch_busy,
 )
 from kering_portal import KeringPortal
-from kering_jobs import prepare_selection, make_loader, schedule_status
+from kering_jobs import prepare_selection, make_loader, schedule_status, automatic_decision
 from image_repository import ImageRepository
 from image_exports import order_export_plan, prepare_order_zip, repository_signature
 from cloud_design import page_title
@@ -110,11 +110,17 @@ def render_job_settings(config_store):
         cutoff = st.date_input("Fecha de corte", date.fromisoformat(config["cutoff_date"]), format=DATE_FORMAT)
         automatic = st.toggle("Procesamiento autom\u00e1tico", value=config["auto_enabled"])
         hours = st.number_input("Intervalo (horas)", min_value=0.0, value=float(config["auto_interval_hours"]), step=1.0)
+        max_attempts = st.number_input("Máximo de intentos técnicos automáticos consecutivos",
+                                       min_value=1, value=int(config["auto_max_technical_attempts"]), step=1)
+        retry_hours = st.number_input("Intervalo mínimo entre reintentos técnicos (horas)",
+                                      min_value=0.01, value=float(config["auto_retry_interval_hours"]), step=1.0)
+        st.caption("Las vistas no disponibles requieren revisión o procesamiento manual; no se reintentan automáticamente.")
         test_mode = st.toggle("Modo de prueba", value=config["test_mode"] if validated else True, disabled=not validated)
         saved = st.form_submit_button("Guardar procesamiento", icon=SAVE_ICON)
     if saved:
         save_settings(config_store, {**config_store.load(), "cutoff_date": cutoff.isoformat(),
                                    "auto_enabled": automatic, "auto_interval_hours": hours,
+                                   "auto_max_technical_attempts": max_attempts, "auto_retry_interval_hours": retry_hours,
                                    "test_mode": test_mode, "full_lot_validated": validated and not test_mode})
     if not validated:
         st.info("Validaci\u00f3n inicial de pedidos pendiente")
@@ -404,12 +410,25 @@ def load_order_listing(engine, store, config, start, end, number="", status="Tod
         if order.get("name"):
             store.repository.associate_order(
                 "Kering", str(order["name"]), order_eans(order))
-    latest = latest_attempts(store)
+    history = {}
+    for attempt in store.history():
+        history.setdefault(attempt["order_id"], []).append(attempt)
+    latest = {order_id: attempts[0] for order_id, attempts in history.items()}
     cache = {}
+    now = datetime.now(MADRID).timestamp()
+    labels = {
+        "sin_pendientes": "Sin pendientes", "elegible": "Elegible",
+        "revision_parcial": "Revisión: vistas no disponibles",
+        "revision_limite_tecnico": "Revisión: límite técnico agotado",
+        "espera_reintento": "Esperando reintento técnico",
+    }
     pairs = [
         (
             order,
-            purchase_row(store, order, latest.get(order["id"]), cache),
+            {**purchase_row(store, order, latest.get(order["id"]), cache),
+             "Automático": labels[automatic_decision(
+                 order, purchase_status(store, order, latest.get(order["id"]), cache),
+                 history.get(order["id"], []), config, now)]},
         )
         for order in orders
     ]
@@ -965,7 +984,7 @@ def render_gallery(repository, ean, prefix="product"):
                 st.json(selected.metadata["view_review"])
             review = st.selectbox(
                 "Vista comprobada",
-                ["unknown", *LIBRARY_VIEW_ORDER, "detalle"],
+                ["unknown", *LIBRARY_VIEW_ORDER, "detalle", "lifestyle"],
                 key=f"{prefix}-{ean}-review-view",
             )
             reason = st.text_input(
@@ -1351,7 +1370,7 @@ def render_product_library(store, ean):
                 st.json(selected_record.metadata.get("view_detection", {}))
                 reviewed_view = st.selectbox(
                     "Vista comprobada",
-                    ["unknown", *LIBRARY_VIEW_ORDER, "detalle"],
+                    ["unknown", *LIBRARY_VIEW_ORDER, "detalle", "lifestyle"],
                     key=f"kering-library-{ean}-review-view",
                 )
                 reason = st.text_input(

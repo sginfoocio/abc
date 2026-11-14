@@ -232,6 +232,10 @@ Se aplica en `kering_media.classify_viewer` sobre el orden del visor (DOM de
   declara completo.
 - Solo afecta a descargas nuevas: registros historicos (incluido unknown
   reutilizado por URL) no se reclasifican ni se renombran por posicion.
+- Una fotografia de modelo puede revisarse individualmente como `lifestyle`
+  en la galeria Kering, con revisor y motivo. Se conserva el archivo, su
+  deteccion y procedencia; lifestyle no acredita V1, V2 ni V3. La posicion 4
+  no es evidencia suficiente y los demas `unknown` no se modifican.
 
 ### Pantalla, consultas y exportacion
 
@@ -794,10 +798,42 @@ es obligatorio auto_enabled en la configuracion. No se ha desplegado en esta PR.
 
 Cada vencimiento consulta desde corte hasta el dia actual completo de Madrid;
 en piloto consulta solo los IDs autorizados. Compara lineas/fotos/historial y
-procesa nuevos, incompletos o cambiados. Pedidos completos sin cambios se omiten;
+procesa los elegibles segun la politica siguiente. Pedidos completos sin cambios se omiten;
 un EAN completo reutilizado no provoca busqueda ni descarga. Cada pedido se relee
 antes de ejecutarlo y se revalida proveedor/corte/alcance. Origen **Manual** o
 **Automatico** en runs/historial (la interfaz muestra el acento).
+
+### Politica de revision y reintentos por pedido
+
+- `Completo` exige todas las vistas requeridas; un parcial por vistas no
+  disponibles conserva las imagenes y queda pendiente de revision o reproceso
+  manual, sin reintentos automaticos. No se convierte en completo.
+- Un error tecnico, incluso si hay imagenes reutilizadas, queda `Error`. Se
+  permiten por defecto tres intentos tecnicos consecutivos por pedido, con al
+  menos 24 horas desde el ultimo; ambos valores se configuran en la pantalla de
+  procesamiento. Al alcanzar el limite requiere revision o reproceso manual.
+  Los intentos manuales tambien forman parte del historial consecutivo. Las
+  llamadas internas del adaptador dentro de un intento no son intentos de pedido.
+- La decision se calcula con el historial y la firma de lineas, sin migrar ni
+  alterar intentos anteriores. Un cambio de lineas vuelve a habilitar el pedido;
+  un pedido antes completo con archivos ausentes sigue siendo reparable.
+  La columna de procesamiento automatico explica espera y revision.
+- Fallos previos a crear intentos (por ejemplo, al consultar pedidos) se registran
+  con identificador de ejecucion, etapa y clase de excepcion sin su mensaje. No
+  se incluyen en el limite por pedido; el scheduler conserva su espera de lote.
+  Un fallo historico sin intentos no permite demostrar su causa.
+
+Los eventos de acceso registran fase, codigo, duracion, presupuesto y tiempo
+hasta el fallo cuando procede, sin URL, cookies, tokens ni credenciales. Se
+distinguen `timeout_portal`, `login_fallido`, `redireccion_inesperada`,
+`fallo_red`, `portal_no_disponible`, `fallo_http_portal` y `fallo_chromium`;
+la expiracion de sesion se informa como `sesion_caducada`. Un timeout durante
+redireccion no demuestra por si solo su causa ni implica cambiar los limites.
+
+La biblioteca identifica productos por el codigo almacenado. Un EAN y un UPC
+distintos no se fusionan automaticamente: verificar la asociacion documentada
+en catalogo antes de revisar o reprocesar, sin inferir equivalencias ni duplicar
+archivos. No se modifica ninguna imagen historica sin revision explicita.
 
 SQLite conserva ultima/proxima ejecucion, ID y resultado. `batch.lock` se adquiere
 antes de leer decisiones de programacion; no se solapan procesos automaticos
@@ -849,6 +885,20 @@ desactivacion, modo piloto, bloqueos manual/auto, decisiones dentro del bloqueo,
 reinicio/interrupcion, errores de consulta persistidos y espera acotada.
 No se ejecuta Kering/Odoo real en CI; las validaciones reales autorizadas se
 describen aparte. Build Docker local no disponible: validar build remoto de PR.
+
+### Despliegue y verificacion posterior
+
+Solo tras revision, CI y autorizacion expresa: preparar copia de seguridad
+verificada de la configuracion y SQLite persistentes, y desplegar la imagen
+aprobada en la aplicacion y el scheduler con el volumen y secretos existentes.
+No se requiere migracion de datos. Para volver atras, usar la imagen anterior;
+no restaurar una copia antigua sobre datos nuevos sin reconciliar el historial.
+Sin iniciar procesamientos, comprobar que ambos servicios arrancan, que el historial
+y las cuatro imagenes siguen presentes, que V2 permanece pendiente y que la
+columna automatica indica revision o espera segun corresponda. Revisar la imagen
+lifestyle solo tras confirmar visualmente el registro y registrar revisor y motivo.
+Comprobar configuracion y logs saneados. Una prueba contra el portal o un
+reproceso manual necesita autorizacion separada y su alcance debe acordarse antes.
 
 ## Diagnostico del listado
 

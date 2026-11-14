@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from datetime import date, datetime, timezone
 import json
+import logging
 import signal
 from threading import Event
 import time
@@ -14,7 +15,7 @@ from sqlalchemy import create_engine, URL
 from db_config import load_db_config
 from kering_images import (
     ConfigStore, ImageStore, DEFAULT_SETTINGS, configured_orders, batch_lock, execute_run,
-    latest_attempts, purchase_status, trial_validated, data_root, IN_PROGRESS,
+    purchase_status, trial_validated, data_root, IN_PROGRESS, line_signature, NON_TECHNICAL_REASONS,
 )
 from kering_portal import KeringPortal
 
@@ -22,6 +23,39 @@ from kering_portal import KeringPortal
 AUTO_ORIGIN = "Autom\u00e1tico"
 ERROR_BACKOFF = 300
 MADRID = ZoneInfo("Europe/Madrid")
+LOGGER = logging.getLogger(__name__)
+
+
+def automatic_decision(order, status, attempts, config, now):
+    """Keep automatic retries bounded without changing manual processing or historical attempts."""
+    if not status["needs_processing"]:
+        return "sin_pendientes"
+    attempts = [attempt for attempt in attempts if attempt["status"] not in {"Pendiente", IN_PROGRESS}]
+    if not attempts:
+        return "elegible"
+    latest = attempts[0]
+    if line_signature(order) != line_signature(json.loads(latest["snapshot"])):
+        return "elegible"
+    if latest["status"] == "Completo":
+        return "elegible"
+    errors = 0
+    for attempt in attempts:
+        if line_signature(order) != line_signature(json.loads(attempt["snapshot"])):
+            break
+        reasons = {item.get("reason", "") for item in json.loads(attempt["results"]).values()}
+        technical = attempt["status"] in {"Error", "Interrumpido"} or bool(reasons - NON_TECHNICAL_REASONS)
+        if not technical:
+            break
+        errors += 1
+    if not errors:
+        return "revision_parcial"
+    if errors >= config.get("auto_max_technical_attempts", DEFAULT_SETTINGS["auto_max_technical_attempts"]):
+        return "revision_limite_tecnico"
+    last = latest["ended"] or latest["started"]
+    hours = config.get("auto_retry_interval_hours", DEFAULT_SETTINGS["auto_retry_interval_hours"])
+    if now < last + float(hours) * 3600:
+        return "espera_reintento"
+    return "elegible"
 
 
 def order_day(order):
@@ -131,7 +165,9 @@ class KeringScheduler:
         result = "Error"
         try:
             result = self.process_pending(config, now, run_id)
-        except Exception:
+        except Exception as error:
+            LOGGER.error("kering_scheduler stage=preparacion run_id=%s code=fallo_programador exception_type=%s",
+                         run_id, type(error).__name__)
             result = "Error"
             with self.store.connect() as connection:
                 connection.execute("UPDATE runs SET status='Error',ended=? WHERE id=?", (self.clock(), run_id))
@@ -152,18 +188,37 @@ class KeringScheduler:
             execute_run(self.store, run_id, lambda _: None, None)
             return "Sin pedidos autorizados"
         check_permission(self.store, config, ids or [0])
-        orders = configured_orders(self.engine_factory(), config, start, end, ids)
+        try:
+            orders = configured_orders(self.engine_factory(), config, start, end, ids)
+        except Exception as error:
+            LOGGER.error("kering_scheduler stage=lectura_pedidos run_id=%s exception_type=%s",
+                         run_id, type(error).__name__)
+            raise
         orders = [order for order in orders if start <= order_day(order) <= end and (ids is None or order["id"] in ids)]
-        latest = latest_attempts(self.store)
+        history = {}
+        for attempt in self.store.history():
+            history.setdefault(attempt["order_id"], []).append(attempt)
         views_cache = {}
-        pending = [order for order in orders if purchase_status(self.store, order, latest.get(order["id"]), views_cache)["needs_processing"]]
+        pending = []
+        decisions = {}
+        for order in orders:
+            attempts = history.get(order["id"], [])
+            status = purchase_status(self.store, order, attempts[0] if attempts else None, views_cache)
+            decision = automatic_decision(order, status, attempts, config, now)
+            decisions[decision] = decisions.get(decision, 0) + 1
+            if decision == "elegible":
+                pending.append(order)
+        if decisions.get("revision_limite_tecnico") or decisions.get("revision_parcial"):
+            LOGGER.warning("kering_scheduler run_id=%s decisions=%s", run_id, json.dumps(decisions, sort_keys=True))
         self.store.add_orders(run_id, pending)
         portal = None
         try:
             portal = self.portal_factory(config) if pending else None
             loader = make_loader(self.store, self.config_store, self.engine_factory, start, end, config["supplier_id"])
             execute_run(self.store, run_id, loader, portal)
-        except Exception:
+        except Exception as error:
+            LOGGER.error("kering_scheduler stage=procesamiento run_id=%s code=fallo_programador exception_type=%s",
+                         run_id, type(error).__name__)
             with self.store.connect() as connection:
                 connection.execute("UPDATE attempts SET status='Error',error='fallo_programador' WHERE run_id=?", (run_id,))
                 connection.execute("UPDATE runs SET status='Error',ended=? WHERE id=?", (self.clock(), run_id))

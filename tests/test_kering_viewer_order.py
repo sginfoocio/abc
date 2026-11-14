@@ -167,6 +167,29 @@ def test_extra_images_preserved_and_explicit_v2_completes(monkeypatch, tmp_path)
     assert count_complete_lines(store, order(), {}) == 1
 
 
+def test_explicit_lifestyle_review_preserves_files_and_does_not_supply_v2(monkeypatch, tmp_path):
+    from image_library import LibraryFilters, filter_groups, group_records
+    portal, reader = viewer(monkeypatch, ["a.png", "b.png", "c.png", "d.png"])
+    store = ImageStore(tmp_path / "kering")
+    result = process_ean(store, portal, EAN)
+    records = by_origin(store)
+    target = records["d.png"]
+    before = {name: (record.id, record.path, record.checksum) for name, record in records.items()}
+    assert target.view == "unknown" and result["views"]["perspectiva"] == "Pendiente"
+
+    store.repository.review_view_for_user(
+        target.id, "lifestyle", role="admin", reviewer="operator", reason="Visual inspection of model wearing glasses")
+    reviewed = by_origin(store)
+    assert reviewed["d.png"].view == "lifestyle"
+    assert reviewed["d.png"].metadata["view_review"]["previous_view"] == "unknown"
+    assert reviewed["d.png"].metadata["view_detection"] == target.metadata["view_detection"]
+    assert {name: (record.id, record.path, record.checksum) for name, record in reviewed.items()} == before
+    assert "perspectiva" not in store.valid_views(EAN)
+    assert order_status(order(), {EAN: result}) == "Parcial"
+    groups = group_records(list(reviewed.values()))
+    assert len(filter_groups(groups, LibraryFilters(view="Lifestyle"))) == 1
+
+
 def test_matching_explicit_labels_keep_original_rule(monkeypatch, tmp_path):
     names = ["MODEL__001__shad__lt.png", "b.png", "c.png"]
     portal, reader = viewer(monkeypatch, names)
