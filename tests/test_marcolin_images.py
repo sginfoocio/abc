@@ -188,6 +188,28 @@ def test_marcolin_excel_marks_missing_and_ambiguous_references_for_review(setup)
     assert rows[upcs[2]][10].value == "sin correspondencia Odoo confirmada"
 
 
+def test_marcolin_excel_preserves_portal_groups_and_flags_conflicting_references(setup):
+    connector, store, _, _ = setup
+    request_id = connector.plan_eans(EANS[:2])["created"][0]
+    connector.record_portal_groups(request_id, [
+        {"portal_ref": "REF-A", "status": "inactive", "upcs": EANS[:2]},
+        {"portal_ref": "REF-B", "status": "active", "upcs": [EANS[1]]},
+    ])
+    store.save_odoo_items(request_id, [
+        {"ean": EANS[1], "sku": "SKU-1", "status": "confirmed", "reason": "Odoo verificado"},
+    ])
+    before = store.get(request_id)
+
+    sheet = load_workbook(BytesIO(connector.export_request_xlsx(request_id))).active
+    rows = {row[0].value: row for row in sheet.iter_rows(min_row=2)}
+    assert rows[EANS[0]][8].value == "REF-A"
+    assert rows[EANS[1]][8].value is None
+    assert "referencias portal ambiguas" in rows[EANS[1]][10].value
+    assert "Odoo verificado" in rows[EANS[1]][10].value
+    assert rows[EANS[1]][1].value == "SKU-1"
+    assert store.get(request_id) == before
+
+
 def test_marcolin_excel_generation_is_repeatable_without_mutating_request(setup):
     connector, store, _, _ = setup
     request_id = connector.plan_eans([EANS[0]])["created"][0]
