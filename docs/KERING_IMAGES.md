@@ -818,10 +818,17 @@ antes de ejecutarlo y se revalida proveedor/corte/alcance. Origen **Manual** o
   alterar intentos anteriores. Un cambio de lineas vuelve a habilitar el pedido;
   un pedido antes completo con archivos ausentes sigue siendo reparable.
   La columna de procesamiento automatico explica espera y revision.
-- Fallos previos a crear intentos (por ejemplo, al consultar pedidos) se registran
-  con identificador de ejecucion, etapa y clase de excepcion sin su mensaje. No
-  se incluyen en el limite por pedido; el scheduler conserva su espera de lote.
-  Un fallo historico sin intentos no permite demostrar su causa.
+- Fallos o interrupciones consecutivos del lote antes de crear intentos se
+  contabilizan por separado usando las ejecuciones automaticas historicas.
+  Se aplican el mismo limite y la misma espera configurables; al agotarse no
+  se programan nuevos lotes hasta que un administrador registre la revision y
+  su motivo. La revision no borra ni modifica ejecuciones anteriores. Errores
+  que impidan abrir la configuracion o la base de datos no pueden registrarse
+  como ejecucion; requieren vigilancia de los logs del servicio.
+- Los fallos de lectura se registran con identificador de ejecucion, etapa y
+  clase de excepcion sin su mensaje. Un fallo historico sin intentos no permite
+  demostrar su causa. Un error tecnico despues de obtener algunas fotos conserva
+  los archivos y sigue siendo error, no `vistas_no_disponibles`.
 
 Los eventos de acceso registran fase, codigo, duracion, presupuesto y tiempo
 hasta el fallo cuando procede, sin URL, cookies, tokens ni credenciales. Se
@@ -830,10 +837,18 @@ distinguen `timeout_portal`, `login_fallido`, `redireccion_inesperada`,
 la expiracion de sesion se informa como `sesion_caducada`. Un timeout durante
 redireccion no demuestra por si solo su causa ni implica cambiar los limites.
 
-La biblioteca identifica productos por el codigo almacenado. Un EAN y un UPC
-distintos no se fusionan automaticamente: verificar la asociacion documentada
-en catalogo antes de revisar o reprocesar, sin inferir equivalencias ni duplicar
-archivos. No se modifica ninguna imagen historica sin revision explicita.
+Cuando una ficha Kering identifica exactamente el codigo consultado y otro
+codigo ya tiene fotos Kering, se detiene antes de descargarlas como
+`codigo_alternativo_con_imagenes` y el pedido queda para revision manual, sin
+reintentos automaticos. Un administrador puede asociar expresamente
+ambos codigos desde la biblioteca Kering, aportando evidencia de producto y
+variante; la asociacion se puede retirar y ambas acciones quedan auditadas. La
+asociacion es uno a uno y no se infiere por posicion ni por modelo similar.
+Las vistas Kering del codigo alternativo se reutilizan sin copiar originales;
+las revisiones bloqueantes de ambos codigos se respetan. La biblioteca y
+procesos de otros proveedores mantienen su busqueda normal por codigo.
+Tras asociarlos, el pedido puede reprocesarse manualmente cuando corresponda.
+No se modifica ninguna imagen historica sin revision explicita.
 
 SQLite conserva ultima/proxima ejecucion, ID y resultado. `batch.lock` se adquiere
 antes de leer decisiones de programacion; no se solapan procesos automaticos
@@ -891,12 +906,17 @@ describen aparte. Build Docker local no disponible: validar build remoto de PR.
 Solo tras revision, CI y autorizacion expresa: preparar copia de seguridad
 verificada de la configuracion y SQLite persistentes, y desplegar la imagen
 aprobada en la aplicacion y el scheduler con el volumen y secretos existentes.
-No se requiere migracion de datos. Para volver atras, usar la imagen anterior;
+El arranque agrega las tablas `batch_failure_reviews`, `kering_code_links` y
+`kering_code_link_events` a `history.sqlite3`; no modifica historicos y los
+binarios anteriores ignoran esas tablas (y por tanto las asociaciones). Verificar la
+copia de seguridad antes del despliegue. Para volver atras, usar la imagen anterior;
 no restaurar una copia antigua sobre datos nuevos sin reconciliar el historial.
 Sin iniciar procesamientos, comprobar que ambos servicios arrancan, que el historial
 y las cuatro imagenes siguen presentes, que V2 permanece pendiente y que la
-columna automatica indica revision o espera segun corresponda. Revisar la imagen
-lifestyle solo tras confirmar visualmente el registro y registrar revisor y motivo.
+columna automatica indica revision o espera segun corresponda. Tras verificar la
+identidad de ambos codigos, un administrador puede asociarlos con evidencia y
+revisar la imagen lifestyle concreta con revisor y motivo. Esas acciones son
+manuales y no deben ejecutarse durante una vigilancia que prohíba cambios.
 Comprobar configuracion y logs saneados. Una prueba contra el portal o un
 reproceso manual necesita autorizacion separada y su alcance debe acordarse antes.
 

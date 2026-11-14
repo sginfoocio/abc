@@ -38,6 +38,9 @@ def automatic_decision(order, status, attempts, config, now):
         return "elegible"
     if latest["status"] == "Completo":
         return "elegible"
+    latest_reasons = {item.get("reason", "") for item in json.loads(latest["results"]).values()}
+    if "codigo_alternativo_con_imagenes" in latest_reasons:
+        return "revision_codigo_alternativo"
     errors = 0
     for attempt in attempts:
         if line_signature(order) != line_signature(json.loads(attempt["snapshot"])):
@@ -98,6 +101,40 @@ def make_loader(store, config_store, engine_factory, start, end, supplier, reade
     return loader
 
 
+def batch_failure_history(store):
+    failures = []
+    with store.connect() as connection:
+        rows = connection.execute("""
+            SELECT r.id, r.status, r.ended,
+                   EXISTS(SELECT 1 FROM attempts a WHERE a.run_id=r.id) AS has_attempts,
+                   EXISTS(SELECT 1 FROM batch_failure_reviews b WHERE b.run_id=r.id) AS reviewed
+            FROM runs r WHERE r.origin=? ORDER BY r.rowid DESC
+        """, (AUTO_ORIGIN,))
+        for row in rows:
+            if row["ended"] is None:
+                continue
+            if row["reviewed"] or row["status"] not in {"Error", "Interrumpido"} or row["has_attempts"]:
+                break
+            failures.append(row["id"])
+    return failures
+
+
+def review_batch_failure(store, config, *, role, reviewer, reason):
+    if role != "admin" or not isinstance(reviewer, str) or not reviewer.strip():
+        raise PermissionError("La revisión del lote requiere un administrador")
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("Indique el motivo de la revisión")
+    with batch_lock(store):
+        failures = batch_failure_history(store)
+        if len(failures) < config["auto_max_technical_attempts"]:
+            raise ValueError("No hay un límite de lote agotado")
+        with store.connect() as connection:
+            connection.execute(
+                "INSERT INTO batch_failure_reviews(run_id,reviewer,reason,created) VALUES(?,?,?,?)",
+                (failures[0], reviewer.strip(), reason.strip(), time.time()),
+            )
+
+
 def schedule_status(store, config, now=None):
     timestamp = time.time() if now is None else now
     with store.connect() as connection:
@@ -106,15 +143,25 @@ def schedule_status(store, config, now=None):
     interval = float(config.get("auto_interval_hours", 6)) * 3600
     if status["result"] in {"Error", "Parcial", "Interrumpido"}:
         interval = max(interval, ERROR_BACKOFF)
+    failures = batch_failure_history(store)
+    blocked = len(failures) >= config.get("auto_max_technical_attempts", DEFAULT_SETTINGS["auto_max_technical_attempts"])
+    if failures:
+        interval = max(interval, float(config.get("auto_retry_interval_hours",
+                                                  DEFAULT_SETTINGS["auto_retry_interval_hours"])) * 3600)
     if not config.get("auto_enabled", False):
         due = None
     elif status["result"] == IN_PROGRESS:
         due = status.get("next_run")
+    elif blocked:
+        due = None
+        status["result"] = "Revisión requerida: error de lote"
     elif status["last_finished"] is not None:
         due = status["last_finished"] + interval
     else:
         due = timestamp
     status["next_run"] = due
+    status["batch_review_required"] = blocked
+    status["batch_failures"] = len(failures)
     return status
 
 
@@ -156,9 +203,11 @@ class KeringScheduler:
             due = now + max(float(config["auto_interval_hours"]) * 3600, ERROR_BACKOFF)
             self.write_state(status["last_started"], now, due, "Interrumpido", status["run_id"])
             return schedule_status(self.store, config, now)
+        if status["batch_review_required"]:
+            return status
         if status["next_run"] is not None and now < status["next_run"]:
             return status
-        start = date.fromisoformat(config["cutoff_date"])
+        start = config["cutoff_date"]
         end = datetime.fromtimestamp(now, MADRID).date()
         run_id = self.store.create_run([], "programador", config["supplier_id"], start, end, AUTO_ORIGIN)
         self.write_state(now, None, now + float(config["auto_interval_hours"]) * 3600, IN_PROGRESS, run_id)
@@ -208,7 +257,8 @@ class KeringScheduler:
             decisions[decision] = decisions.get(decision, 0) + 1
             if decision == "elegible":
                 pending.append(order)
-        if decisions.get("revision_limite_tecnico") or decisions.get("revision_parcial"):
+        if (decisions.get("revision_limite_tecnico") or decisions.get("revision_parcial")
+                or decisions.get("revision_codigo_alternativo")):
             LOGGER.warning("kering_scheduler run_id=%s decisions=%s", run_id, json.dumps(decisions, sort_keys=True))
         self.store.add_orders(run_id, pending)
         portal = None

@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import streamlit as st
 from cryptography.fernet import InvalidToken
+from filelock import Timeout
 from sqlalchemy.exc import OperationalError
 
 from kering_images import (
@@ -16,7 +17,7 @@ from kering_images import (
     read_supplier_contacts, displayed_views, purchase_status, latest_attempts, trial_validated, batch_busy,
 )
 from kering_portal import KeringPortal
-from kering_jobs import prepare_selection, make_loader, schedule_status, automatic_decision
+from kering_jobs import prepare_selection, make_loader, schedule_status, automatic_decision, review_batch_failure
 from image_repository import ImageRepository
 from image_exports import order_export_plan, prepare_order_zip, repository_signature
 from cloud_design import page_title
@@ -156,6 +157,18 @@ def render_scheduler_status():
         previous.metric("\u00daltima ejecuci\u00f3n autom\u00e1tica", format_timestamp(status["last_finished"] or status["last_started"]))
         upcoming.metric("Pr\u00f3xima ejecuci\u00f3n", format_timestamp(status["next_run"]))
         st.write(f"Resultado: {status['result']}")
+        if status["batch_review_required"]:
+            st.warning("El límite de errores de lote está agotado. Investigue la incidencia antes de reactivar.")
+            with st.form("kering_batch_failure_review"):
+                reason = st.text_input("Motivo de la revisión del lote")
+                reviewed = st.form_submit_button("Confirmar revisión y reactivar")
+            if reviewed:
+                try:
+                    review_batch_failure(service().store, config, role=st.session_state.get("auth_role"),
+                                         reviewer=st.session_state.get("auth_user", ""), reason=reason)
+                    st.success("Revisión registrada; el programador queda habilitado.")
+                except (ValueError, PermissionError, Timeout):
+                    st.error("No se pudo registrar la revisión; compruebe el motivo y que no haya otro lote activo.")
     except Exception:
         st.error("No se pudo consultar el estado del programador.")
 
@@ -420,6 +433,7 @@ def load_order_listing(engine, store, config, start, end, number="", status="Tod
         "sin_pendientes": "Sin pendientes", "elegible": "Elegible",
         "revision_parcial": "Revisión: vistas no disponibles",
         "revision_limite_tecnico": "Revisión: límite técnico agotado",
+        "revision_codigo_alternativo": "Revisión: imágenes con otro código",
         "espera_reintento": "Esperando reintento técnico",
     }
     pairs = [
@@ -715,6 +729,9 @@ def render_product(store, ean, result, prefix="product"):
     reason = result.get("reason", "")
     if reason == "vistas_sin_identificar":
         st.info("Fotos adquiridas; no hay senales suficientes para acreditar las vistas. Revision pendiente.")
+    elif reason == "codigo_alternativo_con_imagenes":
+        st.warning("Kering identifica imágenes bajo otro código del producto. Revise el catálogo antes de continuar; "
+                   "no se han copiado ni descargado de nuevo.")
     elif reason:
         st.warning("Quedan vistas pendientes. Consulte el diagnostico o revise las fotos.")
     view_review = result.get("view_review")
@@ -1048,9 +1065,10 @@ def render_image_search(store):
     page = st.session_state.get("kering_library_page", 0)
     render_matching_orders(store, query)
     try:
-        page_results = store.repository.search_eans(
-            query, limit=13, offset=page * 12
-        )
+        if query.isascii() and query.isdigit() and store.repository.alternate_code(query):
+            page_results = [query] if page == 0 else []
+        else:
+            page_results = store.repository.search_eans(query, limit=13, offset=page * 12)
         has_next = len(page_results) > 12
         eans = page_results[:12]
         records_by_ean = {
@@ -1220,6 +1238,13 @@ def show_product_status(status, label):
     messages[status](label)
 
 
+def invalidate_kering_code_views(*codes):
+    for key in list(st.session_state):
+        if key.endswith("-records") and any(f"-{code}-" in key for code in codes):
+            st.session_state.pop(key, None)
+    st.session_state.pop("kering_prepared_zip", None)
+
+
 def render_product_library(store, ean):
     library_only()
     try:
@@ -1246,6 +1271,39 @@ def render_product_library(store, ean):
     st.caption(
         f"EAN {ean} · Última actualización: {format_image_update(records)}"
     )
+    alternate = store.repository.alternate_code(ean)
+    if alternate:
+        st.caption(f"Código Kering asociado: {alternate}")
+        if st.session_state.get("auth_role") == "admin":
+            with st.expander("Retirar asociación de códigos"):
+                with st.form(f"kering-code-unlink-{ean}"):
+                    reason = st.text_input("Motivo de la retirada", key=f"kering-unlink-reason-{ean}")
+                    unlink = st.form_submit_button("Retirar asociación")
+                if unlink:
+                    try:
+                        store.unlink_kering_codes(ean, role=st.session_state.get("auth_role"),
+                                                  reviewer=st.session_state.get("auth_user", ""), reason=reason)
+                        invalidate_kering_code_views(ean, alternate)
+                        st.success("Asociación retirada sin modificar las imágenes.")
+                        st.rerun()
+                    except (ValueError, PermissionError, Timeout, sqlite3.Error):
+                        st.error("No se pudo retirar la asociación; compruebe el motivo y el lote activo.")
+    elif st.session_state.get("auth_role") == "admin":
+        with st.expander("Asociar otro código Kering verificado"):
+            st.warning("Compruebe que ambos códigos corresponden al mismo producto y variante antes de asociarlos.")
+            with st.form(f"kering-code-link-{ean}"):
+                other = st.text_input("Otro EAN o UPC", key=f"kering-other-code-{ean}").strip()
+                evidence = st.text_input("Evidencia de la asociación", key=f"kering-link-evidence-{ean}")
+                link = st.form_submit_button("Confirmar asociación")
+            if link:
+                try:
+                    store.link_kering_codes(ean, other, role=st.session_state.get("auth_role"),
+                                           reviewer=st.session_state.get("auth_user", ""), reason=evidence)
+                    invalidate_kering_code_views(ean, other)
+                    st.success("Asociación registrada sin copiar imágenes.")
+                    st.rerun()
+                except (ValueError, PermissionError, Timeout, sqlite3.Error):
+                    st.error("No se pudo asociar. Compruebe los códigos, la evidencia y que no haya un lote activo.")
     show_product_status(status, label)
     if review_blocking:
         st.info(

@@ -15,7 +15,7 @@ from playwright.sync_api import sync_playwright, TimeoutError as BrowserTimeout,
 
 from kering_images import (
     PORTAL_URL, InterventionRequired, LoginFailed, PortalFailure, PortalTimeout,
-    ProductNotFound, SessionExpired,
+    ProductNotFound, SessionExpired, AlternateCodeHasImages,
 )
 
 
@@ -68,6 +68,7 @@ class KeringPortal:
         self.view_reviews = {}
         self.access_events = []
         self.access_failure = None
+        self.partial_failure = None
         self._access_deadline = None
         self._phase_deadline = None
         self._phase = None
@@ -262,6 +263,12 @@ class KeringPortal:
     def _download(self, snapshot, pending, collected):
         repository = self.repository or ImageRepository()
         ean = getattr(self, "_ean", snapshot["ean"])
+        if all(key in snapshot for key in ("ean", "upc", "reference", "size")) and exact_product(snapshot, ean):
+            for other in (snapshot["ean"], snapshot["upc"]):
+                if (isinstance(other, str) and other != ean and other.isascii() and other.isdigit() and len(other) <= 20
+                        and not getattr(repository, "kering_code_linked", lambda *_: False)(ean, other)
+                        and any(record.provider == "Kering" for record in repository.records(other))):
+                    raise AlternateCodeHasImages() from None
         records = repository.records(ean)
         reference, color = snapshot["reference"].rsplit("-", 1)
         viewer = [image for image in snapshot["images"]
@@ -333,6 +340,7 @@ class KeringPortal:
     def fetch(self, ean: str, pending: tuple[str, ...]) -> dict[str, bytes]:
         self._ean = ean
         self.media = {}
+        self.partial_failure = None
         self.view_reviews.pop(ean, None)
         collected = {}
         try:
@@ -349,11 +357,16 @@ class KeringPortal:
         except BrowserTimeout:
             self._intervention_if_open()
             if collected:
+                self.partial_failure = "timeout_portal"
                 return collected
             raise PortalTimeout() from None
         except BrowserError as error:
             code = "fallo_red" if "net::ERR_" in str(error) else "fallo_chromium"
             LOGGER.warning("kering_browser code=%s", code)
+            if collected:
+                self.partial_failure = code
+                self.close()
+                return collected
             failure = PortalFailure()
             failure.code = code
             raise failure from None
@@ -363,6 +376,10 @@ class KeringPortal:
                 error.retryable = False
                 LOGGER.info("kering_access phase=comprobacion_sesion duration_ms=0 code=%s", error.code)
             self.close()
+            if collected:
+                self.partial_failure = ("intervencion_captcha_o_mfa"
+                                        if isinstance(error, InterventionRequired) else error.code)
+                return collected
             raise
         except Exception:
             raise PortalFailure() from None
