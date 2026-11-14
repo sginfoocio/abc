@@ -88,6 +88,33 @@ Las tres vistas validas necesitan imagen verificable de al menos 600 px en ambos
 ejes y huellas visuales distintas (contrato Kering existente).
 Los originales menores tambien se conservan, pero no acreditan completitud.
 
+## Busqueda masiva por EAN
+
+En el menu del repositorio, la opcion administrativa **Busqueda masiva por EAN** permite
+pegar codigos o cargar CSV/TXT UTF-8. Solo al pulsar **Analizar listado** se
+leen las fuentes configuradas. El limite es 500 entradas y 1 MiB por archivo;
+se conserva el codigo literal y se agrupan GTIN equivalentes con ceros iniciales.
+Los repetidos cuentan entradas validas adicionales de una misma identidad; los
+invalidos se enumeran aparte. XLSX no esta incluido.
+
+Se abre el catalogo existente en modo lectura y se comprueban los originales
+con checksum y huella. V1, V2 y V3 exigen imagenes validas y huellas distintas;
+detalle y vistas desconocidas no completan cobertura. "Sin registros" solo
+describe el catalogo, no una busqueda exhaustiva de archivos en el NAS. Si el
+catalogo o el almacenamiento no responde, la cobertura es desconocida. El visor
+lee los originales comprobados sin crear miniaturas, ZIP, copias ni bloqueos.
+
+La consulta Odoo usa exclusivamente los codigos indicados, sin filtrar stock,
+con transaccion de lectura y limite de resultados. Una relacion en
+`product_supplierinfo` acredita la plantilla, no la variante ni su vigencia;
+las compras confirmadas son solo evidencia historica. Un vinculo
+proveedor–portal confirmado puede producir un candidato, nunca confirmar por si
+solo la ruta. Marcas fuera del ambito configurado, proveedores multiples y
+variantes ambiguas requieren revision. No hay una fuente configurada de
+asociaciones confirmadas de variante–proveedor–portal: hasta definirla y
+verificarla no se producen rutas confirmadas en la interfaz. Ningun resultado
+autoriza adquisiciones, solicitudes o conexiones con portales.
+
 Bloqueos de fichero compartidos por EAN cubren consulta, descarga y escritura.
 SQLite usa transacciones durables; los bytes se escriben antes de publicar
 metadatos. Todas las herramientas deben usar la misma raiz y sus bloqueos.

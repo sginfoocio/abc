@@ -210,7 +210,7 @@ def _select(record_id: int) -> None:
     st.session_state["lib_photo"] = record_id
 
 
-def _render_viewer(repository, group, records, access, previews) -> None:
+def _render_viewer(repository, group, records, access, previews, *, readonly=False) -> None:
     ids = [record.id for record in records]
     selected_id = st.session_state.get("lib_photo")
     index = ids.index(selected_id) if selected_id in ids else 0
@@ -221,7 +221,7 @@ def _render_viewer(repository, group, records, access, previews) -> None:
             st.warning(f"No se puede mostrar esta fotografía: {previews.get(record.id, 'original no accesible')}")
         else:
             try:
-                st.image(_original(repository, record), width="stretch")
+                st.image(previews[record.id] if readonly else _original(repository, record), width="stretch")
             except (OSError, ValueError) as error:
                 st.error(f"No se puede abrir la imagen: {error}")
     with info_column:
@@ -235,7 +235,7 @@ def _render_viewer(repository, group, records, access, previews) -> None:
         following.button("Siguiente", icon=":material/chevron_right:", key="lib_photo_next", width="stretch",
                          disabled=len(records) < 2, on_click=_step, args=(1, records, index))
         cached = st.session_state.get("lib_original")
-        if cached and cached["id"] == record.id:
+        if not readonly and cached and cached["id"] == record.id:
             st.download_button("Descargar imagen", cached["bytes"], file_name=record.name,
                                mime=MIME.get(Path(record.name).suffix.lower(), "application/octet-stream"),
                                icon=":material/download:", key="lib_download_one", width="stretch")
