@@ -70,6 +70,11 @@ manifiesto exacto y los últimos cierres esperados. Excluye, entre otros, cambio
 estado, recibos no vacíos, reservas desde el inicio del intento (también sin EAN),
 colas en revisión o ejecución, candidatas pendientes y evidencias posteriores.
 No se han comprobado las exclusiones en la base operativa.
+También se excluyen fichas con identidad pendiente y reservas que no permitan
+atribuir con seguridad el competidor; una reserva identificada de otra tienda
+no bloquea el par. Los saldos compartidos se calculan y reservan en la base
+operativa: una base aislada no comparte esa contabilidad. No lanzar consultas
+paralelas desde una copia ni ejecutar código de la rama contra la base operativa.
 
 Para una futura intervención **expresamente autorizada**:
 
@@ -96,3 +101,19 @@ una oferta anterior esté vencida; no restauran automáticamente revisiones hist
 Las categorías `reused_negative` y `reused_data` distinguen respuestas negativas
 o datos reutilizados de ofertas comparables y de consultas comerciales nuevas.
 La ejecución real y su efecto quedan pendientes de autorización y validación operativa.
+
+El informe contiene un agregado de 44 ofertas comparables calculado sobre el
+inventario al generar el informe. Los últimos inventarios guardados en recibos,
+evaluados frente al latido de `2026-11-15T10:57:39.743076+00:00`, reconstruyen
+43 ofertas para 34 EAN. Son fuentes temporales distintas: el informe no incluye
+una instantánea final del inventario por par, por lo que no permite identificar
+la oferta de diferencia ni acreditar cuál es el estado actual. Sus 1.197 recibos
+HTTP únicos sí se pueden deduplicar por ID y coinciden con el agregado del informe.
+Los informes anteriores de seis tiendas registran 84 y 106 ofertas, no el número
+de productos; no acreditan por sí solos la caída comunicada de 70 a 37 productos.
+
+Si un ProductGroup publica un precio común y el calibre asociado al EAN
+contradice el catálogo, el extractor conserva ese precio como evidencia, no como
+oferta comparable: identidad y stock permanecen en revisión. La corrección usa
+fixtures sintéticas; no sustituye las respuestas HTML originales aún pendientes
+de obtener mediante un flujo supervisado y presupuestado.

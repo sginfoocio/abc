@@ -159,6 +159,32 @@ def test_unknown_ean_reservation_and_later_evidence_are_excluded(recovery):
     assert not rows[0]["eligible"] and not rows[70]["eligible"]
 
 
+def test_missing_competitor_in_reservation_and_pending_identity_are_excluded(recovery):
+    store, allowlist, report, entries, started = recovery
+    unknown, review = entries[0], entries[70]
+    with store._connect() as con, con:
+        con.execute("""INSERT INTO access_requests(scope,scope_id,competitor_id,method,purpose,ean,reserved_at,result)
+            VALUES('provider','unknown','','ficha','test',?,?,'reserved')""",
+                    (unknown["ean"], started.isoformat()))
+        con.execute("""INSERT INTO competitor_product_urls(competitor_id,ean,url,match_status,status,verified_at)
+            VALUES(?,?,'https://example.test/ambiguous','probable','pending_verification',?)""",
+                    (review["competitor_id"], review["ean"], (started - timedelta(days=1)).isoformat()))
+    rows = preview(store.database_path, allowlist, report)
+    assert "reserva" in rows[0]["reason"]
+    assert "identidad pendiente" in rows[70]["reason"]
+    assert not rows[0]["eligible"] and not rows[70]["eligible"]
+
+
+def test_unrelated_competitor_scope_does_not_block_recovery(recovery):
+    store, allowlist, report, entries, started = recovery
+    pair = entries[0]
+    with store._connect() as con, con:
+        con.execute("""INSERT INTO access_requests(scope,scope_id,competitor_id,method,purpose,ean,reserved_at,result)
+            VALUES('competitor','unrelated','','ficha','test',?,?,'reserved')""",
+                    (pair["ean"], started.isoformat()))
+    assert preview(store.database_path, allowlist, report)[0]["eligible"]
+
+
 def test_apply_rolls_back_every_change_and_preserves_future_deadline(recovery):
     store, allowlist, report, entries, started = recovery
     future = (started + timedelta(days=30)).isoformat()

@@ -125,7 +125,9 @@ def _evaluate(con, entries):
                     reason = "Recibo de interrupción incompleto o no vacío"
         if not reason:
             requests = con.execute("""SELECT reserved_at FROM access_requests
-                WHERE competitor_id=? AND (ean=? OR ean='' OR ean IS NULL)""", (cid, ean)).fetchall()
+                WHERE (competitor_id=? OR (scope='competitor' AND scope_id=?)
+                       OR ((competitor_id='' OR competitor_id IS NULL) AND scope!='competitor'))
+                  AND (ean=? OR ean='' OR ean IS NULL)""", (cid, cid, ean)).fetchall()
             try:
                 if any(_time(r["reserved_at"]) >= _time(entry["attempt_started_at"]) for r in requests):
                     reason = "Petición o reserva posterior al inicio, incluso sin EAN"
@@ -140,6 +142,9 @@ def _evaluate(con, entries):
         if not reason and con.execute("""SELECT 1 FROM pilot_url_candidates WHERE competitor_id=? AND ean=?
             AND state IN ('candidate_found','pending_validation') LIMIT 1""", (cid, ean)).fetchone():
             reason = "Hay una candidata pendiente de revisión"
+        if not reason and con.execute("""SELECT 1 FROM competitor_product_urls WHERE competitor_id=? AND ean=?
+            AND status IN ('probable','pending_verification') LIMIT 1""", (cid, ean)).fetchone():
+            reason = "Hay una ficha con identidad pendiente de revisión"
         if not reason:
             events = con.execute("""SELECT e.at FROM locate_events e JOIN locate_jobs j ON j.id=e.job_id
                 WHERE j.competitor_id=? AND j.ean=? AND e.requests>0""", (cid, ean)).fetchall()
