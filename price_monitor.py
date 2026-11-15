@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -30,7 +32,7 @@ from price_references import EXACT, classify
 from price_watch import PriceWatch
 from price_web import Outcome, WebPriceSearch, WebSearchError, comparability_gap, validate_competitor_url
 from price_web_extract import ProductPage, extract_product, select_product_variant
-from price_web_fetch import PageGone, RobotsDenied, _requests_transport
+from price_web_fetch import Fetched, PageGone, RobotsDenied, _requests_transport
 from vytria_price_sync import SyncInProgress, VytriaPriceSync
 
 SCHEDULE_ENV = "PRICE_MONITOR_SCHEDULE_ENABLED"
@@ -41,6 +43,23 @@ STATES = {"pending": "Pendiente", "running": "En ejecución", "done": "Terminada
 ALERTS = {"price_down": "Bajada de precio", "price_up": "Subida de precio",
           "undercut": "Más barato que Vytria", "availability": "Cambio de disponibilidad",
           "gone": "Ficha desaparecida", "stale": "Precio caducado"}
+
+_capture_observer: ContextVar[Callable[[str, str, Fetched, ProductPage | None, dict], None] | None] = (
+    ContextVar("price_capture_observer", default=None))
+_capture_url_guard: ContextVar[Callable[[str], None] | None] = ContextVar("price_capture_url_guard", default=None)
+
+
+@contextmanager
+def capture_context(observer, url_guard):
+    if _capture_observer.get() is not None:
+        raise ValueError("Ya hay una captura activa en este contexto")
+    observer_token = _capture_observer.set(observer)
+    guard_token = _capture_url_guard.set(url_guard)
+    try:
+        yield
+    finally:
+        _capture_url_guard.reset(guard_token)
+        _capture_observer.reset(observer_token)
 
 
 def _utc() -> datetime:
@@ -63,6 +82,17 @@ def _inventory_datetime(value: object) -> datetime:
         return parsed.to_pydatetime(warn=False)
     except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError("Fecha de vigencia no válida") from exc
+
+
+def _done_job_restriction(job):
+    if job["state"] != "done" or not job.get("not_before"):
+        return None
+    deadline = _inventory_datetime(job["not_before"])
+    if (job.get("sampled_at") and job.get("last_ok_at") and job.get("valid_until")
+            and _inventory_datetime(job["sampled_at"]) == _inventory_datetime(job["last_ok_at"])
+            and deadline == _inventory_datetime(job["valid_until"])):
+        return None
+    return deadline
 
 
 def schedule_enabled() -> bool:
@@ -140,7 +170,9 @@ class PriceMonitor:
                 changed = job["url"] != row["url"] or job["state"] in ("inactive", "gone", "review")
                 due = (datetime.fromisoformat(job["sampled_at"]) + timedelta(hours=interval)
                        if job["sampled_at"] else now)
-                if changed or (job["state"] == "done" and due <= now):
+                not_before = _done_job_restriction(dict(job))
+                if ((changed or (job["state"] == "done" and due <= now))
+                        and (not_before is None or not_before <= now)):
                     con.execute("""UPDATE monitor_jobs SET url=?,state='pending',not_before=NULL,lease_until=NULL,
                         attempts=0,previous_sample=CASE WHEN sample<>'' THEN sample ELSE previous_sample END,
                         sample='',sampled_at=NULL,eligible=CASE WHEN ? THEN 0 ELSE eligible END,
@@ -150,7 +182,7 @@ class PriceMonitor:
                     valid_until = (_iso(datetime.fromisoformat(job["last_ok_at"]) + timedelta(hours=interval))
                                    if job["last_ok_at"] else None)
                     con.execute("UPDATE monitor_jobs SET not_before=?,valid_until=? WHERE id=?",
-                                (_iso(due), valid_until, job["id"]))
+                                (_iso(max(due, not_before)) if not_before else _iso(due), valid_until, job["id"]))
         self.check_stale(competitor_ids, eans)
         return added
 
@@ -243,6 +275,7 @@ class PriceMonitor:
                     fetcher = GovernedFetcher(
                         self.access, cid, "ficha", purpose="monitor", transport=self._transport, sleep=self._sleep,
                         pause_seconds=0, request_guard=guard, request_reserved=reserved,
+                        url_guard=_capture_url_guard.get(),
                         retries=0, max_requests=1_000_000,
                         timeout=float(config["timeout_seconds"] or 15))
                     try:
@@ -342,6 +375,9 @@ class PriceMonitor:
                     "identity_reasons": list(match.reasons) if match else [],
                     "rejection": product_page_rejection(fetched.text, fetched.url) if page is None else "",
                 }
+                observer = _capture_observer.get()
+                if not reuse_shared and observer is not None:
+                    observer(cid, ean, fetched, page, self._job_trace)
                 if page is None or match is None or match.status != EXACT or page.ambiguous:
                     detail = ("; ".join(match.reasons) if match else "Sin datos legibles de producto")
                     with self.store._connect() as con, con:

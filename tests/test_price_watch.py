@@ -137,6 +137,28 @@ def test_watch_tables_do_not_touch_the_pilot(watch):
             assert connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
 
 
+def test_supervised_recovery_and_capture_render_without_execution(monkeypatch):
+    import requests
+
+    def deny(*args, **kwargs):
+        pytest.fail("La pantalla no debe consultar tiendas")
+
+    monkeypatch.setattr(requests.Session, "send", deny)
+    app = AppTest.from_string(
+        "from app_pages.price_watch import _render_interrupted_recovery, _render_continuity_capture\n"
+        "class Service:\n"
+        "    def diagnostic_candidates(self, cid, ean): return ['https://shop.example/candidate']\n"
+        "    def capture_diagnostic(self, *args, **kwargs): raise AssertionError('No ejecutar al renderizar')\n"
+        "_render_interrupted_recovery(None)\n"
+        "_render_continuity_capture(Service(), {'competitors': {'shop': 'Tienda'}, 'eans': ['0805289126577']})"
+    ).run(timeout=30)
+    assert not app.exception
+    assert app.selectbox(key="capture_competitor").value == "shop"
+    assert app.selectbox(key="capture_ean").value == "0805289126577"
+    assert app.selectbox(key="diagnostic_url").value == "https://shop.example/candidate"
+    assert [field.value for field in app.text_input if field.label == "Responsable"] == ["", ""]
+
+
 def test_watch_admin_ui_adds_products_and_shows_authorizations(tmp_path, monkeypatch):
     store = _store(tmp_path)
     monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))

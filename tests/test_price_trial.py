@@ -514,6 +514,492 @@ def _activate_continuity(service, clock):
     return service.activate_continuity(actor="operator", build_commit="c" * 40)
 
 
+def _diagnostic_review(trial):
+    service, store, _, _, _, clock, cid, site, _ = trial
+    active = _activate_continuity(service, clock)
+    ean = manifest()["eans"][0]
+    url = site.product("Gucci", "GG1660S", "001", gtin=ean)
+    with store._connect() as con, con:
+        con.execute("UPDATE competitor_web_config SET access_status='robots_allowed' WHERE competitor_id=?", (cid,))
+        con.execute("""INSERT INTO competitor_product_urls(competitor_id,ean,url,match_status,status,verified_at)
+            VALUES(?,?,?,'manual_review','probable',?)""", (cid, ean, url, clock().isoformat()))
+        con.execute("""UPDATE price_continuity_pairs SET state='review',defer_reason='Identidad ambigua'
+            WHERE continuity_id=? AND competitor_id=? AND ean=?""", (active["id"], cid, ean))
+        con.execute("UPDATE locate_jobs SET state='review',url=? WHERE competitor_id=? AND ean=?", (url, cid, ean))
+    return service, store, clock, cid, ean, url, site
+
+
+def _commercial_snapshot(store):
+    with store._connect() as con:
+        return {table: [tuple(row) for row in con.execute(f"SELECT * FROM {table} ORDER BY rowid")]
+                for table in ("price_continuity_pairs", "price_continuity_checks", "locate_jobs", "locate_events",
+                              "monitor_jobs", "monitor_events", "competitor_product_urls", "pilot_url_candidates",
+                              "offers", "search_results", "products", "watch_products", "competitor_web_config")}
+
+
+def test_diagnostic_capture_preserves_reviews_and_offers(trial):
+    import base64
+    import hashlib
+
+    service, store, _, cid, ean, url, site = _diagnostic_review(trial)
+    site.pages[url] = site.pages[url].replace(
+        "</head>", '<link rel="canonical" href="https://other.example/canonical"></head>')
+    before = _commercial_snapshot(store)
+    result = service.capture_diagnostic(cid, ean, url, actor="operator", note="review",
+                                        build_commit="b" * 40, approved=True)
+    assert _commercial_snapshot(store) == before
+    assert base64.b64decode(result["html_base64"]) == site.pages[url].encode()
+    assert result["sha256"] == hashlib.sha256(site.pages[url].encode()).hexdigest()
+    assert result["requested_url"] == url and result["final_url"] == url
+    assert result["canonical_urls"] == ["https://other.example/canonical"]
+    assert "https://other.example/canonical" not in site.calls
+    assert site.calls.count(url) == 1
+    with store._connect() as con:
+        audit = con.execute("SELECT * FROM access_audit WHERE action='capture_diagnostic_html'").fetchone()
+        stored = json.loads(audit["current"])
+        assert stored["status"] == "captured" and stored["requests"]
+        assert audit["actor"] == "operator" and audit["note"] == "review"
+
+
+def test_diagnostic_finds_candidate_in_pair_review_receipt(trial):
+    service, store, clock, cid, ean, url, site = _diagnostic_review(trial)
+    with store._connect() as con, con:
+        con.execute("DELETE FROM competitor_product_urls WHERE competitor_id=? AND ean=?", (cid, ean))
+        con.execute("UPDATE locate_jobs SET url='' WHERE competitor_id=? AND ean=?", (cid, ean))
+        continuity = con.execute("SELECT id FROM price_continuity WHERE status='active'").fetchone()[0]
+        receipt = {"result": {"pairs": [{"competitor_id": cid, "ean": ean,
+                                         "outcomes": [{"state": "review", "url": url}]}]}}
+        con.execute("""INSERT INTO price_continuity_checks
+            (continuity_id,competitor_id,ean,started_at,finished_at,state,category,receipt)
+            VALUES(?,?,?,?,?,'review','checked_now',?)""",
+                    (continuity, cid, ean, clock().isoformat(), clock().isoformat(), json.dumps(receipt)))
+    assert service.diagnostic_candidates(cid, ean) == [url]
+    before = _commercial_snapshot(store)
+    result = service.capture_diagnostic(cid, ean, url, actor="operator", note="review",
+                                        build_commit="b" * 40, approved=True)
+    assert result["status"] == "captured" and site.calls.count(url) == 1
+    assert _commercial_snapshot(store) == before
+
+
+@pytest.mark.parametrize("resolved", ["rejected", "verified"])
+def test_diagnostic_excludes_resolved_candidates_even_with_old_review(trial, resolved):
+    service, store, _, cid, ean, url, site = _diagnostic_review(trial)
+    with store._connect() as con, con:
+        con.execute("UPDATE competitor_product_urls SET status=? WHERE competitor_id=? AND ean=?",
+                    (resolved, cid, ean))
+    assert url not in service.diagnostic_candidates(cid, ean)
+    with pytest.raises(ValueError):
+        service.capture_diagnostic(cid, ean, url, actor="operator", note="review",
+                                   build_commit="b" * 40, approved=True)
+    assert not site.calls
+
+
+@pytest.mark.parametrize("reason", ["undocumented", "robots", "sensitive", "blocked", "deferred"])
+def test_diagnostic_rejections_are_audited_without_changing_review(trial, reason):
+    service, store, clock, cid, ean, url, site = _diagnostic_review(trial)
+    if reason == "undocumented":
+        url += "-unknown"
+    elif reason == "robots":
+        site.robots = "User-agent: *\nDisallow: /gafas/\n"
+    elif reason == "sensitive":
+        site.pages[url] += '<input name="csrf" value="sensitive">'
+    elif reason == "blocked":
+        with store._connect() as con, con:
+            con.execute("UPDATE competitor_web_config SET access_status='blocked' WHERE competitor_id=?", (cid,))
+    elif reason == "deferred":
+        with store._connect() as con, con:
+            con.execute("UPDATE locate_jobs SET not_before=? WHERE competitor_id=? AND ean=?",
+                        ((clock() + timedelta(hours=1)).isoformat(), cid, ean))
+    before = _commercial_snapshot(store)
+    with pytest.raises((ValueError, RuntimeError)):
+        service.capture_diagnostic(cid, ean, url, actor="operator", note="review",
+                                   build_commit="b" * 40, approved=True)
+    assert _commercial_snapshot(store) == before
+    if reason != "sensitive":
+        assert url not in site.calls
+    with store._connect() as con:
+        audit = con.execute("SELECT * FROM access_audit WHERE action='capture_diagnostic_html'").fetchone()
+        stored = json.loads(audit["current"])
+        assert stored["status"] == "rejected" and "html_base64" not in stored
+        assert audit["actor"] == "operator" and audit["note"] == "review"
+        assert len(stored["requests"]) == len(site.calls)
+
+
+@pytest.mark.parametrize("target", ["https://www.amevista.com/gafas/other?token=private",
+                                    "https://evil.example/gafas/other",
+                                    "https://amevista.com/gafas/other"])
+def test_diagnostic_redirect_does_not_authorize_target(trial, target):
+    service, store, _, cid, ean, url, site = _diagnostic_review(trial)
+    locator = service._batch.locator
+
+    def transport(request_url, headers, timeout):
+        if request_url == url:
+            site.calls.append(request_url)
+            return 302, {"Location": target}, b""
+        return site(request_url, headers, timeout)
+
+    locator._transport = transport
+    before = _commercial_snapshot(store)
+    with pytest.raises(RuntimeError):
+        service.capture_diagnostic(cid, ean, url, actor="operator", note="review",
+                                   build_commit="b" * 40, approved=True)
+    assert _commercial_snapshot(store) == before
+    assert url in site.calls and target not in site.calls
+    with store._connect() as con:
+        assert con.execute("SELECT COUNT(*) FROM access_requests WHERE url=?", (target,)).fetchone()[0] == 0
+        audit = json.loads(con.execute("SELECT current FROM access_audit WHERE action='capture_diagnostic_html'")
+                           .fetchone()[0])
+        assert audit["status"] == "rejected" and len(audit["requests"]) == len(site.calls)
+        assert "private" not in json.dumps(audit)
+
+
+def test_diagnostic_concurrent_attempt_is_rejected_and_audited(trial):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    from filelock import Timeout
+
+    service, store, _, cid, ean, url, site = _diagnostic_review(trial)
+    locator = service._batch.locator
+    entered, release = Event(), Event()
+
+    def transport(request_url, headers, timeout):
+        if request_url == url:
+            entered.set()
+            if not release.wait(10):
+                raise RuntimeError("No se liberó la petición simulada")
+        return site(request_url, headers, timeout)
+
+    locator._transport = transport
+    before = _commercial_snapshot(store)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(service.capture_diagnostic, cid, ean, url, actor="one", note="review",
+                                 build_commit="b" * 40, approved=True)
+        try:
+            assert entered.wait(10)
+            with pytest.raises(Timeout):
+                service.capture_diagnostic(cid, ean, url, actor="two", note="review",
+                                           build_commit="b" * 40, approved=True)
+        finally:
+            release.set()
+        assert future.result(timeout=10)["status"] == "captured"
+    assert _commercial_snapshot(store) == before
+    assert site.calls.count(url) == 1
+    with store._connect() as con:
+        records = {r["actor"]: json.loads(r["current"]) for r in con.execute(
+            "SELECT actor,current FROM access_audit WHERE action='capture_diagnostic_html'")}
+        assert records["one"]["status"] == "captured"
+        assert records["two"]["status"] == "rejected" and not records["two"]["requests"]
+
+
+def test_diagnostic_respects_existing_competitor_lock(trial):
+    from filelock import Timeout
+
+    service, store, _, cid, ean, url, site = _diagnostic_review(trial)
+    with service._batch.locator.search._lock(cid):
+        with pytest.raises(Timeout):
+            service.capture_diagnostic(cid, ean, url, actor="operator", note="review",
+                                       build_commit="b" * 40, approved=True)
+    assert not site.calls
+    with store._connect() as con:
+        audit = json.loads(con.execute("SELECT current FROM access_audit WHERE action='capture_diagnostic_html'")
+                           .fetchone()[0])
+        assert audit["status"] == "rejected" and not audit["requests"]
+
+
+@pytest.mark.parametrize("restriction", ["budget", "method"])
+def test_diagnostic_respects_shared_access_controls(trial, restriction):
+    service, store, _, cid, ean, url, site = _diagnostic_review(trial)
+    access = trial[2]
+    if restriction == "budget":
+        access.set_budget("competitor", cid, daily_limit=0, per_minute_limit=10, pause_seconds=0, actor="operator")
+    else:
+        access.set_method(cid, "ficha", "denied", actor="operator", note="No autorizado")
+    before = _commercial_snapshot(store)
+    with pytest.raises(AccessDenied):
+        service.capture_diagnostic(cid, ean, url, actor="operator", note="review",
+                                   build_commit="b" * 40, approved=True)
+    assert _commercial_snapshot(store) == before and not site.calls
+    with store._connect() as con:
+        audit = json.loads(con.execute("SELECT current FROM access_audit WHERE action='capture_diagnostic_html'")
+                           .fetchone()[0])
+        assert audit["status"] == "rejected" and not audit["requests"]
+        assert audit["access_code"] in ("prohibited", "budget_daily")
+
+
+def test_diagnostic_does_not_log_sensitive_candidate_url(trial):
+    service, store, _, cid, ean, url, site = _diagnostic_review(trial)
+    sensitive_url = url + "?variant=token-private"
+    with store._connect() as con, con:
+        con.execute("UPDATE competitor_product_urls SET url=? WHERE competitor_id=? AND ean=?",
+                    (sensitive_url, cid, ean))
+        con.execute("UPDATE locate_jobs SET url=? WHERE competitor_id=? AND ean=?", (sensitive_url, cid, ean))
+    with pytest.raises(RuntimeError):
+        service.capture_diagnostic(cid, ean, sensitive_url, actor="operator", note="review",
+                                   build_commit="b" * 40, approved=True)
+    assert not site.calls
+    with store._connect() as con:
+        assert con.execute("SELECT COUNT(*) FROM access_requests WHERE url=?", (sensitive_url,)).fetchone()[0] == 0
+        audit = con.execute("SELECT current FROM access_audit WHERE action='capture_diagnostic_html'").fetchone()[0]
+        assert "token-private" not in audit and json.loads(audit)["status"] == "rejected"
+
+
+def test_diagnostic_http_block_opens_shared_incident(trial):
+    service, store, _, cid, ean, url, site = _diagnostic_review(trial)
+    site.status[url] = 403
+    before = _commercial_snapshot(store)
+    with pytest.raises(RuntimeError):
+        service.capture_diagnostic(cid, ean, url, actor="operator", note="review",
+                                   build_commit="b" * 40, approved=True)
+    assert _commercial_snapshot(store) == before
+    with store._connect() as con:
+        assert con.execute("""SELECT COUNT(*) FROM access_incidents WHERE scope_id=? AND kind='http_403'
+            AND status='open'""", (cid,)).fetchone()[0] == 1
+        audit = json.loads(con.execute("SELECT current FROM access_audit WHERE action='capture_diagnostic_html'")
+                           .fetchone()[0])
+        assert audit["status"] == "rejected" and len(audit["requests"]) == 2
+    calls = list(site.calls)
+    with pytest.raises(AccessDenied):
+        service.capture_diagnostic(cid, ean, url, actor="operator", note="review",
+                                   build_commit="b" * 40, approved=True)
+    assert site.calls == calls
+
+
+def test_diagnostic_uses_existing_pilot_budget_for_overlapping_pair(trial):
+    from price_pilot import PricePilot, SAMPLE_EANS
+    from tests.test_price_review_fixes import _vytria
+
+    _, store, _, _, _, _, _, _, _ = trial
+    for ean in SAMPLE_EANS:
+        _vytria(store, ean, 300)
+    with store._connect() as con, con:
+        con.execute("UPDATE vytria_prices SET synced_at=?", (datetime.now().astimezone().isoformat(),))
+    pilot = PricePilot(store)
+    pilot.save(list(SAMPLE_EANS), {r["id"]: {"pause_seconds": 3, "max_http_requests": 200}
+                                  for r in pilot.competitors()})
+    pilot.enable()
+    service, store, _, cid, ean, url, site = _diagnostic_review(trial)
+    assert ean in SAMPLE_EANS
+    before = _commercial_snapshot(store)
+    result = service.capture_diagnostic(cid, ean, url, actor="operator", note="review",
+                                        build_commit="b" * 40, approved=True)
+    assert result["status"] == "captured" and _commercial_snapshot(store) == before
+    with store._connect() as con:
+        run = con.execute("SELECT id,status FROM pilot_runs WHERE operation='watch_check'").fetchone()
+        budget = con.execute("SELECT requests FROM pilot_budgets WHERE run_id=? AND competitor_id=?",
+                             (run["id"], cid)).fetchone()
+        assert run["status"] == "done" and budget["requests"] == len(site.calls)
+        assert con.execute("SELECT outcome FROM pilot_jobs WHERE run_id=?", (run["id"],)).fetchone()[0] == "diagnostic_fetch"
+    trial[2].set_method(cid, "ficha", "denied", actor="operator", note="No autorizado")
+    with pytest.raises(AccessDenied):
+        service.capture_diagnostic(cid, ean, url, actor="operator", note="review",
+                                   build_commit="b" * 40, approved=True)
+    with store._connect() as con:
+        run = con.execute("SELECT id,status FROM pilot_runs WHERE operation='watch_check' ORDER BY id DESC").fetchone()
+        assert run["status"] == "done"
+        assert con.execute("SELECT outcome FROM pilot_jobs WHERE run_id=?", (run["id"],)).fetchone()[0] == "diagnostic_rejected"
+    assert _commercial_snapshot(store) == before
+    with store._connect() as con, con:
+        con.execute("UPDATE price_pilot SET enabled=0 WHERE id=1")
+    calls = list(site.calls)
+    with pytest.raises(ValueError, match="Piloto desactivado"):
+        service.capture_diagnostic(cid, ean, url, actor="operator", note="review",
+                                   build_commit="b" * 40, approved=True)
+    assert site.calls == calls and _commercial_snapshot(store) == before
+
+
+def test_supervised_capture_uses_due_continuity_and_shared_receipts(trial):
+    import base64
+    import hashlib
+
+    service, store, _, _, _, clock, cid, site, reader = trial
+    active = _activate_continuity(service, clock)
+    ean = manifest()["eans"][0]
+    url = site.product("Gucci", "GG1660S", "001", gtin=ean)
+    site.pages[url] = site.pages[url].replace("</head>", '<link rel="canonical" href="/canonical"></head>')
+    with store._connect() as con, con:
+        con.execute("""INSERT INTO competitor_product_urls(competitor_id,ean,url,match_status,status,verified_at)
+            VALUES(?,?,?,'exact_match','verified',?)""", (cid, ean, url, clock().isoformat()))
+        con.execute("UPDATE locate_jobs SET state='done' WHERE competitor_id=? AND ean=?", (cid, ean))
+        con.execute("UPDATE price_continuity SET next_sync_at=? WHERE id=?",
+                    ((clock() - timedelta(hours=1)).isoformat(), active["id"]))
+    prior_syncs = list(reader.calls)
+    item = service.capture_continuity(cid, ean, actor="operator", note="review", build_commit="b" * 40,
+                                      approved=True)
+    body = base64.b64decode(item["html_base64"])
+    assert body == site.pages[url].encode("utf-8")
+    assert item["sha256"] == hashlib.sha256(body).hexdigest()
+    assert item["requested_url"] == url and item["http_status"] == 200
+    assert item["canonical_urls"] == [site.base + "/canonical"] and site.base + "/canonical" not in site.calls
+    assert site.calls.count(url) == 1 and reader.calls == prior_syncs
+    with store._connect() as con:
+        check = con.execute("SELECT requests FROM price_continuity_checks WHERE id=?",
+                            (item["continuity_check_id"],)).fetchone()
+        assert check["requests"] >= 1
+        assert con.execute("SELECT COUNT(*) FROM access_audit WHERE action='capture_continuity_html'").fetchone()[0] == 1
+    with pytest.raises(ValueError, match="pendiente y vencido"):
+        service.capture_continuity(cid, ean, actor="operator", note="review",
+                                   build_commit="b" * 40, approved=True)
+    assert site.calls.count(url) == 1
+
+
+def test_supervised_capture_rejects_sensitive_html_and_never_accepts_review(trial):
+    from filelock import Timeout
+
+    service, store, _, _, _, clock, cid, site, _ = trial
+    active = _activate_continuity(service, clock)
+    ean = manifest()["eans"][0]
+    url = site.product("Gucci", "GG1660S", "001", gtin=ean)
+    site.pages[url] += '<input name="csrf" value="sensitive">'
+    with store._connect() as con, con:
+        con.execute("""INSERT INTO competitor_product_urls(competitor_id,ean,url,match_status,status,verified_at)
+            VALUES(?,?,?,'exact_match','verified',?)""", (cid, ean, url, clock().isoformat()))
+        con.execute("UPDATE locate_jobs SET state='done' WHERE competitor_id=? AND ean=?", (cid, ean))
+        con.execute("""UPDATE price_continuity_pairs SET state='review' WHERE continuity_id=?
+            AND competitor_id=? AND ean=?""", (active["id"], cid, ean))
+    with pytest.raises(ValueError, match="pendiente y vencido"):
+        service.capture_continuity(cid, ean, actor="operator", note="review",
+                                   build_commit="b" * 40, approved=True)
+    assert not site.calls
+    with store._connect() as con, con:
+        con.execute("""UPDATE price_continuity_pairs SET state='pending' WHERE continuity_id=?
+            AND competitor_id=? AND ean=?""", (active["id"], cid, ean))
+        con.execute("""INSERT INTO competitor_product_urls(competitor_id,ean,url,match_status,status,verified_at)
+            VALUES(?,?,?,'probable','pending_verification',?)""",
+                    (cid, ean, url + "-other", clock().isoformat()))
+    with pytest.raises(ValueError, match="identidades pendientes"):
+        service.capture_continuity(cid, ean, actor="operator", note="review",
+                                   build_commit="b" * 40, approved=True)
+    with store._connect() as con, con:
+        con.execute("DELETE FROM competitor_product_urls WHERE competitor_id=? AND ean=? AND url=?",
+                    (cid, ean, url + "-other"))
+    with service.continuity_lock():
+        with pytest.raises(Timeout):
+            service.capture_continuity(cid, ean, actor="operator", note="review",
+                                       build_commit="b" * 40, approved=True)
+    assert not site.calls
+    with pytest.raises(ValueError, match="datos sensibles"):
+        service.capture_continuity(cid, ean, actor="operator", note="review",
+                                   build_commit="b" * 40, approved=True)
+    with store._connect() as con:
+        assert con.execute("SELECT COUNT(*) FROM access_audit WHERE action='capture_continuity_html'").fetchone()[0] == 0
+
+
+def test_supervised_capture_respects_robots(trial):
+    service, store, _, _, _, clock, cid, site, _ = trial
+    _activate_continuity(service, clock)
+    ean = manifest()["eans"][0]
+    url = site.product("Gucci", "GG1660S", "001", gtin=ean)
+    site.robots = "User-agent: *\nDisallow: /gafas/\n"
+    with store._connect() as con, con:
+        con.execute("""INSERT INTO competitor_product_urls(competitor_id,ean,url,match_status,status,verified_at)
+            VALUES(?,?,?,'exact_match','verified',?)""", (cid, ean, url, clock().isoformat()))
+        con.execute("UPDATE locate_jobs SET state='done' WHERE competitor_id=? AND ean=?", (cid, ean))
+    with pytest.raises(ValueError, match="No hubo una respuesta nueva"):
+        service.capture_continuity(cid, ean, actor="operator", note="review",
+                                   build_commit="b" * 40, approved=True)
+    assert url not in site.calls and site.calls == [site.base + "/robots.txt"]
+    with store._connect() as con:
+        assert con.execute("SELECT COUNT(*) FROM access_audit WHERE action='capture_continuity_html'").fetchone()[0] == 0
+
+
+def test_capture_rejects_sensitive_query_before_reserving_http(trial):
+    service, store, _, _, _, clock, cid, site, _ = trial
+    _activate_continuity(service, clock)
+    ean = manifest()["eans"][0]
+    url = site.product("Gucci", "GG1660S", "001", gtin=ean) + "?token=example"
+    with store._connect() as con, con:
+        con.execute("""INSERT INTO competitor_product_urls(competitor_id,ean,url,match_status,status,verified_at)
+            VALUES(?,?,?,'exact_match','verified',?)""", (cid, ean, url, clock().isoformat()))
+        con.execute("UPDATE locate_jobs SET state='done' WHERE competitor_id=? AND ean=?", (cid, ean))
+    with pytest.raises(ValueError, match="No hubo una respuesta nueva"):
+        service.capture_continuity(cid, ean, actor="operator", note="review",
+                                   build_commit="b" * 40, approved=True)
+    assert url not in site.calls
+    with store._connect() as con:
+        assert con.execute("SELECT COUNT(*) FROM access_requests WHERE url=?", (url,)).fetchone()[0] == 0
+
+
+def test_capture_rejects_pending_discovery_without_network(trial):
+    service, store, _, _, _, clock, cid, site, _ = trial
+    _activate_continuity(service, clock)
+    ean = manifest()["eans"][0]
+    url = site.product("Gucci", "GG1660S", "001", gtin=ean)
+    with store._connect() as con, con:
+        con.execute("""INSERT INTO competitor_product_urls(competitor_id,ean,url,match_status,status,verified_at)
+            VALUES(?,?,?,'exact_match','verified',?)""", (cid, ean, url, clock().isoformat()))
+        assert con.execute("SELECT state FROM locate_jobs WHERE competitor_id=? AND ean=?",
+                           (cid, ean)).fetchone()["state"] != "done"
+    with pytest.raises(ValueError, match="pendientes de revisión"):
+        service.capture_continuity(cid, ean, actor="operator", note="review",
+                                   build_commit="b" * 40, approved=True)
+    assert not site.calls
+
+
+def test_capture_rejects_sensitive_redirect_before_reserving_it(trial):
+    service, store, _, _, monitor, clock, cid, site, _ = trial
+    _activate_continuity(service, clock)
+    ean = manifest()["eans"][0]
+    url = site.product("Gucci", "GG1660S", "001", gtin=ean)
+    redirected = site.base + "/gafas/target?token=example"
+
+    def transport(request_url, headers, timeout):
+        if request_url == url:
+            site.calls.append(request_url)
+            return 302, {"Location": redirected}, b""
+        return site(request_url, headers, timeout)
+
+    monitor._transport = transport
+    with store._connect() as con, con:
+        con.execute("""INSERT INTO competitor_product_urls(competitor_id,ean,url,match_status,status,verified_at)
+            VALUES(?,?,?,'exact_match','verified',?)""", (cid, ean, url, clock().isoformat()))
+        con.execute("UPDATE locate_jobs SET state='done' WHERE competitor_id=? AND ean=?", (cid, ean))
+    with pytest.raises(ValueError, match="No hubo una respuesta nueva"):
+        service.capture_continuity(cid, ean, actor="operator", note="review",
+                                   build_commit="b" * 40, approved=True)
+    assert url in site.calls and redirected not in site.calls
+    with store._connect() as con:
+        assert con.execute("SELECT COUNT(*) FROM access_requests WHERE url=?", (redirected,)).fetchone()[0] == 0
+
+
+def test_concurrent_supervised_capture_does_not_replace_first_observer(trial):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    from filelock import Timeout
+
+    service, store, _, _, monitor, clock, cid, site, _ = trial
+    _activate_continuity(service, clock)
+    ean = manifest()["eans"][0]
+    url = site.product("Gucci", "GG1660S", "001", gtin=ean)
+    entered, release = Event(), Event()
+
+    def transport(request_url, headers, timeout):
+        if request_url == url:
+            entered.set()
+            if not release.wait(10):
+                raise RuntimeError("No se liberó la petición simulada")
+        return site(request_url, headers, timeout)
+
+    monitor._transport = transport
+    with store._connect() as con, con:
+        con.execute("""INSERT INTO competitor_product_urls(competitor_id,ean,url,match_status,status,verified_at)
+            VALUES(?,?,?,'exact_match','verified',?)""", (cid, ean, url, clock().isoformat()))
+        con.execute("UPDATE locate_jobs SET state='done' WHERE competitor_id=? AND ean=?", (cid, ean))
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        first = executor.submit(service.capture_continuity, cid, ean, actor="operator", note="review",
+                                build_commit="b" * 40, approved=True)
+        try:
+            assert entered.wait(10)
+            with pytest.raises(Timeout):
+                service.capture_continuity(cid, ean, actor="operator", note="review",
+                                           build_commit="b" * 40, approved=True)
+        finally:
+            release.set()
+        assert first.result(timeout=10)["requested_url"] == url
+    assert site.calls.count(url) == 1
+
+
 def test_continuity_manifest_is_persisted_once_and_activation_is_explicit(trial):
     service, store, _, _, _, clock, _, _, _ = trial
     config = continuity_config()
@@ -814,6 +1300,40 @@ def test_continuity_due_time_survives_restart_and_rechecks_after_expiry(trial):
         assert con.execute("""SELECT COUNT(*) FROM price_continuity_checks
             WHERE continuity_id=? AND competitor_id=? AND ean=?""",
                            (active["id"], cid, target_ean)).fetchone()[0] == 2
+
+
+@pytest.mark.parametrize("located,restricted", [(True, True), (False, True), (True, False)])
+def test_continuity_keeps_future_deferral_when_other_deadlines_are_past(trial, located, restricted):
+    import pandas as pd
+
+    service, store, _, _, _, clock, cid, _, _ = trial
+    active = _activate_continuity(service, clock)
+    ean = manifest()["eans"][0]
+    with store._connect() as con, con:
+        con.execute("UPDATE price_continuity_pairs SET state='review' WHERE continuity_id=?", (active["id"],))
+        con.execute("""UPDATE price_continuity_pairs SET state='pending',next_check_at=NULL
+            WHERE continuity_id=? AND competitor_id=? AND ean=?""", (active["id"], cid, ean))
+    due = (clock() + timedelta(days=6)).isoformat()
+
+    class Batch:
+        def preview(self, eans, competitors):
+            return pd.DataFrame([{"located": located, "last_ok_at": (clock() - timedelta(days=3)).isoformat(),
+                                  "next_check_at": (clock() - timedelta(hours=1)).isoformat() if not located else due,
+                                  "not_before": due if restricted else None, "access_retry_at": None,
+                                  "valid_until": None, "defer_reason": f"Aplazado hasta not_before={due}"}])
+
+        def execute(self, eans, competitors, **kwargs):
+            return {"pairs": [{"ean": eans[0], "competitor_id": competitors[0], "processed": False,
+                               "category": "not_executed", "reason": "Aplazado"}]}
+
+    service._batch = Batch()
+    service.continuity_tick(max_pairs=1)
+    with store._connect() as con:
+        row = con.execute("""SELECT state,next_check_at,defer_reason FROM price_continuity_pairs
+            WHERE continuity_id=? AND competitor_id=? AND ean=?""", (active["id"], cid, ean)).fetchone()
+    assert row["state"] == ("pending" if restricted else "review")
+    assert row["next_check_at"] == (due if restricted else None)
+    assert "Aplazado" in row["defer_reason"]
 
 
 def test_interrupted_continuity_reservation_is_reviewed_and_never_replayed(trial):

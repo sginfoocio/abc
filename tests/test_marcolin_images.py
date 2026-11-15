@@ -188,7 +188,27 @@ def test_marcolin_excel_marks_missing_and_ambiguous_references_for_review(setup)
     assert rows[upcs[2]][10].value == "sin correspondencia Odoo confirmada"
 
 
-def test_marcolin_excel_generation_is_repeatable_without_mutating_request(setup):
+def test_marcolin_excel_generation_is_repeatable_without_mutating_request(setup, monkeypatch):
+    import datetime
+    import time
+    import zipfile
+    from types import SimpleNamespace
+
+    import openpyxl.packaging.core
+    import openpyxl.writer.excel
+
+    # XLSX embeds timestamps both in workbook metadata and in the ZIP container.
+    class FrozenDateTime(datetime.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 1, 1, tzinfo=tz)
+
+    fixed_datetime = SimpleNamespace(datetime=FrozenDateTime, timezone=datetime.timezone)
+    fixed_zip_time = SimpleNamespace(time=lambda: 0, localtime=lambda _: time.struct_time(
+        (2026, 1, 1, 0, 0, 0, 3, 1, -1)))
+    monkeypatch.setattr(openpyxl.packaging.core, "datetime", fixed_datetime)
+    monkeypatch.setattr(openpyxl.writer.excel, "datetime", fixed_datetime)
+    monkeypatch.setattr(zipfile, "time", fixed_zip_time)
     connector, store, _, _ = setup
     request_id = connector.plan_eans([EANS[0]])["created"][0]
     store.save_odoo_items(request_id, [{"ean": EANS[0], "sku": "SKU-1", "status": "confirmed"}])
@@ -197,6 +217,8 @@ def test_marcolin_excel_generation_is_repeatable_without_mutating_request(setup)
     second = connector.export_request_xlsx(request_id)
     assert first == second
     assert store.get(request_id) == before
+    store.save_odoo_items(request_id, [{"ean": EANS[0], "sku": "SKU-2", "status": "confirmed"}])
+    assert connector.export_request_xlsx(request_id) != first
 
 
 def test_odoo_evidence_table_is_added_without_losing_existing_requests(setup):

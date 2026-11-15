@@ -369,7 +369,8 @@ def _from_json_ld(html: str, url: str) -> ProductPage | None:
         page.ambiguous = True
         page.notes.append("EAN publicados contradictorios: " + ", ".join(gtins))
     page.identifiers = [str(node[k]) for k in ("mpn", "sku") if node.get(k)]
-    page.caliber = (extract_caliber(_name(node.get("size"))) or extract_caliber(page.title)
+    page.caliber = (normalize_caliber(_name(node.get("size"))) or extract_caliber(_name(node.get("size")))
+                    or extract_caliber(page.title)
                     or extract_caliber(urlparse(url).path.rsplit("/", 1)[-1]))
     facts = _offer_facts(node, url)
     page.ambiguous |= facts["ambiguous"]
@@ -451,12 +452,17 @@ def select_product_variant(page: ProductPage | None, product: dict[str, Any]) ->
     published_caliber = normalize_caliber(selected.caliber)
     if selected_from_group and target_caliber and published_caliber \
             and compare_calibers(target_caliber, published_caliber) == "different":
+        common_price = bool(record["shared_offer"]) and not selected.ambiguous and selected.price is not None
         selected.ambiguous = True
         selected.ean_published = ""
-        selected.price = None
-        selected.currency = ""
+        if not common_price:
+            selected.price = None
+            selected.currency = ""
         selected.availability = "unknown"
+        selected.stock_conflict = True
         selected.notes.append("El calibre de la variante estructurada contradice el producto objetivo")
+        if common_price:
+            selected.notes.append("Precio común del grupo conservado solo como evidencia; stock e identidad requieren revisión")
     elif selected_from_group:
         selected.notes.append("Variante ProductGroup vinculada por EAN normalizado, no por orden de listas")
     return selected

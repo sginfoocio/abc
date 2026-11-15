@@ -64,7 +64,7 @@ COPY scripts/cloud_image_entrypoint.sh ./scripts/cloud_image_entrypoint.sh
 COPY cloud_dashboard.py process_activity.py build_info.py .
 COPY price_comparator.py vytria_price_sync.py price_connectors.py price_scheduler.py price_analytics.py price_web.py price_web_extract.py price_web_fetch.py .
 COPY price_references.py price_observations.py competitor_requirements.py price_known_urls.py .
-COPY price_pilot.py price_discovery.py price_auto_confirm.py price_access.py price_watch.py price_locator.py price_monitor.py .
+COPY price_pilot.py price_discovery.py price_auto_confirm.py price_access.py price_watch.py price_locator.py price_monitor.py price_recovery.py .
 COPY price_batch.py price_url_candidates.py price_trial.py price_trial_manifest.json price_watch_continuity.json .
 COPY docs/PRICE_COVERAGE_MEASUREMENT_EVIDENCE.csv ./docs/
 COPY assets ./assets

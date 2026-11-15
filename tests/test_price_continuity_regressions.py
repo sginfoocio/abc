@@ -401,6 +401,28 @@ def test_common_group_price_does_not_mix_size_stock_or_require_size_prices():
     assert available.includes_tax is unavailable.includes_tax is True
 
 
+def test_common_group_price_survives_size_conflict_without_transferring_stock(tmp_path):
+    url = "https://www.amevista.com/es/ray-ban-rb2140-901-wayfarer"
+    group = _amevista_group(url)
+    group["hasVariant"][0]["size"] = "50"
+    page = select_product_variant(extract_product(_ld(group), url),
+                                  {"ean": "0805289126577", "caliber": "54"})
+    assert page.price == 200 and page.currency == "EUR"
+    assert page.ambiguous and not page.ean_published
+    assert page.availability == "unknown" and page.stock_conflict
+    assert any("solo como evidencia" in note for note in page.notes)
+    target = {"ean": "0805289126577", "brand": "Ray-Ban", "model": "RB2140",
+              "color": "901", "caliber": "54"}
+    outcome, store, _ = _visit(tmp_path, target, url, _ld(group))
+    assert outcome.state != "exact"
+    assert store.dashboard(now=NOW)[1]["confirmed"] == 0
+
+    del group["offers"]
+    page = select_product_variant(extract_product(_ld(group), url),
+                                  {"ean": "0805289126577", "caliber": "54"})
+    assert page.ambiguous and page.price is None and page.availability == "unknown"
+
+
 def _observed_edel_layout(url, ean, product_id, title, second_title, price, *, different_stock=False):
     """Synthetic reduction of 2026-11-12 public HTML layout, not the original HTTP response."""
     offer = ('<div class="eoProductPrice"><span itemprop="offers" itemscope '

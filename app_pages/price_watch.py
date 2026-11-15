@@ -960,6 +960,10 @@ def _render_continuity(store: PriceComparatorStore, service=None) -> None:
             if st.button("Detener continuidad", key="continuity_stop_paused"):
                 service.stop_continuity(actor=actor)
                 _refresh("Continuidad detenida; historial y recibos conservados.")
+        if report["status"] in ("active", "paused"):
+            _render_interrupted_recovery(store)
+        if report["status"] == "active":
+            _render_continuity_capture(service, frozen)
         if report["status"] == "active" and report["summary"]["restricted_pairs"]:
             key = f"continuity_reevaluation_{report['id']}"
             with st.expander("Reevaluación auditada de pares restringidos"):
@@ -1011,6 +1015,130 @@ def _render_continuity(store: PriceComparatorStore, service=None) -> None:
                                 st.error(str(exc))
         if report["pairs"]:
             st.dataframe(pd.DataFrame(report["pairs"]), width="stretch", hide_index=True)
+
+
+def _render_interrupted_recovery(store: PriceComparatorStore) -> None:
+    import hashlib
+    import sqlite3
+
+    from filelock import Timeout
+    from build_info import load_build_info
+    from price_recovery import apply, preview
+
+    with st.expander("Recuperación auditada de interrupciones"):
+        st.caption("La vista previa no consulta tiendas ni modifica la base. La aplicación revalida los recibos, "
+                   "las revisiones y los bloqueos; no autoriza consultas ni modifica permisos. Introduzca su "
+                   "identidad real; el campo no autentica al responsable.")
+        allowlist = st.file_uploader("Lista histórica de 182 pares (JSON)", type=["json"], key="interrupted_list")
+        historical_report = st.file_uploader("Informe histórico vinculado (JSON)", type=["json"],
+                                             key="interrupted_report")
+        if not allowlist or not historical_report:
+            return
+        source = (hashlib.sha256(allowlist.getvalue()).hexdigest(),
+                  hashlib.sha256(historical_report.getvalue()).hexdigest())
+        if st.session_state.get("interrupted_preview_source") != source:
+            st.session_state.pop("interrupted_preview_rows", None)
+        if st.button("Previsualizar recuperación", key="interrupted_preview"):
+            try:
+                st.session_state["interrupted_preview_rows"] = preview(
+                    store.database_path, allowlist.getvalue(), historical_report.getvalue())
+                st.session_state["interrupted_preview_source"] = source
+            except (ValueError, KeyError, TypeError, OSError, sqlite3.Error) as exc:
+                st.session_state.pop("interrupted_preview_rows", None)
+                st.error(f"No se pudo validar la recuperación: {exc}")
+        rows = st.session_state.get("interrupted_preview_rows")
+        if rows is None:
+            return
+        st.dataframe(pd.DataFrame([{k: row[k] for k in ("ean", "competitor_id", "eligible", "reason")}
+                                   for row in rows]), hide_index=True)
+        info = load_build_info()
+        with st.form("interrupted_apply_form"):
+            actor = st.text_input("Responsable", value="")
+            note = st.text_input("Motivo de recuperación")
+            approved = st.checkbox("Autorizo aplicar solo los pares elegibles revalidados")
+            submitted = st.form_submit_button("Aplicar recuperación auditada",
+                                              disabled=not info["build"].startswith("actions-"))
+        if submitted:
+            try:
+                result = apply(store.database_path, allowlist.getvalue(), historical_report.getvalue(),
+                               actor=actor, note=note, build_commit=info["commit"], approved=approved)
+                st.session_state.pop("interrupted_preview_rows", None)
+                st.success(f"Aplicados {sum(row['eligible'] for row in result)} pares; "
+                           f"excluidos {sum(not row['eligible'] for row in result)}.")
+            except (ValueError, KeyError, TypeError, OSError, sqlite3.Error, Timeout) as exc:
+                st.error(f"No se pudo aplicar la recuperación: {exc}")
+
+
+def _render_continuity_capture(service, frozen: dict) -> None:
+    import sqlite3
+
+    from filelock import Timeout
+    from build_info import load_build_info
+
+    with st.expander("Captura supervisada de un par"):
+        st.caption("Procesa solo un par pendiente y vencido con ficha ya verificada, usando el trabajador y "
+                   "sus controles existentes. No fuerza fechas ni acepta revisiones. El HTML se conserva solo "
+                   "si supera las comprobaciones de tamaño y datos sensibles. Introduzca su identidad real; "
+                   "el campo no autentica al responsable.")
+        cid = st.selectbox("Competidor exacto", options=list(frozen["competitors"]),
+                           format_func=lambda value: frozen["competitors"][value], key="capture_competitor")
+        ean = st.selectbox("EAN exacto", options=frozen["eans"], key="capture_ean")
+        info = load_build_info()
+        with st.form("continuity_capture_form"):
+            actor = st.text_input("Responsable", value="")
+            note = st.text_input("Motivo de captura")
+            approved = st.checkbox("Autorizo procesar este único par si está vencido y permitido")
+            submitted = st.form_submit_button("Capturar durante la comprobación supervisada",
+                                              disabled=not info["build"].startswith("actions-"))
+        if submitted:
+            try:
+                st.session_state["continuity_capture_result"] = service.capture_continuity(
+                    cid, ean, actor=actor, note=note, build_commit=info["commit"], approved=approved)
+                st.success("Respuesta guardada en la auditoría junto a su comprobación de continuidad.")
+            except (ValueError, RuntimeError, sqlite3.Error, Timeout) as exc:
+                st.session_state.pop("continuity_capture_result", None)
+                st.error(f"No se guardó una captura: {exc}")
+        result = st.session_state.get("continuity_capture_result")
+        if result is not None:
+            st.download_button("Descargar evidencia de captura", json.dumps(result, ensure_ascii=False).encode("utf-8"),
+                               "price-continuity-capture.json", "application/json", key="continuity_capture_download")
+
+    with st.expander("Diagnóstico supervisado de candidatas en revisión"):
+        st.caption("Consulta una candidata ya documentada sin aceptar la revisión ni modificar ofertas o plazos. "
+                   "Usa permisos, robots y presupuestos existentes; los rechazos también se auditan. Introduzca "
+                   "su identidad real; el campo no autentica al responsable.")
+        cid = st.selectbox("Competidor", options=list(frozen["competitors"]),
+                           format_func=lambda value: frozen["competitors"][value], key="diagnostic_competitor")
+        ean = st.selectbox("EAN", options=frozen["eans"], key="diagnostic_ean")
+        candidates = service.diagnostic_candidates(cid, ean)
+        if not candidates:
+            st.info("No hay candidatas documentadas pendientes de revisión para este par.")
+            return
+        url = st.selectbox("URL candidata documentada", candidates, key="diagnostic_url")
+        selection = (cid, ean, url)
+        if st.session_state.get("diagnostic_capture_selection") != selection:
+            st.session_state.pop("diagnostic_capture_result", None)
+            st.session_state["diagnostic_capture_selection"] = selection
+        info = load_build_info()
+        with st.form("diagnostic_capture_form"):
+            actor = st.text_input("Responsable", value="")
+            note = st.text_input("Motivo del diagnóstico")
+            approved = st.checkbox("Autorizo una consulta diagnóstica gobernada")
+            submitted = st.form_submit_button("Capturar evidencia diagnóstica",
+                                              disabled=not info["build"].startswith("actions-"))
+        if submitted:
+            try:
+                st.session_state["diagnostic_capture_result"] = service.capture_diagnostic(
+                    cid, ean, url, actor=actor, note=note, build_commit=info["commit"], approved=approved)
+                st.success("Evidencia guardada en la auditoría sin modificar la revisión.")
+            except (ValueError, RuntimeError, sqlite3.Error, Timeout) as exc:
+                st.session_state.pop("diagnostic_capture_result", None)
+                st.error(f"No se guardó una captura: {exc}")
+        result = st.session_state.get("diagnostic_capture_result")
+        if result is not None:
+            st.download_button("Descargar evidencia diagnóstica",
+                               json.dumps(result, ensure_ascii=False).encode("utf-8"),
+                               "price-diagnostic-capture.json", "application/json", key="diagnostic_download")
 
 
 def _render_batch(store: PriceComparatorStore, names: dict[str, str]) -> None:
