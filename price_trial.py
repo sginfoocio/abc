@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass
@@ -10,11 +11,12 @@ import hashlib
 import json
 import logging
 from pathlib import Path
+import re
 import signal
 import subprocess
 import threading
 import time
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urljoin, urlsplit
 from zoneinfo import ZoneInfo
 
 from filelock import FileLock, Timeout
@@ -789,18 +791,23 @@ class PriceTrial:
             con.execute("UPDATE price_continuity SET sync_receipt=?,error='' WHERE id=?",
                         (json.dumps(receipt, ensure_ascii=False), row["id"]))
 
-    def continuity_tick(self, *, max_pairs: int = 20, deadline_seconds: int = 240) -> None:
+    def continuity_tick(self, *, max_pairs: int = 20, deadline_seconds: int = 240,
+                        exact_pair: tuple[str, str] | None = None) -> int | None:
         try:
             with self.continuity_lock():
-                self.heartbeat()
+                if exact_pair is None:
+                    self.heartbeat()
                 row = continuity_row(self.store)
                 if not row or row["status"] != "active":
+                    if exact_pair is not None:
+                        raise ValueError("La continuidad no está activa")
                     return
-                self._close_continuity_interrupted(row["id"])
+                if exact_pair is None:
+                    self._close_continuity_interrupted(row["id"])
                 now = self.clock()
                 if now < datetime.fromisoformat(row["started_at"]):
                     return
-                if row["next_sync_at"] and datetime.fromisoformat(row["next_sync_at"]) <= now:
+                if exact_pair is None and row["next_sync_at"] and datetime.fromisoformat(row["next_sync_at"]) <= now:
                     self._run_continuity_sync(row)
                 from price_batch import WatchBatch
                 batch = self._batch or WatchBatch(self.store)
@@ -809,10 +816,30 @@ class PriceTrial:
                     pairs = con.execute("""SELECT p.* FROM price_continuity_pairs p
                         WHERE p.continuity_id=? AND p.state='pending'
                           AND (p.next_check_at IS NULL OR p.next_check_at<=?)
+                          AND (? IS NULL OR (p.competitor_id=? AND p.ean=?))
                         ORDER BY CASE WHEN EXISTS(SELECT 1 FROM competitor_product_urls u
                             WHERE u.competitor_id=p.competitor_id AND u.ean=p.ean AND u.status='verified')
                             THEN 0 ELSE 1 END,p.next_check_at,p.competitor_id,p.ean LIMIT ?""",
-                                        (row["id"], now_text, max_pairs)).fetchall()
+                                        (row["id"], now_text, exact_pair[0] if exact_pair else None,
+                                         *(exact_pair or ("", "")), max_pairs)).fetchall()
+                if exact_pair is not None and not pairs:
+                    raise ValueError("El par no está pendiente y vencido; no se fuerza su procesamiento")
+                if exact_pair is not None:
+                    with self.store._connect() as con:
+                        verified = con.execute("""SELECT 1 FROM competitor_product_urls
+                            WHERE competitor_id=? AND ean=? AND status='verified' LIMIT 1""", exact_pair).fetchone()
+                        review = con.execute("""SELECT 1 FROM competitor_product_urls WHERE competitor_id=? AND ean=?
+                            AND status IN ('probable','pending_verification')
+                            UNION ALL SELECT 1 FROM pilot_url_candidates WHERE competitor_id=? AND ean=?
+                            AND state IN ('candidate_found','pending_validation')
+                            UNION ALL SELECT 1 FROM locate_jobs WHERE competitor_id=? AND ean=?
+                            AND state!='done'
+                            UNION ALL SELECT 1 FROM monitor_jobs WHERE competitor_id=? AND ean=?
+                            AND state IN ('review','failed','running') LIMIT 1""", exact_pair * 4).fetchone()
+                    if not verified:
+                        raise ValueError("La captura requiere una ficha ya verificada; no acepta revisiones")
+                    if review:
+                        raise ValueError("Hay trabajos o identidades pendientes de revisión; no se fuerza la captura")
                 offer_interval = continuity_config()["offer_check_interval_hours"]
                 started = time.monotonic()
                 for pair in pairs:
@@ -891,20 +918,87 @@ class PriceTrial:
                     commercial = len(receipts) - robots
                     unconfirmed = sum(r["result"] in {"", "reserved"} for r in receipts)
                     with self.store._connect() as con, con:
-                        con.execute("""INSERT INTO price_continuity_checks
+                        check_id = con.execute("""INSERT INTO price_continuity_checks
                             (continuity_id,competitor_id,ean,started_at,finished_at,state,category,requests,
                              http_commercial,http_robots,unconfirmed_http,next_check_at,defer_reason,receipt)
                             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                                     (row["id"], cid, ean, started_at, finished_at, state, category, len(receipts),
                                      commercial, robots, unconfirmed,
                                      next_check.isoformat() if next_check else None, reason,
-                                     json.dumps(receipt, ensure_ascii=False)))
+                                     json.dumps(receipt, ensure_ascii=False))).lastrowid
                         con.execute("""UPDATE price_continuity_pairs SET state=?,next_check_at=?,defer_reason=?,
                             checked_at=? WHERE id=?""",
                                     (state, next_check.isoformat() if next_check else None, reason,
                                      finished_at, pair["id"]))
+                    if exact_pair is not None:
+                        return check_id
         except Timeout:
+            if exact_pair is not None:
+                raise
             return
+
+    def capture_continuity(self, competitor_id: str, ean: str, *, actor: str, note: str,
+                           build_commit: str, approved: bool) -> dict:
+        """Capture a single ordinary, due continuity check; never starts a second HTTP consumer."""
+        if not approved or not actor.strip() or not note.strip():
+            raise ValueError("Responsable, motivo y aprobación explícita obligatorios")
+        if len(build_commit) != 40 or any(c not in "0123456789abcdef" for c in build_commit):
+            raise ValueError("Commit válido de 40 caracteres requerido")
+        ean = normalize_gtin(ean)
+        from price_monitor import capture_context
+
+        evidence = []
+        failure = []
+        sensitive = re.compile(rb"(?i)(csrf|password|passwd|cookie|secret|token|session|authorization|api[_-]?key)")
+
+        def guard_url(url):
+            parsed = urlsplit(url)
+            parameters = parse_qsl(parsed.query, keep_blank_values=True)
+            if (parsed.scheme != "https" or parsed.port not in (None, 443)
+                    or parsed.username or parsed.password or parsed.fragment
+                    or any(key not in {"variant", "selectedSize"} or
+                           not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", value)
+                           for key, value in parameters)):
+                raise ConnectorError("URL con parámetros no admitidos para una captura segura")
+
+        def capture(observed_cid, observed_ean, fetched, page, identity):
+            if (observed_cid, observed_ean) != (competitor_id, ean):
+                return
+            body = fetched.content
+            metadata = json.dumps(fetched.trace, ensure_ascii=False).encode("utf-8")
+            if len(body) > 1024 * 1024:
+                failure.append("La respuesta supera el límite de captura de 1 MiB")
+            elif sensitive.search(body) or sensitive.search(metadata):
+                failure.append("La respuesta o URL puede contener datos sensibles; no se conserva")
+            elif not re.search(rb"(?i)<(?:!doctype\s+html|html|head|body)\b", body[:4096]):
+                failure.append("La respuesta no acredita contenido HTML")
+            else:
+                from price_web_extract import _Collector
+                collector = _Collector()
+                collector.feed(fetched.text)
+                evidence.append({"captured_at": self.clock().isoformat(),
+                                 "requested_url": fetched.requested_url, "final_url": fetched.url,
+                                 "http_status": fetched.status, "redirects": fetched.redirects,
+                                 "canonical_urls": list(dict.fromkeys(urljoin(fetched.url, href)
+                                                                       for href in collector.canonicals)),
+                                 "sha256": hashlib.sha256(body).hexdigest(),
+                                 "html_base64": base64.b64encode(body).decode("ascii"),
+                                 "extraction": asdict(page) if page else None, "identity": identity})
+
+        with capture_context(capture, guard_url):
+            check_id = self.continuity_tick(max_pairs=1, exact_pair=(competitor_id, ean))
+        if failure:
+            raise ValueError(failure[0])
+        if len(evidence) != 1 or check_id is None:
+            raise ValueError("No hubo una respuesta nueva capturable; consulte el recibo de continuidad")
+        item = {"continuity_check_id": check_id, "competitor_id": competitor_id, "ean": ean,
+                "build_commit": build_commit, **evidence[0]}
+        with self.store._connect() as con, con:
+            con.execute("""INSERT INTO access_audit(scope,scope_id,action,previous,current,actor,note,at)
+                VALUES('competitor',?,'capture_continuity_html','',?,?,?,?)""",
+                        (competitor_id, json.dumps(item, ensure_ascii=False), actor.strip(), note.strip(),
+                         item["captured_at"]))
+        return item
 
     def reevaluate_restricted_pairs(self, *, actor: str = "", note: str = "",
                                     apply: bool = False) -> list[dict]:

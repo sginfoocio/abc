@@ -410,7 +410,8 @@ class GovernedFetcher(WebFetcher):
     def __init__(self, access: AccessControl, competitor_id: str, method: str, *, purpose: str, ean: str = "",
                  sleep: Callable[[float], None] = time.sleep,
                  request_guard: Callable[[], None] | None = None,
-                 request_reserved: Callable[[str, str], None] | None = None, **kwargs) -> None:
+                 request_reserved: Callable[[str, str], None] | None = None,
+                 url_guard: Callable[[str], None] | None = None, **kwargs) -> None:
         kwargs.setdefault("robots_cache", PersistentRobotsCache(access.store, clock=access._now))
         super().__init__(sleep=sleep, **kwargs)
         self.access, self.competitor_id, self.method, self.purpose, self.ean = (
@@ -418,6 +419,8 @@ class GovernedFetcher(WebFetcher):
         inner = self._transport
 
         def governed(url: str, headers: dict, timeout: float):
+            if url_guard is not None:
+                url_guard(url)
             if request_guard is not None:
                 request_guard()
             request_id = self._reserve(url)

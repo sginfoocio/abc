@@ -84,6 +84,7 @@ def test_preview_is_read_only_and_validates_snapshot_and_scope(recovery):
     before = dump(store)
     rows = preview(store.database_path, allowlist, report)
     assert len(rows) == 182 and all(r["eligible"] for r in rows)
+    assert preview(store.database_path, allowlist.read_bytes(), report.read_bytes()) == rows
     assert dump(store) == before
     altered = json.loads(allowlist.read_text(encoding="utf-8"))
     altered["pairs"][0]["expected_latest_check_id"] = altered["pairs"][1]["expected_latest_check_id"]

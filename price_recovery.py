@@ -31,8 +31,9 @@ def _time(value):
 
 def load_allowlist(path, report_path):
     """Validate the supplied historical snapshot, not the current database."""
-    data = json.loads(Path(path).read_text(encoding="utf-8-sig"))
-    content = Path(report_path).read_bytes()
+    list_content = path if isinstance(path, bytes) else Path(path).read_bytes()
+    data = json.loads(list_content.decode("utf-8-sig"))
+    content = report_path if isinstance(report_path, bytes) else Path(report_path).read_bytes()
     if hashlib.sha256(content).hexdigest() != data.get("source_report_sha256"):
         raise ValueError("La huella del informe histórico no coincide")
     report = json.loads(content.decode("utf-8-sig"))

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -30,7 +32,7 @@ from price_references import EXACT, classify
 from price_watch import PriceWatch
 from price_web import Outcome, WebPriceSearch, WebSearchError, comparability_gap, validate_competitor_url
 from price_web_extract import ProductPage, extract_product, select_product_variant
-from price_web_fetch import PageGone, RobotsDenied, _requests_transport
+from price_web_fetch import Fetched, PageGone, RobotsDenied, _requests_transport
 from vytria_price_sync import SyncInProgress, VytriaPriceSync
 
 SCHEDULE_ENV = "PRICE_MONITOR_SCHEDULE_ENABLED"
@@ -41,6 +43,23 @@ STATES = {"pending": "Pendiente", "running": "En ejecución", "done": "Terminada
 ALERTS = {"price_down": "Bajada de precio", "price_up": "Subida de precio",
           "undercut": "Más barato que Vytria", "availability": "Cambio de disponibilidad",
           "gone": "Ficha desaparecida", "stale": "Precio caducado"}
+
+_capture_observer: ContextVar[Callable[[str, str, Fetched, ProductPage | None, dict], None] | None] = (
+    ContextVar("price_capture_observer", default=None))
+_capture_url_guard: ContextVar[Callable[[str], None] | None] = ContextVar("price_capture_url_guard", default=None)
+
+
+@contextmanager
+def capture_context(observer, url_guard):
+    if _capture_observer.get() is not None:
+        raise ValueError("Ya hay una captura activa en este contexto")
+    observer_token = _capture_observer.set(observer)
+    guard_token = _capture_url_guard.set(url_guard)
+    try:
+        yield
+    finally:
+        _capture_url_guard.reset(guard_token)
+        _capture_observer.reset(observer_token)
 
 
 def _utc() -> datetime:
@@ -256,6 +275,7 @@ class PriceMonitor:
                     fetcher = GovernedFetcher(
                         self.access, cid, "ficha", purpose="monitor", transport=self._transport, sleep=self._sleep,
                         pause_seconds=0, request_guard=guard, request_reserved=reserved,
+                        url_guard=_capture_url_guard.get(),
                         retries=0, max_requests=1_000_000,
                         timeout=float(config["timeout_seconds"] or 15))
                     try:
@@ -355,6 +375,9 @@ class PriceMonitor:
                     "identity_reasons": list(match.reasons) if match else [],
                     "rejection": product_page_rejection(fetched.text, fetched.url) if page is None else "",
                 }
+                observer = _capture_observer.get()
+                if not reuse_shared and observer is not None:
+                    observer(cid, ean, fetched, page, self._job_trace)
                 if page is None or match is None or match.status != EXACT or page.ambiguous:
                     detail = ("; ".join(match.reasons) if match else "Sin datos legibles de producto")
                     with self.store._connect() as con, con:

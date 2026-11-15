@@ -117,3 +117,44 @@ contradice el catálogo, el extractor conserva ese precio como evidencia, no com
 oferta comparable: identidad y stock permanecen en revisión. La corrección usa
 fixtures sintéticas; no sustituye las respuestas HTML originales aún pendientes
 de obtener mediante un flujo supervisado y presupuestado.
+
+El resumen histórico de 44 ofertas procede de `PriceMonitor.inventory()` al
+generar el informe. La reconstrucción conservadora obtiene 43 a partir del
+último `inventory_after` conservado por cada par y evalúa su vigencia en el
+latido histórico de 2026-11-15 10:57:39 UTC. Son instantáneas y momentos de
+evaluación distintos: falta el inventario final por par utilizado por el
+resumen, por lo que no se puede identificar de forma inequívoca la oferta
+que explica la diferencia. Ninguna de las dos cifras demuestra el estado actual.
+
+## Acciones supervisadas tras una integración autorizada
+
+En la sección de continuidad, un administrador puede cargar la lista histórica y
+el informe para previsualizar la recuperación. La aplicación requiere responsable,
+motivo y confirmación; revalida los archivos y el estado bajo los bloqueos existentes.
+Una continuidad activa puede procesar inmediatamente los pares recuperados. No
+se aplicó ninguna recuperación durante el desarrollo.
+
+La captura supervisada selecciona un único competidor y EAN del manifiesto. Solo
+procesa el trabajo normal si el par está pendiente y vencido y existe una ficha
+verificada: no fuerza `not_before`, no acepta revisiones ni sincroniza Vytria.
+Rechaza también cualquier trabajo de localización no terminado, para evitar
+que el lote lance una búsqueda antes de la captura. Usa
+el mismo trabajador, bloqueo, permisos, robots y reservas de la vigilancia. La
+respuesta nueva se vincula al ID del chequeo y se guarda en auditoría con su hash,
+URL, redirecciones y resultado de extracción; también puede descargarse en JSON.
+El cuerpo se limita a 1 MiB y se rechaza si contiene indicadores de datos sensibles.
+Antes de reservar HTTP también se rechazan URLs con credenciales, fragmentos o
+parámetros distintos de `variant` y `selectedSize`; esto puede dejar pendientes
+fichas legítimas con otras queries, que no deben adaptarse ni forzarse sin revisión.
+Ese filtro es conservador, no una garantía de que un sitio nunca publique datos
+privados: revisar la evidencia antes de compartirla. Si no se puede conservar el
+cuerpo, el chequeo normal ya puede haberse efectuado y consumido presupuesto;
+no repetirlo sin revisar su recibo y próxima fecha. No se guarda ningún cuerpo en
+caso de rechazo. No se realizaron capturas reales en el desarrollo.
+
+Después de desplegar solo con autorización independiente, verificar el build,
+presupuestos compartidos, permisos, robots, incidentes, estado del par y su
+próxima fecha. Para cada captura autorizada, revisar el recibo, hash, identidad,
+mercado y stock antes de contabilizar una oferta; no cambiar rutas o métodos para
+sortear bloqueos. Las fichas no verificadas y las revisiones necesitan un circuito
+de revisión propio: esta acción no las promueve ni sustituye esa validación.
