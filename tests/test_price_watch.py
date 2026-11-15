@@ -149,6 +149,7 @@ def test_supervised_recovery_and_capture_render_without_execution(monkeypatch):
         "class Service:\n"
         "    def diagnostic_candidates(self, cid, ean): return ['https://shop.example/candidate']\n"
         "    def capture_diagnostic(self, *args, **kwargs): raise AssertionError('No ejecutar al renderizar')\n"
+        "    def diagnostic_results(self, cid, ean): return []\n"
         "_render_interrupted_recovery(None)\n"
         "_render_selected_recovery(None, 1)\n"
         "_render_continuity_capture(Service(), {'competitors': {'shop': 'Tienda'}, 'eans': ['0805289126577']})"

@@ -1090,23 +1090,153 @@ class PriceTrial:
                         urls.add(outcome["url"])
         return sorted(urls - excluded)
 
+    def request_diagnostic(self, competitor_id, ean, url, *, actor, note, build_commit, approved):
+        from price_diagnostic import _SECRET
+        actor, note = actor.strip(), note.strip()
+        try:
+            if not approved or not actor or not note:
+                raise ValueError("Responsable, motivo y aprobación explícita obligatorios")
+            if _SECRET.search(actor) or _SECRET.search(note):
+                raise ValueError("No incluya datos sensibles en responsable o motivo")
+            if len(build_commit) != 40 or any(c not in "0123456789abcdef" for c in build_commit):
+                raise ValueError("Commit válido de 40 caracteres requerido")
+            ean = normalize_gtin(ean)
+            _capture_url_guard(url)
+            row = continuity_row(self.store)
+            if not row or row["status"] not in {"active", "paused"}:
+                raise ValueError("No hay continuidad activa o pausada")
+            frozen = json.loads(row["manifest"])
+            if competitor_id not in frozen["competitors"] or ean not in frozen["eans"]:
+                raise ValueError("Par fuera del manifiesto")
+            if url not in self.diagnostic_candidates(competitor_id, ean):
+                raise ValueError("La URL no es una candidata documentada pendiente de revisión")
+        except (ValueError, RuntimeError) as exc:
+            with self.store._connect() as con, con:
+                con.execute("""INSERT INTO access_audit(scope,scope_id,action,previous,current,actor,note,at)
+                    VALUES('competitor',?,'request_diagnostic','',?,?,?,?)""",
+                            (competitor_id, json.dumps({"status": "rejected", "error_type": type(exc).__name__,
+                                                        "url_sha256": hashlib.sha256(url.encode()).hexdigest()}),
+                             actor if actor and not _SECRET.search(actor) else "sin identificar",
+                             "", self.clock().isoformat()))
+            raise
+        with self.store._connect() as con, con:
+            con.execute("""INSERT OR IGNORE INTO price_diagnostic_requests
+                (continuity_id,competitor_id,ean,url,actor,note,build_commit,created_at)
+                VALUES(?,?,?,?,?,?,?,?)""",
+                        (row["id"], competitor_id, ean, url, actor, note, build_commit, self.clock().isoformat()))
+            saved = dict(con.execute("""SELECT id,status FROM price_diagnostic_requests
+                WHERE continuity_id=? AND competitor_id=? AND ean=? AND url=? AND status!='expired'""",
+                                     (row["id"], competitor_id, ean, url)).fetchone())
+            con.execute("""INSERT INTO access_audit(scope,scope_id,action,previous,current,actor,note,at)
+                VALUES('competitor',?,'request_diagnostic','',?,?,?,?)""",
+                        (competitor_id, json.dumps(saved), actor, note, self.clock().isoformat()))
+        return saved
+
+    def diagnostic_results(self, competitor_id, ean):
+        with self.store._connect() as con:
+            rows = con.execute("""SELECT id,status,reason,created_at,finished_at,result,expires_at,
+                (artifact IS NOT NULL AND expires_at>?) AS available FROM price_diagnostic_requests
+                WHERE competitor_id=? AND ean=? ORDER BY id DESC""",
+                               (self.clock().isoformat(), competitor_id, ean)).fetchall()
+        return [dict(row) for row in rows]
+
+    def diagnostic_artifact(self, request_id):
+        from price_diagnostic import expire
+        with self.store._connect() as con, con:
+            expire(con, self.clock())
+            row = con.execute("SELECT artifact FROM price_diagnostic_requests WHERE id=?", (request_id,)).fetchone()
+        if not row or row["artifact"] is None:
+            raise ValueError("La evidencia no existe o ha caducado")
+        return bytes(row["artifact"])
+
+    def diagnostic_tick(self):
+        from price_diagnostic import EvidenceError, expire, expiry, has_capacity, limits
+        try:
+            lock = self.continuity_lock()
+            with lock:
+                with self.store._connect() as con, con:
+                    expire(con, self.clock())
+                    interrupted = con.execute("""SELECT id,competitor_id FROM price_diagnostic_requests
+                        WHERE status='running'""").fetchall()
+                    con.execute("""UPDATE price_diagnostic_requests SET status='rejected',
+                        reason='Interrupción con consumo incierto; no se repite automáticamente',finished_at=?
+                        WHERE status='running'""", (self.clock().isoformat(),))
+                    for item in interrupted:
+                        con.execute("""INSERT INTO access_audit(scope,scope_id,action,previous,current,actor,note,at)
+                            VALUES('competitor',?,'interrupt_diagnostic_request',?,'rejected','worker','',?)""",
+                                    (item["competitor_id"], str(item["id"]), self.clock().isoformat()))
+                continuity = continuity_row(self.store)
+                if not continuity or continuity["status"] != "active":
+                    return
+                with self.store._connect() as con, con:
+                    row = con.execute("""SELECT * FROM price_diagnostic_requests WHERE continuity_id=?
+                        AND (status='pending' OR (status='deferred' AND reason='capacity'))
+                        ORDER BY id LIMIT 1""", (continuity["id"],)).fetchone()
+                    if not row:
+                        return
+                    request = dict(row)
+                    body_limit, quota, _ = limits()
+                    used = con.execute("""SELECT COALESCE(SUM(length(artifact)),0)
+                        FROM price_diagnostic_requests""").fetchone()[0]
+                    if not has_capacity(self.store.database_path, used, body_limit, quota):
+                        if request["status"] != "deferred" or request["reason"] != "capacity":
+                            con.execute("""UPDATE price_diagnostic_requests SET status='deferred',reason='capacity'
+                                WHERE id=?""", (request["id"],))
+                            con.execute("""INSERT INTO access_audit(scope,scope_id,action,previous,current,actor,note,at)
+                                VALUES('competitor',?,'defer_diagnostic_capacity',?,'deferred','worker','',?)""",
+                                        (request["competitor_id"], str(request["id"]), self.clock().isoformat()))
+                        return
+                    con.execute("""UPDATE price_diagnostic_requests SET status='running',started_at=?
+                        WHERE id=?""", (self.clock().isoformat(), request["id"]))
+                try:
+                    result = self.capture_diagnostic(request["competitor_id"], request["ean"], request["url"],
+                                                     actor=request["actor"], note=request["note"],
+                                                     build_commit=request["build_commit"], approved=True,
+                                                     _held_lock=lock, _queue_id=request["id"])
+                    artifact = base64.b64decode(result.pop("html_base64"), validate=True)
+                    _, _, days = limits()
+                    status, reason = "captured", ""
+                except Timeout:
+                    result, artifact, status, reason = {}, None, "pending", "Bloqueo ocupado"
+                except (ValueError, RuntimeError) as exc:
+                    with self.store._connect() as con:
+                        audit = con.execute("""SELECT current FROM access_audit WHERE action='capture_diagnostic_html'
+                            AND json_extract(current,'$.queue_id')=? ORDER BY id DESC LIMIT 1""",
+                                            (request["id"],)).fetchone()
+                    result = json.loads(audit["current"]) if audit else {"error_type": type(exc).__name__}
+                    artifact = None
+                    if str(exc) == "Capacidad insuficiente para conservar la respuesta":
+                        status, reason = "deferred", "capacity"
+                    else:
+                        status = "rejected"
+                        reason = result.get("reason") or (str(exc) if isinstance(exc, EvidenceError)
+                                                          else type(exc).__name__)
+                with self.store._connect() as con, con:
+                    con.execute("""UPDATE price_diagnostic_requests SET status=?,reason=?,finished_at=?,result=?,
+                        artifact=?,expires_at=? WHERE id=?""",
+                                (status, reason, self.clock().isoformat(), json.dumps(result, ensure_ascii=False),
+                                 artifact, expiry(self.clock(), days) if artifact else None, request["id"]))
+        except Timeout:
+            return
+
     def capture_diagnostic(self, competitor_id: str, ean: str, url: str, *, actor: str, note: str,
-                           build_commit: str, approved: bool) -> dict:
+                           build_commit: str, approved: bool, _held_lock: FileLock | None = None,
+                           _queue_id: int | None = None) -> dict:
         """Collect candidate HTML without changing any pair, identity, offer or review."""
         from price_batch import WatchBatch
         from price_pilot import PricePilot, pilot_scope
         from price_web import validate_competitor_url
-        from price_web_extract import _Collector
+        from price_diagnostic import EvidenceError, expire, has_capacity, limits, require_private_database, sanitise
 
         actor, note = actor.strip(), note.strip()
         started = self.clock().isoformat()
         with self.store._connect() as con, con:
             audit_id = con.execute("""INSERT INTO access_audit(scope,scope_id,action,previous,current,actor,note,at)
                 VALUES('competitor',?,'capture_diagnostic_html','',?,?,?,?)""",
-                                   (competitor_id, json.dumps({"status": "started"}), actor or "sin identificar",
+                                   (competitor_id, json.dumps({"status": "started", "queue_id": _queue_id}), actor or "sin identificar",
                                     note, started)).lastrowid
         purpose = f"diagnostic:{audit_id}"
-        result = {"status": "interrupted", "stage": "authorization", "ean": ean,
+        result = {"status": "interrupted", "stage": "authorization", "ean": ean, "queue_id": _queue_id,
                   "url_sha256": hashlib.sha256(url.encode()).hexdigest(),
                   "build_commit": build_commit}
         try:
@@ -1117,10 +1247,22 @@ class PriceTrial:
             ean = normalize_gtin(ean)
             result["ean"] = ean
             result["stage"] = "lock_and_scope"
-            with self.continuity_lock():
+            if _held_lock is not None and (not isinstance(_held_lock, FileLock) or not _held_lock.is_locked or
+                                           Path(_held_lock.lock_file).resolve() !=
+                                           Path(f"{self.store.database_path}.continuity.lock").resolve()):
+                raise ValueError("Bloqueo de continuidad no acreditado")
+            with nullcontext() if _held_lock else self.continuity_lock():
                 row = continuity_row(self.store)
                 if not row or row["status"] != "active":
                     raise ValueError("La continuidad no está activa")
+                require_private_database(self.store.database_path)
+                body_limit, quota, _ = limits()
+                with self.store._connect() as con, con:
+                    expire(con, self.clock())
+                    used = con.execute("""SELECT COALESCE(SUM(length(artifact)),0)
+                        FROM price_diagnostic_requests""").fetchone()[0]
+                if not has_capacity(self.store.database_path, used, body_limit, quota):
+                    raise ValueError("Capacidad insuficiente para conservar la respuesta")
                 frozen = json.loads(row["manifest"])
                 if competitor_id not in frozen["competitors"] or ean not in frozen["eans"]:
                     raise ValueError("Par fuera del manifiesto de continuidad")
@@ -1167,7 +1309,7 @@ class PriceTrial:
                         with self.execution(0, competitor_id, ean, program="continuity", program_id=row["id"]):
                             fetched = locator.capture_diagnostic(competitor_id, ean, url, purpose=purpose,
                                                                  url_guard=guard, validate=validate,
-                                                                 pilot_run_id=pilot_run_id)
+                                                                 pilot_run_id=pilot_run_id, max_bytes=body_limit)
                     except (ValueError, RuntimeError, Timeout) as exc:
                         error = exc
                     if pilot_run_id is not None:
@@ -1182,24 +1324,20 @@ class PriceTrial:
                 if fetched is None:
                     raise RuntimeError("La consulta diagnóstica no devolvió respuesta")
                 result["stage"] = "response"
-                body = fetched.content
-                sensitive = re.compile(rb"(?i)(csrf|password|passwd|cookie|secret|token|session|authorization|api[_-]?key)")
-                if (len(body) > 1024 * 1024 or sensitive.search(body)
-                        or sensitive.search(json.dumps(fetched.trace).encode())
-                        or not re.search(rb"(?i)<(?:!doctype\s+html|html|head|body)\b", body[:4096])):
-                    raise ValueError("Respuesta no conservable: tamaño, formato o posibles datos sensibles")
-                collector = _Collector()
-                collector.feed(fetched.text)
+                result.update(received_bytes=len(fetched.content),
+                              received_sha256=hashlib.sha256(fetched.content).hexdigest(),
+                              http_status=fetched.status)
+                metadata, artifact = sanitise(fetched, body_limit)
                 result.update({"status": "captured", "stage": "complete", "captured_at": self.clock().isoformat(),
-                               "requested_url": fetched.requested_url, "final_url": fetched.url,
-                               "http_status": fetched.status, "redirects": fetched.redirects,
-                               "canonical_urls": list(dict.fromkeys(urljoin(fetched.url, href)
-                                                                     for href in collector.canonicals)),
-                               "sha256": hashlib.sha256(body).hexdigest(),
-                               "html_base64": base64.b64encode(body).decode("ascii")})
+                               **metadata, "html_base64": base64.b64encode(artifact).decode("ascii")})
                 return result
         except (ValueError, RuntimeError, Timeout) as exc:
             result.update(status="rejected", error_type=type(exc).__name__)
+            if isinstance(exc, EvidenceError):
+                result["reason"] = str(exc)
+            elif str(exc) in {"La respuesta supera el tamaño máximo permitido",
+                              "Capacidad insuficiente para conservar la respuesta"}:
+                result["reason"] = str(exc)
             from price_access import AccessDenied
             if isinstance(exc, AccessDenied):
                 result["access_code"] = exc.decision.code
@@ -1209,8 +1347,9 @@ class PriceTrial:
                 requests = [dict(r) for r in con.execute("""SELECT id,result,reserved_at FROM access_requests
                     WHERE purpose=? ORDER BY id""", (purpose,))]
                 result["requests"] = requests
+                audit_result = {k: v for k, v in result.items() if k != "html_base64"}
                 con.execute("UPDATE access_audit SET current=? WHERE id=?",
-                            (json.dumps(result, ensure_ascii=False), audit_id))
+                            (json.dumps(audit_result, ensure_ascii=False), audit_id))
 
     def reevaluate_restricted_pairs(self, *, actor: str = "", note: str = "",
                                     apply: bool = False) -> list[dict]:
@@ -1486,6 +1625,7 @@ def serve(command):
                     service = PriceTrial(store)
                     service.tick()
                     service.continuity_tick()
+                    service.diagnostic_tick()
             except Exception:
                 LOG.exception("Price watch worker failed; no automatic reactivation")
             stopped.wait(30)

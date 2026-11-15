@@ -37,6 +37,11 @@ class Reader:
         return []
 
 
+@pytest.fixture(autouse=True)
+def private_diagnostic_storage(monkeypatch):
+    monkeypatch.setattr("price_diagnostic.require_private_database", lambda path: None)
+
+
 @pytest.fixture
 def trial(tmp_path):
     site = Site(base="https://www.amevista.com", robots="User-agent: *\nAllow: /\n")
@@ -548,8 +553,11 @@ def test_diagnostic_capture_preserves_reviews_and_offers(trial):
     result = service.capture_diagnostic(cid, ean, url, actor="operator", note="review",
                                         build_commit="b" * 40, approved=True)
     assert _commercial_snapshot(store) == before
-    assert base64.b64decode(result["html_base64"]) == site.pages[url].encode()
-    assert result["sha256"] == hashlib.sha256(site.pages[url].encode()).hexdigest()
+    artifact = base64.b64decode(result["html_base64"])
+    assert artifact != site.pages[url].encode() and b"application/ld+json" in artifact
+    assert result["artifact_kind"] == "sanitizado_parcial_jsonld"
+    assert result["received_sha256"] == hashlib.sha256(site.pages[url].encode()).hexdigest()
+    assert result["artifact_sha256"] == hashlib.sha256(artifact).hexdigest()
     assert result["requested_url"] == url and result["final_url"] == url
     assert result["canonical_urls"] == ["https://other.example/canonical"]
     assert "https://other.example/canonical" not in site.calls
@@ -558,7 +566,209 @@ def test_diagnostic_capture_preserves_reviews_and_offers(trial):
         audit = con.execute("SELECT * FROM access_audit WHERE action='capture_diagnostic_html'").fetchone()
         stored = json.loads(audit["current"])
         assert stored["status"] == "captured" and stored["requests"]
+        assert "html_base64" not in stored
         assert audit["actor"] == "operator" and audit["note"] == "review"
+
+
+def test_diagnostic_queue_survives_busy_worker_pause_and_session_restart(trial):
+    from concurrent.futures import ThreadPoolExecutor
+    import hashlib
+
+    service, store, clock, cid, ean, url, site = _diagnostic_review(trial)
+    graph = {"@context": "https://schema.org", "@graph": [
+        {"@type": "ProductGroup", "@id": url + "#group", "hasVariant": {"@id": url + "#variant"}},
+        {"@type": "Product", "@id": url + "#variant", "gtin13": ean, "offers": {"@id": url + "#offer"}},
+        {"@type": "Offer", "@id": url + "#offer", "price": "120", "priceCurrency": "EUR",
+         "availability": "https://schema.org/InStock"},
+        {"@type": "Person", "name": "private name"},
+    ]}
+    site.pages[url] = ('<html><head><script type="application/ld+json">' + json.dumps(graph)
+                       + '</script></head><body><input name="csrf" value="sensitive"></body></html>')
+    before = _commercial_snapshot(store)
+    kwargs = {"actor": "operator", "note": "diagnóstico", "build_commit": "b" * 40, "approved": True}
+    with service.continuity_lock():
+        request = service.request_diagnostic(cid, ean, url, **kwargs)
+        assert service.request_diagnostic(cid, ean, url, **kwargs)["id"] == request["id"]
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pool.submit(service.diagnostic_tick).result(timeout=10)
+        assert service.diagnostic_results(cid, ean)[0]["status"] == "pending"
+    service.pause_continuity(actor="operator")
+    service.diagnostic_tick()
+    assert not site.calls
+    service.resume_continuity(actor="operator")
+    service.diagnostic_tick()
+    service.diagnostic_tick()
+    saved = service.diagnostic_results(cid, ean)[0]
+    assert saved["status"] == "captured" and site.calls.count(url) == 1
+    restarted = PriceTrial(store, clock=clock, batch=service._batch, sync=service._sync)
+    artifact = restarted.diagnostic_artifact(request["id"])
+    assert b"#group" in artifact and b"#variant" in artifact and b"#offer" in artifact
+    assert b"sensitive" not in artifact and b"private name" not in artifact
+    assert json.loads(saved["result"])["artifact_sha256"] == hashlib.sha256(artifact).hexdigest()
+    assert _commercial_snapshot(store) == before
+    clock.advance(days=8)
+    with pytest.raises(ValueError, match="caducado"):
+        restarted.diagnostic_artifact(request["id"])
+    with store._connect() as con:
+        assert con.execute("SELECT COUNT(*) FROM access_audit WHERE action='expire_diagnostic_artifact'").fetchone()[0] == 1
+
+
+def test_diagnostic_requested_during_normal_check_runs_once_afterward(trial):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    import pandas as pd
+
+    service, store, clock, cid, ean, url, site = _diagnostic_review(trial)
+    continuity_id = service.continuity_report()["id"]
+    normal_ean = manifest()["eans"][1]
+    with store._connect() as con, con:
+        con.execute("UPDATE price_continuity_pairs SET state='review' WHERE continuity_id=?", (continuity_id,))
+        con.execute("""UPDATE price_continuity_pairs SET state='pending',next_check_at=NULL
+            WHERE continuity_id=? AND competitor_id=? AND ean=?""", (continuity_id, cid, normal_ean))
+    entered, release = threading.Event(), threading.Event()
+    locator = service._batch.locator
+
+    class Batch:
+        def __init__(self):
+            self.locator = locator
+
+        def preview(self, eans, competitors):
+            return pd.DataFrame([{"next_check_at": (clock() + timedelta(days=1)).isoformat()}])
+
+        def execute(self, eans, competitors, **kwargs):
+            entered.set()
+            assert release.wait(10)
+            return {"pairs": [{"ean": eans[0], "competitor_id": competitors[0], "processed": True,
+                               "category": "checked_now", "requests": 0, "outcomes": []}]}
+
+    service._batch = Batch()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(service.continuity_tick, max_pairs=1)
+        try:
+            assert entered.wait(10)
+            request = service.request_diagnostic(cid, ean, url, actor="operator", note="review",
+                                                 build_commit="b" * 40, approved=True)
+            assert service.diagnostic_results(cid, ean)[0]["status"] == "pending"
+        finally:
+            release.set()
+        future.result(timeout=10)
+    before = _commercial_snapshot(store)
+    service.diagnostic_tick()
+    service.diagnostic_tick()
+    assert site.calls.count(url) == 1
+    assert service.diagnostic_artifact(request["id"])
+    assert _commercial_snapshot(store) == before
+
+
+def test_diagnostic_evidence_is_visible_in_a_new_browser_session(trial):
+    from streamlit.testing.v1 import AppTest
+
+    service, store, clock, cid, ean, url, _ = _diagnostic_review(trial)
+    request = service.request_diagnostic(cid, ean, url, actor="operator", note="review",
+                                         build_commit="b" * 40, approved=True)
+    service.diagnostic_tick()
+    script = (
+        "from datetime import datetime\n"
+        "from price_comparator import PriceComparatorStore\n"
+        "from price_trial import PriceTrial\n"
+        "from app_pages.price_watch import _render_continuity_capture\n"
+        f"store=PriceComparatorStore({str(store.database_path)!r})\n"
+        f"service=PriceTrial(store, clock=lambda: datetime.fromisoformat({clock().isoformat()!r}))\n"
+        "frozen=service.continuity_report()['manifest']\n"
+        "_render_continuity_capture(service, frozen)\n"
+    )
+    app = AppTest.from_string(script).run(timeout=30)
+    app.selectbox(key="diagnostic_competitor").set_value(cid)
+    app.selectbox(key="diagnostic_ean").set_value(ean).run(timeout=30)
+    assert not app.exception
+    assert app.selectbox(key="diagnostic_saved").value["id"] == request["id"]
+    assert app.get("download_button")
+
+
+def test_diagnostic_queue_defers_capacity_before_http_and_rejects_sensitive_fields(trial, monkeypatch):
+    service, store, _, cid, ean, url, site = _diagnostic_review(trial)
+    request = service.request_diagnostic(cid, ean, url, actor="operator", note="review",
+                                         build_commit="b" * 40, approved=True)
+    monkeypatch.setenv("PRICE_DIAGNOSTIC_QUOTA_BYTES", "1")
+    service.diagnostic_tick()
+    assert service.diagnostic_results(cid, ean)[0]["status"] == "deferred"
+    assert not site.calls
+    monkeypatch.delenv("PRICE_DIAGNOSTIC_QUOTA_BYTES")
+    graph = {"@type": "Product", "name": "password=not-for-storage", "sku": "AB123"}
+    site.pages[url] = ('<html><head><script type="application/ld+json">' + json.dumps(graph)
+                       + '</script></head></html>')
+    service.diagnostic_tick()
+    saved = service.diagnostic_results(cid, ean)[0]
+    assert saved["status"] == "rejected" and "sensible" in saved["reason"]
+    assert not saved["available"] and site.calls.count(url) == 1
+    with store._connect() as con:
+        row = con.execute("SELECT result,artifact FROM price_diagnostic_requests WHERE id=?", (request["id"],)).fetchone()
+        audit = " ".join(r[0] for r in con.execute("SELECT current FROM access_audit"))
+    assert row["artifact"] is None and "not-for-storage" not in row["result"] + audit
+
+
+def test_diagnostic_restart_does_not_repeat_an_uncertain_request(trial):
+    service, store, clock, cid, ean, url, site = _diagnostic_review(trial)
+    request = service.request_diagnostic(cid, ean, url, actor="operator", note="review",
+                                         build_commit="b" * 40, approved=True)
+    with store._connect() as con, con:
+        con.execute("UPDATE price_diagnostic_requests SET status='running' WHERE id=?", (request["id"],))
+    restarted = PriceTrial(store, clock=clock, batch=service._batch, sync=service._sync)
+    restarted.diagnostic_tick()
+    restarted.diagnostic_tick()
+    saved = restarted.diagnostic_results(cid, ean)[0]
+    assert saved["status"] == "rejected" and "incierto" in saved["reason"] and not site.calls
+
+
+def test_diagnostic_rejects_unverifiable_private_storage_before_http(trial, monkeypatch):
+    from price_diagnostic import EvidenceError
+
+    service, _, _, cid, ean, url, site = _diagnostic_review(trial)
+    service.request_diagnostic(cid, ean, url, actor="operator", note="review",
+                               build_commit="b" * 40, approved=True)
+
+    def deny(path):
+        raise EvidenceError("El almacenamiento no acredita permisos privados")
+
+    monkeypatch.setattr("price_diagnostic.require_private_database", deny)
+    service.diagnostic_tick()
+    saved = service.diagnostic_results(cid, ean)[0]
+    assert saved["status"] == "rejected" and "privados" in saved["reason"]
+    assert not site.calls
+
+
+def test_diagnostic_rejects_unrelated_claimed_lock(trial, tmp_path):
+    from filelock import FileLock
+
+    service, _, _, cid, ean, url, site = _diagnostic_review(trial)
+    with FileLock(str(tmp_path / "unrelated.lock")) as lock:
+        with pytest.raises(ValueError, match="Bloqueo de continuidad"):
+            service.capture_diagnostic(cid, ean, url, actor="operator", note="review",
+                                       build_commit="b" * 40, approved=True, _held_lock=lock)
+    assert not site.calls
+
+
+def test_diagnostic_capacity_does_not_remove_unexpired_evidence(trial, monkeypatch):
+    service, store, clock, cid, ean, url, site = _diagnostic_review(trial)
+    request = service.request_diagnostic(cid, ean, url, actor="operator", note="review",
+                                         build_commit="b" * 40, approved=True)
+    with store._connect() as con, con:
+        con.execute("""INSERT INTO price_diagnostic_requests
+            (continuity_id,competitor_id,ean,url,actor,note,build_commit,status,created_at,artifact,expires_at)
+            SELECT continuity_id,competitor_id,ean,url || '-other',actor,note,build_commit,'captured',
+            created_at,?,? FROM price_diagnostic_requests WHERE id=?""",
+                    (b"valid evidence", (clock() + timedelta(days=1)).isoformat(), request["id"]))
+    monkeypatch.setenv("PRICE_DIAGNOSTIC_QUOTA_BYTES", str(2 * 1024 * 1024))
+    service.diagnostic_tick()
+    assert not site.calls
+    with store._connect() as con:
+        assert con.execute("SELECT COUNT(*) FROM price_diagnostic_requests WHERE artifact IS NOT NULL").fetchone()[0] == 1
+        assert con.execute("SELECT status FROM price_diagnostic_requests WHERE id=?", (request["id"],)).fetchone()[0] == "deferred"
+    clock.advance(days=2)
+    service.diagnostic_tick()
+    assert site.calls.count(url) == 1
+    with store._connect() as con:
+        assert con.execute("SELECT COUNT(*) FROM access_audit WHERE action='expire_diagnostic_artifact'").fetchone()[0] == 1
 
 
 def test_diagnostic_finds_candidate_in_pair_review_receipt(trial):
@@ -594,15 +804,13 @@ def test_diagnostic_excludes_resolved_candidates_even_with_old_review(trial, res
     assert not site.calls
 
 
-@pytest.mark.parametrize("reason", ["undocumented", "robots", "sensitive", "blocked", "deferred"])
+@pytest.mark.parametrize("reason", ["undocumented", "robots", "blocked", "deferred"])
 def test_diagnostic_rejections_are_audited_without_changing_review(trial, reason):
     service, store, clock, cid, ean, url, site = _diagnostic_review(trial)
     if reason == "undocumented":
         url += "-unknown"
     elif reason == "robots":
         site.robots = "User-agent: *\nDisallow: /gafas/\n"
-    elif reason == "sensitive":
-        site.pages[url] += '<input name="csrf" value="sensitive">'
     elif reason == "blocked":
         with store._connect() as con, con:
             con.execute("UPDATE competitor_web_config SET access_status='blocked' WHERE competitor_id=?", (cid,))

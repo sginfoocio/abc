@@ -963,8 +963,8 @@ def _render_continuity(store: PriceComparatorStore, service=None) -> None:
         if report["status"] in ("active", "paused"):
             _render_interrupted_recovery(store)
             _render_selected_recovery(store, report["id"])
-        if report["status"] == "active":
-            _render_continuity_capture(service, frozen)
+        if report["status"] in ("active", "paused"):
+            _render_continuity_capture(service, frozen, active=report["status"] == "active")
         if report["status"] == "active" and report["summary"]["restricted_pairs"]:
             key = f"continuity_reevaluation_{report['id']}"
             with st.expander("Reevaluación auditada de pares restringidos"):
@@ -1120,7 +1120,7 @@ def _render_selected_recovery(store: PriceComparatorStore, continuity_id: int) -
                 st.error(f"No se pudo aplicar la recuperación: {exc}")
 
 
-def _render_continuity_capture(service, frozen: dict) -> None:
+def _render_continuity_capture(service, frozen: dict, *, active: bool = True) -> None:
     import sqlite3
 
     from filelock import Timeout
@@ -1140,7 +1140,7 @@ def _render_continuity_capture(service, frozen: dict) -> None:
             note = st.text_input("Motivo de captura")
             approved = st.checkbox("Autorizo procesar este único par si está vencido y permitido")
             submitted = st.form_submit_button("Capturar durante la comprobación supervisada",
-                                              disabled=not info["build"].startswith("actions-"))
+                                              disabled=not active or not info["build"].startswith("actions-"))
         if submitted:
             try:
                 st.session_state["continuity_capture_result"] = service.capture_continuity(
@@ -1162,34 +1162,39 @@ def _render_continuity_capture(service, frozen: dict) -> None:
                            format_func=lambda value: frozen["competitors"][value], key="diagnostic_competitor")
         ean = st.selectbox("EAN", options=frozen["eans"], key="diagnostic_ean")
         candidates = service.diagnostic_candidates(cid, ean)
+        st.button("Actualizar estado", key="diagnostic_refresh")
+        results = service.diagnostic_results(cid, ean)
+        if results:
+            st.dataframe(pd.DataFrame(results), hide_index=True)
+            available = [r for r in results if r["available"]]
+            if available:
+                chosen = st.selectbox("Evidencia guardada", available,
+                                      format_func=lambda r: f"{r['id']} · {r['finished_at']}",
+                                      key="diagnostic_saved")
+                try:
+                    artifact = service.diagnostic_artifact(chosen["id"])
+                    st.download_button("Descargar evidencia sanitizada", artifact,
+                                       "price-diagnostic-sanitized.html", "text/html", key="diagnostic_download")
+                except (ValueError, sqlite3.Error) as exc:
+                    st.warning(f"Evidencia no disponible: {exc}")
         if not candidates:
             st.info("No hay candidatas documentadas pendientes de revisión para este par.")
             return
         url = st.selectbox("URL candidata documentada", candidates, key="diagnostic_url")
-        selection = (cid, ean, url)
-        if st.session_state.get("diagnostic_capture_selection") != selection:
-            st.session_state.pop("diagnostic_capture_result", None)
-            st.session_state["diagnostic_capture_selection"] = selection
         info = load_build_info()
         with st.form("diagnostic_capture_form"):
             actor = st.text_input("Responsable", value="")
             note = st.text_input("Motivo del diagnóstico")
             approved = st.checkbox("Autorizo una consulta diagnóstica gobernada")
-            submitted = st.form_submit_button("Capturar evidencia diagnóstica",
+            submitted = st.form_submit_button("Solicitar evidencia diagnóstica",
                                               disabled=not info["build"].startswith("actions-"))
         if submitted:
             try:
-                st.session_state["diagnostic_capture_result"] = service.capture_diagnostic(
+                saved = service.request_diagnostic(
                     cid, ean, url, actor=actor, note=note, build_commit=info["commit"], approved=approved)
-                st.success("Evidencia guardada en la auditoría sin modificar la revisión.")
+                st.success(f"Solicitud {saved['id']}: {saved['status']}. El trabajador la procesará sin esperar aquí.")
             except (ValueError, RuntimeError, sqlite3.Error, Timeout) as exc:
-                st.session_state.pop("diagnostic_capture_result", None)
-                st.error(f"No se guardó una captura: {exc}")
-        result = st.session_state.get("diagnostic_capture_result")
-        if result is not None:
-            st.download_button("Descargar evidencia diagnóstica",
-                               json.dumps(result, ensure_ascii=False).encode("utf-8"),
-                               "price-diagnostic-capture.json", "application/json", key="diagnostic_download")
+                st.error(f"No se pudo registrar la solicitud: {exc}")
 
 
 def _render_batch(store: PriceComparatorStore, names: dict[str, str]) -> None:

@@ -13,6 +13,7 @@ import gzip
 import os
 import re
 import time
+import zlib
 from typing import Callable, Protocol
 from urllib.parse import urljoin, urlparse
 
@@ -203,7 +204,8 @@ class Fetched:
         return self.content.decode("utf-8", errors="replace")
 
 
-def _requests_transport(url: str, headers: dict, timeout: float) -> tuple[int, dict, bytes]:
+def _requests_transport(url: str, headers: dict, timeout: float, *,
+                        max_bytes: int = MAX_SITEMAP_BYTES) -> tuple[int, dict, bytes]:
     import requests
 
     _assert_public_host(urlparse(url).hostname or "")
@@ -214,9 +216,9 @@ def _requests_transport(url: str, headers: dict, timeout: float) -> tuple[int, d
     with response:
         body = bytearray()
         for chunk in response.iter_content(65536):
-            body.extend(chunk)
-            if len(body) > MAX_SITEMAP_BYTES:
+            if len(chunk) > max_bytes - len(body):
                 raise ConnectorError("La respuesta supera el tamaño máximo permitido")
+            body.extend(chunk)
         return response.status_code, dict(response.headers), bytes(body)
 
 
@@ -336,7 +338,7 @@ class WebFetcher:
             self._last_request = probe._last_request
             self.blocked.update(probe.blocked)
 
-    def get(self, url: str, *, max_bytes: int = MAX_PAGE_BYTES) -> Fetched:
+    def get(self, url: str, *, max_bytes: int = MAX_PAGE_BYTES, bounded_gzip: bool = False) -> Fetched:
         if urlparse(url).scheme != "https":
             raise ConnectorError("Solo se consultan páginas HTTPS")
         requested_url = url
@@ -358,7 +360,18 @@ class WebFetcher:
             if status >= 400:
                 raise ConnectorError(f"El sitio respondió HTTP {status}")
             if body[:2] == b"\x1f\x8b":
-                body = gzip.decompress(body)[:max_bytes]
+                if bounded_gzip:
+                    decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+                    try:
+                        body = decoder.decompress(body, max_bytes + 1)
+                    except zlib.error as exc:
+                        raise ConnectorError("Respuesta comprimida inválida") from exc
+                    if len(body) > max_bytes or not decoder.eof:
+                        raise ConnectorError("La respuesta supera el tamaño máximo permitido")
+                    if decoder.unused_data:
+                        raise ConnectorError("Respuesta comprimida con segmentos adicionales")
+                else:
+                    body = gzip.decompress(body)[:max_bytes]
             if _CAPTCHA.search(body[:20000].decode("utf-8", errors="ignore")) and b"application/ld+json" not in body:
                 self.blocked[origin_host] = "CAPTCHA o control antibot"
                 raise ConnectorBlocked("El sitio presenta un control antibot/CAPTCHA; no se intenta superarlo")

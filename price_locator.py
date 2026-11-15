@@ -424,17 +424,19 @@ class PriceLocator:
         self.external_search, self.external_provider = external_search, external_provider
 
     def capture_diagnostic(self, competitor_id: str, ean: str, url: str, *, purpose: str,
-                           url_guard, validate, pilot_run_id: int | None = None):
+                           url_guard, validate, pilot_run_id: int | None = None,
+                           max_bytes: int = 2 * 1024 * 1024):
         """Fetch documented evidence with the same competitor lock and governed locator session."""
         with self.search._lock(competitor_id):
             validate()
             session = _Session(self, competitor_id, diagnostic_purpose=purpose, url_guard=url_guard,
-                               pilot_run_id=pilot_run_id)
+                               pilot_run_id=pilot_run_id, diagnostic_max_bytes=max_bytes)
             gate = self.search._gate(session.config)
             if gate:
                 raise ConnectorError(gate)
             url_guard(url)
-            return session.fetcher("ficha", ean).get(url)
+            fetcher = session.fetcher("ficha", ean)
+            return fetcher.get(url, max_bytes=max_bytes, bounded_gzip=True)
 
     # queue ------------------------------------------------------------------------------------
     def enqueue(self, competitor_ids: list[str] | None = None, eans: list[str] | None = None) -> dict[str, int]:
@@ -905,8 +907,10 @@ class _Session:
     """One competitor during one run: authorised methods, governed fetchers (robots.txt shared) and caches."""
 
     def __init__(self, locator: PriceLocator, competitor_id: str, *, point_check: bool = False,
-                 pilot_run_id: int | None = None, diagnostic_purpose: str = "", url_guard=None) -> None:
+                 pilot_run_id: int | None = None, diagnostic_purpose: str = "", url_guard=None,
+                 diagnostic_max_bytes: int | None = None) -> None:
         self.locator, self.store, self.competitor_id = locator, locator.store, competitor_id
+        self.diagnostic_max_bytes = diagnostic_max_bytes
         self.point_check = point_check
         self.diagnostic_purpose, self.url_guard = diagnostic_purpose, url_guard
         self._checked_urls: set[str] = set()
@@ -965,9 +969,13 @@ class _Session:
 
     def fetcher(self, method: str, ean: str = "") -> GovernedFetcher:
         if method not in self._fetchers:
+            transport = self.locator._transport
+            if self.diagnostic_max_bytes is not None and transport is _requests_transport:
+                from functools import partial
+                transport = partial(transport, max_bytes=self.diagnostic_max_bytes)
             fetcher = GovernedFetcher(self.locator.access, self.competitor_id, method,
                                       purpose=self.diagnostic_purpose or "locate",
-                                      transport=self.locator._transport, sleep=self.locator._sleep,
+                                      transport=transport, sleep=self.locator._sleep,
                                       pause_seconds=0.0, request_guard=self._pilot_guard,
                                       request_reserved=self._pilot_reserved, url_guard=self.url_guard,
                                       max_requests=1_000_000,
