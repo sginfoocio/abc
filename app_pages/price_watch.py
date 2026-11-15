@@ -1027,7 +1027,8 @@ def _render_interrupted_recovery(store: PriceComparatorStore) -> None:
 
     with st.expander("Recuperación auditada de interrupciones"):
         st.caption("La vista previa no consulta tiendas ni modifica la base. La aplicación revalida los recibos, "
-                   "las revisiones y los bloqueos; no autoriza consultas ni modifica permisos.")
+                   "las revisiones y los bloqueos; no autoriza consultas ni modifica permisos. Introduzca su "
+                   "identidad real; el campo no autentica al responsable.")
         allowlist = st.file_uploader("Lista histórica de 182 pares (JSON)", type=["json"], key="interrupted_list")
         historical_report = st.file_uploader("Informe histórico vinculado (JSON)", type=["json"],
                                              key="interrupted_report")
@@ -1052,7 +1053,7 @@ def _render_interrupted_recovery(store: PriceComparatorStore) -> None:
                                    for row in rows]), hide_index=True)
         info = load_build_info()
         with st.form("interrupted_apply_form"):
-            actor = st.text_input("Responsable", value=_actor())
+            actor = st.text_input("Responsable", value="")
             note = st.text_input("Motivo de recuperación")
             approved = st.checkbox("Autorizo aplicar solo los pares elegibles revalidados")
             submitted = st.form_submit_button("Aplicar recuperación auditada",
@@ -1077,13 +1078,14 @@ def _render_continuity_capture(service, frozen: dict) -> None:
     with st.expander("Captura supervisada de un par"):
         st.caption("Procesa solo un par pendiente y vencido con ficha ya verificada, usando el trabajador y "
                    "sus controles existentes. No fuerza fechas ni acepta revisiones. El HTML se conserva solo "
-                   "si supera las comprobaciones de tamaño y datos sensibles.")
+                   "si supera las comprobaciones de tamaño y datos sensibles. Introduzca su identidad real; "
+                   "el campo no autentica al responsable.")
         cid = st.selectbox("Competidor exacto", options=list(frozen["competitors"]),
                            format_func=lambda value: frozen["competitors"][value], key="capture_competitor")
         ean = st.selectbox("EAN exacto", options=frozen["eans"], key="capture_ean")
         info = load_build_info()
         with st.form("continuity_capture_form"):
-            actor = st.text_input("Responsable", value=_actor())
+            actor = st.text_input("Responsable", value="")
             note = st.text_input("Motivo de captura")
             approved = st.checkbox("Autorizo procesar este único par si está vencido y permitido")
             submitted = st.form_submit_button("Capturar durante la comprobación supervisada",
@@ -1103,7 +1105,8 @@ def _render_continuity_capture(service, frozen: dict) -> None:
 
     with st.expander("Diagnóstico supervisado de candidatas en revisión"):
         st.caption("Consulta una candidata ya documentada sin aceptar la revisión ni modificar ofertas o plazos. "
-                   "Usa permisos, robots y presupuestos existentes; los rechazos también se auditan.")
+                   "Usa permisos, robots y presupuestos existentes; los rechazos también se auditan. Introduzca "
+                   "su identidad real; el campo no autentica al responsable.")
         cid = st.selectbox("Competidor", options=list(frozen["competitors"]),
                            format_func=lambda value: frozen["competitors"][value], key="diagnostic_competitor")
         ean = st.selectbox("EAN", options=frozen["eans"], key="diagnostic_ean")
@@ -1118,7 +1121,7 @@ def _render_continuity_capture(service, frozen: dict) -> None:
             st.session_state["diagnostic_capture_selection"] = selection
         info = load_build_info()
         with st.form("diagnostic_capture_form"):
-            actor = st.text_input("Responsable", value=_actor())
+            actor = st.text_input("Responsable", value="")
             note = st.text_input("Motivo del diagnóstico")
             approved = st.checkbox("Autorizo una consulta diagnóstica gobernada")
             submitted = st.form_submit_button("Capturar evidencia diagnóstica",

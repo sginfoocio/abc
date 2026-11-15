@@ -156,6 +156,7 @@ def test_supervised_recovery_and_capture_render_without_execution(monkeypatch):
     assert app.selectbox(key="capture_competitor").value == "shop"
     assert app.selectbox(key="capture_ean").value == "0805289126577"
     assert app.selectbox(key="diagnostic_url").value == "https://shop.example/candidate"
+    assert [field.value for field in app.text_input if field.label == "Responsable"] == ["", ""]
 
 
 def test_watch_admin_ui_adds_products_and_shows_authorizations(tmp_path, monkeypatch):

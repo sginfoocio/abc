@@ -72,7 +72,8 @@ colas en revisión o ejecución, candidatas pendientes y evidencias posteriores.
 No se han comprobado las exclusiones en la base operativa.
 También se excluyen fichas con identidad pendiente y reservas que no permitan
 atribuir con seguridad el competidor; una reserva identificada de otra tienda
-no bloquea el par. Los saldos compartidos se calculan y reservan en la base
+no bloquea el par. Una reserva de ámbito de competidor sin identificador atribuible
+también se considera incierta. Los saldos compartidos se calculan y reservan en la base
 operativa: una base aislada no comparte esa contabilidad. No lanzar consultas
 paralelas desde una copia ni ejecutar código de la rama contra la base operativa.
 
@@ -89,7 +90,8 @@ Para una futura intervención **expresamente autorizada**:
    por separado que ese SHA corresponde al build instalado: el argumento no lo
    verifica. La aplicación bloquea continuidad y tiendas, revalida en una transacción,
    conserva fechas y registra una auditoría. Una repetición no reabre los pares ya
-   modificados. Si la continuidad está activa, los pares sin próxima fecha pueden
+   modificados; una aplicación sin pares elegibles también registra sus exclusiones.
+   Si la continuidad está activa, los pares sin próxima fecha pueden
    procesarse en cuanto se liberen los bloqueos; los controles normales del trabajador
    siguen siendo obligatorios. `--approved` es una confirmación del operador, no un
    mecanismo de autenticación ni una autorización por sí misma.
@@ -131,6 +133,8 @@ que explica la diferencia. Ninguna de las dos cifras demuestra el estado actual.
 En la sección de continuidad, un administrador puede cargar la lista histórica y
 el informe para previsualizar la recuperación. La aplicación requiere responsable,
 motivo y confirmación; revalida los archivos y el estado bajo los bloqueos existentes.
+En recuperación y capturas el campo de responsable comienza vacío: el operador debe
+introducir su identidad real, que no queda autenticada por ese campo.
 Una continuidad activa puede procesar inmediatamente los pares recuperados. No
 se aplicó ninguna recuperación durante el desarrollo.
 
@@ -174,6 +178,11 @@ conservadores y no pueden garantizar ausencia de todos los datos privados:
 revisar la evidencia antes de compartirla. Un bloqueo HTTP sí abre el incidente
 de seguridad habitual; no se intenta eludir. Un rechazo puede haber consumido
 reservas de robots o de la ficha y debe revisarse antes de repetir.
+El cuerpo se guarda en la auditoría de la base SQLite compartida: el límite de
+1 MiB es por respuesta, no una cuota agregada. Antes de capturar hay que verificar
+la privacidad efectiva del volumen, las copias y el acceso a la base, y establecer
+un límite operativo de almacenamiento. Sin esas garantías no se deben guardar
+capturas reales.
 
 Después de desplegar solo con autorización independiente, verificar el build,
 presupuestos compartidos, permisos, robots, incidentes, estado del par y su

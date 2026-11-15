@@ -122,6 +122,8 @@ def test_apply_revalidates_requests_and_reviews_preserves_history_and_is_idempot
     assert not any(r["eligible"] for r in again)
     with store._connect() as con:
         assert con.execute("SELECT COUNT(*) FROM access_audit WHERE action='recover_interrupted_pairs'").fetchone()[0] == 1
+        noop = con.execute("SELECT actor,note FROM access_audit WHERE action='recover_interrupted_pairs_noop'").fetchone()
+        assert noop["actor"] == "operator" and len(json.loads(noop["note"])["excluded"]) == 182
 
 
 def test_apply_refuses_parallel_worker_and_requires_confirmation(recovery):
@@ -184,6 +186,15 @@ def test_unrelated_competitor_scope_does_not_block_recovery(recovery):
             VALUES('competitor','unrelated','','ficha','test',?,?,'reserved')""",
                     (pair["ean"], started.isoformat()))
     assert preview(store.database_path, allowlist, report)[0]["eligible"]
+
+
+def test_unattributed_competitor_reservation_blocks_recovery(recovery):
+    store, allowlist, report, entries, started = recovery
+    with store._connect() as con, con:
+        con.execute("""INSERT INTO access_requests(scope,scope_id,competitor_id,method,purpose,ean,reserved_at,result)
+            VALUES('competitor','','','ficha','test','',?,'reserved')""", (started.isoformat(),))
+    rows = preview(store.database_path, allowlist, report)
+    assert all(not row["eligible"] and "reserva" in row["reason"] for row in rows)
 
 
 def test_apply_rolls_back_every_change_and_preserves_future_deadline(recovery):

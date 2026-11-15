@@ -127,7 +127,8 @@ def _evaluate(con, entries):
         if not reason:
             requests = con.execute("""SELECT reserved_at FROM access_requests
                 WHERE (competitor_id=? OR (scope='competitor' AND scope_id=?)
-                       OR ((competitor_id='' OR competitor_id IS NULL) AND scope!='competitor'))
+                       OR ((competitor_id='' OR competitor_id IS NULL)
+                           AND (scope!='competitor' OR scope_id='' OR scope_id IS NULL)))
                   AND (ean=? OR ean='' OR ean IS NULL)""", (cid, cid, ean)).fetchall()
             try:
                 if any(_time(r["reserved_at"]) >= _time(entry["attempt_started_at"]) for r in requests):
@@ -218,19 +219,23 @@ def apply(database, allowlist_path, report_path, *, actor, note, build_commit, a
                     WHERE id=? AND continuity_id=? AND state='review'""",
                             ("Recuperación técnica auditada; sujeta a controles vigentes", row["pair_id"], continuity_id))
                 changed.append(row)
+            metadata = {"reason": note.strip(), "build_commit": build_commit,
+                        "source_report_sha256": allowlist["source_report_sha256"],
+                        "excluded": [{k: r[k] for k in ("pair_id", "competitor_id", "ean", "reason")}
+                                     for r in rows if not r["eligible"]]}
             if changed:
                 previous = [r["previous"] for r in changed]
                 current = [{"id": r["pair_id"], "state": "pending", "next_check_at": r["previous"]["next_check_at"]}
                            for r in changed]
-                metadata = {"reason": note.strip(), "build_commit": build_commit,
-                            "source_report_sha256": allowlist["source_report_sha256"],
-                            "excluded": [{k: r[k] for k in ("pair_id", "competitor_id", "ean", "reason")}
-                                         for r in rows if not r["eligible"]]}
                 con.execute("""INSERT INTO access_audit(scope,scope_id,action,previous,current,actor,note,at)
                     VALUES('price_continuity',?,'recover_interrupted_pairs',?,?,?,?,?)""",
                             (str(continuity_id), json.dumps(previous, ensure_ascii=False),
                              json.dumps(current, ensure_ascii=False), actor.strip(),
                              json.dumps(metadata, ensure_ascii=False), now))
+            else:
+                con.execute("""INSERT INTO access_audit(scope,scope_id,action,previous,current,actor,note,at)
+                    VALUES('price_continuity',?,'recover_interrupted_pairs_noop','[]','[]',?,?,?)""",
+                            (str(continuity_id), actor.strip(), json.dumps(metadata, ensure_ascii=False), now))
             con.commit()
     return rows
 
