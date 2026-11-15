@@ -90,6 +90,36 @@ def test_verified_watch_only_and_no_search_on_subsequent_updates(tmp_path):
     assert monitor.run([cid]).processed == 0 and not site.calls
 
 
+@pytest.mark.parametrize("changed_url", [False, True])
+def test_done_job_respects_future_not_before_and_reopens_when_due(tmp_path, changed_url):
+    from price_batch import WatchBatch
+
+    store, _, locator, monitor, clock, cid, site = _monitor_env(tmp_path)
+    assert monitor.run([cid]).states == {"done": 1}
+    clock.advance(hours=25)
+    future = (clock() + timedelta(days=5)).isoformat()
+    with store._connect() as con, con:
+        con.execute("UPDATE monitor_jobs SET not_before=? WHERE competitor_id=?", (future, cid))
+    batch = WatchBatch(store, locator=locator, monitor=monitor)
+    preview = batch.preview([EAN], [cid]).iloc[0]
+    assert not preview["ready"] and preview["next_check_at"] == future
+    if changed_url:
+        with store._connect() as con, con:
+            con.execute("UPDATE competitor_product_urls SET url=? WHERE competitor_id=? AND ean=?",
+                        ("https://example.test/changed", cid, EAN))
+    monitor.enqueue([cid], [EAN])
+    assert monitor.jobs().iloc[0]["state"] == "done"
+    assert monitor.jobs().iloc[0]["not_before"] == future
+    site.calls.clear()
+    clock.advance(days=5)
+    assert batch.preview([EAN], [cid]).iloc[0]["ready"]
+    if changed_url:
+        monitor.enqueue([cid], [EAN])
+        assert monitor.jobs().iloc[0]["state"] == "pending"
+    else:
+        assert monitor.run([cid], eans=[EAN]).processed == 1
+
+
 def test_price_stock_alerts_and_persistent_deduplication(tmp_path):
     store, _, _, monitor, clock, cid, site = _monitor_env(tmp_path)
     store.import_own_prices(pd.DataFrame([{"EAN": EAN, "Mercado": "ES", "Precio": "115", "Moneda": "EUR",
@@ -254,6 +284,8 @@ def test_frequency_group_override_stale_alert_and_schedule_switch(tmp_path, monk
     assert monitor.run([cid]).processed == 0
     monitor.watch.save_group("Rápido", 2)
     monitor.watch.move([EAN], "Rápido")
+    from price_batch import WatchBatch
+    assert WatchBatch(store, monitor=monitor).preview([EAN], [cid]).iloc[0]["ready"]
     assert monitor.run([cid]).processed == 1
     earlier_episodes = len(monitor.alerts().query("kind == 'stale'"))
     clock.advance(hours=5)

@@ -1,0 +1,182 @@
+"""Synthetic continuity and historical report; no production data or HTTP."""
+from datetime import datetime, timedelta, timezone
+import hashlib
+import json
+import sqlite3
+
+from filelock import FileLock, Timeout
+import pytest
+import requests
+
+from price_comparator import PriceComparatorStore
+from price_recovery import EXPECTED_COUNTS, REASON, apply, load_allowlist, preview
+from price_trial import manifest
+
+
+@pytest.fixture(autouse=True)
+def forbid_network(monkeypatch):
+    def deny(*args, **kwargs):
+        pytest.fail("No commercial HTTP")
+    monkeypatch.setattr(requests.Session, "send", deny)
+
+
+@pytest.fixture
+def recovery(tmp_path):
+    store = PriceComparatorStore(tmp_path / "synthetic.sqlite3")
+    store.seed_defaults()
+    eans = manifest()["eans"]
+    started = datetime(2026, 11, 14, tzinfo=timezone.utc)
+    closed = started + timedelta(seconds=30)
+    with store._connect() as con, con:
+        shops = {r["id"]: r["name"] for r in con.execute("SELECT id,name FROM competitors")}
+        assert len(shops) == 14
+        con.executemany("INSERT INTO products(ean,original_ean,updated_at) VALUES(?,?,?)",
+                        [(e, e, started.isoformat()) for e in eans])
+        pairs = [(cid, ean) for cid in shops for ean in eans]
+        frozen = {"eans": eans, "competitors": shops,
+                  "pairs": [{"competitor_id": cid, "ean": ean} for cid, ean in pairs]}
+        con.execute("""INSERT INTO price_continuity(id,status,prepared_at,actor,build_commit,manifest,limits,
+            interval_hours,started_at) VALUES(1,'active',?,'test',?,?,'{}',24,?)""",
+                    (started.isoformat(), "a" * 40, json.dumps(frozen), started.isoformat()))
+        con.executemany("INSERT INTO price_continuity_pairs(continuity_id,competitor_id,ean) VALUES(1,?,?)", pairs)
+        entries, report_pairs, checks = [], [], []
+        index = 0
+        for cid, count in EXPECTED_COUNTS.items():
+            for _ in range(count):
+                ean = eans[index % 85]
+                index += 1
+                pair_id = con.execute("SELECT id FROM price_continuity_pairs WHERE competitor_id=? AND ean=?",
+                                      (cid, ean)).fetchone()[0]
+                con.execute("""UPDATE price_continuity_pairs SET state='review',started_at=?,checked_at=?,
+                    defer_reason=? WHERE id=?""", (started.isoformat(), closed.isoformat(), REASON, pair_id))
+                receipt = json.dumps({"http_receipts": [], "closure_reason": REASON})
+                cursor = con.execute("""INSERT INTO price_continuity_checks
+                    (continuity_id,competitor_id,ean,started_at,finished_at,state,category,defer_reason,receipt)
+                    VALUES(1,?,?,?,?,'review','interrupted',?,?)""",
+                                     (cid, ean, started.isoformat(), closed.isoformat(), REASON, receipt))
+                check_id = cursor.lastrowid
+                check = dict(con.execute("SELECT * FROM price_continuity_checks WHERE id=?", (check_id,)).fetchone())
+                pair = dict(con.execute("SELECT * FROM price_continuity_pairs WHERE id=?", (pair_id,)).fetchone())
+                pair["latest_check"] = check
+                checks.append(check)
+                report_pairs.append(pair)
+                entries.append({"continuity_id": 1, "pair_id": pair_id, "competitor_id": cid, "ean": ean,
+                                "expected_latest_check_id": check_id, "expected_state": "review",
+                                "expected_category": "interrupted", "expected_reason": REASON,
+                                "attempt_started_at": started.isoformat(), "closed_at": closed.isoformat()})
+    report_path = tmp_path / "report.json"
+    report_path.write_text(json.dumps({"pairs": report_pairs, "checks": checks}), encoding="utf-8")
+    allowlist = {"kind": "offline_recovery_review_allowlist_not_execution_authorization", "selected_pairs": 1400,
+                 "technical_pairs": 182, "distinct_eans_in_technical_pairs": 85,
+                 "source_report_sha256": hashlib.sha256(report_path.read_bytes()).hexdigest(), "pairs": entries}
+    allowlist_path = tmp_path / "allowlist.json"
+    allowlist_path.write_text(json.dumps(allowlist), encoding="utf-8")
+    return store, allowlist_path, report_path, entries, started
+
+
+def dump(store):
+    with store._connect() as con:
+        return "\n".join(con.iterdump())
+
+
+def test_preview_is_read_only_and_validates_snapshot_and_scope(recovery):
+    store, allowlist, report, entries, _ = recovery
+    before = dump(store)
+    rows = preview(store.database_path, allowlist, report)
+    assert len(rows) == 182 and all(r["eligible"] for r in rows)
+    assert dump(store) == before
+    altered = json.loads(allowlist.read_text(encoding="utf-8"))
+    altered["pairs"][0]["expected_latest_check_id"] = altered["pairs"][1]["expected_latest_check_id"]
+    allowlist.write_text(json.dumps(altered), encoding="utf-8")
+    with pytest.raises(ValueError):
+        preview(store.database_path, allowlist, report)
+    assert dump(store) == before
+
+
+def test_apply_revalidates_requests_and_reviews_preserves_history_and_is_idempotent(recovery):
+    store, allowlist, report, entries, started = recovery
+    before = preview(store.database_path, allowlist, report)
+    assert all(r["eligible"] for r in before)
+    request, review = entries[:2]
+    with store._connect() as con, con:
+        con.execute("""INSERT INTO access_requests(scope,scope_id,competitor_id,method,purpose,ean,reserved_at,result)
+            VALUES('competitor',?,?,'ficha','test',?,?,'reserved')""",
+                    (request["competitor_id"], request["competitor_id"], request["ean"], started.isoformat()))
+        con.execute("""INSERT INTO locate_jobs(ean,competitor_id,state,created_at,updated_at)
+            VALUES(?,?,'review',?,?)""", (review["ean"], review["competitor_id"], started.isoformat(),
+                                         started.isoformat()))
+        original_checks = [tuple(r) for r in con.execute("SELECT * FROM price_continuity_checks ORDER BY id")]
+    rows = apply(store.database_path, allowlist, report, actor="operator", note="reviewed",
+                 build_commit="b" * 40, approved=True)
+    assert sum(r["eligible"] for r in rows) == 180
+    assert "reserva" in rows[0]["reason"] and "revisión" in rows[1]["reason"]
+    with store._connect() as con:
+        assert [tuple(r) for r in con.execute("SELECT * FROM price_continuity_checks ORDER BY id")] == original_checks
+        assert con.execute("SELECT COUNT(*) FROM price_continuity_pairs WHERE state='pending'").fetchone()[0] == 1398
+        audits = con.execute("SELECT previous,current,note FROM access_audit WHERE action='recover_interrupted_pairs'").fetchall()
+        assert len(audits) == 1 and len(json.loads(audits[0]["current"])) == 180
+        assert len(json.loads(audits[0]["note"])["excluded"]) == 2
+    again = apply(store.database_path, allowlist, report, actor="operator", note="reviewed",
+                  build_commit="b" * 40, approved=True)
+    assert not any(r["eligible"] for r in again)
+    with store._connect() as con:
+        assert con.execute("SELECT COUNT(*) FROM access_audit WHERE action='recover_interrupted_pairs'").fetchone()[0] == 1
+
+
+def test_apply_refuses_parallel_worker_and_requires_confirmation(recovery):
+    store, allowlist, report, _, _ = recovery
+    before = dump(store)
+    with FileLock(f"{store.database_path}.continuity.lock", timeout=0):
+        with pytest.raises(Timeout):
+            apply(store.database_path, allowlist, report, actor="operator", note="reason",
+                  build_commit="b" * 40, approved=True)
+    with pytest.raises(ValueError):
+        apply(store.database_path, allowlist, report, actor="operator", note="reason",
+              build_commit="b" * 40)
+    assert dump(store) == before
+
+
+def test_report_hash_is_required(recovery):
+    _, allowlist, report, _, _ = recovery
+    report.write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="huella"):
+        load_allowlist(allowlist, report)
+
+
+def test_unknown_ean_reservation_and_later_evidence_are_excluded(recovery):
+    store, allowlist, report, entries, started = recovery
+    unknown, later = entries[0], entries[70]
+    with store._connect() as con, con:
+        con.execute("""INSERT INTO access_requests(scope,scope_id,competitor_id,method,purpose,ean,reserved_at,result)
+            VALUES('competitor',?,?,'robots','test','',?,'HTTP 200')""",
+                    (unknown["competitor_id"], unknown["competitor_id"], started.isoformat()))
+        con.execute("""INSERT INTO search_results(ean,competitor_id,market,captured_at,method,match_status,evidence,fingerprint)
+            VALUES(?,?,'ES',?,'test','probable','test','fixture')""",
+                    (later["ean"], later["competitor_id"], (started + timedelta(seconds=1)).isoformat()))
+    rows = preview(store.database_path, allowlist, report)
+    assert "sin EAN" in rows[0]["reason"]
+    assert "Evidencia" in rows[70]["reason"]
+    assert not rows[0]["eligible"] and not rows[70]["eligible"]
+
+
+def test_apply_rolls_back_every_change_and_preserves_future_deadline(recovery):
+    store, allowlist, report, entries, started = recovery
+    future = (started + timedelta(days=30)).isoformat()
+    with store._connect() as con, con:
+        con.execute("UPDATE price_continuity_pairs SET next_check_at=? WHERE id=?", (future, entries[0]["pair_id"]))
+        con.execute(f"""CREATE TRIGGER reject_recovery BEFORE UPDATE ON price_continuity_pairs
+            WHEN NEW.id={entries[1]["pair_id"]} AND NEW.state='pending'
+            BEGIN SELECT RAISE(ABORT, 'storage failure'); END""")
+    before = dump(store)
+    with pytest.raises(sqlite3.IntegrityError, match="storage failure"):
+        apply(store.database_path, allowlist, report, actor="operator", note="reviewed",
+              build_commit="b" * 40, approved=True)
+    assert dump(store) == before
+    with store._connect() as con, con:
+        con.execute("DROP TRIGGER reject_recovery")
+    apply(store.database_path, allowlist, report, actor="operator", note="reviewed",
+          build_commit="b" * 40, approved=True)
+    with store._connect() as con:
+        row = con.execute("SELECT state,next_check_at FROM price_continuity_pairs WHERE id=?",
+                          (entries[0]["pair_id"],)).fetchone()
+    assert row["state"] == "pending" and row["next_check_at"] == future

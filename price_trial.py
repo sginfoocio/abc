@@ -846,20 +846,36 @@ class PriceTrial:
                     category = pair_result.get("category", "not_executed")
                     next_value = (after.get("next_check_at") or after.get("access_retry_at")
                                   or after.get("not_before") or after.get("valid_until"))
+                    invalid_deadline = False
                     try:
                         next_check = _utc_datetime(next_value) if next_value else None
                     except (TypeError, ValueError):
                         next_check = None
+                        invalid_deadline = True
+                    for restriction in (after.get("not_before"), after.get("access_retry_at")):
+                        if restriction:
+                            try:
+                                limit = _utc_datetime(restriction)
+                            except (TypeError, ValueError):
+                                LOG.warning("Fecha de aplazamiento inválida para %s/%s", cid, ean)
+                                invalid_deadline = True
+                                continue
+                            if next_check is None or limit > next_check:
+                                next_check = limit
                     if after.get("located") and after.get("last_ok_at"):
                         try:
                             verified_due = _utc_datetime(after["last_ok_at"]) + timedelta(hours=offer_interval)
-                            next_check = min(next_check, verified_due) if next_check else verified_due
+                            if verified_due > self.clock() and not (after.get("not_before") or after.get("access_retry_at")):
+                                next_check = min(next_check, verified_due) if next_check else verified_due
                         except (TypeError, ValueError):
                             LOG.warning("No se pudo interpretar last_ok_at para %s/%s", cid, ean)
                     reason = after.get("defer_reason") or pair_result.get("reason") or ""
                     if not reason and category == "reused":
                         reason = "Oferta verificada reutilizada; se reevalúa al vencer su vigencia."
-                    if next_check and next_check > self.clock():
+                    if invalid_deadline:
+                        state, next_check = "review", None
+                        reason = "Fecha de aplazamiento inválida; requiere revisión."
+                    elif next_check and next_check > self.clock():
                         state = "pending"
                     elif any(word in reason.lower() for word in ("revisión", "revision", "review")):
                         state, next_check = "review", None

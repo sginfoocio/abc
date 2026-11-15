@@ -15,6 +15,14 @@ from tests.test_price_monitor import _monitor_env
 from tests.test_price_pilot import pilot
 
 
+def test_reused_negative_and_shared_source_are_not_counted_as_new_or_reused_offers():
+    from price_batch import _outcome_category
+
+    assert _outcome_category([{"state": "not_found", "current_source": True, "commercial_requests": 0}]) == "reused_negative"
+    assert _outcome_category([{"state": "done", "current_source": True, "commercial_requests": 0}]) == "reused_data"
+    assert _outcome_category([{"state": "not_found", "commercial_requests": 1}]) == "checked_now"
+
+
 def test_preview_does_not_advertise_deferred_negative_as_ready(tmp_path):
     site = Site()
     store, _, locator, clock, cid = _env(tmp_path, site)
@@ -333,7 +341,7 @@ def test_shared_search_url_is_read_once_per_point_check(tmp_path, monkeypatch):
     result = WatchBatch(store, locator=locator, monitor=monitor).execute(
         eans, [cid], approved=True, sync_vytria=False, point_check=True)
     assert result["processed_pairs"] == 2 and site.count("/search") == 1
-    assert {r["category"] for r in result["pairs"]} == {"checked_now"}
+    assert {r["category"] for r in result["pairs"]} == {"checked_now", "reused_negative"}
 
 
 def test_zero_claims_remain_deferred_not_reported_as_completed(tmp_path, monkeypatch):

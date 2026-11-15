@@ -65,6 +65,17 @@ def _inventory_datetime(value: object) -> datetime:
         raise ValueError("Fecha de vigencia no válida") from exc
 
 
+def _done_job_restriction(job):
+    if job["state"] != "done" or not job.get("not_before"):
+        return None
+    deadline = _inventory_datetime(job["not_before"])
+    if (job.get("sampled_at") and job.get("last_ok_at") and job.get("valid_until")
+            and _inventory_datetime(job["sampled_at"]) == _inventory_datetime(job["last_ok_at"])
+            and deadline == _inventory_datetime(job["valid_until"])):
+        return None
+    return deadline
+
+
 def schedule_enabled() -> bool:
     return os.environ.get(SCHEDULE_ENV, "").strip().lower() in {"1", "true", "yes"}
 
@@ -140,7 +151,9 @@ class PriceMonitor:
                 changed = job["url"] != row["url"] or job["state"] in ("inactive", "gone", "review")
                 due = (datetime.fromisoformat(job["sampled_at"]) + timedelta(hours=interval)
                        if job["sampled_at"] else now)
-                if changed or (job["state"] == "done" and due <= now):
+                not_before = _done_job_restriction(dict(job))
+                if ((changed or (job["state"] == "done" and due <= now))
+                        and (not_before is None or not_before <= now)):
                     con.execute("""UPDATE monitor_jobs SET url=?,state='pending',not_before=NULL,lease_until=NULL,
                         attempts=0,previous_sample=CASE WHEN sample<>'' THEN sample ELSE previous_sample END,
                         sample='',sampled_at=NULL,eligible=CASE WHEN ? THEN 0 ELSE eligible END,
@@ -150,7 +163,7 @@ class PriceMonitor:
                     valid_until = (_iso(datetime.fromisoformat(job["last_ok_at"]) + timedelta(hours=interval))
                                    if job["last_ok_at"] else None)
                     con.execute("UPDATE monitor_jobs SET not_before=?,valid_until=? WHERE id=?",
-                                (_iso(due), valid_until, job["id"]))
+                                (_iso(max(due, not_before)) if not_before else _iso(due), valid_until, job["id"]))
         self.check_stale(competitor_ids, eans)
         return added
 

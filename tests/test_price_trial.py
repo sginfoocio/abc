@@ -816,6 +816,39 @@ def test_continuity_due_time_survives_restart_and_rechecks_after_expiry(trial):
                            (active["id"], cid, target_ean)).fetchone()[0] == 2
 
 
+@pytest.mark.parametrize("located", [True, False])
+def test_continuity_keeps_future_deferral_when_other_deadlines_are_past(trial, located):
+    import pandas as pd
+
+    service, store, _, _, _, clock, cid, _, _ = trial
+    active = _activate_continuity(service, clock)
+    ean = manifest()["eans"][0]
+    with store._connect() as con, con:
+        con.execute("UPDATE price_continuity_pairs SET state='review' WHERE continuity_id=?", (active["id"],))
+        con.execute("""UPDATE price_continuity_pairs SET state='pending',next_check_at=NULL
+            WHERE continuity_id=? AND competitor_id=? AND ean=?""", (active["id"], cid, ean))
+    due = (clock() + timedelta(days=6)).isoformat()
+
+    class Batch:
+        def preview(self, eans, competitors):
+            return pd.DataFrame([{"located": located, "last_ok_at": (clock() - timedelta(days=3)).isoformat(),
+                                  "next_check_at": (clock() - timedelta(hours=1)).isoformat() if not located else due,
+                                  "not_before": due, "access_retry_at": None,
+                                  "valid_until": None, "defer_reason": f"Aplazado hasta not_before={due}"}])
+
+        def execute(self, eans, competitors, **kwargs):
+            return {"pairs": [{"ean": eans[0], "competitor_id": competitors[0], "processed": False,
+                               "category": "not_executed", "reason": "Aplazado"}]}
+
+    service._batch = Batch()
+    service.continuity_tick(max_pairs=1)
+    with store._connect() as con:
+        row = con.execute("""SELECT state,next_check_at,defer_reason FROM price_continuity_pairs
+            WHERE continuity_id=? AND competitor_id=? AND ean=?""", (active["id"], cid, ean)).fetchone()
+    assert row["state"] == "pending" and row["next_check_at"] == due
+    assert "Aplazado" in row["defer_reason"]
+
+
 def test_interrupted_continuity_reservation_is_reviewed_and_never_replayed(trial):
     service, store, access, _, _, clock, cid, site, _ = trial
     active = _activate_continuity(service, clock)

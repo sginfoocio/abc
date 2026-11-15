@@ -52,3 +52,47 @@ trabajador con transporte y sincronizador sintéticos. La vista previa ahora fil
 el inventario por los EAN y competidores seleccionados antes de comprobar presupuestos;
 autorizar otras tiendas no rompe una ejecución congelada de seis competidores.
 No se ejecutan consultas comerciales en las pruebas ni se activa producción al desplegar.
+
+## Recuperación de interrupciones: preparación offline
+
+El informe histórico del 15 de noviembre contiene 182 cierres técnicos en revisión,
+distribuidos entre seis tiendas y 85 EAN. La lista vinculada a ese informe no es
+una autorización de ejecución ni demuestra que los pares sigan siendo elegibles.
+La exportación histórica contiene 246 fichas verificadas agregadas por tienda;
+no identifica por sí sola el estado actual de cada par. Las capturas HTML originales
+de Bassol, Optical H, Visual-Click y Mia Burton no están disponibles: la asociación
+entre variante y oferta sigue pendiente de validación. El calibre no modifica el
+precio del mismo modelo/color, pero tampoco acredita identidad ni stock de otra variante.
+
+La previsualización de `price_recovery.py` solo lee una base SQLite existente y no
+realiza HTTP. Exige la lista original y su informe con SHA-256 coincidente, el
+manifiesto exacto y los últimos cierres esperados. Excluye, entre otros, cambios de
+estado, recibos no vacíos, reservas desde el inicio del intento (también sin EAN),
+colas en revisión o ejecución, candidatas pendientes y evidencias posteriores.
+No se han comprobado las exclusiones en la base operativa.
+
+Para una futura intervención **expresamente autorizada**:
+
+1. Verificar despliegue, copia de seguridad, permisos del operador, estado de la
+   continuidad, controles de acceso, incidentes, pausas, robots y presupuestos.
+   No modificar estas condiciones para ejecutar la recuperación.
+2. Ejecutar primero `python price_recovery.py --database <base> --allowlist <lista>
+   --report <informe>` y conservar la salida. Examinar individualmente los motivos
+   de exclusión y confirmar que solo se contemplan los cierres técnicos autorizados.
+3. Solo con autorización específica, añadir `--apply --approved --actor <responsable>
+   --note <motivo> --commit <sha-completo-del-build>`. El operador debe confirmar
+   por separado que ese SHA corresponde al build instalado: el argumento no lo
+   verifica. La aplicación bloquea continuidad y tiendas, revalida en una transacción,
+   conserva fechas y registra una auditoría. Una repetición no reabre los pares ya
+   modificados. Si la continuidad está activa, los pares sin próxima fecha pueden
+   procesarse en cuanto se liberen los bloqueos; los controles normales del trabajador
+   siguen siendo obligatorios. `--approved` es una confirmación del operador, no un
+   mecanismo de autenticación ni una autorización por sí misma.
+4. Comprobar la auditoría y los estados tras la aplicación; investigar cualquier
+   exclusión, reserva incierta o cambio inesperado sin forzar nuevas consultas.
+
+Las correcciones de aplazamiento respetan la fecha restrictiva `not_before` aunque
+una oferta anterior esté vencida; no restauran automáticamente revisiones históricas.
+Las categorías `reused_negative` y `reused_data` distinguen respuestas negativas
+o datos reutilizados de ofertas comparables y de consultas comerciales nuevas.
+La ejecución real y su efecto quedan pendientes de autorización y validación operativa.

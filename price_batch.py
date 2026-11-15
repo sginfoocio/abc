@@ -10,9 +10,28 @@ import pandas as pd
 
 from price_comparator import PriceComparatorStore
 from price_locator import PriceLocator, catalog_plan_assessment, job_deferral, link_matches
-from price_monitor import PriceMonitor, _inventory_datetime
+from price_monitor import PriceMonitor, _done_job_restriction, _inventory_datetime
 from price_pilot import PricePilot, pilot_scope, stamp
 from price_url_candidates import CandidatePlan, candidate_plan
+
+
+def _outcome_category(outcomes):
+    if any(outcome.get("commercial_requests") for outcome in outcomes):
+        return "checked_now"
+    if not outcomes:
+        return "not_executed"
+    last = outcomes[-1]
+    if last.get("state") == "not_found":
+        return "reused_negative"
+    if last.get("state") != "done":
+        return "not_executed"
+    sample = last.get("sample") or {}
+    page = sample.get("page") or {}
+    if (last.get("state") == "done" and not sample.get("gap") and page.get("price") is not None
+            and page.get("includes_tax") is True and page.get("availability") == "available"
+            and not page.get("stock_conflict")):
+        return "reused"
+    return "reused_data"
 
 
 class WatchBatch:
@@ -154,7 +173,10 @@ class WatchBatch:
                 reason = self.locator.search._gate({"access_status": access_states[cid]})
             queue = job if row["located"] else locate_job
             # Normal monitor.enqueue reopens completed samples whose frequency is due.
-            eligibility_job = {} if row["located"] and due and job.get("state") == "done" else queue
+            eligibility_job = ({**job, "state": "pending"}
+                               if row["located"] and due and job.get("state") == "done" else queue)
+            if eligibility_job is not queue and not _done_job_restriction(job):
+                eligibility_job["not_before"] = None
             deferred = job_deferral(eligibility_job, now, point_check=point_check,
                                     monitoring=bool(row["located"]),
                                     pilot_authorized=pilot and (point_check or supervised_trial))
@@ -258,12 +280,10 @@ class WatchBatch:
                 for ean in selected:
                     outcomes = [r for r in located.outcomes + monitored.outcomes if r["ean"] == ean]
                     requests = sum(r["requests"] for r in outcomes)
-                    checked = any(r.get("commercial_requests") or r.get("current_source") for r in outcomes)
-                    reused = bool(outcomes and outcomes[-1]["state"] in {"done", "not_found"})
                     preview_row = preview.loc[(preview["competitor_id"] == cid) &
                                               (preview["ean"] == ean)].iloc[0]
                     pair = {"ean": ean, "competitor_id": cid, "processed": ean in processed,
-                            "category": "checked_now" if checked else "reused" if reused else "not_executed",
+                            "category": _outcome_category(outcomes),
                             "requests": requests, "outcomes": outcomes,
                             "reason": (outcomes[-1]["detail"] if outcomes else
                                        run["errors"].get(cid) or located.deferred_reason or monitored.deferred_reason
@@ -288,8 +308,9 @@ class WatchBatch:
         for row in preview.loc[~preview["ready"]].to_dict("records"):
             result["pairs"].append({"ean": row["ean"], "competitor_id": row["competitor_id"],
                                     "processed": False,
-                                    "category": "reused" if row["action"] == "Reutilizar precio vigente"
-                                    else "not_executed", "requests": 0, "outcomes": [],
+                                    "category": ("reused" if row.get("comparable") else "reused_data")
+                                    if row["action"] == "Reutilizar precio vigente" else "not_executed",
+                                    "requests": 0, "outcomes": [],
                                     "reason": row["defer_reason"] or row["action"]})
         included = {(p["competitor_id"], p["ean"]) for p in result["pairs"]}
         for row in preview.to_dict("records"):
