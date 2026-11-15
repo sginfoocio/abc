@@ -138,6 +138,23 @@ introducir su identidad real, que no queda autenticada por ese campo.
 Una continuidad activa puede procesar inmediatamente los pares recuperados. No
 se aplicó ninguna recuperación durante el desarrollo.
 
+Para un cierre técnico posterior al lote histórico, la sección «Recuperación
+auditada de un cierre posterior» permite seleccionar una continuidad, un ID de par
+y el ID esperado de su última comprobación. La vista previa es de solo lectura;
+la aplicación exige responsable, motivo y confirmación, adquiere los bloqueos
+compartidos y vuelve a comprobar el manifiesto, los recibos, las reservas y las
+revisiones. Solo admite el mismo contrato conservador de interrupción histórica:
+no recupera revisiones de identidad ni otros tipos de cierre. No presupone que el
+par 529 o la comprobación 2795 sigan siendo elegibles.
+
+Si una pausa se detecta inmediatamente después de reclamar un par y no hay
+reservas desde el inicio, el trabajador cierra la reclamación como detención
+controlada sin HTTP y conserva la fecha programada. Una excepción antes de iniciar
+la ejecución, sin reservas posteriores, queda en revisión como error técnico sin
+HTTP; si la ejecución ya empezó o hay reservas inciertas, queda como interrupción
+prudente. Estas categorías se probaron offline y no demuestran la causa del cierre
+histórico de ConGafasDeSol.
+
 La captura supervisada selecciona un único competidor y EAN del manifiesto. Solo
 procesa el trabajo normal si el par está pendiente y vencido y existe una ficha
 verificada: no fuerza `not_before`, no acepta revisiones ni sincroniza Vytria.

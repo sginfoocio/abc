@@ -9,7 +9,8 @@ import pytest
 import requests
 
 from price_comparator import PriceComparatorStore
-from price_recovery import EXPECTED_COUNTS, REASON, apply, load_allowlist, preview
+from price_recovery import (EXPECTED_COUNTS, REASON, apply, apply_selected, load_allowlist, preview,
+                            preview_selected)
 from price_trial import manifest
 
 
@@ -195,6 +196,73 @@ def test_unattributed_competitor_reservation_blocks_recovery(recovery):
             VALUES('competitor','','','ficha','test','',?,'reserved')""", (started.isoformat(),))
     rows = preview(store.database_path, allowlist, report)
     assert all(not row["eligible"] and "reserva" in row["reason"] for row in rows)
+
+
+def test_selected_recovery_revalidates_exact_ids_and_is_idempotent(recovery):
+    store, _, _, entries, started = recovery
+    entry = entries[0]
+    selection = {"continuity_id": entry["continuity_id"], "pair_id": entry["pair_id"],
+                 "check_id": entry["expected_latest_check_id"]}
+    before = dump(store)
+    assert preview_selected(store.database_path, **selection)["eligible"]
+    assert dump(store) == before
+    with store._connect() as con, con:
+        con.execute("""INSERT INTO access_requests(scope,scope_id,competitor_id,method,purpose,ean,reserved_at,result)
+            VALUES('competitor','','','ficha','test','',?,'reserved')""", (started.isoformat(),))
+    result = apply_selected(store.database_path, **selection, actor="operator", note="reviewed",
+                            build_commit="b" * 40, approved=True)
+    assert not result["eligible"] and "reserva" in result["reason"]
+    with store._connect() as con, con:
+        con.execute("DELETE FROM access_requests WHERE purpose='test'")
+    result = apply_selected(store.database_path, **selection, actor="operator", note="reviewed",
+                            build_commit="b" * 40, approved=True)
+    assert result["eligible"]
+    repeated = apply_selected(store.database_path, **selection, actor="operator", note="reviewed",
+                              build_commit="b" * 40, approved=True)
+    assert not repeated["eligible"]
+    with store._connect() as con:
+        audit = con.execute("""SELECT note FROM access_audit WHERE action='recover_selected_interrupted_pair'
+            ORDER BY id""").fetchall()
+        assert [json.loads(row["note"])["eligible"] for row in audit] == [False, True, False]
+        assert con.execute("SELECT COUNT(*) FROM price_continuity_checks").fetchone()[0] == 182
+    with pytest.raises(ValueError):
+        preview_selected(store.database_path, **{**selection, "check_id": entries[1]["expected_latest_check_id"]})
+
+
+def test_selected_recovery_refuses_newer_check(recovery):
+    store, _, _, entries, started = recovery
+    entry = entries[0]
+    with store._connect() as con, con:
+        con.execute("""INSERT INTO price_continuity_checks
+            (continuity_id,competitor_id,ean,started_at,finished_at,state,category,receipt)
+            VALUES(?,?,?,?,?,'review','identity','{}')""",
+                    (entry["continuity_id"], entry["competitor_id"], entry["ean"], started.isoformat(),
+                     started.isoformat()))
+    row = preview_selected(store.database_path, continuity_id=entry["continuity_id"],
+                           pair_id=entry["pair_id"], check_id=entry["expected_latest_check_id"])
+    assert not row["eligible"] and "comprobación" in row["reason"]
+
+
+def test_selected_recovery_preserves_review_and_obeys_shared_locks(recovery):
+    from filelock import FileLock, Timeout
+
+    store, _, _, entries, _ = recovery
+    entry = entries[0]
+    selection = {"continuity_id": entry["continuity_id"], "pair_id": entry["pair_id"],
+                 "check_id": entry["expected_latest_check_id"]}
+    with FileLock(f"{store.database_path}.competitor-{entry['competitor_id']}.lock", timeout=0):
+        with pytest.raises(Timeout):
+            apply_selected(store.database_path, **selection, actor="operator", note="reviewed",
+                           build_commit="b" * 40, approved=True)
+    with store._connect() as con, con:
+        con.execute("UPDATE price_continuity_checks SET category='identity' WHERE id=?",
+                    (entry["expected_latest_check_id"],))
+    result = apply_selected(store.database_path, **selection, actor="operator", note="reviewed",
+                            build_commit="b" * 40, approved=True)
+    assert not result["eligible"]
+    with store._connect() as con:
+        state = con.execute("SELECT state FROM price_continuity_pairs WHERE id=?", (entry["pair_id"],)).fetchone()[0]
+    assert state == "review"
 
 
 def test_apply_rolls_back_every_change_and_preserves_future_deadline(recovery):

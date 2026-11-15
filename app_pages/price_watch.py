@@ -962,6 +962,7 @@ def _render_continuity(store: PriceComparatorStore, service=None) -> None:
                 _refresh("Continuidad detenida; historial y recibos conservados.")
         if report["status"] in ("active", "paused"):
             _render_interrupted_recovery(store)
+            _render_selected_recovery(store, report["id"])
         if report["status"] == "active":
             _render_continuity_capture(service, frozen)
         if report["status"] == "active" and report["summary"]["restricted_pairs"]:
@@ -1065,6 +1066,56 @@ def _render_interrupted_recovery(store: PriceComparatorStore) -> None:
                 st.session_state.pop("interrupted_preview_rows", None)
                 st.success(f"Aplicados {sum(row['eligible'] for row in result)} pares; "
                            f"excluidos {sum(not row['eligible'] for row in result)}.")
+            except (ValueError, KeyError, TypeError, OSError, sqlite3.Error, Timeout) as exc:
+                st.error(f"No se pudo aplicar la recuperación: {exc}")
+
+
+def _render_selected_recovery(store: PriceComparatorStore, continuity_id: int) -> None:
+    import sqlite3
+    from filelock import Timeout
+    from build_info import load_build_info
+    from price_recovery import apply_selected, preview_selected
+
+    with st.expander("Recuperación auditada de un cierre posterior"):
+        st.caption("Seleccione un único par y el ID de su última comprobación. La aplicación revalida "
+                   "manifiesto, recibos, reservas y revisiones bajo los bloqueos compartidos.")
+        pair_id = st.number_input("ID del par", min_value=1, step=1, key="selected_recovery_pair")
+        check_id = st.number_input("ID de la comprobación esperada", min_value=1, step=1,
+                                   key="selected_recovery_check")
+        selection = (continuity_id, int(pair_id), int(check_id))
+        if st.session_state.get("selected_recovery_selection") != selection:
+            st.session_state.pop("selected_recovery_preview", None)
+        if st.button("Previsualizar cierre seleccionado", key="selected_recovery_preview_button"):
+            try:
+                row = preview_selected(store.database_path, continuity_id=selection[0],
+                                       pair_id=selection[1], check_id=selection[2])
+                st.session_state["selected_recovery_selection"] = selection
+                st.session_state["selected_recovery_preview"] = row
+            except (ValueError, KeyError, TypeError, OSError, sqlite3.Error) as exc:
+                st.session_state.pop("selected_recovery_preview", None)
+                st.error(f"No se pudo validar el cierre: {exc}")
+        row = st.session_state.get("selected_recovery_preview")
+        if row is None:
+            return
+        st.dataframe(pd.DataFrame([{k: row[k] for k in ("pair_id", "ean", "competitor_id", "eligible", "reason")}]),
+                     hide_index=True)
+        info = load_build_info()
+        with st.form("selected_recovery_apply_form"):
+            actor = st.text_input("Responsable", value="")
+            note = st.text_input("Motivo de recuperación")
+            approved = st.checkbox("Autorizo aplicar solo este cierre si sigue siendo elegible")
+            submitted = st.form_submit_button("Aplicar recuperación del cierre seleccionado",
+                                              disabled=not info["build"].startswith("actions-"))
+        if submitted:
+            try:
+                result = apply_selected(store.database_path, continuity_id=selection[0], pair_id=selection[1],
+                                        check_id=selection[2], actor=actor, note=note,
+                                        build_commit=info["commit"], approved=approved)
+                st.session_state.pop("selected_recovery_preview", None)
+                if result["eligible"]:
+                    st.success("Cierre recuperado; sujeto a los controles vigentes.")
+                else:
+                    st.warning(f"No recuperado: {result['reason']}")
             except (ValueError, KeyError, TypeError, OSError, sqlite3.Error, Timeout) as exc:
                 st.error(f"No se pudo aplicar la recuperación: {exc}")
 

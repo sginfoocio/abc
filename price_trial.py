@@ -780,6 +780,55 @@ class PriceTrial:
                 con.execute("""UPDATE price_continuity_pairs SET state='review',checked_at=?,next_check_at=NULL,
                     defer_reason=? WHERE id=?""", (now, reason, pair["id"]))
 
+    def _close_continuity_failure(self, continuity_id, pair, started_at, *, phase, error_type=""):
+        finished_at = self.clock().isoformat()
+        with self.store._connect() as con, con:
+            requests = [dict(r) for r in con.execute("""SELECT id,competitor_id,ean,scope,scope_id,reserved_at,result,url
+                FROM access_requests ORDER BY id""")]
+            relevant = []
+            uncertain = False
+            for request in requests:
+                try:
+                    if _utc_datetime(request["reserved_at"]) >= _utc_datetime(started_at):
+                        uncertain = True
+                        relevant.append(request)
+                except (TypeError, ValueError):
+                    uncertain = True
+                    relevant.append(request)
+            safe = phase in {"paused_before_execution", "preview_before_execution"} and not uncertain
+            controlled = safe and phase == "paused_before_execution"
+            category = ("controlled_stop_no_http" if controlled else
+                        "technical_no_http" if safe else "interrupted")
+            state = "pending" if controlled else "review"
+            reason = ("Pausa controlada antes de ejecutar; sin reservas posteriores"
+                      if controlled else "Error técnico antes de ejecutar; sin reservas posteriores"
+                      if safe else "Trabajador interrumpido; no se repite una reserva incierta")
+            pair_receipts = [r for r in relevant if r["competitor_id"] == pair["competitor_id"]
+                             and r["ean"] == pair["ean"]]
+            redacted_receipts = [{"id": r["id"],
+                                  "result": (r["result"] if re.fullmatch(
+                                      r"HTTP [0-9]{3}|error: [A-Za-z0-9_]+|reserved", r["result"] or "")
+                                             else "reserved"),
+                                  "url": "/robots.txt" if _is_robots_receipt(r) else ""}
+                                 for r in pair_receipts]
+            receipt = {"closure_reason": reason, "phase": phase, "error_type": error_type,
+                       "reservation_check": "none_since_start" if not uncertain else "uncertain",
+                       "reservation_ids_since_start": [r["id"] for r in relevant],
+                       "http_receipts": redacted_receipts}
+            con.execute("""INSERT INTO price_continuity_checks
+                (continuity_id,competitor_id,ean,started_at,finished_at,state,category,requests,http_commercial,
+                 http_robots,unconfirmed_http,defer_reason,receipt)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (continuity_id, pair["competitor_id"], pair["ean"], started_at, finished_at,
+                         state, category, len(pair_receipts),
+                         sum(not _is_robots_receipt(r) for r in pair_receipts),
+                         sum(_is_robots_receipt(r) for r in pair_receipts),
+                         sum(r["result"] == "reserved" for r in redacted_receipts),
+                         reason, json.dumps(receipt, ensure_ascii=False)))
+            con.execute("""UPDATE price_continuity_pairs SET state=?,checked_at=?,defer_reason=?
+                WHERE id=? AND continuity_id=? AND state='running' AND started_at=?""",
+                        (state, finished_at, reason, pair["id"], continuity_id, started_at))
+
     def _run_continuity_sync(self, row: dict) -> None:
         next_sync = self.clock() + timedelta(hours=row["interval_hours"])
         with self.store._connect() as con, con:
@@ -868,16 +917,29 @@ class PriceTrial:
                             WHERE id=? AND state='pending'""", (started_at, pair["id"])).rowcount
                     if not claimed:
                         continue
-                    with self.execution(0, cid, ean, program="continuity", program_id=row["id"]):
-                        before = json.loads(batch.preview([ean], [cid]).to_json(orient="records"))[0]
-                        with self.store._connect() as con:
-                            first_request = con.execute("SELECT COALESCE(MAX(id),0) FROM access_requests").fetchone()[0]
-                        result = batch.execute([ean], [cid], approved=True, sync_vytria=False, max_jobs=1)
-                        after = json.loads(batch.preview([ean], [cid]).to_json(orient="records"))[0]
-                        with self.store._connect() as con:
-                            receipts = [dict(r) for r in con.execute("""SELECT * FROM access_requests
-                                WHERE competitor_id=? AND ean=? AND id>? ORDER BY id""",
-                                                                      (cid, ean, first_request))]
+                    current = continuity_row(self.store, row["id"])
+                    if not current or current["status"] != "active":
+                        self._close_continuity_failure(row["id"], pair, started_at, phase="paused_before_execution")
+                        break
+                    phase = "preview_before_execution"
+                    try:
+                        with self.execution(0, cid, ean, program="continuity", program_id=row["id"]):
+                            before = json.loads(batch.preview([ean], [cid]).to_json(orient="records"))[0]
+                            with self.store._connect() as con:
+                                first_request = con.execute("SELECT COALESCE(MAX(id),0) FROM access_requests").fetchone()[0]
+                            phase = "execution_started"
+                            result = batch.execute([ean], [cid], approved=True, sync_vytria=False, max_jobs=1)
+                            after = json.loads(batch.preview([ean], [cid]).to_json(orient="records"))[0]
+                            with self.store._connect() as con:
+                                receipts = [dict(r) for r in con.execute("""SELECT * FROM access_requests
+                                    WHERE competitor_id=? AND ean=? AND id>? ORDER BY id""",
+                                                                          (cid, ean, first_request))]
+                    except Exception as exc:
+                        LOG.error("Error en comprobación de continuidad %s/%s (%s, %s)",
+                                  cid, ean, phase, type(exc).__name__)
+                        self._close_continuity_failure(row["id"], pair, started_at, phase=phase,
+                                                       error_type=type(exc).__name__)
+                        continue
                     result["inventory_before"] = before
                     result["inventory_after"] = after
                     result["http_receipts"] = receipts

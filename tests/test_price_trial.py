@@ -1363,6 +1363,79 @@ def test_interrupted_continuity_reservation_is_reviewed_and_never_replayed(trial
                            (active["id"], cid, ean)).fetchone()[0] == 1
 
 
+@pytest.mark.parametrize("during_execution", [False, True])
+def test_continuity_exception_closes_claim_without_retry(trial, during_execution):
+    import pandas as pd
+
+    service, store, access, _, _, clock, cid, _, _ = trial
+    active = _activate_continuity(service, clock)
+    ean = manifest()["eans"][0]
+    with store._connect() as con, con:
+        con.execute("UPDATE price_continuity_pairs SET state='review' WHERE continuity_id=?", (active["id"],))
+        con.execute("""UPDATE price_continuity_pairs SET state='pending',next_check_at=NULL
+            WHERE continuity_id=? AND competitor_id=? AND ean=?""", (active["id"], cid, ean))
+
+    class Batch:
+        def preview(self, eans, competitors):
+            if not during_execution:
+                raise RuntimeError("sensitive exception detail")
+            return pd.DataFrame([{"action": "Monitorizar"}])
+
+        def execute(self, eans, competitors, **kwargs):
+            access.reserve(cid, "ficha", purpose="monitor", ean="", url="https://shop.example/item")
+            raise RuntimeError("sensitive exception detail")
+
+    service._batch = Batch()
+    service.continuity_tick(max_pairs=1)
+    service.continuity_tick(max_pairs=1)
+    with store._connect() as con:
+        pair = con.execute("""SELECT state FROM price_continuity_pairs WHERE continuity_id=?
+            AND competitor_id=? AND ean=?""", (active["id"], cid, ean)).fetchone()
+        checks = con.execute("""SELECT category,receipt FROM price_continuity_checks WHERE continuity_id=?
+            AND competitor_id=? AND ean=?""", (active["id"], cid, ean)).fetchall()
+    assert pair["state"] == "review"
+    assert len(checks) == 1
+    assert checks[0]["category"] == ("interrupted" if during_execution else "technical_no_http")
+    assert "sensitive exception detail" not in checks[0]["receipt"]
+    receipt = json.loads(checks[0]["receipt"])
+    assert bool(receipt["reservation_ids_since_start"]) == during_execution
+
+
+def test_pause_after_claim_closes_controlled_without_execution(trial, monkeypatch):
+    import price_trial
+
+    service, store, _, _, _, clock, cid, _, _ = trial
+    active = _activate_continuity(service, clock)
+    ean = manifest()["eans"][0]
+    with store._connect() as con, con:
+        con.execute("UPDATE price_continuity_pairs SET state='review' WHERE continuity_id=?", (active["id"],))
+        con.execute("""UPDATE price_continuity_pairs SET state='pending',next_check_at=NULL
+            WHERE continuity_id=? AND competitor_id=? AND ean=?""", (active["id"], cid, ean))
+
+    original = price_trial.continuity_row
+    paused = False
+
+    def pause_after_claim(store_arg, continuity_id=None):
+        nonlocal paused
+        with store_arg._connect() as con:
+            claimed = con.execute("""SELECT 1 FROM price_continuity_pairs WHERE continuity_id=?
+                AND competitor_id=? AND ean=? AND state='running'""", (active["id"], cid, ean)).fetchone()
+        if claimed and not paused:
+            paused = True
+            service.pause_continuity(actor="operator")
+        return original(store_arg, continuity_id)
+
+    monkeypatch.setattr(price_trial, "continuity_row", pause_after_claim)
+    service.continuity_tick(max_pairs=1)
+    with store._connect() as con:
+        pair = con.execute("""SELECT state FROM price_continuity_pairs WHERE continuity_id=?
+            AND competitor_id=? AND ean=?""", (active["id"], cid, ean)).fetchone()
+        check = con.execute("""SELECT category FROM price_continuity_checks WHERE continuity_id=?
+            AND competitor_id=? AND ean=?""", (active["id"], cid, ean)).fetchone()
+    assert pair["state"] == "pending"
+    assert check["category"] == "controlled_stop_no_http"
+
+
 def test_trial_carries_unexpired_pair_deadlines_into_the_next_cycle(trial):
     import pandas as pd
 
