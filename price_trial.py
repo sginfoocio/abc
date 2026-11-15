@@ -865,7 +865,7 @@ class PriceTrial:
                     if after.get("located") and after.get("last_ok_at"):
                         try:
                             verified_due = _utc_datetime(after["last_ok_at"]) + timedelta(hours=offer_interval)
-                            if verified_due > self.clock() and not (after.get("not_before") or after.get("access_retry_at")):
+                            if not (after.get("not_before") or after.get("access_retry_at")):
                                 next_check = min(next_check, verified_due) if next_check else verified_due
                         except (TypeError, ValueError):
                             LOG.warning("No se pudo interpretar last_ok_at para %s/%s", cid, ean)

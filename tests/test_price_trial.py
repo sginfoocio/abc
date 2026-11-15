@@ -816,8 +816,8 @@ def test_continuity_due_time_survives_restart_and_rechecks_after_expiry(trial):
                            (active["id"], cid, target_ean)).fetchone()[0] == 2
 
 
-@pytest.mark.parametrize("located", [True, False])
-def test_continuity_keeps_future_deferral_when_other_deadlines_are_past(trial, located):
+@pytest.mark.parametrize("located,restricted", [(True, True), (False, True), (True, False)])
+def test_continuity_keeps_future_deferral_when_other_deadlines_are_past(trial, located, restricted):
     import pandas as pd
 
     service, store, _, _, _, clock, cid, _, _ = trial
@@ -833,7 +833,7 @@ def test_continuity_keeps_future_deferral_when_other_deadlines_are_past(trial, l
         def preview(self, eans, competitors):
             return pd.DataFrame([{"located": located, "last_ok_at": (clock() - timedelta(days=3)).isoformat(),
                                   "next_check_at": (clock() - timedelta(hours=1)).isoformat() if not located else due,
-                                  "not_before": due, "access_retry_at": None,
+                                  "not_before": due if restricted else None, "access_retry_at": None,
                                   "valid_until": None, "defer_reason": f"Aplazado hasta not_before={due}"}])
 
         def execute(self, eans, competitors, **kwargs):
@@ -845,7 +845,8 @@ def test_continuity_keeps_future_deferral_when_other_deadlines_are_past(trial, l
     with store._connect() as con:
         row = con.execute("""SELECT state,next_check_at,defer_reason FROM price_continuity_pairs
             WHERE continuity_id=? AND competitor_id=? AND ean=?""", (active["id"], cid, ean)).fetchone()
-    assert row["state"] == "pending" and row["next_check_at"] == due
+    assert row["state"] == ("pending" if restricted else "review")
+    assert row["next_check_at"] == (due if restricted else None)
     assert "Aplazado" in row["defer_reason"]
 
 
