@@ -423,6 +423,19 @@ class PriceLocator:
         # Optional extension point (product, config) -> URLs; refused unless PRICE_EXTERNAL_SEARCH_ENABLED.
         self.external_search, self.external_provider = external_search, external_provider
 
+    def capture_diagnostic(self, competitor_id: str, ean: str, url: str, *, purpose: str,
+                           url_guard, validate, pilot_run_id: int | None = None):
+        """Fetch documented evidence with the same competitor lock and governed locator session."""
+        with self.search._lock(competitor_id):
+            validate()
+            session = _Session(self, competitor_id, diagnostic_purpose=purpose, url_guard=url_guard,
+                               pilot_run_id=pilot_run_id)
+            gate = self.search._gate(session.config)
+            if gate:
+                raise ConnectorError(gate)
+            url_guard(url)
+            return session.fetcher("ficha", ean).get(url)
+
     # queue ------------------------------------------------------------------------------------
     def enqueue(self, competitor_ids: list[str] | None = None, eans: list[str] | None = None) -> dict[str, int]:
         """Create the missing product × competitor jobs (idempotent) and reopen what needs another look:
@@ -892,9 +905,10 @@ class _Session:
     """One competitor during one run: authorised methods, governed fetchers (robots.txt shared) and caches."""
 
     def __init__(self, locator: PriceLocator, competitor_id: str, *, point_check: bool = False,
-                 pilot_run_id: int | None = None) -> None:
+                 pilot_run_id: int | None = None, diagnostic_purpose: str = "", url_guard=None) -> None:
         self.locator, self.store, self.competitor_id = locator, locator.store, competitor_id
         self.point_check = point_check
+        self.diagnostic_purpose, self.url_guard = diagnostic_purpose, url_guard
         self._checked_urls: set[str] = set()
         self._fresh_sources: set[str] = set()
         self._fresh_sitemap = False
@@ -909,7 +923,7 @@ class _Session:
             self.pilot_limits = PricePilot(self.store).watch_check_limits(pilot_run_id, competitor_id)
             self._pilot_guard, self._pilot_reserved = PricePilot(self.store).watch_check_hooks(
                 pilot_run_id, competitor_id, clock=self.locator._now, sleep=self.locator._sleep)
-        self.config = locator.search.config(competitor_id)
+        self.config = locator.search.config(competitor_id, initialize=not diagnostic_purpose)
         self.method_statuses = {method: locator.access.method_status(competitor_id, method) for method in METHODS}
         self.methods = {method for method, status in self.method_statuses.items()
                         if method != "external" and status == "authorized"}
@@ -951,12 +965,14 @@ class _Session:
 
     def fetcher(self, method: str, ean: str = "") -> GovernedFetcher:
         if method not in self._fetchers:
-            fetcher = GovernedFetcher(self.locator.access, self.competitor_id, method, purpose="locate",
+            fetcher = GovernedFetcher(self.locator.access, self.competitor_id, method,
+                                      purpose=self.diagnostic_purpose or "locate",
                                       transport=self.locator._transport, sleep=self.locator._sleep,
                                       pause_seconds=0.0, request_guard=self._pilot_guard,
-                                      request_reserved=self._pilot_reserved, max_requests=1_000_000,
+                                      request_reserved=self._pilot_reserved, url_guard=self.url_guard,
+                                      max_requests=1_000_000,
                                       timeout=float(self.config["timeout_seconds"] or 15),
-                                      retries=int(self.config["retries"] or 0))
+                                      retries=0 if self.diagnostic_purpose else int(self.config["retries"] or 0))
             # One robots.txt read and one block memory per competitor, whatever the method.
             fetcher._robots, fetcher._robots_state, fetcher.blocked = self._robots, self._robots_state, self._blocked
             self._fetchers[method] = fetcher

@@ -152,6 +152,29 @@ cuerpo, el chequeo normal ya puede haberse efectuado y consumido presupuesto;
 no repetirlo sin revisar su recibo y próxima fecha. No se guarda ningún cuerpo en
 caso de rechazo. No se realizaron capturas reales en el desarrollo.
 
+La acción separada «Diagnóstico supervisado de candidatas en revisión» permite
+seleccionar una URL ya documentada para el competidor y EAN exactos, incluso con
+el par en revisión. Acepta candidatas pendientes del índice, piloto, localizador
+o recibos de continuidad; no acepta URLs rechazadas ni arbitrarias. Revalida el
+alcance y la candidata bajo los bloqueos de continuidad y competidor, respeta
+aplazamientos, permisos, robots y presupuestos, y utiliza la sesión gobernada del
+localizador sin ejecutar su cola comercial. No cambia identidad, ofertas,
+revisiones ni programación. Cada intento deja una auditoría iniciada antes de
+pedir los bloqueos, con responsable, motivo, estado y reservas identificables;
+si el proceso se interrumpe, las reservas mantienen el identificador de auditoría.
+Cuando el par también pertenece al piloto anterior, se exige su comprobación
+supervisada existente, incluidos su bloqueo y presupuesto; si está desactivado,
+el diagnóstico se rechaza en lugar de eludirlo.
+
+Se conservan fecha, URLs, redirecciones, canonical, SHA-256 y HTML solo si pasan
+los filtros de tamaño y posibles datos sensibles. El canonical se registra como
+evidencia y nunca se consulta; los destinos de redirección deben superar los
+mismos controles y pertenecer al mismo host de la candidata. Los filtros son
+conservadores y no pueden garantizar ausencia de todos los datos privados:
+revisar la evidencia antes de compartirla. Un bloqueo HTTP sí abre el incidente
+de seguridad habitual; no se intenta eludir. Un rechazo puede haber consumido
+reservas de robots o de la ficha y debe revisarse antes de repetir.
+
 Después de desplegar solo con autorización independiente, verificar el build,
 presupuestos compartidos, permisos, robots, incidentes, estado del par y su
 próxima fecha. Para cada captura autorizada, revisar el recibo, hash, identidad,

@@ -169,8 +169,9 @@ class WebPriceSearch:
         with self.store._connect() as connection, connection:
             connection.execute("INSERT OR IGNORE INTO competitor_web_config(competitor_id) SELECT id FROM competitors")
 
-    def config(self, competitor_id: str) -> dict:
-        self.ensure_config()
+    def config(self, competitor_id: str, *, initialize: bool = True) -> dict:
+        if initialize:
+            self.ensure_config()
         with self.store._connect() as connection:
             row = connection.execute("""
                 SELECT w.*,c.name,c.url AS site_url,c.domain,c.market,c.currency FROM competitor_web_config w

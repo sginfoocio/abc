@@ -1101,6 +1101,42 @@ def _render_continuity_capture(service, frozen: dict) -> None:
             st.download_button("Descargar evidencia de captura", json.dumps(result, ensure_ascii=False).encode("utf-8"),
                                "price-continuity-capture.json", "application/json", key="continuity_capture_download")
 
+    with st.expander("Diagnóstico supervisado de candidatas en revisión"):
+        st.caption("Consulta una candidata ya documentada sin aceptar la revisión ni modificar ofertas o plazos. "
+                   "Usa permisos, robots y presupuestos existentes; los rechazos también se auditan.")
+        cid = st.selectbox("Competidor", options=list(frozen["competitors"]),
+                           format_func=lambda value: frozen["competitors"][value], key="diagnostic_competitor")
+        ean = st.selectbox("EAN", options=frozen["eans"], key="diagnostic_ean")
+        candidates = service.diagnostic_candidates(cid, ean)
+        if not candidates:
+            st.info("No hay candidatas documentadas pendientes de revisión para este par.")
+            return
+        url = st.selectbox("URL candidata documentada", candidates, key="diagnostic_url")
+        selection = (cid, ean, url)
+        if st.session_state.get("diagnostic_capture_selection") != selection:
+            st.session_state.pop("diagnostic_capture_result", None)
+            st.session_state["diagnostic_capture_selection"] = selection
+        info = load_build_info()
+        with st.form("diagnostic_capture_form"):
+            actor = st.text_input("Responsable", value=_actor())
+            note = st.text_input("Motivo del diagnóstico")
+            approved = st.checkbox("Autorizo una consulta diagnóstica gobernada")
+            submitted = st.form_submit_button("Capturar evidencia diagnóstica",
+                                              disabled=not info["build"].startswith("actions-"))
+        if submitted:
+            try:
+                st.session_state["diagnostic_capture_result"] = service.capture_diagnostic(
+                    cid, ean, url, actor=actor, note=note, build_commit=info["commit"], approved=approved)
+                st.success("Evidencia guardada en la auditoría sin modificar la revisión.")
+            except (ValueError, RuntimeError, sqlite3.Error, Timeout) as exc:
+                st.session_state.pop("diagnostic_capture_result", None)
+                st.error(f"No se guardó una captura: {exc}")
+        result = st.session_state.get("diagnostic_capture_result")
+        if result is not None:
+            st.download_button("Descargar evidencia diagnóstica",
+                               json.dumps(result, ensure_ascii=False).encode("utf-8"),
+                               "price-diagnostic-capture.json", "application/json", key="diagnostic_download")
+
 
 def _render_batch(store: PriceComparatorStore, names: dict[str, str]) -> None:
     from price_batch import WatchBatch, batch_pairs_export
