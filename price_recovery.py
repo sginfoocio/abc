@@ -197,6 +197,66 @@ def preview(database, allowlist_path, report_path):
     return rows
 
 
+def _selected_entry(con, continuity_id, pair_id, check_id):
+    if any(not isinstance(value, int) or isinstance(value, bool) or value <= 0
+           for value in (continuity_id, pair_id, check_id)):
+        raise ValueError("Indique IDs positivos de continuidad, par y comprobación")
+    pair = con.execute("SELECT * FROM price_continuity_pairs WHERE id=? AND continuity_id=?",
+                       (pair_id, continuity_id)).fetchone()
+    check = con.execute("SELECT * FROM price_continuity_checks WHERE id=? AND continuity_id=?",
+                        (check_id, continuity_id)).fetchone()
+    if not pair or not check or (pair["competitor_id"], pair["ean"]) != (check["competitor_id"], check["ean"]):
+        raise ValueError("El par y la comprobación no corresponden a la continuidad seleccionada")
+    return {"continuity_id": continuity_id, "pair_id": pair_id, "competitor_id": pair["competitor_id"],
+            "ean": pair["ean"], "expected_latest_check_id": check_id,
+            "attempt_started_at": check["started_at"], "closed_at": check["finished_at"]}
+
+
+def preview_selected(database, *, continuity_id, pair_id, check_id):
+    with closing(_connect(database, readonly=True)) as con:
+        con.execute("BEGIN")
+        entry = _selected_entry(con, continuity_id, pair_id, check_id)
+        _, rows = _evaluate(con, [entry])
+        con.rollback()
+    return rows[0]
+
+
+def apply_selected(database, *, continuity_id, pair_id, check_id, actor, note, build_commit, approved=False):
+    if not approved or not actor.strip() or not note.strip():
+        raise ValueError("Confirmación explícita, responsable y motivo obligatorios")
+    if len(build_commit) != 40 or any(c not in "0123456789abcdef" for c in build_commit):
+        raise ValueError("Commit válido de 40 caracteres requerido")
+    path = Path(database).resolve()
+    with FileLock(f"{path}.continuity.lock", timeout=0):
+        with closing(_connect(path, readonly=True)) as con:
+            entry = _selected_entry(con, continuity_id, pair_id, check_id)
+        locked_competitor = entry["competitor_id"]
+        with FileLock(f"{path}.competitor-{locked_competitor}.lock", timeout=0):
+            with closing(_connect(path, readonly=False)) as con:
+                con.execute("BEGIN IMMEDIATE")
+                entry = _selected_entry(con, continuity_id, pair_id, check_id)
+                if entry["competitor_id"] != locked_competitor:
+                    raise ValueError("El competidor cambió antes de adquirir los bloqueos")
+                _, rows = _evaluate(con, [entry])
+                row = rows[0]
+                if row["eligible"]:
+                    con.execute("""UPDATE price_continuity_pairs SET state='pending',defer_reason=?
+                        WHERE id=? AND continuity_id=? AND state='review'""",
+                                ("Recuperación técnica auditada; sujeta a controles vigentes", pair_id, continuity_id))
+                metadata = {"reason": note.strip(), "build_commit": build_commit, "pair_id": pair_id,
+                            "expected_latest_check_id": check_id, "competitor_id": entry["competitor_id"],
+                            "ean": entry["ean"], "eligible": row["eligible"], "evaluation": row["reason"]}
+                con.execute("""INSERT INTO access_audit(scope,scope_id,action,previous,current,actor,note,at)
+                    VALUES('price_continuity',?,'recover_selected_interrupted_pair',?,?,?,?,?)""",
+                            (str(continuity_id), json.dumps(row["previous"], ensure_ascii=False),
+                             json.dumps({"state": "pending" if row["eligible"] else "unchanged"},
+                                        ensure_ascii=False),
+                             actor.strip(), json.dumps(metadata, ensure_ascii=False),
+                             datetime.now(timezone.utc).isoformat()))
+                con.commit()
+    return row
+
+
 def apply(database, allowlist_path, report_path, *, actor, note, build_commit, approved=False):
     if not approved or not actor.strip() or not note.strip():
         raise ValueError("Confirmación explícita, responsable y motivo obligatorios")

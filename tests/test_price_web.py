@@ -34,6 +34,47 @@ def pilot(tmp_path):
     return site, store, search, cid
 
 
+def test_diagnostic_transport_rejects_oversize_during_stream(monkeypatch):
+    import requests
+    import price_web_fetch
+
+    class Response:
+        status_code = 200
+        headers = {}
+        chunks_read = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def iter_content(self, size):
+            for _ in range(100):
+                self.chunks_read += 1
+                yield b"x" * size
+
+    response = Response()
+    monkeypatch.setattr(price_web_fetch, "_assert_public_host", lambda host: None)
+    monkeypatch.setattr(requests, "get", lambda *args, **kwargs: response)
+    with pytest.raises(ConnectorError, match="tamaño máximo"):
+        price_web_fetch._requests_transport("https://example.test", {}, 1, max_bytes=2 * 1024 * 1024)
+    assert response.chunks_read == 33
+
+
+def test_diagnostic_gzip_limit_does_not_change_other_fetches(monkeypatch):
+    import gzip
+    from price_web_fetch import WebFetcher, RobotsRules
+
+    content = b"<html>" + b"x" * 2048 + b"</html>"
+    compressed = gzip.compress(content)
+    fetcher = WebFetcher(transport=lambda *args: (200, {}, compressed), retries=0)
+    monkeypatch.setattr(fetcher, "rules", lambda url: RobotsRules(allow_all=True))
+    with pytest.raises(ConnectorError, match="tamaño máximo"):
+        fetcher.get("https://example.test/item", max_bytes=1024, bounded_gzip=True)
+    assert fetcher.get("https://example.test/item", max_bytes=1024).content == content[:1024]
+
+
 # --- extraction -------------------------------------------------------------------------------
 def test_json_ld_extraction_with_vat_proved_by_pretax_price():
     html = prada_page("8056597875349")

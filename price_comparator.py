@@ -847,6 +847,27 @@ class PriceComparatorStore:
                     );
                     CREATE INDEX IF NOT EXISTS idx_price_continuity_checks_pair
                         ON price_continuity_checks(continuity_id,competitor_id,ean,started_at);
+                    CREATE TABLE IF NOT EXISTS price_diagnostic_requests (
+                        id INTEGER PRIMARY KEY,
+                        continuity_id INTEGER NOT NULL REFERENCES price_continuity(id),
+                        competitor_id TEXT NOT NULL REFERENCES competitors(id),
+                        ean TEXT NOT NULL REFERENCES products(ean),
+                        url TEXT NOT NULL,
+                        actor TEXT NOT NULL,
+                        note TEXT NOT NULL,
+                        build_commit TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        reason TEXT NOT NULL DEFAULT '',
+                        created_at TEXT NOT NULL,
+                        started_at TEXT,
+                        finished_at TEXT,
+                        result TEXT NOT NULL DEFAULT '{}',
+                        artifact BLOB,
+                        expires_at TEXT
+                    );
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_price_diagnostic_active
+                        ON price_diagnostic_requests(continuity_id,competitor_id,ean,url)
+                        WHERE status!='expired';
                     CREATE TABLE IF NOT EXISTS price_robots_cache (
                         origin TEXT NOT NULL,
                         agent TEXT NOT NULL,

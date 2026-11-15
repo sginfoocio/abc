@@ -138,6 +138,23 @@ introducir su identidad real, que no queda autenticada por ese campo.
 Una continuidad activa puede procesar inmediatamente los pares recuperados. No
 se aplicó ninguna recuperación durante el desarrollo.
 
+Para un cierre técnico posterior al lote histórico, la sección «Recuperación
+auditada de un cierre posterior» permite seleccionar una continuidad, un ID de par
+y el ID esperado de su última comprobación. La vista previa es de solo lectura;
+la aplicación exige responsable, motivo y confirmación, adquiere los bloqueos
+compartidos y vuelve a comprobar el manifiesto, los recibos, las reservas y las
+revisiones. Solo admite el mismo contrato conservador de interrupción histórica:
+no recupera revisiones de identidad ni otros tipos de cierre. No presupone que el
+par 529 o la comprobación 2795 sigan siendo elegibles.
+
+Si una pausa se detecta inmediatamente después de reclamar un par y no hay
+reservas desde el inicio, el trabajador cierra la reclamación como detención
+controlada sin HTTP y conserva la fecha programada. Una excepción antes de iniciar
+la ejecución, sin reservas posteriores, queda en revisión como error técnico sin
+HTTP; si la ejecución ya empezó o hay reservas inciertas, queda como interrupción
+prudente. Estas categorías se probaron offline y no demuestran la causa del cierre
+histórico de ConGafasDeSol.
+
 La captura supervisada selecciona un único competidor y EAN del manifiesto. Solo
 procesa el trabajo normal si el par está pendiente y vencido y existe una ficha
 verificada: no fuerza `not_before`, no acepta revisiones ni sincroniza Vytria.
@@ -159,30 +176,52 @@ caso de rechazo. No se realizaron capturas reales en el desarrollo.
 La acción separada «Diagnóstico supervisado de candidatas en revisión» permite
 seleccionar una URL ya documentada para el competidor y EAN exactos, incluso con
 el par en revisión. Acepta candidatas pendientes del índice, piloto, localizador
-o recibos de continuidad; no acepta URLs rechazadas ni arbitrarias. Revalida el
-alcance y la candidata bajo los bloqueos de continuidad y competidor, respeta
-aplazamientos, permisos, robots y presupuestos, y utiliza la sesión gobernada del
-localizador sin ejecutar su cola comercial. No cambia identidad, ofertas,
-revisiones ni programación. Cada intento deja una auditoría iniciada antes de
-pedir los bloqueos, con responsable, motivo, estado y reservas identificables;
-si el proceso se interrumpe, las reservas mantienen el identificador de auditoría.
+o recibos de continuidad; no acepta URLs rechazadas ni arbitrarias. La interfaz
+registra la solicitud sin esperar al bloqueo de continuidad; el trabajador procesa
+como máximo una por turno tras la vigilancia normal. Una selección idéntica no
+crea duplicados. Se muestran el estado y los resultados guardados tras una nueva
+sesión. Al reiniciar, una ejecución interrumpida queda rechazada por consumo
+incierto y no se repite automáticamente.
+
+El trabajador revalida el alcance y la candidata bajo los bloqueos de continuidad
+y competidor, respeta aplazamientos, permisos, robots y presupuestos, y utiliza
+la sesión gobernada del localizador sin ejecutar su cola comercial. No cambia
+identidad, ofertas, revisiones ni programación. Cada intento deja una auditoría
+con responsable, motivo, estado y reservas identificables.
 Cuando el par también pertenece al piloto anterior, se exige su comprobación
 supervisada existente, incluidos su bloqueo y presupuesto; si está desactivado,
 el diagnóstico se rechaza en lugar de eludirlo.
 
-Se conservan fecha, URLs, redirecciones, canonical, SHA-256 y HTML solo si pasan
-los filtros de tamaño y posibles datos sensibles. El canonical se registra como
-evidencia y nunca se consulta; los destinos de redirección deben superar los
-mismos controles y pertenecer al mismo host de la candidata. Los filtros son
-conservadores y no pueden garantizar ausencia de todos los datos privados:
-revisar la evidencia antes de compartirla. Un bloqueo HTTP sí abre el incidente
-de seguridad habitual; no se intenta eludir. Un rechazo puede haber consumido
-reservas de robots o de la ficha y debe revisarse antes de repetir.
-El cuerpo se guarda en la auditoría de la base SQLite compartida: el límite de
-1 MiB es por respuesta, no una cuota agregada. Antes de capturar hay que verificar
-la privacidad efectiva del volumen, las copias y el acceso a la base, y establecer
-un límite operativo de almacenamiento. Sin esas garantías no se deben guardar
-capturas reales.
+La evidencia es **HTML parcial sanitizado**, reconstruido exclusivamente a partir
+de propiedades JSON-LD permitidas; no es la respuesta original. Descarta formularios
+y nodos ajenos, como personas, y rechaza valores sensibles detectados en los campos
+conservados. Se guardan metadatos sanitizados, fecha, estado HTTP, tamaño y hashes
+del cuerpo recibido y del artefacto. Los parámetros no permitidos se eliminan de
+las URLs conservadas, no de la consulta. El canonical nunca se consulta; las
+redirecciones siguen sujetas al host original y a los controles de acceso.
+Si no hay estructura útil o no es seguro conservarla, se rechaza con motivo.
+Los filtros no garantizan la ausencia absoluta de datos privados; revisar antes de
+compartir. Un rechazo puede haber consumido robots o ficha: revisar los recibos.
+
+Por defecto la lectura se limita a 2 MiB, los artefactos vigentes a 100 MiB y su
+retención a 7 días; `PRICE_DIAGNOSTIC_BODY_BYTES`, `PRICE_DIAGNOSTIC_QUOTA_BYTES`
+y `PRICE_DIAGNOSTIC_RETENTION_DAYS` permiten configurarlos con enteros positivos.
+Antes de HTTP se borran artefactos vencidos con auditoría y se exige espacio para
+una respuesta completa; si falta espacio se aplaza sin borrar evidencia vigente.
+También se exige espacio libre en el volumen equivalente al doble del límite por
+respuesta; es una comprobación previa, no una reserva física frente a otros procesos.
+La limpieza también se ejecuta en cada turno del trabajador. Los artefactos están
+en la base SQLite, no en la auditoría; el límite agregado cuenta sus blobs vigentes,
+no el tamaño físico de SQLite, WAL o copias. La caducidad elimina el blob lógico
+con `secure_delete`, pero no garantiza el borrado de copias ni de páginas antiguas
+del WAL: la política de copias y almacenamiento debe comprobarse por separado.
+
+Antes de HTTP el servidor exige en POSIX que la base y sus archivos auxiliares
+sean privados para el propietario y que el directorio no sea escribible por otros.
+Si no puede comprobarlo, rechaza la captura. La comprobación de ACL de Windows no
+está implementada y allí se rechaza por precaución; las pruebas sintéticas simulan
+un almacenamiento autorizado. Esta comprobación no acredita la privacidad de
+copias, instantáneas ni sistemas externos.
 
 Después de desplegar solo con autorización independiente, verificar el build,
 presupuestos compartidos, permisos, robots, incidentes, estado del par y su
