@@ -824,7 +824,8 @@ def test_diagnostic_retry_rechecks_reservations_before_http(trial, monkeypatch):
         assert "petición o reserva" in row["reason"]
 
 
-@pytest.mark.parametrize("unsafe", ["reservation", "receipt", "unattributed", "uncertain", "blocked", "changed_candidate"])
+@pytest.mark.parametrize("unsafe", ["reservation", "receipt", "unattributed", "uncertain", "blocked",
+                                    "access_blocked", "budget", "changed_candidate"])
 def test_diagnostic_privacy_retry_rejects_uncertain_or_blocked_attempts(trial, monkeypatch, unsafe):
     service, store, clock, cid, ean, url, site, request, kwargs, _ = _privacy_rejected_diagnostic(trial, monkeypatch)
     with store._connect() as con, con:
@@ -840,6 +841,13 @@ def test_diagnostic_privacy_retry_rejects_uncertain_or_blocked_attempts(trial, m
             con.execute("UPDATE price_diagnostic_requests SET result='{}' WHERE id=?", (request["id"],))
         elif unsafe == "blocked":
             con.execute("UPDATE locate_jobs SET state='blocked' WHERE competitor_id=? AND ean=?", (cid, ean))
+        elif unsafe == "access_blocked":
+            con.execute("UPDATE competitor_web_config SET access_status='blocked' WHERE competitor_id=?", (cid,))
+        elif unsafe == "budget":
+            con.execute("UPDATE access_budgets SET daily_limit=1 WHERE scope='competitor' AND scope_id=?", (cid,))
+            con.execute("""INSERT INTO access_requests(scope,scope_id,competitor_id,method,purpose,ean,url,reserved_at)
+                VALUES('competitor',?,?,'ficha','other','another-ean','',?)""",
+                        (cid, cid, clock().isoformat()))
         elif unsafe == "changed_candidate":
             con.execute("UPDATE competitor_product_urls SET status='rejected' WHERE competitor_id=? AND ean=?",
                         (cid, ean))
