@@ -53,6 +53,7 @@ class ProductPage:
     market_source: str = ""
     market_conflict: bool = False
     ambiguous: bool = False
+    offer_binding_unresolved: bool = False
     source_url: str = ""
     variant_urls: list[str] = field(default_factory=list)
     structured_variants: list[dict[str, Any]] = field(default_factory=list)
@@ -72,7 +73,8 @@ class ProductPage:
         """The listing as seen by ``price_references.classify``."""
         return {"brand": self.brand, "model": self.model, "color": self.color, "caliber": self.caliber,
                 "ean_published": self.ean_published, "title": self.title,
-                "identifiers": self.identifiers, "ambiguous": self.ambiguous}
+                "identifiers": self.identifiers, "ambiguous": self.ambiguous,
+                "offer_binding_unresolved": self.offer_binding_unresolved}
 
 
 def parse_price(value: Any) -> float | None:
@@ -410,6 +412,10 @@ def _from_json_ld(html: str, url: str) -> ProductPage | None:
         page.ambiguous = True
         page.notes.append("EAN publicados contradictorios: " + ", ".join(gtins))
     page.identifiers = [str(node[k]) for k in ("mpn", "sku") if node.get(k)]
+    sku_values = _as_list(node.get("sku"))
+    if not gtins and any(isinstance(value, str) and re.match(r"^\d{8,14}(?:[-_/]|$)", value.strip())
+                         for value in sku_values):
+        page.notes.append("Prefijo numérico de SKU sin regla documentada; no se interpreta como GTIN")
     page.caliber = (normalize_caliber(_name(node.get("size"))) or extract_caliber(_name(node.get("size")))
                     or extract_caliber(page.title) or extract_lens(page.title)
                     or extract_caliber(urlparse(url).path.rsplit("/", 1)[-1]))
@@ -418,6 +424,8 @@ def _from_json_ld(html: str, url: str) -> ProductPage | None:
         page.variant_scoped = True
     if facts.get("bound_variant_url"):
         page.variant_id = dict(parse_qsl(urlparse(facts["bound_variant_url"]).query))["variant"]
+        page.variant_scoped = True
+    page.offer_binding_unresolved = bool(len(matching) == 1 and facts["variant_conflict"] and not page.ambiguous)
     page.ambiguous |= facts["ambiguous"]
     if facts["variant_conflict"]:
         page.ean_published = ""
@@ -435,7 +443,10 @@ def _from_json_ld(html: str, url: str) -> ProductPage | None:
     page.stock_conflict = facts.get("stock_conflict", False)
     page.notes.extend("Plazo publicado: " + value for value in page.delivery_evidence)
     if page.variant_scoped and not facts.get("multiple_variant_offers"):
-        page.notes.append("Variante según URL: " + url + "; identificadores: " + ", ".join(page.identifiers))
+        if facts.get("bound_variant_url"):
+            page.notes.append("Oferta vinculada a variant=" + page.variant_id + ": " + facts["bound_variant_url"])
+        else:
+            page.notes.append("Variante según URL: " + url + "; identificadores: " + ", ".join(page.identifiers))
         if any(key == "selectedSize" for key, _ in parse_qsl(urlparse(url).query)):
             page.notes.append("selectedSize se conserva como Product Id de Edel-Optics, no como calibre ni EAN")
     return page
@@ -499,6 +510,7 @@ def select_product_variant(page: ProductPage | None, product: dict[str, Any]) ->
             and compare_calibers(target_caliber, published_caliber) == "different":
         common_price = bool(record["shared_offer"]) and not selected.ambiguous and selected.price is not None
         selected.ambiguous = True
+        selected.offer_binding_unresolved = False
         selected.ean_published = ""
         if not common_price:
             selected.price = None

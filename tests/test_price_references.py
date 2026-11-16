@@ -50,6 +50,12 @@ def test_caliber_normalisation():
     assert refs.normalize_caliber("54\u25a121") == "54-21"
     assert refs.normalize_caliber("54/21") == "54-21"
     assert refs.normalize_caliber("63") == "63"
+    assert refs.normalize_caliber("32-50") == ""
+    assert refs.extract_caliber("RB2140 901-32-50") == ""
+    bassol_slug = "Ray-Ban RB2140 Wayfarer 901-32-50"
+    parsed = refs.parse_reference(bassol_slug, brands=["Ray Ban"], models=["RB2140"])
+    assert parsed.color_key == "90132" and parsed.caliber == "50"
+    assert refs.classify(CATALOG[4], {"title": bassol_slug}).status == refs.REJECTED
     assert refs.compare_calibers("54-21", "54-20") == "different"
     assert refs.compare_calibers("63-13", "63") == "equal"
     assert refs.compare_calibers("", "63") == "unknown"

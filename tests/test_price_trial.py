@@ -768,6 +768,8 @@ def test_diagnostic_privacy_retry_preserves_original_and_runs_once(trial, monkey
     assert service.request_diagnostic(cid, ean, url, **kwargs)["id"] == request["id"]
     retry = service.retry_diagnostic(request["id"], **kwargs)
     assert retry["retry_of"] == request["id"] and retry["status"] == "pending"
+    assert retry["actor"] == kwargs["actor"] and retry["note"] == kwargs["note"]
+    assert retry["build_commit"] == kwargs["build_commit"] and retry["created_at"]
     assert service.retry_diagnostic(request["id"], **kwargs)["id"] == retry["id"]
     service.diagnostic_tick()
     service.diagnostic_tick()
@@ -777,8 +779,17 @@ def test_diagnostic_privacy_retry_preserves_original_and_runs_once(trial, monkey
     with store._connect() as con:
         assert dict(con.execute("SELECT * FROM price_diagnostic_requests WHERE id=?", (request["id"],)).fetchone()) == original
         assert con.execute("SELECT COUNT(*) FROM price_diagnostic_requests WHERE retry_of=?", (request["id"],)).fetchone()[0] == 1
+        child = dict(con.execute("SELECT * FROM price_diagnostic_requests WHERE retry_of=?",
+                                 (request["id"],)).fetchone())
+        assert (child["actor"], child["note"], child["build_commit"]) == (
+            kwargs["actor"], kwargs["note"], kwargs["build_commit"])
+        assert child["created_at"] == retry["created_at"] and child["retry_of"] == request["id"]
         audit = con.execute("SELECT * FROM access_audit WHERE action='retry_diagnostic'").fetchone()
         assert audit["actor"] == kwargs["actor"] and audit["note"] == kwargs["note"]
+        assert json.loads(audit["current"])["build_commit"] == kwargs["build_commit"]
+    result = service.diagnostic_results(cid, ean)[0]
+    assert (result["actor"], result["note"], result["build_commit"]) == (
+        kwargs["actor"], kwargs["note"], kwargs["build_commit"])
     clock.advance(days=8)
     with pytest.raises(ValueError, match="caducado"):
         service.diagnostic_artifact(retry["id"])
@@ -812,6 +823,7 @@ def test_diagnostic_retry_is_idempotent_under_concurrent_submissions(trial, monk
 def test_diagnostic_retry_rechecks_reservations_before_http(trial, monkeypatch):
     service, store, clock, cid, ean, url, site, request, kwargs, _ = _privacy_rejected_diagnostic(trial, monkeypatch)
     retry = service.retry_diagnostic(request["id"], **kwargs)
+    clock.advance(seconds=1)
     with store._connect() as con, con:
         con.execute("""INSERT INTO access_requests(scope,scope_id,competitor_id,method,purpose,ean,url,reserved_at)
             VALUES('competitor',?,?,'ficha','other',?,?,?)""",
@@ -822,6 +834,34 @@ def test_diagnostic_retry_rechecks_reservations_before_http(trial, monkeypatch):
         row = con.execute("SELECT status,reason FROM price_diagnostic_requests WHERE id=?", (retry["id"],)).fetchone()
         assert row["status"] == "rejected"
         assert "petición o reserva" in row["reason"]
+
+
+def test_diagnostic_retry_rejects_reservation_after_original_attempt(trial, monkeypatch):
+    service, store, clock, cid, ean, url, site, request, kwargs, _ = _privacy_rejected_diagnostic(trial, monkeypatch)
+    clock.advance(seconds=1)
+    with store._connect() as con, con:
+        con.execute("""INSERT INTO access_requests(scope,scope_id,competitor_id,method,purpose,ean,url,reserved_at)
+            VALUES('competitor',?,?,'ficha','other',?,?,?)""",
+                    (cid, cid, ean, url, clock().isoformat()))
+
+    with pytest.raises(ValueError, match="posterior al rechazo"):
+        service.retry_diagnostic(request["id"], **kwargs)
+    assert not site.calls
+    with store._connect() as con:
+        assert con.execute("SELECT COUNT(*) FROM price_diagnostic_requests WHERE retry_of=?",
+                           (request["id"],)).fetchone()[0] == 0
+
+
+def test_diagnostic_retry_rechecks_route_robots_before_product_http(trial, monkeypatch):
+    service, store, _, cid, ean, url, site, request, kwargs, _ = _privacy_rejected_diagnostic(trial, monkeypatch)
+    retry = service.retry_diagnostic(request["id"], **kwargs)
+    site.robots = "User-agent: *\nDisallow: /\n"
+    with store._connect() as con, con:
+        con.execute("DELETE FROM price_robots_cache")
+    service.diagnostic_tick()
+    result = next(row for row in service.diagnostic_results(cid, ean) if row["id"] == retry["id"])
+    assert result["status"] == "rejected" and "robots.txt" in result["reason"]
+    assert url not in site.calls and site.calls.count(site.base + "/robots.txt") == 1
 
 
 @pytest.mark.parametrize("unsafe", ["reservation", "receipt", "unattributed", "uncertain", "blocked",

@@ -55,9 +55,10 @@ def normalize_caliber(value: Any) -> str:
     text = _ascii(value).strip()
     if not text:
         return ""
-    match = _CALIBER.search(text)
-    if match:
-        return f"{match.group(1)}-{int(match.group(2))}"
+    for match in _CALIBER.finditer(text):
+        lens, bridge = int(match.group(1)), int(match.group(2))
+        if 38 <= lens <= 66 and 10 <= bridge <= 26:
+            return f"{lens}-{bridge}"
     return text if _LENS_ONLY.fullmatch(text) else ""
 
 
@@ -76,8 +77,11 @@ def compare_calibers(left: Any, right: Any) -> str:
 
 
 def extract_caliber(text: Any) -> str:
-    match = _CALIBER.search(_ascii(text))
-    return f"{match.group(1)}-{int(match.group(2))}" if match else ""
+    for match in _CALIBER.finditer(_ascii(text)):
+        lens, bridge = int(match.group(1)), int(match.group(2))
+        if 38 <= lens <= 66 and 10 <= bridge <= 26:
+            return f"{lens}-{bridge}"
+    return ""
 
 
 def extract_lens(text: Any) -> str:
@@ -331,6 +335,19 @@ def classify(product: Mapping[str, Any], candidate: Mapping[str, Any]) -> MatchR
 
     if published and not ean:
         reasons.append("EAN publicado no válido: no se aplica la excepción de calibre")
+    ambiguous_references = any(ref.ambiguous for ref in references)
+    ambiguous = candidate.get("ambiguous") or ambiguous_references
+
+    def ambiguous_result() -> MatchResult:
+        reasons.append("Identificación ambigua: requiere revisión")
+        for index, (text, ref) in enumerate(zip([title, *(candidate.get("identifiers") or [])], references)):
+            if ref.ambiguous:
+                source = "título" if index == 0 else f"identificador {index}"
+                reasons.append(f"Varias referencias en {source}: {text}")
+        return result(PROBABLE)
+
+    if ambiguous and (not candidate.get("offer_binding_unresolved") or ambiguous_references):
+        return ambiguous_result()
     identity_fields = [(own_brand, brands), (own_model, models), (own_color, colors)]
     contradictions = any(found and found != {expected} for expected, found in identity_fields)
     for name, expected, found in [("Marca", own_brand, brands), ("Modelo", own_model, models),
@@ -346,13 +363,8 @@ def classify(product: Mapping[str, Any], candidate: Mapping[str, Any]) -> MatchR
         return result(REJECTED if contradictions else PROBABLE)
     if contradictions:
         return result(PROBABLE if verified_ean else REJECTED)
-    if candidate.get("ambiguous") or any(ref.ambiguous for ref in references):
-        reasons.append("Identificación ambigua: requiere revisión")
-        for index, (text, ref) in enumerate(zip([title, *(candidate.get("identifiers") or [])], references)):
-            if ref.ambiguous:
-                source = "título" if index == 0 else f"identificador {index}"
-                reasons.append(f"Varias referencias en {source}: {text}")
-        return result(PROBABLE)
+    if ambiguous:
+        return ambiguous_result()
     if reasons:
         return result(PROBABLE)
     reasons.append("EAN publicado idéntico; marca, modelo y código de color confirmados" if verified_ean else
