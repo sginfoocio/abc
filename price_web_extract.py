@@ -250,6 +250,12 @@ def _offer_facts(node: dict, url: str) -> dict[str, Any]:
             facts["notes"].append("Ninguna oferta corresponde a la URL de variante solicitada")
             offers = []
         else:
+            if len(selected_offers) == 1:
+                selected_url = urljoin(url, selected_offers[0][0]["url"])
+                variant_parameters = [(key, value) for key, value in parse_qsl(urlparse(selected_url).query)
+                                       if key in {"variant", "selectedSize"}]
+                if len(variant_parameters) == 1 and variant_parameters[0][1]:
+                    facts["bound_variant_url"] = selected_url
             variant_offer_ids = {id(offer) for offer, _ in variant_offers}
             shared_offers = [(offer, restrictions) for offer, restrictions in offers
                              if id(offer) not in variant_offer_ids]
@@ -423,8 +429,12 @@ def _from_json_ld(html: str, url: str) -> ProductPage | None:
     if facts.get("multiple_variant_offers"):
         page.variant_scoped = True
     if facts.get("bound_variant_url"):
-        page.variant_id = dict(parse_qsl(urlparse(facts["bound_variant_url"]).query))["variant"]
+        variant_parameters = [(key, value) for key, value in parse_qsl(
+            urlparse(facts["bound_variant_url"]).query) if key in {"variant", "selectedSize"}]
+        if len(variant_parameters) == 1 and variant_parameters[0][1]:
+            page.variant_id = variant_parameters[0][1]
         page.variant_scoped = True
+        page.url_trace["selected_variant_url"] = facts["bound_variant_url"]
     page.offer_binding_unresolved = bool(len(matching) == 1 and facts["variant_conflict"] and not page.ambiguous)
     page.ambiguous |= facts["ambiguous"]
     if facts["variant_conflict"]:
@@ -1051,9 +1061,7 @@ def extract_product(html: str, url: str, *, price_selector: str = "", availabili
             page.market_conflict = True
         else:
             page.market, page.market_source = explicit, "ficha:product:market"
-    bound_variant_url = next((value for value in page.variant_urls
-                              if page.variant_id and any(key == "variant" and item == page.variant_id
-                                                         for key, item in parse_qsl(urlparse(value).query))), "")
+    bound_variant_url = page.url_trace.get("selected_variant_url", "")
     page.url_trace = {**(url_trace or {}), "final_url": requested_url,
                       "selected_variant_url": url if selected_size else bound_variant_url,
                       "canonical_urls": list(dict.fromkeys(urljoin(requested_url, href)

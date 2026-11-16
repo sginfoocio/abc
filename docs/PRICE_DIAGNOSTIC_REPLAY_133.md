@@ -103,10 +103,14 @@ rechazo de Visual-Click, precio común y stock desconocido de Mia Burton,
 normalización del slug Bassol, rechazo previo a HTTP, reintento enlazado,
 auditoría, concurrencia, reservas, permisos, presupuesto, bloqueos, robots y
 revalidación del trabajador. En el checkout con manifiestos canónicos, la
-batería dirigida de continuidad, referencias, web y reintentos pasó: **216
-tests**. La comprobación flake8 selectiva y la compilación de los módulos
-modificados también pasaron. El CI completo y el build/smoke Docker sobre el
-HEAD final siguen pendientes.
+batería dirigida final de continuidad, referencias, web, auditoría de reintento,
+trazas de variante y contexto Docker pasó: **271 tests**. La comprobación
+flake8 selectiva y la compilación de los módulos modificados también pasaron.
+La ejecución local completa (2.151 aprobados, 16 omitidos y 10 subtests)
+encontró dos regresiones ahora corregidas y cubiertas por esos tests dirigidos;
+la tercera fue una prueba de validación fotográfica Kering, reproducida también
+en el `HEAD` sin modificar de esta rama. CI completo y build/smoke Docker sobre
+el HEAD final siguen pendientes.
 
 El smoke de Docker carga el paquete parcial dentro del contenedor, comprueba la
 identidad de las tres capturas, usa el usuario real UID 1037, verifica SQLite

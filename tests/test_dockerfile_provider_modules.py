@@ -33,15 +33,19 @@ def test_dockerfile_copies_local_dependencies_of_provider_modules():
 
 def test_docker_context_allows_only_the_required_documentary_resource():
     resource = "docs/PRICE_COVERAGE_MEASUREMENT_EVIDENCE.csv"
+    evidence = "docs/Precios/100_EAN/evidencia_replay_133_20261116.zip"
     rules = [line.strip() for line in (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
              if line.strip() and not line.startswith("#")]
     # Ordered Docker negation contract: reopen the directory, exclude its contents, allow one file.
     docs_rules = [rule for rule in rules if rule.lstrip("!").split("/")[0] == "docs"]
-    assert docs_rules == ["docs/", "!docs/", "docs/**", "!" + resource]
+    assert docs_rules == ["docs/", "!docs/", "docs/**", "!" + resource,
+                          "!docs/Precios/", "!docs/Precios/100_EAN/", "!" + evidence]
     assert rules.index("*.csv") < rules.index("!" + resource)
-    assert resource in _copied((ROOT / "Dockerfile").read_text(encoding="utf-8"))
-    assert (ROOT / resource).is_file()
-    assert "COPY docs " not in (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    copied = _copied(dockerfile)
+    assert resource in copied and evidence in copied
+    assert (ROOT / resource).is_file() and (ROOT / evidence).is_file()
+    assert "COPY docs " not in dockerfile
 
 
 def test_missing_runtime_evidence_is_an_explicit_failure(tmp_path, monkeypatch):
