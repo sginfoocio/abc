@@ -178,6 +178,25 @@ def test_color_suffix_is_not_mistaken_for_a_caliber(suffix):
     assert match.normalized["listing"]["calibers"] == ["50"]
 
 
+@pytest.mark.parametrize("multiple_variants", [False, True])
+def test_explicit_large_caliber_conflict_in_product_group_remains_a_review(multiple_variants):
+    url = "https://example.test/products/fixture"
+    target = {"ean": "0805289126577", "brand": "Ray Ban", "model": "RB2140",
+              "color": "901", "caliber": "50-22"}
+    node = {"@type": "ProductGroup", "url": url, "name": "Ray Ban RB2140 901",
+            "brand": "Ray Ban", "model": "RB2140", "color": "901",
+            "hasVariant": [{"@type": "Product", "url": url, "gtin13": target["ean"],
+                            "size": "69-14", "offers": {"@type": "Offer", "price": "174",
+                                                         "priceCurrency": "EUR", "availability": "InStock"}}]}
+    if multiple_variants:
+        node["hasVariant"].append({"@type": "Product", "url": url, "gtin12": "805289126584", "size": "54-18"})
+
+    page = select_product_variant(extract_product(_ld(node), url), target)
+
+    assert page.ambiguous and page.availability == "unknown"
+    assert any("calibre" in note.lower() and "contradice" in note.lower() for note in page.notes)
+
+
 def test_mia_burton_sanitized_facts_common_price_without_variant_stock_or_ean(tmp_path):
     url = "https://miaburton.com/de/sonnenbrillen/ray-ban/wayfarer-rb2140-901-58"
     target = {"ean": "0805289126577", "brand": "Ray Ban", "model": "RB2140", "color": "901"}

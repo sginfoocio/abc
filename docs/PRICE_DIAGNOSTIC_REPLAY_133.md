@@ -44,6 +44,12 @@ La interfaz distingue `reintentable (sujeto a comprobación)`, `pendiente`,
 `ejecutando`, `capturado`, `rechazado` y `caducado`, y expone responsable,
 motivo, fecha y commit.
 
+La extracción heurística de medidas en texto libre no elimina secuencias
+numéricas que no haya reconocido como calibre: así un sufijo de color no
+desaparece al aparecer otra medida después. Una medida explícita estructurada
+se conserva aunque sea inusual, para no ocultar contradicciones con el EAN
+solicitado.
+
 ## Reevaluación offline del manifiesto
 
 La matriz contiene 1.400 combinaciones únicas; coteja exactamente los 100 EAN,

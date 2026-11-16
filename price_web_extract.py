@@ -375,7 +375,8 @@ def _from_json_ld(html: str, url: str) -> ProductPage | None:
                              if node.get(key) is not None}
                 for variant in _as_list(node.get("hasVariant")):
                     if isinstance(variant, dict):
-                        records.append({"product": {**inherited, **variant}, "shared_offer": common_offer})
+                        records.append({"product": {**inherited, **variant}, "shared_offer": common_offer,
+                                        "from_group": True})
     if not records:
         return None
     products = [record["product"] for record in records]
@@ -397,6 +398,8 @@ def _from_json_ld(html: str, url: str) -> ProductPage | None:
     if len(matching) == 1:
         record = matching[0]
         node = _with_shared_group_offer(record["product"], record["shared_offer"])
+        if record.get("from_group") and len(records) == 1 and _gtins(record["product"]):
+            page.structured_variants = matching
     elif not matching and len(products) == 1 and not page.variant_scoped:
         node = products[0]
     else:

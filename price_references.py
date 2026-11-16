@@ -55,10 +55,9 @@ def normalize_caliber(value: Any) -> str:
     text = _ascii(value).strip()
     if not text:
         return ""
-    for match in _CALIBER.finditer(text):
-        lens, bridge = int(match.group(1)), int(match.group(2))
-        if 38 <= lens <= 66 and 10 <= bridge <= 26:
-            return f"{lens}-{bridge}"
+    match = _CALIBER.search(text)
+    if match:
+        return f"{match.group(1)}-{int(match.group(2))}"
     return text if _LENS_ONLY.fullmatch(text) else ""
 
 
@@ -89,6 +88,17 @@ def extract_lens(text: Any) -> str:
     match = _LENS_TOKEN.search(_ascii(text).strip())
     lens = int(match.group(1) or match.group(2)) if match else 0
     return str(lens) if 38 <= lens <= 66 else ""
+
+
+def _without_caliber(text: str, caliber: str) -> str:
+    if not caliber:
+        return text
+    if "-" not in caliber:
+        return _LENS_TOKEN.sub(" ", text)
+    for match in _CALIBER.finditer(text):
+        if extract_caliber(match.group()) == caliber:
+            return text[:match.start()] + " " + text[match.end():]
+    return text
 
 
 def caliber_from_code(code: Any) -> str:
@@ -149,7 +159,7 @@ def parse_reference(text: str, *, brands: Iterable[str] = (), models: Iterable[s
         return Reference(model=identifier.group(1).upper() + "B", color=identifier.group(2))
     caliber = extract_caliber(raw) or extract_lens(raw)
     if caliber:
-        raw = _CALIBER.sub(" ", raw) if "-" in caliber else _LENS_TOKEN.sub(" ", raw)
+        raw = _without_caliber(raw, caliber)
     raw = re.sub(r"(?<=\d)/(?=\d)", "", raw)
     brand, rest = strip_brand(raw, brand_list)
     parts = tokens(rest)
@@ -389,7 +399,7 @@ class ReferenceIndex:
         if self.by_ean(text):
             return "ean", [self.by_ean(text)]
         ref = parse_reference(text, brands=self.brands, models=self.models)
-        compact = key(re.sub(_CALIBER, " ", _ascii(text)))
+        compact = key(_without_caliber(_ascii(text), ref.caliber))
         for level, test in (
             ("brand_model_color", lambda p: ref.brand and key(p["brand"]) == key(ref.brand)
              and model_key(p["model"]) == ref.model_key and key(p["color"]) == ref.color_key),
