@@ -52,6 +52,7 @@ _ADDED_COLUMNS = {
     "pilot_budgets": {"last_http_at": "REAL"},
     "price_pilot": {"last_error": "TEXT NOT NULL DEFAULT ''"},
     "price_trial_pairs": {"next_check_at": "TEXT", "defer_reason": "TEXT NOT NULL DEFAULT ''"},
+    "price_diagnostic_requests": {"retry_of": "INTEGER REFERENCES price_diagnostic_requests(id)"},
     "locate_events": {"metadata": "TEXT NOT NULL DEFAULT '{}'"},
     "offers": {"ean_published": "TEXT NOT NULL DEFAULT ''", "model_code": "TEXT NOT NULL DEFAULT ''",
                "color_code": "TEXT NOT NULL DEFAULT ''", "caliber": "TEXT NOT NULL DEFAULT ''",
@@ -867,7 +868,7 @@ class PriceComparatorStore:
                     );
                     CREATE UNIQUE INDEX IF NOT EXISTS idx_price_diagnostic_active
                         ON price_diagnostic_requests(continuity_id,competitor_id,ean,url)
-                        WHERE status!='expired';
+                        WHERE status NOT IN ('expired','rejected');
                     CREATE TABLE IF NOT EXISTS price_robots_cache (
                         origin TEXT NOT NULL,
                         agent TEXT NOT NULL,
@@ -952,6 +953,14 @@ class PriceComparatorStore:
                     for name, definition in columns.items():
                         if name not in existing:
                             connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+                index = connection.execute("SELECT sql FROM sqlite_master WHERE name='idx_price_diagnostic_active'").fetchone()
+                if index and "status!='expired'" in index["sql"]:
+                    connection.execute("DROP INDEX idx_price_diagnostic_active")
+                connection.execute("""CREATE UNIQUE INDEX IF NOT EXISTS idx_price_diagnostic_active
+                    ON price_diagnostic_requests(continuity_id,competitor_id,ean,url)
+                    WHERE status NOT IN ('expired','rejected')""")
+                connection.execute("""CREATE UNIQUE INDEX IF NOT EXISTS idx_price_diagnostic_retry
+                    ON price_diagnostic_requests(retry_of) WHERE retry_of IS NOT NULL""")
 
     def seed_defaults(self) -> dict[str, int]:
         """Persist the initial configuration. Idempotent: existing values are never overwritten.

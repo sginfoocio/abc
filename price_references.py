@@ -19,7 +19,7 @@ LEVELS = ("ean", "brand_model_color", "model_color", "normalized_variants")
 
 _SEPARATORS = re.compile(r"[\s\-_/.·,;:|\\]+")
 # The bridge must end the number: "54 0PR_..." or "C54 16K08Z" (a colour code) are not a calibre.
-_CALIBER = re.compile(r"(?<!\d)(\d{2})\s*(?:[-/x×□]|\s)\s*(\d{1,2})(?:mm)?(?![\dA-Za-z])", re.IGNORECASE)
+_CALIBER = re.compile(r"(?<!\d)(?<!\d/)(\d{2})\s*(?:[-/x×□]|\s)\s*(\d{1,2})(?:mm)?(?![\dA-Za-z])", re.IGNORECASE)
 _LENS_ONLY = re.compile(r"^\d{2}$")
 _LENS_TOKEN = re.compile(r"(?<![\dA-Za-z])C(\d{2})(?![\dA-Za-z])|\s(\d{2})\s*$")
 _CODE_CALIBER = re.compile(r"^0?[A-Z]{1,4}_[A-Z0-9]+?(\d{2})(\d{2})$")
@@ -146,6 +146,7 @@ def parse_reference(text: str, *, brands: Iterable[str] = (), models: Iterable[s
     caliber = extract_caliber(raw) or extract_lens(raw)
     if caliber:
         raw = _CALIBER.sub(" ", raw) if "-" in caliber else _LENS_TOKEN.sub(" ", raw)
+    raw = re.sub(r"(?<=\d)/(?=\d)", "", raw)
     brand, rest = strip_brand(raw, brand_list)
     parts = tokens(rest)
     if parts and parts[0] in {"COLECCION", "COLLECTION"}:
@@ -330,13 +331,6 @@ def classify(product: Mapping[str, Any], candidate: Mapping[str, Any]) -> MatchR
 
     if published and not ean:
         reasons.append("EAN publicado no válido: no se aplica la excepción de calibre")
-    if candidate.get("ambiguous") or any(ref.ambiguous for ref in references):
-        reasons.append("Identificación ambigua: requiere revisión")
-        for index, (text, ref) in enumerate(zip([title, *(candidate.get("identifiers") or [])], references)):
-            if ref.ambiguous:
-                source = "título" if index == 0 else f"identificador {index}"
-                reasons.append(f"Varias referencias en {source}: {text}")
-        return result(PROBABLE)
     identity_fields = [(own_brand, brands), (own_model, models), (own_color, colors)]
     contradictions = any(found and found != {expected} for expected, found in identity_fields)
     for name, expected, found in [("Marca", own_brand, brands), ("Modelo", own_model, models),
@@ -347,11 +341,18 @@ def classify(product: Mapping[str, Any], candidate: Mapping[str, Any]) -> MatchR
         elif not verified_ean and (not expected or not found):
             reasons.append(f"{name} no confirmado: catálogo {expected or 'desconocido'}, "
                            f"ficha {', '.join(sorted(found)) or 'desconocido'}")
-    if ean and ean != product.get("ean"):
+    if ean and ean != _valid_gtin(product.get("ean")):
         reasons.insert(0, f"EAN publicado distinto: {ean}; revisión manual obligatoria")
         return result(REJECTED if contradictions else PROBABLE)
     if contradictions:
         return result(PROBABLE if verified_ean else REJECTED)
+    if candidate.get("ambiguous") or any(ref.ambiguous for ref in references):
+        reasons.append("Identificación ambigua: requiere revisión")
+        for index, (text, ref) in enumerate(zip([title, *(candidate.get("identifiers") or [])], references)):
+            if ref.ambiguous:
+                source = "título" if index == 0 else f"identificador {index}"
+                reasons.append(f"Varias referencias en {source}: {text}")
+        return result(PROBABLE)
     if reasons:
         return result(PROBABLE)
     reasons.append("EAN publicado idéntico; marca, modelo y código de color confirmados" if verified_ean else

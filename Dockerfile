@@ -58,6 +58,7 @@ COPY scripts/smoke_luxoptica_stop.py ./scripts/
 COPY scripts/monitor_stop_fixture ./scripts/monitor_stop_fixture
 COPY deployment/nfs/staging-layout.tsv ./deployment/nfs/staging-layout.tsv
 COPY scripts/smoke_image_storage.py ./scripts/smoke_image_storage.py
+COPY scripts/smoke_price_diagnostic.py ./scripts/smoke_price_diagnostic.py
 COPY scripts/smoke_image_thumbnails.py ./scripts/smoke_image_thumbnails.py
 COPY scripts/regenerate_image_thumbnails.py ./scripts/regenerate_image_thumbnails.py
 COPY scripts/cloud_image_entrypoint.sh ./scripts/cloud_image_entrypoint.sh

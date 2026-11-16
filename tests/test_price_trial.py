@@ -737,6 +737,120 @@ def test_diagnostic_rejects_unverifiable_private_storage_before_http(trial, monk
     assert not site.calls
 
 
+def _privacy_rejected_diagnostic(trial, monkeypatch):
+    from price_diagnostic import EvidenceError
+
+    service, store, clock, cid, ean, url, site = _diagnostic_review(trial)
+    kwargs = {"actor": "operator", "note": "diagnóstico", "build_commit": "b" * 40, "approved": True}
+    request = service.request_diagnostic(cid, ean, url, **kwargs)
+
+    def deny(_path):
+        raise EvidenceError("El almacenamiento no acredita permisos privados")
+
+    monkeypatch.setattr("price_diagnostic.require_private_database", deny)
+    service.diagnostic_tick()
+    monkeypatch.setattr("price_diagnostic.require_private_database", lambda path: None)
+    assert not site.calls
+    with store._connect() as con:
+        original = dict(con.execute("SELECT * FROM price_diagnostic_requests WHERE id=?", (request["id"],)).fetchone())
+    assert original["status"] == "rejected" and json.loads(original["result"])["requests"] == []
+    return service, store, clock, cid, ean, url, site, request, kwargs, original
+
+
+def test_diagnostic_privacy_retry_preserves_original_and_runs_once(trial, monkeypatch):
+    service, store, clock, cid, ean, url, site, request, kwargs, original = _privacy_rejected_diagnostic(trial, monkeypatch)
+    with store._connect() as con, con:
+        con.execute("DROP INDEX idx_price_diagnostic_active")
+        con.execute("""CREATE UNIQUE INDEX idx_price_diagnostic_active
+            ON price_diagnostic_requests(continuity_id,competitor_id,ean,url) WHERE status!='expired'""")
+    PriceComparatorStore(store.database_path)
+    before = _commercial_snapshot(store)
+    assert service.request_diagnostic(cid, ean, url, **kwargs)["id"] == request["id"]
+    retry = service.retry_diagnostic(request["id"], **kwargs)
+    assert retry["retry_of"] == request["id"] and retry["status"] == "pending"
+    assert service.retry_diagnostic(request["id"], **kwargs)["id"] == retry["id"]
+    service.diagnostic_tick()
+    service.diagnostic_tick()
+    assert site.calls.count(url) == 1
+    assert service.diagnostic_artifact(retry["id"])
+    assert _commercial_snapshot(store) == before
+    with store._connect() as con:
+        assert dict(con.execute("SELECT * FROM price_diagnostic_requests WHERE id=?", (request["id"],)).fetchone()) == original
+        assert con.execute("SELECT COUNT(*) FROM price_diagnostic_requests WHERE retry_of=?", (request["id"],)).fetchone()[0] == 1
+        audit = con.execute("SELECT * FROM access_audit WHERE action='retry_diagnostic'").fetchone()
+        assert audit["actor"] == kwargs["actor"] and audit["note"] == kwargs["note"]
+    clock.advance(days=8)
+    with pytest.raises(ValueError, match="caducado"):
+        service.diagnostic_artifact(retry["id"])
+    fresh = service.request_diagnostic(cid, ean, url, **kwargs)
+    assert fresh["status"] == "pending" and fresh["id"] != retry["id"]
+
+
+def test_diagnostic_retry_is_idempotent_under_concurrent_submissions(trial, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from filelock import Timeout
+
+    service, store, _, _, _, url, site, request, kwargs, _ = _privacy_rejected_diagnostic(trial, monkeypatch)
+
+    def submit():
+        try:
+            return service.retry_diagnostic(request["id"], **kwargs)
+        except Timeout:
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: submit(), range(2)))
+    assert any(results)
+    retry = service.retry_diagnostic(request["id"], **kwargs)
+    assert all(result is None or result["id"] == retry["id"] for result in results)
+    service.diagnostic_tick()
+    assert site.calls.count(url) == 1
+    with store._connect() as con:
+        assert con.execute("SELECT COUNT(*) FROM price_diagnostic_requests WHERE retry_of=?", (request["id"],)).fetchone()[0] == 1
+
+
+def test_diagnostic_retry_rechecks_reservations_before_http(trial, monkeypatch):
+    service, store, clock, cid, ean, url, site, request, kwargs, _ = _privacy_rejected_diagnostic(trial, monkeypatch)
+    retry = service.retry_diagnostic(request["id"], **kwargs)
+    with store._connect() as con, con:
+        con.execute("""INSERT INTO access_requests(scope,scope_id,competitor_id,method,purpose,ean,url,reserved_at)
+            VALUES('competitor',?,?,'ficha','other',?,?,?)""",
+                    (cid, cid, ean, url, clock().isoformat()))
+    service.diagnostic_tick()
+    assert not site.calls
+    with store._connect() as con:
+        row = con.execute("SELECT status,reason FROM price_diagnostic_requests WHERE id=?", (retry["id"],)).fetchone()
+        assert row["status"] == "rejected"
+        assert "petición o reserva" in row["reason"]
+
+
+@pytest.mark.parametrize("unsafe", ["reservation", "receipt", "unattributed", "uncertain", "blocked", "changed_candidate"])
+def test_diagnostic_privacy_retry_rejects_uncertain_or_blocked_attempts(trial, monkeypatch, unsafe):
+    service, store, clock, cid, ean, url, site, request, kwargs, _ = _privacy_rejected_diagnostic(trial, monkeypatch)
+    with store._connect() as con, con:
+        if unsafe in {"reservation", "receipt"}:
+            con.execute("""INSERT INTO access_requests(scope,scope_id,competitor_id,method,purpose,ean,url,reserved_at,result)
+                VALUES('competitor',?,?,'ficha','other',?,?,?,?)""",
+                        (cid, cid, "" if unsafe == "reservation" else ean, url, clock().isoformat(),
+                         "reserved" if unsafe == "reservation" else "HTTP 200"))
+        elif unsafe == "unattributed":
+            con.execute("""INSERT INTO access_requests(scope,scope_id,competitor_id,method,purpose,ean,url,reserved_at)
+                VALUES('competitor','','','ficha','other','','',?)""", (clock().isoformat(),))
+        elif unsafe == "uncertain":
+            con.execute("UPDATE price_diagnostic_requests SET result='{}' WHERE id=?", (request["id"],))
+        elif unsafe == "blocked":
+            con.execute("UPDATE locate_jobs SET state='blocked' WHERE competitor_id=? AND ean=?", (cid, ean))
+        elif unsafe == "changed_candidate":
+            con.execute("UPDATE competitor_product_urls SET status='rejected' WHERE competitor_id=? AND ean=?",
+                        (cid, ean))
+    with pytest.raises(ValueError):
+        service.retry_diagnostic(request["id"], **kwargs)
+    assert not site.calls
+    with store._connect() as con:
+        assert con.execute("SELECT COUNT(*) FROM price_diagnostic_requests WHERE retry_of=?", (request["id"],)).fetchone()[0] == 0
+        assert con.execute("SELECT COUNT(*) FROM access_audit WHERE action='retry_diagnostic'").fetchone()[0] == 1
+
+
 def test_diagnostic_rejects_unrelated_claimed_lock(trial, tmp_path):
     from filelock import FileLock
 

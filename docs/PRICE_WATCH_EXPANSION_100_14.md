@@ -34,7 +34,7 @@ efectiva de 3 segundos. Los permisos se comprueban al aplicar, sin modificarlos.
 Robots por ruta/agente, incidentes, CAPTCHA, bloqueos, restricciones, stock y revisiones
 siguen vigentes. Tener 1.400 pares seleccionados no significa 1.400 fichas ni ofertas.
 El calibre no cambia el precio del mismo modelo/color; no se transfieren disponibilidad
-ni EAN entre variantes contradictorias. No se ha modificado el extractor.
+ni EAN entre variantes contradictorias.
 
 ## Límite conocido de Bassol
 
@@ -59,9 +59,10 @@ El informe histórico del 15 de noviembre contiene 182 cierres técnicos en revi
 distribuidos entre seis tiendas y 85 EAN. La lista vinculada a ese informe no es
 una autorización de ejecución ni demuestra que los pares sigan siendo elegibles.
 La exportación histórica contiene 246 fichas verificadas agregadas por tienda;
-no identifica por sí sola el estado actual de cada par. Las capturas HTML originales
-de Bassol, Optical H, Visual-Click y Mia Burton no están disponibles: la asociación
-entre variante y oferta sigue pendiente de validación. El calibre no modifica el
+no identifica por sí sola el estado actual de cada par. Las respuestas HTML originales
+completas de Bassol, Optical H, Visual-Click y Mia Burton no están disponibles.
+Después se obtuvieron capturas sanitizadas parciales de tres tiendas, descritas abajo.
+El calibre no modifica el
 precio del mismo modelo/color, pero tampoco acredita identidad ni stock de otra variante.
 
 La previsualización de `price_recovery.py` solo lee una base SQLite existente y no
@@ -117,8 +118,7 @@ de productos; no acreditan por sí solos la caída comunicada de 70 a 37 product
 Si un ProductGroup publica un precio común y el calibre asociado al EAN
 contradice el catálogo, el extractor conserva ese precio como evidencia, no como
 oferta comparable: identidad y stock permanecen en revisión. La corrección usa
-fixtures sintéticas; no sustituye las respuestas HTML originales aún pendientes
-de obtener mediante un flujo supervisado y presupuestado.
+fixtures sintéticas; no sustituye las respuestas HTML originales completas.
 
 El resumen histórico de 44 ofertas procede de `PriceMonitor.inventory()` al
 generar el informe. La reconstrucción conservadora obtiene 43 a partir del
@@ -191,6 +191,62 @@ con responsable, motivo, estado y reservas identificables.
 Cuando el par también pertenece al piloto anterior, se exige su comprobación
 supervisada existente, incluidos su bloqueo y presupuesto; si está desactivado,
 el diagnóstico se rechaza en lugar de eludirlo.
+
+### Replay de evidencias y reintento explícito
+
+El paquete `evidencias_133_20261116.zip` conserva JSON-LD sanitizado parcial,
+no las respuestas completas. El replay offline identifica:
+
+- Optical H: un único `Product` con GTIN UPC normalizado a `0805289126577` y
+  una única `Offer` anidada con URL de variante. Esa relación se admite solo
+  con URL base coincidente y sin GTIN o SKU contradictorios; no se consulta
+  la URL de variante por el hecho de estar publicada. El replay produce identidad
+  exacta y precio observado de 109,85 EUR, no una oferta vigente.
+- Visual-Click: `901/32` es un código de color distinto de `901`; no se
+  interpreta `32 50` como calibre ni se trata el prefijo del SKU como GTIN.
+  La ficha se rechaza por color y no se atribuyen su precio ni su stock al par.
+  Sigue pendiente buscar una alternativa por fuentes autorizadas.
+- Mia Burton: tres `Offer` describen medidas diferentes y el mismo precio de
+  174 EUR. Se conserva el precio común, pero no se atribuye stock ni EAN a una
+  variante sin vínculo. En la captura conservada `black` no acredita el código
+  de color `901`; la identidad sigue en revisión. El sufijo de URL no prueba
+  talla o EAN.
+
+La [matriz de replay](PRICE_DIAGNOSTIC_REPLAY_1400.xlsx) documenta los 1.400 pares:
+275 tienen hechos de extracción
+históricos para repetir únicamente la clasificación de identidad, tres tienen
+HTML sanitizado parcial y 1.122 carecen de muestra estructurada para reevaluar.
+En los tres replay parciales cambian dos clasificaciones de identidad: Optical H
+de probable a exacta y Visual-Click de probable a rechazada; Mia Burton sigue
+probable. Esto no verifica fichas, acepta revisiones ni demuestra ofertas actuales.
+Los hechos históricos sin HTML no permiten reconstruir las relaciones de oferta.
+Para cada par con muestra se usa la última muestra disponible por ID de
+comprobación, comparando el clasificador anterior con el nuevo sobre los mismos
+hechos extraídos. En las tres capturas parciales se reproducen también ambos
+extractores. Las fuentes locales se leen sin modificarlas: SHA-256 del paquete
+`evidencias_133_20261116.zip`:
+`bb52a03e699c968bd4c032766b95194215c47f662c501ca22726eeddbe154106`;
+SHA-256 de `evidencias_operacion_132.zip`:
+`4f098f8a27ae1daa00e5a941dc57334e19c7f8f45f3c91653922c10544f6829a`.
+
+La solicitud diagnóstica Bassol 1 fue rechazada por privacidad antes de HTTP.
+Repetir el envío ordinario no la reabre. Tras desplegar y verificar privacidad
+de la base, sus auxiliares, volumen y copias, el operador puede seleccionar el
+mismo par y URL documentada y pulsar **Reintentar rechazo previo a HTTP**, con su
+identidad real, motivo y confirmación. El servidor conserva el intento anterior,
+vincula un nuevo intento y registra auditoría; un doble envío devuelve el mismo
+intento nuevo. Solo se permite ese motivo de privacidad, con auditoría coincidente,
+sin peticiones ni reservas atribuibles o inciertas durante el intento anterior.
+Se revalidan alcance, candidata, estado y aplazamientos bajo los bloqueos
+compartidos. El trabajador vuelve a comprobar esos extremos, además de privacidad,
+cuota, permisos, robots y presupuesto, antes de HTTP. Si existe un bloqueo o una
+reserva incierta, no se fuerza el reintento. Capturar la URL `901-32` no acepta su
+identidad ni autoriza a atribuirle el EAN `0805289126577`.
+
+No se ejecutó el reintento ni la reevaluación selectiva en producción durante el
+desarrollo. La recuperación de los elegibles del lote anterior ya se aplicó:
+no repetir masivamente los 182. El par 529 / comprobación 2795 quedó excluido
+por petición o reserva posterior y debe conservar ese control.
 
 La evidencia es **HTML parcial sanitizado**, reconstruido exclusivamente a partir
 de propiedades JSON-LD permitidas; no es la respuesta original. Descarta formularios

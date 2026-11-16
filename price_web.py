@@ -886,8 +886,10 @@ class WebPriceSearch:
                                            ELSE excluded.last_availability END,
                     last_ok_at=COALESCE(excluded.last_ok_at,competitor_product_urls.last_ok_at)
             """, (config["competitor_id"], product["ean"], outcome.url, product["model"], product["color"],
-                  page.caliber, page.ean_published, outcome.match_status, status, stamp, page.price,
-                  page.availability, stamp if outcome.state == "exact" and page.has_price else None, source, note))
+                  page.caliber, page.ean_published, outcome.match_status, status, stamp,
+                  page.price if outcome.state != "rejected" else None,
+                  page.availability if outcome.state != "rejected" else "",
+                  stamp if outcome.state == "exact" and page.has_price else None, source, note))
 
     def _mark_relocation(self, competitor_id: str, ean: str, url: str) -> None:
         with self.store._connect() as connection, connection:

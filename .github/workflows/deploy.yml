@@ -167,6 +167,9 @@ jobs:
           docker run --rm --network none --read-only --user 1037:100 --tmpfs /tmp:size=536870912,mode=1777 \
             --mount "type=volume,source=$VOLUME,target=/smoke" -e CLOUD_SMOKE_DIRECTORY=/smoke/state \
             -e HOME=/home/cloud-images -e PYTHONPATH=/app "$IMAGE" python scripts/smoke_image_storage.py
+          docker run --rm --network none --read-only --user 1037:100 --tmpfs /tmp:size=536870912,mode=1777 \
+            --mount "type=volume,source=$VOLUME,target=/smoke" -e CLOUD_SMOKE_DIRECTORY=/smoke/state \
+            -e HOME=/home/cloud-images -e PYTHONPATH=/app "$IMAGE" python scripts/smoke_price_diagnostic.py
           docker run --rm --network none --read-only --user 1037:100 --cap-drop ALL --security-opt no-new-privileges \
             --tmpfs /tmp:size=536870912,mode=1777 --mount "type=volume,source=$VOLUME,target=/smoke" \
             -e CLOUD_SMOKE_DIRECTORY=/smoke/state -e HOME=/home/cloud-images -e PYTHONPATH=/app \

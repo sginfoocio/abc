@@ -147,6 +147,17 @@ def _gtins(node: dict) -> list[str]:
     return list(dict.fromkeys(found))
 
 
+def _gtins_consistent(node: dict, expected: str) -> bool:
+    for field in ("gtin13", "gtin12", "gtin14", "gtin8", "gtin", "ean"):
+        for value in _as_list(node.get(field)):
+            try:
+                if normalize_gtin(value) != expected:
+                    return False
+            except ValueError:
+                return False
+    return True
+
+
 def _url_key(url: str) -> tuple[str, str, str, tuple[tuple[str, str], ...]]:
     parsed = urlparse(url)
     return (parsed.scheme.lower(), parsed.netloc.lower(), parsed.path.rstrip("/"),
@@ -212,6 +223,25 @@ def _offer_facts(node: dict, url: str) -> dict[str, Any]:
             for o, _ in variant_offers for key, _ in parse_qsl(urlparse(o["url"]).query))):
         selected_offers = [(o, restrictions) for o, restrictions in variant_offers
                            if _url_key(urljoin(url, o["url"])) == _url_key(url)]
+        if not selected_offers and len(offers) == len(variant_offers) == 1 and len(_gtins(node)) == 1:
+            offer = variant_offers[0][0]
+            offer_url = urljoin(url, offer["url"])
+            parts = urlparse(offer_url)
+            parameters = parse_qsl(parts.query, keep_blank_values=True)
+            offer_gtins = _gtins(offer)
+            has_offer_gtin = any(offer.get(field) is not None
+                                 for field in ("gtin13", "gtin12", "gtin14", "gtin8", "gtin", "ean"))
+            if (isinstance(node.get("url"), str) and _url_key(urljoin(url, node["url"])) == _url_key(url)
+                    and not urlparse(url).query
+                    and _url_key(parts._replace(query="").geturl()) == _url_key(url)
+                    and len(parameters) == 1 and parameters[0][0] == "variant" and parameters[0][1]
+                    and _gtins_consistent(node, _gtins(node)[0])
+                    and (not has_offer_gtin or (offer_gtins == _gtins(node)
+                                                and _gtins_consistent(offer, _gtins(node)[0])))
+                    and (not offer.get("sku") or not node.get("sku") or offer["sku"] == node["sku"])):
+                selected_offers = variant_offers
+                facts["bound_variant_url"] = offer_url
+                facts["notes"].append("Oferta única vinculada al Product con GTIN y URL base publicados")
         if not selected_offers:
             facts["ambiguous"] = True
             facts["variant_conflict"] = True
@@ -297,6 +327,17 @@ def _offer_facts(node: dict, url: str) -> dict[str, Any]:
     if facts["stock_conflict"]:
         facts["availability"] = "unknown"
         facts["notes"].append("Stock publicado contradictorio entre ofertas: revisión obligatoria")
+    dimensions = {json.dumps(offer.get("additionalProperty"), sort_keys=True)
+                  for offer, _ in offers if offer.get("additionalProperty")}
+    if len(dimensions) > 1:
+        facts["availability"] = "unknown"
+        facts["multiple_variant_offers"] = True
+        facts["notes"].append("Stock por variante no vinculado al EAN solicitado")
+        if len(seen) != len(offers) or any(item[0] is None or not item[1] for item in seen) or len(distinct) != 1:
+            facts["price"] = None
+            facts["currency"] = ""
+            facts["ambiguous"] = True
+            facts["notes"].append("Precio común de las variantes no acreditado")
     if len(markets) == 1:
         facts["market"] = next(iter(markets))
     elif markets:
@@ -370,9 +411,13 @@ def _from_json_ld(html: str, url: str) -> ProductPage | None:
         page.notes.append("EAN publicados contradictorios: " + ", ".join(gtins))
     page.identifiers = [str(node[k]) for k in ("mpn", "sku") if node.get(k)]
     page.caliber = (normalize_caliber(_name(node.get("size"))) or extract_caliber(_name(node.get("size")))
-                    or extract_caliber(page.title)
+                    or extract_caliber(page.title) or extract_lens(page.title)
                     or extract_caliber(urlparse(url).path.rsplit("/", 1)[-1]))
     facts = _offer_facts(node, url)
+    if facts.get("multiple_variant_offers"):
+        page.variant_scoped = True
+    if facts.get("bound_variant_url"):
+        page.variant_id = dict(parse_qsl(urlparse(facts["bound_variant_url"]).query))["variant"]
     page.ambiguous |= facts["ambiguous"]
     if facts["variant_conflict"]:
         page.ean_published = ""
@@ -389,7 +434,7 @@ def _from_json_ld(html: str, url: str) -> ProductPage | None:
     page.delivery_evidence = facts["delivery_evidence"]
     page.stock_conflict = facts.get("stock_conflict", False)
     page.notes.extend("Plazo publicado: " + value for value in page.delivery_evidence)
-    if page.variant_scoped:
+    if page.variant_scoped and not facts.get("multiple_variant_offers"):
         page.notes.append("Variante según URL: " + url + "; identificadores: " + ", ".join(page.identifiers))
         if any(key == "selectedSize" for key, _ in parse_qsl(urlparse(url).query)):
             page.notes.append("selectedSize se conserva como Product Id de Edel-Optics, no como calibre ni EAN")
@@ -994,8 +1039,11 @@ def extract_product(html: str, url: str, *, price_selector: str = "", availabili
             page.market_conflict = True
         else:
             page.market, page.market_source = explicit, "ficha:product:market"
+    bound_variant_url = next((value for value in page.variant_urls
+                              if page.variant_id and any(key == "variant" and item == page.variant_id
+                                                         for key, item in parse_qsl(urlparse(value).query))), "")
     page.url_trace = {**(url_trace or {}), "final_url": requested_url,
-                      "selected_variant_url": url if selected_size else "",
+                      "selected_variant_url": url if selected_size else bound_variant_url,
                       "canonical_urls": list(dict.fromkeys(urljoin(requested_url, href)
                                                            for href in parsed.canonicals))}
     return page
