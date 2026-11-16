@@ -151,8 +151,8 @@ class MarcolinConnector(ProviderConnector):
         by_ean = {item["ean"]: item for item in items}
         portal_refs = {}
         for group in self.portal_groups(request_id):
-            if len(group["upcs"]) == 1:
-                portal_refs[group["upcs"][0]] = group["portal_ref"]
+            for ean in group["upcs"]:
+                portal_refs.setdefault(ean, set()).add(group["portal_ref"])
         workbook = Workbook()
         sheet = workbook.active
         sheet.title = "Marcolin"
@@ -166,12 +166,16 @@ class MarcolinConnector(ProviderConnector):
         for row in request["eans"]:
             item = by_ean.get(row["ean"], {})
             status = item.get("status", "pending")
+            refs = portal_refs.get(row["ean"], set())
+            reason = item.get("reason", "sin correspondencia Odoo confirmada")
+            if len(refs) > 1:
+                reason = "; ".join(filter(None, (reason, "referencias portal ambiguas; revisar grupos")))
             sheet.append([
                 row["ean"], item.get("sku", "") if status == "confirmed" else "",
                 row["ean"], item.get("sku", "") if status == "confirmed" else "",
                 item.get("product", ""), item.get("supplier", ""), item.get("order_name", ""),
-                item.get("order_date", ""), portal_refs.get(row["ean"], ""),
-                status, item.get("reason", "sin correspondencia Odoo confirmada"),
+                item.get("order_date", ""), next(iter(refs)) if len(refs) == 1 else "",
+                status, reason,
             ])
         for cell in sheet["A"][1:]:
             cell.number_format = "@"

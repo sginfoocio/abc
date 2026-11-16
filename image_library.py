@@ -15,14 +15,14 @@ from image_repository import ImageRecord
 
 # Stored view -> label. "perspectiva" is V2 only when it was really identified upstream.
 CORE_VIEWS = (("frontal", "V1"), ("perspectiva", "V2"), ("lateral", "V3"))
-VIEW_LABELS = {**dict(CORE_VIEWS), "detalle": "Detalle"}
-VIEW_ORDER = {view: index for index, view in enumerate(("frontal", "perspectiva", "lateral", "detalle"))}
+VIEW_LABELS = {**dict(CORE_VIEWS), "detalle": "Detalle", "lifestyle": "Lifestyle"}
+VIEW_ORDER = {view: index for index, view in enumerate(("frontal", "perspectiva", "lateral", "detalle", "lifestyle"))}
 VIEW_NAMES = {
-    "frontal": "V1 frontal", "perspectiva": "V2", "lateral": "V3 lateral", "detalle": "Detalle",
+    "frontal": "V1 frontal", "perspectiva": "V2", "lateral": "V3 lateral", "detalle": "Detalle", "lifestyle": "Lifestyle",
 }
 VIEW_FILTERS = {
     "Todas": None, "V1": "frontal", "V2": "perspectiva", "V3": "lateral",
-    "Detalle": "detalle", "Originales": "originales",
+    "Detalle": "detalle", "Lifestyle": "lifestyle", "Originales": "originales",
 }
 AVAILABILITY_FILTERS = ("Todos", "Vistas completas (V1, V2, V3)", "Con vistas pendientes")
 PAGE_SIZES = (12, 24, 48)

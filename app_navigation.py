@@ -29,6 +29,7 @@ def build_navigation(st_module: Any, auth_role: str | None, pages: dict[str, Any
             "Master Data": [pages["master_import"], pages["master_dictionary"], pages["master_dryrun"]],
             "Repositorio de imágenes": [
                 pages["luxoptica_images"],
+                *([pages["bulk_image_search"]] if "bulk_image_search" in pages else []),
                 *provider_pages,
                 pages["luxoptica_pending"],
                 pages["kering_images"],

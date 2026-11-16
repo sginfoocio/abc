@@ -76,6 +76,7 @@ from app_navigation import build_navigation
 from cloud_design import NAV_ICONS, inject_styles
 from app_pages.alerts import render_alerts_page
 from app_pages.luxoptica import render_images_page, render_pending_page
+from app_pages.bulk_image_page import render_page as render_bulk_image_page
 from app_pages.price_comparator import render_price_comparator_page
 from abcd_snapshots import (
     ABCD_SNAPSHOT_TABLE,
@@ -2044,20 +2045,25 @@ MASTERDATA_KERING_IMAGES_PAGE = st.Page(
 
 def render_provider_images_page() -> None:
     render_sidebar_shell("Proveedores de imágenes")
-    from provider_images_ui import render_provider_page
-    provider_labels = {
-        "Luxottica": "luxottica",
-        "Kering": "kering",
-        "Marcolin": "marcolin",
-        "NuORDER": "nuorder",
-        "Safilo": "safilo",
-    }
-    provider = st.radio(
+    from provider_images_ui import (
+        IMAGE_PROVIDER_KEYS,
+        IMAGE_PROVIDER_OPTIONS,
+        render_provider_page,
+    )
+
+    cloud_page_title("Proveedores de imágenes")
+    provider = st.segmented_control(
         "Proveedor",
-        tuple(provider_labels),
-        horizontal=True,
+        IMAGE_PROVIDER_OPTIONS,
+        default=IMAGE_PROVIDER_OPTIONS[0],
+        selection_mode="single",
+        width="stretch",
+        wrap=True,
         key="image_provider_selector",
     )
+    if provider is None:
+        render_footer()
+        return
     if provider == "Luxottica":
         require_admin_access()
         cloud_page_title(
@@ -2068,7 +2074,11 @@ def render_provider_images_page() -> None:
     elif provider == "Kering":
         render_kering_page(get_db_engine)
     else:
-        render_provider_page(get_db_engine, selected_provider=provider_labels[provider])
+        render_provider_page(
+            get_db_engine,
+            selected_provider=IMAGE_PROVIDER_KEYS[provider],
+            show_title=False,
+        )
     render_footer()
 
 
@@ -2093,6 +2103,18 @@ LUXOPTICA_IMAGES_PAGE = st.Page(
     title="Biblioteca de imágenes",
     icon=NAV_ICONS["luxoptica_images"],
     url_path="repositorio-imagenes",
+)
+BULK_IMAGE_SEARCH_PAGE = st.Page(
+    partial(
+        render_bulk_image_page,
+        render_sidebar_shell=render_sidebar_shell,
+        require_admin_access=require_admin_access,
+        render_footer=render_footer,
+        engine_factory=get_db_engine,
+    ),
+    title="Búsqueda masiva por EAN",
+    icon=NAV_ICONS["luxoptica_images"],
+    url_path="busqueda-masiva-ean",
 )
 LUXOPTICA_PENDING_PAGE = st.Page(
     partial(
@@ -2142,6 +2164,7 @@ navigation = build_navigation(
         "master_dictionary": MASTER_DICTIONARY_PAGE,
         "masterdata_kering_images": MASTERDATA_KERING_IMAGES_PAGE,
         "luxoptica_images": LUXOPTICA_IMAGES_PAGE,
+        "bulk_image_search": BULK_IMAGE_SEARCH_PAGE,
         "luxoptica_pending": LUXOPTICA_PENDING_PAGE,
         "kering_images": KERING_IMAGES_PAGE,
         "provider_images": PROVIDER_IMAGES_PAGE,

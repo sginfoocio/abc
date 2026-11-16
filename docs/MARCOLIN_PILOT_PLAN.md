@@ -56,6 +56,9 @@ consulta Odoo durante el renderizado de la página.
 El libro incluye el UPC/EAN literal, SKU completo, código real, referencia confirmada y datos de
 trazabilidad disponibles. Las correspondencias inexistentes o ambiguas quedan con estado pendiente/
 revisión y sin SKU inventado. La exportación repetida es idempotente y no contacta con Marcolin.
+Si el portal agrupa varios UPC bajo una misma referencia, el Excel la muestra para cada uno. Si un
+UPC figura en varias referencias, deja vacía su referencia de portal y solicita revisar los grupos,
+sin alterar la evidencia Odoo ni el estado de la solicitud.
 
 - Precondición: B1–B14 superados con los seis UPC y autorización expresa.
 - Escalado: 6 → 25 → 50 → 100 → 300; un paso por solicitud, esperando entrega y verificación completa antes del siguiente.

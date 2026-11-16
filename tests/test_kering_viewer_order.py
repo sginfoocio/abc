@@ -167,6 +167,123 @@ def test_extra_images_preserved_and_explicit_v2_completes(monkeypatch, tmp_path)
     assert count_complete_lines(store, order(), {}) == 1
 
 
+def test_explicit_lifestyle_review_preserves_files_and_does_not_supply_v2(monkeypatch, tmp_path):
+    from image_library import LibraryFilters, filter_groups, group_records
+    portal, reader = viewer(monkeypatch, ["a.png", "b.png", "c.png", "d.png"])
+    store = ImageStore(tmp_path / "kering")
+    result = process_ean(store, portal, EAN)
+    records = by_origin(store)
+    target = records["d.png"]
+    before = {name: (record.id, record.path, record.checksum) for name, record in records.items()}
+    assert target.view == "unknown" and result["views"]["perspectiva"] == "Pendiente"
+
+    store.repository.review_view_for_user(
+        target.id, "lifestyle", role="admin", reviewer="operator", reason="Visual inspection of model wearing glasses")
+    reviewed = by_origin(store)
+    assert reviewed["d.png"].view == "lifestyle"
+    assert reviewed["d.png"].metadata["view_review"]["previous_view"] == "unknown"
+    assert reviewed["d.png"].metadata["view_detection"] == target.metadata["view_detection"]
+    assert {name: (record.id, record.path, record.checksum) for name, record in reviewed.items()} == before
+    assert "perspectiva" not in store.valid_views(EAN)
+    assert order_status(order(), {EAN: result}) == "Parcial"
+    groups = group_records(list(reviewed.values()))
+    assert len(filter_groups(groups, LibraryFilters(view="Lifestyle"))) == 1
+
+
+def test_confirmed_lifestyle_and_alternate_code_never_duplicate_photos(monkeypatch, tmp_path):
+    from image_library import group_records
+    from image_repository import ImageRepository
+    requested, alternate = "8056376645095", "889652630922"
+    store = ImageStore(tmp_path / "kering")
+    for index, view in enumerate(("lateral", "frontal", "detalle", "unknown"), 1):
+        store.repository.save(alternate, f"image{index}.png", photo(index), provider="Kering",
+                              origin=CDN + f"image{index}.png", view=view,
+                              metadata={"view_detection": {"viewer_position": index}})
+    unrelated, _ = store.repository.save(EAN, "unrelated.png", photo(5), provider="Kering",
+                                         origin=CDN + "unrelated.png", view="unknown")
+    records = store.repository.records(alternate)
+    target = next(record for record in records if record.view == "unknown")
+    originals = [(record.id, record.path, record.checksum) for record in records]
+    store.repository.review_view_for_user(
+        target.id, "lifestyle", role="admin", reviewer="operator", reason="Modelo con gafas revisada visualmente")
+    reviewed = store.repository.records(alternate)
+    assert [(record.id, record.path, record.checksum) for record in reviewed] == originals
+    assert [record.view for record in reviewed] == ["lateral", "frontal", "detalle", "lifestyle"]
+    assert group_records(reviewed)[0].missing_core == ("V2",)
+    assert store.repository.records(EAN)[0].id == unrelated.id
+    assert store.repository.records(EAN)[0].view == "unknown"
+
+    snapshot = {"ean": requested, "upc": alternate, "reference": "CH0347S-001",
+                "size": "TALLA M", "images": [
+                    {"url": CDN + f"image{index}.png", "reference": "CH0347S-001"}
+                    for index in range(1, 5)]}
+    portal = KeringPortal({})
+    monkeypatch.setattr(portal, "_start", lambda: None)
+    monkeypatch.setattr(portal, "_find_product", lambda _: snapshot)
+    reader = Mock()
+    monkeypatch.setattr(portal, "_read_image", reader)
+    result = process_ean(store, portal, requested)
+    assert result["reason"] == "codigo_alternativo_con_imagenes"
+    assert store.repository.records(requested) == []
+    assert len(store.repository.records(alternate)) == 4
+    reader.assert_not_called()
+    with pytest.raises(PermissionError):
+        store.link_kering_codes(requested, alternate, role="masterdata", reviewer="operator", reason="Verificado")
+    store.link_kering_codes(requested, alternate, role="admin", reviewer="operator",
+                            reason="Ficha Kering y producto comprobados")
+    result = process_ean(store, portal, requested)
+    assert result["reason"] == "vistas_no_disponibles"
+    assert result["views"] == {"frontal": "Reutilizada", "lateral": "Reutilizada", "perspectiva": "Pendiente"}
+    assert result["acquisition"]["reused_files"] == 4
+    assert [(record.id, record.path, record.checksum) for record in store.repository.records(requested)] == originals
+    assert ImageRepository().records(requested) == []
+    linked_order = {**order(), "lines": [{**order()["lines"][0], "ean": requested}]}
+    plan = order_export_plan(store.repository, linked_order)
+    assert len(plan.files) == 4
+    assert plan.manifest["products"][0]["missing_views"] == ["perspectiva"]
+    reader.assert_not_called()
+    store.link_kering_codes(requested, alternate, role="admin", reviewer="operator", reason="Repetida")
+    store.unlink_kering_codes(requested, role="admin", reviewer="operator", reason="Revisión de asociación")
+    assert store.repository.records(requested) == []
+    assert [(record.id, record.path, record.checksum) for record in store.repository.records(alternate)] == originals
+    with store.connect() as connection:
+        events = connection.execute("SELECT action FROM kering_code_link_events ORDER BY rowid").fetchall()
+    assert [row["action"] for row in events] == ["asociacion", "retirada"]
+
+
+def test_linked_code_reuses_matching_bytes_when_source_url_changes(monkeypatch, tmp_path):
+    requested, alternate = "1234567890123", "123456789012"
+    store = ImageStore(tmp_path / "kering")
+    existing, _ = store.repository.save(
+        alternate, "original.png", photo(1), provider="Kering", origin=CDN + "old.png", view="unknown")
+    store.link_kering_codes(requested, alternate, role="admin", reviewer="operator", reason="Ficha verificada")
+    with pytest.raises(ValueError):
+        store.link_kering_codes(requested, EAN, role="admin", reviewer="operator", reason="Conflicto")
+    snapshot = {"ean": requested, "upc": alternate, "reference": "MODEL-001", "size": "TALLA M",
+                "images": [{"url": CDN + "new.png", "reference": "MODEL-001"}]}
+    portal = KeringPortal({})
+    monkeypatch.setattr(portal, "_start", lambda: None)
+    monkeypatch.setattr(portal, "_find_product", lambda _: snapshot)
+    monkeypatch.setattr(portal, "_read_image", lambda _: photo(1))
+    process_ean(store, portal, requested)
+    records = store.repository.records(requested)
+    assert {record.path for record in records} == {existing.path}
+    assert {record.checksum for record in records} == {existing.checksum}
+    assert len(records) == 1
+    assert not (store.repository.root / requested).exists()
+
+
+def test_linked_code_preserves_blocking_classification_review(tmp_path):
+    store = ImageStore(tmp_path / "kering")
+    alternate = "123456789012"
+    store.repository.save(alternate, "original.png", photo(1), provider="Kering",
+                          origin=CDN + "original.png", view="frontal")
+    store.link_kering_codes(EAN, alternate, role="admin", reviewer="operator", reason="Ficha verificada")
+    store.record_view_review(alternate, {"reasons": ["etiquetas_contradictorias"],
+                                         "contradictions": [{"url": CDN + "original.png"}]})
+    assert store.blocking_view_review(EAN)
+
+
 def test_matching_explicit_labels_keep_original_rule(monkeypatch, tmp_path):
     names = ["MODEL__001__shad__lt.png", "b.png", "c.png"]
     portal, reader = viewer(monkeypatch, names)
