@@ -1,6 +1,8 @@
 """Synthetic reproductions of saved continuity facts, not captured shop HTML."""
 import json
+from pathlib import Path
 from urllib.parse import urlparse
+from zipfile import ZipFile
 
 import pandas as pd
 import pytest
@@ -45,6 +47,183 @@ def _visit(tmp_path, target, url, body, tax="included", at=NOW):
     if outcome.state == "exact":
         search.record(outcome)
     return outcome, store, site
+
+
+def test_opticalh_sanitized_facts_bind_single_offer_to_normalized_gtin(tmp_path):
+    url = "https://opticalh.com/products/gafas-de-sol-ray-ban-wayfarer-rb2140-901-50-22-61980"
+    target = {"ean": "0805289126577", "brand": "Ray Ban", "model": "RB2140",
+              "color": "901", "caliber": "50-22"}
+    node = {"@type": "Product", "name": "Gafas de Sol Ray-Ban Wayfarer RB2140 901 50 22",
+            "url": url, "sku": "805289126577", "gtin": "805289126577",
+            "brand": {"name": "Ray-Ban"}, "offers": {
+                "@type": "Offer", "price": 109.85, "priceCurrency": "EUR",
+                "availability": "https://schema.org/InStock", "url": url + "?variant=57108062601561"}}
+
+    outcome, store, _ = _visit(tmp_path, target, url, _ld(node))
+
+    assert outcome.state == "exact" and outcome.page.ean_published == target["ean"]
+    assert outcome.page.variant_id == "57108062601561"
+    assert outcome.page.url_trace["selected_variant_url"] == url + "?variant=57108062601561"
+    assert outcome.page.price == 109.85 and outcome.page.availability == "available"
+    with store._connect() as con:
+        assert con.execute("SELECT ean FROM offers").fetchone()[0] == target["ean"]
+
+    node["offers"]["gtin"] = "805289126584"
+    page = select_product_variant(extract_product(_ld(node), url), target)
+    assert page.ambiguous and not page.ean_published and page.price is None
+
+
+def test_archived_133_partial_html_replays_without_promoting_candidates(tmp_path):
+    evidence_path = (Path(__file__).resolve().parents[1] / "docs" / "Precios" / "100_EAN"
+                     / "evidencia_replay_133_20261116.zip")
+    with ZipFile(evidence_path) as evidence:
+        assert evidence.testzip() is None
+        readme = evidence.read("LEEME.md").decode("utf-8")
+        pages = {name: evidence.read(name).decode("utf-8") for name in (
+            "opticalh-sanitizado.html", "visualclick-sanitizado.html", "mia-burton-sanitizado.html")}
+    assert "reconstrucciones sanitizadas parciales" in readme
+    assert "no respuestas HTML originales" in readme
+
+    target = {"ean": "0805289126577", "brand": "Ray Ban", "model": "RB2140",
+              "color": "901", "caliber": "50-22"}
+    optical_url = "https://opticalh.com/products/gafas-de-sol-ray-ban-wayfarer-rb2140-901-50-22-61980"
+    visual_url = "https://visual-click.com/products/ray-ban-rb2140-wayfarer-901-32-50"
+    mia_url = "https://miaburton.com/de/sonnenbrillen/ray-ban/wayfarer-rb2140-901-58"
+
+    optical_dir = tmp_path / "optical"
+    optical_dir.mkdir()
+    optical, optical_store, _ = _visit(optical_dir, target, optical_url, pages["opticalh-sanitizado.html"])
+    assert optical.state == "exact" and optical.page.ean_published == target["ean"]
+    assert optical.page.variant_scoped and optical.page.variant_id == "57108062601561"
+    assert optical.page.url_trace["selected_variant_url"] == optical_url + "?variant=57108062601561"
+    history = optical_store.offer_history(target["ean"])
+    assert history.iloc[0]["ean"] == target["ean"]
+    assert history.iloc[0]["ean_published"] == target["ean"]
+    assert history.iloc[0]["url"] == optical_url + "?variant=57108062601561"
+    assert target["ean"] in history.to_csv(index=False)
+
+    visual_dir = tmp_path / "visual"
+    visual_dir.mkdir()
+    visual, visual_store, _ = _visit(visual_dir, target, visual_url, pages["visualclick-sanitizado.html"])
+    assert visual.state == "rejected" and "Distinto color" in visual.detail
+    assert not visual.page.ean_published and visual.page.price is None
+    assert visual.page.availability == "unknown"
+    assert any("no se interpreta como GTIN" in note for note in visual.page.notes)
+    visual_search = WebPriceSearch(visual_store, clock=lambda: NOW)
+    assert visual_search.record(visual) == ""
+    with visual_store._connect() as con:
+        assert con.execute("SELECT COUNT(*) FROM offers").fetchone()[0] == 0
+        saved = con.execute("SELECT match_status,evidence FROM search_results").fetchone()
+        assert saved["match_status"] == "rejected" and "Distinto color" in saved["evidence"]
+
+    mia_dir = tmp_path / "mia"
+    mia_dir.mkdir()
+    mia, mia_store, _ = _visit(mia_dir, target, mia_url, pages["mia-burton-sanitizado.html"])
+    assert mia.state == "probable" and "Color no confirmado" in mia.detail
+    assert mia.page.price == 174 and not mia.page.ean_published
+    assert mia.page.availability == "unknown" and len(mia.page.stock_evidence) == 3
+    mia_search = WebPriceSearch(mia_store, clock=lambda: NOW)
+    assert mia_search.record(mia) == ""
+    with mia_store._connect() as con:
+        saved = con.execute("SELECT match_status,price,availability,ean_published FROM offers").fetchone()
+        assert saved["match_status"] == "probable_match"
+        assert saved["price"] == 174 and saved["availability"] == "unknown"
+        assert not saved["ean_published"]
+
+
+def test_visualclick_sanitized_facts_reject_color_without_promoting_sku_to_ean(tmp_path):
+    url = "https://visual-click.com/products/ray-ban-rb2140-wayfarer-901-32-50"
+    target = {"ean": "0805289126577", "brand": "Ray Ban", "model": "RB2140", "color": "901"}
+    sku = "0805289183051-0000015386-@7-5"
+    node = {"@type": "Product", "name": "RAY-BAN RB2140 WAYFARER 901/32 50", "url": url,
+            "sku": sku, "brand": {"name": "RAY-BAN"}, "offers": [{
+                "@type": "Offer", "sku": sku, "price": 124, "priceCurrency": "EUR",
+                "availability": "https://schema.org/InStock", "url": url + "?variant=48664635015467"}]}
+
+    outcome, store, _ = _visit(tmp_path, target, url, _ld(node))
+
+    assert outcome.state == "rejected" and "Distinto color" in outcome.detail
+    assert not outcome.page.ean_published and outcome.page.caliber == "50"
+    assert outcome.page.price is None and outcome.page.availability == "unknown"
+    with store._connect() as con:
+        assert con.execute("SELECT COUNT(*) FROM offers").fetchone()[0] == 0
+    node["offers"][0]["url"] = url
+    linked_dir = tmp_path / "linked"
+    linked_dir.mkdir()
+    outcome, store, _ = _visit(linked_dir, target, url, _ld(node))
+    assert outcome.state == "rejected" and outcome.page.price == 124
+    search = WebPriceSearch(store, clock=lambda: NOW)
+    config = search.config(outcome.competitor_id)
+    search._upsert_index(target, config, outcome)
+    with store._connect() as con, con:
+        con.execute("""UPDATE competitor_product_urls SET last_price=124,last_availability='available',last_ok_at=?
+            WHERE competitor_id=? AND ean=? AND url=?""",
+                    (NOW.isoformat(), outcome.competitor_id, target["ean"], outcome.url))
+    search._upsert_index(target, config, outcome)
+    row = search.frame_row(target, config, outcome, NOW.isoformat())
+    assert row["Precio"] == "" and row["Disponibilidad"] == "unknown"
+    assert search.record(outcome) == ""
+    with store._connect() as con:
+        row = con.execute("SELECT last_price,last_availability FROM competitor_product_urls").fetchone()
+        assert row["last_price"] is None and not row["last_availability"]
+        assert con.execute("SELECT COUNT(*) FROM offers").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("suffix", ["32", "50", "58"])
+def test_color_suffix_is_not_mistaken_for_a_caliber(suffix):
+    target = {"ean": "0805289126577", "brand": "Ray Ban", "model": "RB2140", "color": "901"}
+    match = classify(target, {"title": f"RAY-BAN RB2140 WAYFARER 901/{suffix} 50"})
+    assert match.status == "rejected"
+    assert match.normalized["listing"]["colors"] == [f"901{suffix}"]
+    assert match.normalized["listing"]["calibers"] == ["50"]
+
+
+@pytest.mark.parametrize("multiple_variants", [False, True])
+def test_explicit_large_caliber_conflict_in_product_group_remains_a_review(multiple_variants):
+    url = "https://example.test/products/fixture"
+    target = {"ean": "0805289126577", "brand": "Ray Ban", "model": "RB2140",
+              "color": "901", "caliber": "50-22"}
+    node = {"@type": "ProductGroup", "url": url, "name": "Ray Ban RB2140 901",
+            "brand": "Ray Ban", "model": "RB2140", "color": "901",
+            "hasVariant": [{"@type": "Product", "url": url, "gtin13": target["ean"],
+                            "size": "69-14", "offers": {"@type": "Offer", "price": "174",
+                                                         "priceCurrency": "EUR", "availability": "InStock"}}]}
+    if multiple_variants:
+        node["hasVariant"].append({"@type": "Product", "url": url, "gtin12": "805289126584", "size": "54-18"})
+
+    page = select_product_variant(extract_product(_ld(node), url), target)
+
+    assert page.ambiguous and page.availability == "unknown"
+    assert any("calibre" in note.lower() and "contradice" in note.lower() for note in page.notes)
+
+
+def test_mia_burton_sanitized_facts_common_price_without_variant_stock_or_ean(tmp_path):
+    url = "https://miaburton.com/de/sonnenbrillen/ray-ban/wayfarer-rb2140-901-58"
+    target = {"ean": "0805289126577", "brand": "Ray Ban", "model": "RB2140", "color": "901"}
+    offers = [{"@type": "Offer", "url": url, "price": "174.00", "priceCurrency": "EUR",
+               "availability": "InStock", "additionalProperty": [
+                   {"name": "Lens Width", "value": lens}, {"name": "Bridge Width", "value": bridge}]}
+              for lens, bridge in [("50mm", "22mm"), ("54mm", "18mm"), ("52mm", "22mm")]]
+    node = {"@type": "Product", "name": "Ray-Ban RB2140 WAYFARER Sonnenbrillen - Mia Burton",
+            "sku": "185_1286", "brand": {"name": "Ray-Ban"}, "color": "black", "offers": offers}
+
+    outcome, store, _ = _visit(tmp_path, target, url, _ld(node))
+
+    assert outcome.state == "probable" and "Color no confirmado" in outcome.detail
+    assert outcome.page.price == 174 and not outcome.page.ean_published
+    assert outcome.page.availability == "unknown" and not outcome.page.caliber
+    with store._connect() as con:
+        assert con.execute("SELECT COUNT(*) FROM offers").fetchone()[0] == 0
+    node["name"] = "Ray-Ban RB2140 WAYFARER 901"
+    page = select_product_variant(extract_product(_ld(node), url, tax_policy="included"), target)
+    assert classify(target, page.candidate()).status == EXACT
+    assert page.price == 174 and page.availability == "unknown" and not page.ean_published
+    html = _ld(node) + '<span class="stock">En stock</span><p>EAN: 0805289126584</p>'
+    page = extract_product(html, url, availability_selector=".stock")
+    assert page.availability == "unknown" and not page.ean_published
+    offers[1]["price"] = "175.00"
+    page = extract_product(_ld(node), url)
+    assert page.ambiguous and page.price is None and page.availability == "unknown"
 
 
 def _amevista_group(url, *, model="WAYFARER", title="Ray-Ban RB2140 WAYFARER 901", color="901",

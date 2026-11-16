@@ -19,7 +19,7 @@ LEVELS = ("ean", "brand_model_color", "model_color", "normalized_variants")
 
 _SEPARATORS = re.compile(r"[\s\-_/.·,;:|\\]+")
 # The bridge must end the number: "54 0PR_..." or "C54 16K08Z" (a colour code) are not a calibre.
-_CALIBER = re.compile(r"(?<!\d)(\d{2})\s*(?:[-/x×□]|\s)\s*(\d{1,2})(?:mm)?(?![\dA-Za-z])", re.IGNORECASE)
+_CALIBER = re.compile(r"(?<!\d)(?<!\d/)(\d{2})\s*(?:[-/x×□]|\s)\s*(\d{1,2})(?:mm)?(?![\dA-Za-z])", re.IGNORECASE)
 _LENS_ONLY = re.compile(r"^\d{2}$")
 _LENS_TOKEN = re.compile(r"(?<![\dA-Za-z])C(\d{2})(?![\dA-Za-z])|\s(\d{2})\s*$")
 _CODE_CALIBER = re.compile(r"^0?[A-Z]{1,4}_[A-Z0-9]+?(\d{2})(\d{2})$")
@@ -76,8 +76,11 @@ def compare_calibers(left: Any, right: Any) -> str:
 
 
 def extract_caliber(text: Any) -> str:
-    match = _CALIBER.search(_ascii(text))
-    return f"{match.group(1)}-{int(match.group(2))}" if match else ""
+    for match in _CALIBER.finditer(_ascii(text)):
+        lens, bridge = int(match.group(1)), int(match.group(2))
+        if 38 <= lens <= 66 and 10 <= bridge <= 26:
+            return f"{lens}-{bridge}"
+    return ""
 
 
 def extract_lens(text: Any) -> str:
@@ -85,6 +88,17 @@ def extract_lens(text: Any) -> str:
     match = _LENS_TOKEN.search(_ascii(text).strip())
     lens = int(match.group(1) or match.group(2)) if match else 0
     return str(lens) if 38 <= lens <= 66 else ""
+
+
+def _without_caliber(text: str, caliber: str) -> str:
+    if not caliber:
+        return text
+    if "-" not in caliber:
+        return _LENS_TOKEN.sub(" ", text)
+    for match in _CALIBER.finditer(text):
+        if extract_caliber(match.group()) == caliber:
+            return text[:match.start()] + " " + text[match.end():]
+    return text
 
 
 def caliber_from_code(code: Any) -> str:
@@ -145,7 +159,8 @@ def parse_reference(text: str, *, brands: Iterable[str] = (), models: Iterable[s
         return Reference(model=identifier.group(1).upper() + "B", color=identifier.group(2))
     caliber = extract_caliber(raw) or extract_lens(raw)
     if caliber:
-        raw = _CALIBER.sub(" ", raw) if "-" in caliber else _LENS_TOKEN.sub(" ", raw)
+        raw = _without_caliber(raw, caliber)
+    raw = re.sub(r"(?<=\d)/(?=\d)", "", raw)
     brand, rest = strip_brand(raw, brand_list)
     parts = tokens(rest)
     if parts and parts[0] in {"COLECCION", "COLLECTION"}:
@@ -330,13 +345,19 @@ def classify(product: Mapping[str, Any], candidate: Mapping[str, Any]) -> MatchR
 
     if published and not ean:
         reasons.append("EAN publicado no válido: no se aplica la excepción de calibre")
-    if candidate.get("ambiguous") or any(ref.ambiguous for ref in references):
+    ambiguous_references = any(ref.ambiguous for ref in references)
+    ambiguous = candidate.get("ambiguous") or ambiguous_references
+
+    def ambiguous_result() -> MatchResult:
         reasons.append("Identificación ambigua: requiere revisión")
         for index, (text, ref) in enumerate(zip([title, *(candidate.get("identifiers") or [])], references)):
             if ref.ambiguous:
                 source = "título" if index == 0 else f"identificador {index}"
                 reasons.append(f"Varias referencias en {source}: {text}")
         return result(PROBABLE)
+
+    if ambiguous and (not candidate.get("offer_binding_unresolved") or ambiguous_references):
+        return ambiguous_result()
     identity_fields = [(own_brand, brands), (own_model, models), (own_color, colors)]
     contradictions = any(found and found != {expected} for expected, found in identity_fields)
     for name, expected, found in [("Marca", own_brand, brands), ("Modelo", own_model, models),
@@ -347,11 +368,13 @@ def classify(product: Mapping[str, Any], candidate: Mapping[str, Any]) -> MatchR
         elif not verified_ean and (not expected or not found):
             reasons.append(f"{name} no confirmado: catálogo {expected or 'desconocido'}, "
                            f"ficha {', '.join(sorted(found)) or 'desconocido'}")
-    if ean and ean != product.get("ean"):
+    if ean and ean != _valid_gtin(product.get("ean")):
         reasons.insert(0, f"EAN publicado distinto: {ean}; revisión manual obligatoria")
         return result(REJECTED if contradictions else PROBABLE)
     if contradictions:
         return result(PROBABLE if verified_ean else REJECTED)
+    if ambiguous:
+        return ambiguous_result()
     if reasons:
         return result(PROBABLE)
     reasons.append("EAN publicado idéntico; marca, modelo y código de color confirmados" if verified_ean else
@@ -376,7 +399,7 @@ class ReferenceIndex:
         if self.by_ean(text):
             return "ean", [self.by_ean(text)]
         ref = parse_reference(text, brands=self.brands, models=self.models)
-        compact = key(re.sub(_CALIBER, " ", _ascii(text)))
+        compact = key(_without_caliber(_ascii(text), ref.caliber))
         for level, test in (
             ("brand_model_color", lambda p: ref.brand and key(p["brand"]) == key(ref.brand)
              and model_key(p["model"]) == ref.model_key and key(p["color"]) == ref.color_key),

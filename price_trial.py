@@ -36,6 +36,10 @@ class TrialDenied(ConnectorError):
     pass
 
 
+class DiagnosticRetryError(ValueError):
+    pass
+
+
 @dataclass(frozen=True)
 class Execution:
     database: str
@@ -1109,7 +1113,7 @@ class PriceTrial:
             if competitor_id not in frozen["competitors"] or ean not in frozen["eans"]:
                 raise ValueError("Par fuera del manifiesto")
             if url not in self.diagnostic_candidates(competitor_id, ean):
-                raise ValueError("La URL no es una candidata documentada pendiente de revisión")
+                raise DiagnosticRetryError("La URL no es una candidata documentada pendiente de revisión")
         except (ValueError, RuntimeError) as exc:
             with self.store._connect() as con, con:
                 con.execute("""INSERT INTO access_audit(scope,scope_id,action,previous,current,actor,note,at)
@@ -1120,21 +1124,196 @@ class PriceTrial:
                              "", self.clock().isoformat()))
             raise
         with self.store._connect() as con, con:
-            con.execute("""INSERT OR IGNORE INTO price_diagnostic_requests
-                (continuity_id,competitor_id,ean,url,actor,note,build_commit,created_at)
-                VALUES(?,?,?,?,?,?,?,?)""",
-                        (row["id"], competitor_id, ean, url, actor, note, build_commit, self.clock().isoformat()))
+            con.execute("BEGIN IMMEDIATE")
+            existing = con.execute("""SELECT id,status FROM price_diagnostic_requests
+                WHERE continuity_id=? AND competitor_id=? AND ean=? AND url=?
+                ORDER BY id DESC LIMIT 1""", (row["id"], competitor_id, ean, url)).fetchone()
+            if not existing or existing["status"] == "expired":
+                con.execute("""INSERT INTO price_diagnostic_requests
+                    (continuity_id,competitor_id,ean,url,actor,note,build_commit,created_at)
+                    VALUES(?,?,?,?,?,?,?,?)""",
+                            (row["id"], competitor_id, ean, url, actor, note, build_commit, self.clock().isoformat()))
             saved = dict(con.execute("""SELECT id,status FROM price_diagnostic_requests
-                WHERE continuity_id=? AND competitor_id=? AND ean=? AND url=? AND status!='expired'""",
+                WHERE continuity_id=? AND competitor_id=? AND ean=? AND url=?
+                ORDER BY id DESC LIMIT 1""",
                                      (row["id"], competitor_id, ean, url)).fetchone())
             con.execute("""INSERT INTO access_audit(scope,scope_id,action,previous,current,actor,note,at)
                 VALUES('competitor',?,'request_diagnostic','',?,?,?,?)""",
                         (competitor_id, json.dumps(saved), actor, note, self.clock().isoformat()))
         return saved
 
+    def _diagnostic_retry_guard(self, con, previous):
+        if (previous["status"] != "rejected" or not previous["started_at"] or not previous["finished_at"]
+                or previous["artifact"] is not None):
+            raise DiagnosticRetryError("El intento anterior no es un rechazo previo a HTTP acreditado")
+        try:
+            result = json.loads(previous["result"])
+            start = _utc_datetime(previous["started_at"])
+            end = _utc_datetime(previous["finished_at"])
+        except (ValueError, TypeError):
+            raise DiagnosticRetryError("Resultado o fechas del intento anterior inválidos") from None
+        if (not isinstance(result, dict) or end < start or result.get("status") != "rejected"
+                or result.get("stage") != "lock_and_scope" or result.get("error_type") != "EvidenceError"
+                or result.get("reason") != "El almacenamiento no acredita permisos privados"
+                or previous["reason"] != result.get("reason")
+                or result.get("queue_id") != previous["id"] or result.get("requests") != []
+                or result.get("ean") != previous["ean"]
+                or result.get("url_sha256") != hashlib.sha256(previous["url"].encode()).hexdigest()
+                or result.get("build_commit") != previous["build_commit"]):
+            raise DiagnosticRetryError("El rechazo no acredita inequívocamente un fallo previo a HTTP")
+        audits = con.execute("""SELECT id,current FROM access_audit WHERE action='capture_diagnostic_html'
+            AND json_extract(current,'$.queue_id')=?""", (previous["id"],)).fetchall()
+        if len(audits) != 1:
+            raise DiagnosticRetryError("Falta la auditoría inequívoca del intento anterior")
+        try:
+            audited = json.loads(audits[0]["current"])
+        except (ValueError, TypeError):
+            raise DiagnosticRetryError("Auditoría del intento anterior inválida") from None
+        if audited != result:
+            raise DiagnosticRetryError("El resultado no coincide con la auditoría del intento anterior")
+        receipt = con.execute("""SELECT id FROM access_requests
+            WHERE purpose=? OR ((competitor_id=? OR (scope='competitor' AND scope_id=?)
+              OR (competitor_id='' AND (scope!='competitor' OR scope_id='')))
+              AND (ean='' OR ean=?) AND (julianday(reserved_at) IS NULL
+                   OR julianday(reserved_at) BETWEEN julianday(?) AND julianday(?))) LIMIT 1""",
+                              (f"diagnostic:{audits[0]['id']}", previous["competitor_id"],
+                               previous["competitor_id"], previous["ean"],
+                               previous["started_at"], previous["finished_at"])).fetchone()
+        if receipt:
+            raise DiagnosticRetryError("Existe una petición o reserva aplicable al intento anterior")
+        later_receipt = con.execute("""SELECT id FROM access_requests
+            WHERE (competitor_id=? OR (scope='competitor' AND scope_id=?)
+              OR (competitor_id='' AND (scope!='competitor' OR scope_id='')))
+              AND (ean='' OR ean=?)
+              AND (julianday(reserved_at) IS NULL
+                   OR julianday(reserved_at)>=julianday(?)) LIMIT 1""",
+                                    (previous["competitor_id"], previous["competitor_id"],
+                                     previous["ean"], previous["finished_at"])).fetchone()
+        if later_receipt:
+            raise DiagnosticRetryError("Existe una petición o reserva posterior al rechazo previo")
+
+    def _validate_diagnostic_pair(self, continuity_id, competitor_id, ean, url):
+        if url not in self.diagnostic_candidates(competitor_id, ean):
+            raise ValueError("La URL no es una candidata documentada pendiente de revisión")
+        with self.store._connect() as con:
+            pair = con.execute("""SELECT state,next_check_at FROM price_continuity_pairs
+                WHERE continuity_id=? AND competitor_id=? AND ean=?""",
+                               (continuity_id, competitor_id, ean)).fetchone()
+            jobs = [con.execute(f"SELECT state,not_before FROM {table} WHERE competitor_id=? AND ean=?",
+                                (competitor_id, ean)).fetchone()
+                    for table in ("locate_jobs", "monitor_jobs")]
+        if not pair or pair["state"] not in ("review", "pending"):
+            raise DiagnosticRetryError("El par no está disponible para diagnóstico")
+        for job in jobs:
+            if job and (job["state"] in ("running", "blocked", "failed")
+                        or (job["not_before"] and _utc_datetime(job["not_before"]) > self.clock())):
+                raise DiagnosticRetryError("Hay un trabajo bloqueado, en ejecución o aplazado")
+        if pair["next_check_at"] and _utc_datetime(pair["next_check_at"]) > self.clock():
+            raise DiagnosticRetryError("El par está aplazado")
+
+    def retry_diagnostic(self, request_id, *, actor, note, build_commit, approved):
+        from price_batch import WatchBatch
+        from price_diagnostic import EvidenceError, _SECRET, has_capacity, limits, require_private_database
+
+        actor, note = actor.strip(), note.strip()
+        previous = None
+        try:
+            if not approved or not actor or not note or _SECRET.search(actor) or _SECRET.search(note):
+                raise ValueError("Responsable, motivo y aprobación explícita obligatorios, sin datos sensibles")
+            if len(build_commit) != 40 or any(c not in "0123456789abcdef" for c in build_commit):
+                raise ValueError("Commit válido de 40 caracteres requerido")
+            with self.continuity_lock():
+                with self.store._connect() as con:
+                    row = con.execute("SELECT * FROM price_diagnostic_requests WHERE id=?", (request_id,)).fetchone()
+                    if not row:
+                        raise DiagnosticRetryError("Intento anterior inexistente")
+                    previous = dict(row)
+                    child = con.execute("SELECT id,status FROM price_diagnostic_requests WHERE retry_of=?",
+                                        (request_id,)).fetchone()
+                    if child:
+                        saved = dict(child)
+                        with con:
+                            con.execute("""INSERT INTO access_audit(scope,scope_id,action,previous,current,actor,note,at)
+                                VALUES('competitor',?,'retry_diagnostic',?,?,?,?,?)""",
+                                        (previous["competitor_id"], str(request_id),
+                                         json.dumps({**saved, "duplicate": True, "build_commit": build_commit}),
+                                         actor, note,
+                                         self.clock().isoformat()))
+                        return saved
+                batch = self._batch or WatchBatch(self.store)
+                with batch.locator.search._lock(previous["competitor_id"]):
+                    continuity = continuity_row(self.store)
+                    if not continuity or continuity["status"] != "active" or continuity["id"] != previous["continuity_id"]:
+                        raise DiagnosticRetryError("La continuidad original no está activa")
+                    frozen = json.loads(continuity["manifest"])
+                    if previous["competitor_id"] not in frozen["competitors"] or previous["ean"] not in frozen["eans"]:
+                        raise DiagnosticRetryError("Par fuera del manifiesto")
+                    self._validate_diagnostic_pair(continuity["id"], previous["competitor_id"],
+                                                   previous["ean"], previous["url"])
+                    require_private_database(self.store.database_path)
+                    config = batch.locator.search.config(previous["competitor_id"], initialize=False)
+                    gate = batch.locator.search._gate(config)
+                    if gate:
+                        raise DiagnosticRetryError(gate)
+                    decision = batch.locator.access.check(previous["competitor_id"], "ficha")
+                    if not decision.allowed:
+                        raise DiagnosticRetryError(f"Acceso denegado: {decision.code}")
+                    body_limit, quota, _ = limits()
+                    with self.store._connect() as con, con:
+                        con.execute("BEGIN IMMEDIATE")
+                        current = con.execute("SELECT * FROM price_diagnostic_requests WHERE id=?", (request_id,)).fetchone()
+                        self._diagnostic_retry_guard(con, current)
+                        used = con.execute("SELECT COALESCE(SUM(length(artifact)),0) FROM price_diagnostic_requests").fetchone()[0]
+                        if not has_capacity(self.store.database_path, used, body_limit, quota):
+                            raise DiagnosticRetryError("Capacidad insuficiente para conservar la respuesta")
+                        child = con.execute("SELECT id,status FROM price_diagnostic_requests WHERE retry_of=?",
+                                            (request_id,)).fetchone()
+                        if child:
+                            return dict(child)
+                        active = con.execute("""SELECT id FROM price_diagnostic_requests
+                            WHERE continuity_id=? AND competitor_id=? AND ean=? AND url=?
+                            AND status NOT IN ('expired','rejected')""",
+                                             (previous["continuity_id"], previous["competitor_id"],
+                                              previous["ean"], previous["url"])).fetchone()
+                        if active:
+                            raise DiagnosticRetryError("Ya existe otra solicitud activa para esta candidata")
+                        created_at = self.clock().isoformat()
+                        saved_id = con.execute("""INSERT INTO price_diagnostic_requests
+                            (continuity_id,competitor_id,ean,url,actor,note,build_commit,created_at,retry_of)
+                            VALUES(?,?,?,?,?,?,?,?,?)""",
+                                               (previous["continuity_id"], previous["competitor_id"], previous["ean"],
+                                                previous["url"], actor, note, build_commit, created_at,
+                                                request_id)).lastrowid
+                        saved = {"id": saved_id, "status": "pending", "retry_of": request_id,
+                                 "actor": actor, "note": note, "build_commit": build_commit,
+                                 "created_at": created_at}
+                        con.execute("""INSERT INTO access_audit(scope,scope_id,action,previous,current,actor,note,at)
+                            VALUES('competitor',?,'retry_diagnostic',?,?,?,?,?)""",
+                                    (previous["competitor_id"], str(request_id),
+                                     json.dumps({k: saved[k] for k in
+                                                 ("id", "status", "retry_of", "build_commit", "created_at")}),
+                                     actor, note,
+                                     self.clock().isoformat()))
+                        return saved
+        except (ValueError, RuntimeError, Timeout) as exc:
+            with self.store._connect() as con, con:
+                reason = (str(exc) if isinstance(exc, (DiagnosticRetryError, EvidenceError))
+                          else "Bloqueo ocupado" if isinstance(exc, Timeout) else type(exc).__name__)
+                con.execute("""INSERT INTO access_audit(scope,scope_id,action,previous,current,actor,note,at)
+                    VALUES('competitor',?,'retry_diagnostic',?,?,?,?,?)""",
+                            (previous["competitor_id"] if previous else "", str(request_id),
+                             json.dumps({"status": "rejected", "error_type": type(exc).__name__, "reason": reason,
+                                         "build_commit": build_commit if isinstance(build_commit, str)
+                                         and len(build_commit) == 40
+                                         and all(c in "0123456789abcdef" for c in build_commit) else ""}),
+                             actor if actor and not _SECRET.search(actor) else "sin identificar",
+                             note if not _SECRET.search(note) else "", self.clock().isoformat()))
+            raise
+
     def diagnostic_results(self, competitor_id, ean):
         with self.store._connect() as con:
-            rows = con.execute("""SELECT id,status,reason,created_at,finished_at,result,expires_at,
+            rows = con.execute("""SELECT id,retry_of,url,actor,note,build_commit,status,reason,created_at,finished_at,
+                result,expires_at,
                 (artifact IS NOT NULL AND expires_at>?) AS available FROM price_diagnostic_requests
                 WHERE competitor_id=? AND ean=? ORDER BY id DESC""",
                                (self.clock().isoformat(), competitor_id, ean)).fetchall()
@@ -1280,23 +1459,17 @@ class PriceTrial:
 
                 def validate():
                     result["stage"] = "candidate_and_deferrals"
-                    if url not in self.diagnostic_candidates(competitor_id, ean):
-                        raise ValueError("La URL no es una candidata documentada pendiente de revisión")
-                    with self.store._connect() as con:
-                        pair = con.execute("""SELECT state,next_check_at FROM price_continuity_pairs
-                            WHERE continuity_id=? AND competitor_id=? AND ean=?""",
-                                           (row["id"], competitor_id, ean)).fetchone()
-                        jobs = [con.execute(f"SELECT state,not_before FROM {table} WHERE competitor_id=? AND ean=?",
-                                            (competitor_id, ean)).fetchone()
-                                for table in ("locate_jobs", "monitor_jobs")]
-                    if not pair or pair["state"] not in ("review", "pending"):
-                        raise ValueError("El par no está disponible para diagnóstico")
-                    for job in jobs:
-                        if job and (job["state"] in ("running", "blocked", "failed")
-                                    or (job["not_before"] and _utc_datetime(job["not_before"]) > self.clock())):
-                            raise ValueError("Hay un trabajo bloqueado, en ejecución o aplazado")
-                    if pair["next_check_at"] and _utc_datetime(pair["next_check_at"]) > self.clock():
-                        raise ValueError("El par está aplazado")
+                    if _queue_id is not None:
+                        with self.store._connect() as con:
+                            queued = con.execute("SELECT retry_of FROM price_diagnostic_requests WHERE id=?",
+                                                 (_queue_id,)).fetchone()
+                            if queued and queued["retry_of"] is not None:
+                                previous = con.execute("SELECT * FROM price_diagnostic_requests WHERE id=?",
+                                                       (queued["retry_of"],)).fetchone()
+                                if not previous:
+                                    raise ValueError("Intento anterior inexistente")
+                                self._diagnostic_retry_guard(con, previous)
+                    self._validate_diagnostic_pair(row["id"], competitor_id, ean, url)
 
                 scope = pilot_scope(self.store)
                 legacy = scope and competitor_id in scope["competitors"] and ean in scope["eans"]
@@ -1333,7 +1506,8 @@ class PriceTrial:
                 return result
         except (ValueError, RuntimeError, Timeout) as exc:
             result.update(status="rejected", error_type=type(exc).__name__)
-            if isinstance(exc, EvidenceError):
+            from price_web_fetch import RobotsDenied
+            if isinstance(exc, (EvidenceError, DiagnosticRetryError, RobotsDenied)):
                 result["reason"] = str(exc)
             elif str(exc) in {"La respuesta supera el tamaño máximo permitido",
                               "Capacidad insuficiente para conservar la respuesta"}:
@@ -1341,6 +1515,7 @@ class PriceTrial:
             from price_access import AccessDenied
             if isinstance(exc, AccessDenied):
                 result["access_code"] = exc.decision.code
+                result["reason"] = exc.decision.message
             raise
         finally:
             with self.store._connect() as con, con:

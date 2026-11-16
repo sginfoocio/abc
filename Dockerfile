@@ -58,6 +58,7 @@ COPY scripts/smoke_luxoptica_stop.py ./scripts/
 COPY scripts/monitor_stop_fixture ./scripts/monitor_stop_fixture
 COPY deployment/nfs/staging-layout.tsv ./deployment/nfs/staging-layout.tsv
 COPY scripts/smoke_image_storage.py ./scripts/smoke_image_storage.py
+COPY scripts/smoke_price_diagnostic.py ./scripts/smoke_price_diagnostic.py
 COPY scripts/smoke_image_thumbnails.py ./scripts/smoke_image_thumbnails.py
 COPY scripts/regenerate_image_thumbnails.py ./scripts/regenerate_image_thumbnails.py
 COPY scripts/cloud_image_entrypoint.sh ./scripts/cloud_image_entrypoint.sh
@@ -67,6 +68,7 @@ COPY price_references.py price_observations.py competitor_requirements.py price_
 COPY price_pilot.py price_discovery.py price_auto_confirm.py price_access.py price_watch.py price_locator.py price_monitor.py price_recovery.py .
 COPY price_batch.py price_url_candidates.py price_diagnostic.py price_trial.py price_trial_manifest.json price_watch_continuity.json .
 COPY docs/PRICE_COVERAGE_MEASUREMENT_EVIDENCE.csv ./docs/
+COPY docs/Precios/100_EAN/evidencia_replay_133_20261116.zip ./docs/Precios/100_EAN/evidencia_replay_133_20261116.zip
 COPY assets ./assets
 COPY static ./static
 COPY .streamlit/config.toml ./.streamlit/config.toml

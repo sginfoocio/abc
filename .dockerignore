@@ -91,3 +91,6 @@ image-thumbnails/
 !docs/
 docs/**
 !docs/PRICE_COVERAGE_MEASUREMENT_EVIDENCE.csv
+!docs/Precios/
+!docs/Precios/100_EAN/
+!docs/Precios/100_EAN/evidencia_replay_133_20261116.zip

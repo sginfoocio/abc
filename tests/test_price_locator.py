@@ -406,6 +406,34 @@ def test_catalog_continues_to_another_source_when_first_candidate_is_rejected(tm
     assert _urls(store, cid).query("status == 'verified'")["url"].tolist() == [second]
 
 
+def test_visualclick_color_suffix_rejection_continues_to_another_source(tmp_path):
+    site = Site(base="https://visual-click.com")
+    store, _, locator, _, cid = _env(tmp_path, site, name="Visual-Click", template=None)
+    ean = "0805289126577"
+    first = site.product("Ray Ban", "RB2140", "901", slug="ray-ban-rb2140-wayfarer-901-32-50")
+    sku = "0805289183051-0000015386-@7-5"
+    site.pages[first] = '<script type="application/ld+json">' + json.dumps({
+        "@type": "Product", "name": "RAY-BAN RB2140 WAYFARER 901/32 50", "url": first,
+        "sku": sku, "brand": {"name": "RAY-BAN"}, "offers": [{
+            "@type": "Offer", "sku": sku, "price": 124, "priceCurrency": "EUR",
+            "availability": "InStock", "url": first + "?variant=48664635015467"}]}) + "</script>"
+    second = site.product("Ray Ban", "RB2140", "901", slug="other-rb2140-901",
+                          html=page(name="Ray Ban RB2140 901 50", brand="Ray Ban", gtin=ean, price=111))
+    site.brands["ray-ban-one"] = [(first, "Ray Ban RB2140 901/32 50")]
+    site.brands["ray-ban-two"] = [(second, "Ray Ban RB2140 901 50")]
+    for suffix in ("one", "two"):
+        locator.save_source(cid, "catalog", f"{site.base}/marca/{{brand}}-{suffix}", actor="ana", note="Fuente")
+    _watch(store, [(ean, "Ray Ban", "RB2140", "901", "50")])
+
+    report = locator.run([cid], eans=[ean])
+
+    assert report.states == {"done": 1}
+    urls = _urls(store, cid).set_index("url")
+    assert urls.loc[first, "status"] == "rejected" and pd.isna(urls.loc[first, "last_price"])
+    assert "Distinto color" in urls.loc[first, "note"]
+    assert urls.loc[second, "status"] == "verified"
+
+
 def test_shared_robots_denial_does_not_turn_other_pairs_into_not_found(tmp_path):
     site = Site(robots="User-agent: *\nDisallow: /marca/\n")
     store, _, locator, clock, cid = _env(tmp_path, site)

@@ -881,13 +881,19 @@ class WebPriceSearch:
                     status=excluded.status,verified_at=excluded.verified_at,caliber=excluded.caliber,
                     ean_published=excluded.ean_published,failures=0,
                     note=CASE WHEN excluded.note<>'' THEN excluded.note ELSE competitor_product_urls.note END,
-                    last_price=COALESCE(excluded.last_price,competitor_product_urls.last_price),
-                    last_availability=CASE WHEN excluded.last_price IS NULL THEN competitor_product_urls.last_availability
+                    last_price=CASE WHEN excluded.status='rejected' THEN NULL
+                                    WHEN excluded.last_price IS NULL THEN competitor_product_urls.last_price
+                                    ELSE excluded.last_price END,
+                    last_availability=CASE WHEN excluded.status='rejected' THEN ''
+                                           WHEN excluded.last_price IS NULL THEN competitor_product_urls.last_availability
                                            ELSE excluded.last_availability END,
-                    last_ok_at=COALESCE(excluded.last_ok_at,competitor_product_urls.last_ok_at)
+                    last_ok_at=CASE WHEN excluded.status='rejected' THEN NULL
+                                    ELSE COALESCE(excluded.last_ok_at,competitor_product_urls.last_ok_at) END
             """, (config["competitor_id"], product["ean"], outcome.url, product["model"], product["color"],
-                  page.caliber, page.ean_published, outcome.match_status, status, stamp, page.price,
-                  page.availability, stamp if outcome.state == "exact" and page.has_price else None, source, note))
+                  page.caliber, page.ean_published, outcome.match_status, status, stamp,
+                  page.price if outcome.state != "rejected" else None,
+                  page.availability if outcome.state != "rejected" else "",
+                  stamp if outcome.state == "exact" and page.has_price else None, source, note))
 
     def _mark_relocation(self, competitor_id: str, ean: str, url: str) -> None:
         with self.store._connect() as connection, connection:
@@ -926,6 +932,7 @@ class WebPriceSearch:
             status = "manual_review"
         priced = page is not None and page.has_price and status != "rejected"
         tax = "" if page is None or page.includes_tax is None else ("sí" if page.includes_tax else "no")
+        offer_url = (page.url_trace.get("selected_variant_url") if page else "") or outcome.url
         evidence = outcome.detail or "Ficha pública verificada"
         if page:
             evidence += "".join(" | " + note for note in page.notes if note not in evidence)
@@ -936,7 +943,7 @@ class WebPriceSearch:
             "Precio anterior": page.previous_price if priced and page.previous_price else "",
             "Moneda": page.currency if page and page.currency else config["currency"],
             "Mercado": market or "UNKNOWN",
-            "URL": outcome.url, "Disponibilidad": page.availability if page else "unknown",
+            "URL": offer_url, "Disponibilidad": page.availability if page and status != "rejected" else "unknown",
             "Estado coincidencia": status, "Método": outcome.method or "web",
             "Evidencia": evidence + " | " + market_note, "Fecha consulta": stamp,
             "Marca": page.brand if page else "", "Modelo": product["model"] if outcome.state == "exact" else "",

@@ -1164,8 +1164,16 @@ def _render_continuity_capture(service, frozen: dict, *, active: bool = True) ->
         candidates = service.diagnostic_candidates(cid, ean)
         st.button("Actualizar estado", key="diagnostic_refresh")
         results = service.diagnostic_results(cid, ean)
+        retried_ids = {r["retry_of"] for r in results if r["retry_of"] is not None}
         if results:
-            st.dataframe(pd.DataFrame(results), hide_index=True)
+            labels = {"pending": "pendiente", "running": "ejecutando", "captured": "capturado",
+                      "deferred": "aplazado", "expired": "caducado", "rejected": "rechazado"}
+            display = [{**r, "estado": ("reintentable (sujeto a comprobación)"
+                        if r["status"] == "rejected"
+                        and r["id"] not in retried_ids
+                        and r["reason"] == "El almacenamiento no acredita permisos privados"
+                        else labels.get(r["status"], r["status"]))} for r in results]
+            st.dataframe(pd.DataFrame(display), hide_index=True)
             available = [r for r in results if r["available"]]
             if available:
                 chosen = st.selectbox("Evidencia guardada", available,
@@ -1182,17 +1190,32 @@ def _render_continuity_capture(service, frozen: dict, *, active: bool = True) ->
             return
         url = st.selectbox("URL candidata documentada", candidates, key="diagnostic_url")
         info = load_build_info()
+        retryable = [r for r in results if r["id"] not in retried_ids
+                     and r["url"] == url and r["status"] == "rejected"
+                     and r["reason"] == "El almacenamiento no acredita permisos privados"]
         with st.form("diagnostic_capture_form"):
             actor = st.text_input("Responsable", value="")
             note = st.text_input("Motivo del diagnóstico")
             approved = st.checkbox("Autorizo una consulta diagnóstica gobernada")
             submitted = st.form_submit_button("Solicitar evidencia diagnóstica",
                                               disabled=not info["build"].startswith("actions-"))
-        if submitted:
+            retried = st.form_submit_button("Reintentar rechazo previo a HTTP",
+                                            disabled=not retryable or not info["build"].startswith("actions-"))
+        if submitted or retried:
             try:
-                saved = service.request_diagnostic(
-                    cid, ean, url, actor=actor, note=note, build_commit=info["commit"], approved=approved)
-                st.success(f"Solicitud {saved['id']}: {saved['status']}. El trabajador la procesará sin esperar aquí.")
+                if retried:
+                    saved = service.retry_diagnostic(retryable[0]["id"], actor=actor, note=note,
+                                                     build_commit=info["commit"], approved=approved)
+                else:
+                    saved = service.request_diagnostic(
+                        cid, ean, url, actor=actor, note=note, build_commit=info["commit"], approved=approved)
+                labels = {"pending": "pendiente", "running": "ejecutando", "deferred": "aplazada",
+                          "captured": "capturado", "rejected": "rechazado", "expired": "caducado"}
+                label = labels.get(saved["status"], saved["status"])
+                if saved["status"] in {"pending", "running", "deferred"}:
+                    st.success(f"Solicitud {saved['id']}: {label}. El trabajador la procesará cuando sea posible.")
+                else:
+                    st.info(f"Solicitud {saved['id']}: {label}. Consulte el resultado; no se repetirá automáticamente.")
             except (ValueError, RuntimeError, sqlite3.Error, Timeout) as exc:
                 st.error(f"No se pudo registrar la solicitud: {exc}")
 
