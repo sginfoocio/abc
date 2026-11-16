@@ -88,6 +88,7 @@ def test_every_production_destination_uses_one_native_icon_family_without_route_
         "MASTER_DRYRUN_PAGE": "master-dry-run", "MASTER_DICTIONARY_PAGE": "master-diccionario",
         "KERING_IMAGES_PAGE": "imagenes-kering", "MASTERDATA_KERING_IMAGES_PAGE": "imagenes-kering",
         "PROVIDER_IMAGES_PAGE": "proveedores-imagenes", "LUXOPTICA_IMAGES_PAGE": "repositorio-imagenes",
+        "BULK_IMAGE_SEARCH_PAGE": "busqueda-masiva-ean",
         "LUXOPTICA_PENDING_PAGE": "pendiente-luxoptica", "ALERTA_PEDIDOS_PAGE": "alerta-pedidos",
         "SETTINGS_PAGE": "config", "ODOO_RECONCILIATION_PAGE": "conciliacion-odoo",
         "PRICE_COMPARATOR_PAGE": "comparador-precios",
@@ -104,6 +105,8 @@ def test_every_production_destination_uses_one_native_icon_family_without_route_
         found[node.targets[0].id] = ast.literal_eval(kwargs["url_path"])
         icon = kwargs["icon"]
         assert isinstance(icon, ast.Subscript) and icon.value.id == "NAV_ICONS"
+        if node.targets[0].id == "BULK_IMAGE_SEARCH_PAGE":
+            assert ast.literal_eval(icon.slice) == "luxoptica_images"
         value = design.NAV_ICONS[ast.literal_eval(icon.slice)]
         assert value.startswith(":material/") and validate_icon_or_emoji(value) == value
     assert found == expected

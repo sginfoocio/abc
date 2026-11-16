@@ -1,8 +1,11 @@
 # Integración de proveedores de imágenes (#59): auditoría inicial y diseño
 
-Estado: **diseño, sin implementación**. Auditoría solo de código y documentación; no se han
-hecho descargas, accesos a portales, consultas a Odoo ni pruebas con credenciales. Nunca
-incluir credenciales, tokens ni URLs con token en el repositorio, issues, logs ni fixtures.
+Estado: **implementación parcial; consolidación en #131**. Esta auditoría conserva decisiones
+de arquitectura y límites operativos, pero ya existe código para búsqueda masiva de solo lectura,
+selección de proveedor y flujos manuales asistidos. Las regresiones offline no acreditan portales,
+asociaciones comerciales vigentes ni producción. No se han hecho descargas, accesos a portales ni
+consultas productivas a Odoo. Nunca incluir credenciales, tokens ni URLs con token en el repositorio,
+issues, logs ni fixtures.
 
 ## 1. Auditoría del código existente
 
@@ -17,10 +20,14 @@ incluir credenciales, tokens ni URLs con token en el repositorio, issues, logs n
 | Panel de procesos | `process_activity.record_process`, `cloud_dashboard` | Un proceso por proveedor. |
 | Correo Graph | `graph_mail_downloader` | Posible canal si el portal notifica aprobaciones por email (no confirmado). |
 
-Hallazgo: en el repositorio **no existe código de Marcolin, NuORDER ni Sáfilo** para imágenes. La
-única referencia es el flujo n8n `n8n/Trasformación Pedidos More.json`, que transforma ficheros
-de albarán de Marcolin (`SHIP_*`) y fija `Proveedor: "MARCOLIN IBERICA, S.A."` como cadena de texto.
-No sirve para identificar proveedores ni productos de imágenes.
+La observación de que no había conectores era válida al redactarse esta auditoría. Ahora
+`provider_images.py`, `provider_images_ui.py`, `marcolin_images.py`, `nuorder_images.py` y
+`safilo_images.py` implementan el núcleo manual asistido y los contratos de adaptador, pero no
+demuestran que exista un driver real aprobado para los portales. La selección de proveedor y la
+búsqueda masiva se consolidan en #131; la consulta de Odoo se ejecuta solo tras una acción explícita
+y es de solo lectura. El flujo n8n `n8n/Trasformación Pedidos More.json` sigue transformando
+albaranes `SHIP_*` y fijando el proveedor como texto; no identifica proveedores ni productos de
+imágenes.
 
 ## 2. Relación con proveedores reales de Odoo (por verificar, solo lectura)
 
@@ -45,15 +52,23 @@ sin datos personales) en la issue:
 Resultado esperado: una tabla `proveedor Odoo → portal → marcas`, aprobada por el cliente, almacenada
 como configuración (no en código) con el ID de partner como clave.
 
+La búsqueda de #131 muestra la relación proveedor–portal como candidata o pendiente salvo evidencia
+explícita de variante, proveedor y portal. Las relaciones por plantilla y las compras históricas no
+acreditan por sí solas una ruta vigente; las contradicciones y variantes múltiples requieren revisión.
+Abrir o refrescar esa página no consulta Odoo ni crea almacenes o solicitudes.
+
 ## 3. Diseño común
 
-Un núcleo independiente del portal y un adaptador por proveedor. No se crea otra librería de imágenes.
+Se reutilizan el núcleo de solicitudes y el repositorio común; no se crea otra librería de
+imágenes. La búsqueda de #131 es deliberadamente una fase de análisis, separada del flujo manual
+de solicitudes:
 
 ```
-Odoo (solo lectura) ──► ProviderDemand ──► RequestPlanner ──► ProviderPortal (adaptador)
-                                             │                    │ submit/poll/download
-                                  SQLite durable (requests)       ▼
-                                             └──────────► staging ► ImageRepository.save ► NAS
+Acción explícita ─► Odoo (solo lectura) ─► propuesta con evidencia y revisión
+       │
+       └──────────► catálogo de solo lectura ─► archivos verificados ─► visor común
+
+Flujo manual de proveedor ─► SQLite durable ─► ZIP revisado ─► ImageRepository.save
 ```
 
 - **ProviderDemand**: EAN normalizados y deduplicados por proveedor (reutiliza `read_orders`, rango
@@ -79,12 +94,13 @@ Odoo (solo lectura) ──► ProviderDemand ──► RequestPlanner ──► 
 ## 4. Proveedores
 
 ### Marcolin (partner 573 a verificar)
-Flujo documentado: Multimedia → Assets requests → Product images + marcas → lista de EAN → validación →
-confirmaciones → *Profile → Requests* (pendientes/disponibles) → descarga (horas o días).
-Modelo asíncrono por solicitud, encaja directamente con `submitted/pending/available`.
-**Desconocido**: API, estructura del ZIP, nombres de fichero, límite de EAN por solicitud, MFA/CAPTCHA,
-condiciones de uso de la automatización. Hacerlo primero: es el único con flujo asíncrono completo y
-con proveedor ya identificado.
+Flujo comunicado, aún sin revalidación operativa: Multimedia → Assets requests → Product images +
+marcas → lista de EAN → validación → confirmaciones → *Profile → Requests* (pendientes/disponibles)
+→ descarga (horas o días). El código conserva referencias agrupadas por UPC en XLSX y deja
+contradicciones explícitas para revisión; no acredita el driver, la solicitud nº 1 ni una asociación
+con el partner 573. **Desconocido**: API, estructura del ZIP, nombres de fichero, límite de EAN por
+solicitud, MFA/CAPTCHA y condiciones de uso de la automatización. No inferir que el proveedor esté
+confirmado ni priorizar un piloto sin esa evidencia.
 
 ### NuORDER (app.next.nuorder.com)
 Grupos: Dita, Cutler, Akoni (Akoni y Balmain), Linda Farrow (Linda Farrow y Jacquemus). Sin pasos
@@ -93,21 +109,33 @@ vistas y nomenclatura, y comprobar si ofrece API oficial (preferible a automatiz
 No asumir que comparte modelo de solicitudes con Marcolin.
 
 ### Sáfilo (youandsafilo.com / commportal.safilo.com, Safilo Omnia)
-Flujo: búsqueda masiva por lista de EAN con coma → *Add to selection* → selección → *download all selected*
-(todas las vistas; la descarga desde ficha da una sola vista). Es síncrono/interactivo.
+Flujo comunicado, pendiente de validar con un ZIP real: búsqueda masiva por lista de EAN con coma →
+*Add to selection* → selección → *download all selected* (todas las vistas; la descarga desde ficha
+da una sola vista). Es síncrono/interactivo.
 **Riesgo principal**: nombres de fichero poco reconocibles → exigir manifiesto o metadatos del portal que
 demuestren fichero–EAN–vista; si no existen, todo queda en `needs_review` (nunca inferir por orden).
 Pendiente confirmar el comportamiento de la URL de búsqueda avanzada aportada y su compatibilidad con automatización.
 
-## 5. Plan de PR (una responsabilidad cada una; ninguna mezcla #14/#19)
+## 5. Consolidación y alcance vigente
 
-1. **Auditoría Odoo read-only** (script de solo lectura + informe sin datos personales) — sin cambios de runtime.
-2. **Núcleo**: esquema SQLite, máquina de estados, `ProviderDemand` y pruebas offline (idempotencia,
-   concurrencia, reinicio, EAN inválidos). Sin red.
-3. **Marcolin**: adaptador con portal simulado + importación al repositorio + pruebas de partial/late approval.
-4. **UI + scheduler** (deshabilitados por defecto) y proceso en el panel.
-5. **Piloto Marcolin** con autorización expresa y pocos EAN reales; documentar resultados.
-6. **NuORDER** y **Sáfilo**: una issue hija y una PR por conector tras su exploración autorizada.
+La PR integradora activa es #131. Conserva el selector visual, la búsqueda masiva administrativa
+EAN/UPC, la consulta explícita y de solo lectura de Odoo/catálogo, el visor común y las correcciones
+de exportación Marcolin; incorpora además las mejoras de reintentos, conservación y revisión de
+identidad de Kering. No se crearán PR adicionales para volver a separar estos cambios.
+
+| PR de origen | Cambios conservados | Archivos y commits en #131 | Pendientes reales |
+|---|---|---|---|
+| #69 | Auditoría, decisiones de arquitectura y límites operativos; se actualizan las afirmaciones obsoletas de “sin implementación” y el antiguo plan de PR. | `docs/PROVIDER_INTEGRATIONS_59.md`; `d78d451` y revisión documental de consolidación. | Aprobar y verificar en Odoo el mapa proveedor–portal–marcas; no se ha consultado Odoo productivo. |
+| #86 | Selector visual de cinco proveedores; solo se renderiza el proveedor seleccionado, sin cambiar rutas ni permisos. | `app_enhanced.py`, `provider_images_ui.py`, `tests/test_provider_images_ui.py`; `2c8f9d1`. | Validación visual offline con datos sintéticos; no acredita el flujo real de los portales. |
+| #129 | Reintentos acotados, conservación ante fallos, diagnóstico de acceso, revisión de lifestyle y asociación EAN/UPC con evidencia. | `image_library.py`, `image_repository.py`, `kering_images.py`, `kering_images_ui.py`, `kering_jobs.py`, `kering_portal.py`, `tests/test_kering_images.py`, `tests/test_kering_viewer_order.py`; `f512d0e`, `7c27d1d`. | Validar acceso/redirección y asociaciones con evidencia operativa; lifestyle no determina vistas V1/V2/V3. |
+| #130 | Exportación XLSX de referencias agrupadas por UPC y revisión explícita de contradicciones. | `marcolin_images.py`, `docs/MARCOLIN_PILOT_PLAN.md`, `tests/test_marcolin_images.py`; `49f6712`. | Validar circuito de recepción/importación real con autorización; no reenviar ni alterar la solicitud nº 1. |
+| #131 | Entrada EAN/UPC y CSV/TXT, análisis explícito de catálogo/Odoo de solo lectura, revisión de candidatas, reutilización del visor y exportación. | `app_enhanced.py`, `app_navigation.py`, `bulk_image_search.py`, `app_pages/bulk_image_page.py`, `tests/test_app_navigation.py`, `tests/test_bulk_image_search.py`; `8157400`. La corrección del contrato de ruta/icono se añade en `tests/test_cloud_identity.py`. | Confirmar asociaciones con evidencia autorizada; la búsqueda offline no acredita proveedor, imágenes de portal ni datos productivos. |
+
+La automatización de portales sigue desactivada y fuera del alcance de la búsqueda. Los contratos
+manuales no implican validación real de envío, descarga o importación. La solicitud Marcolin nº 1
+permanece sin reenvío ni reconciliación artificial. La validación de un ZIP real de Sáfilo, el acceso
+y formatos de NuORDER y los errores de acceso/redirección de Kering requieren evidencia propia y
+autorización operativa; #59 y las issues funcionales relacionadas permanecen abiertas.
 
 ## 6. Riesgos y decisiones pendientes
 
@@ -117,3 +145,5 @@ Pendiente confirmar el comportamiento de la URL de búsqueda avanzada aportada y
 - Mapa proveedor Odoo ↔ marcas aprobado por el cliente (sección 2).
 - Límites de solicitud por portal y política de repetición para EAN no encontrados.
 - Ubicación del estado (SQLite en `masterdata_data`) y su inclusión en las copias de seguridad.
+- Evidencia operativa para las limitaciones señaladas; los checks offline y los datos sintéticos no
+  se deben presentar como validación de portal, Odoo productivo o importación real.
