@@ -1,5 +1,13 @@
 # Cloud production: approved, app-only releases
 
+## Kering worker: separate maintenance approval
+
+The app-only controller deliberately leaves workers unchanged. The live audit of
+2026-11-17 found app/main at `c787f50` and Kering at `2082ee5`; publishing or
+deploying the app does not activate the new worker retry limits. Follow the
+[Kering-specific release and rollback plan](KERING_WORKER_RELEASE.md), not a
+broader Compose update. No worker update has been executed or authorized here.
+
 ## Automated release pipeline (supersedes per-release policy edits)
 
 Every release no longer needs a root edit on `s2026`. Responsibilities are split:
