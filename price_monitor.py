@@ -968,15 +968,17 @@ class PriceMonitor:
                 if page is None or match is None or match.status != EXACT or page.ambiguous:
                     detail = ("; ".join(match.reasons) if match else "Sin datos legibles de producto")
                     with self.store._connect() as con, con:
-                        con.execute("""UPDATE competitor_product_urls
+                        updated = con.execute("""UPDATE competitor_product_urls
                             SET status='probable',match_status='manual_review',
                             note=substr(? || ' · ' || note,1,1000)
-                            WHERE competitor_id=? AND ean=? AND url=?""", (detail, cid, ean, url))
+                            WHERE competitor_id=? AND ean=? AND url=?
+                            AND NOT (status='verified' AND source='user')""", (detail, cid, ean, url))
                         if page:
                             con.execute("""UPDATE discovery_index SET facts=?,checked_at=? WHERE competitor_id=?
                                 AND url=?""", (json.dumps(asdict(page), ensure_ascii=False), sampled_at, cid, url))
-                        con.execute("""UPDATE locate_jobs SET state='review',url=?,detail=?,updated_at=?
-                            WHERE competitor_id=? AND ean=?""", (url, detail, _iso(self._now()), cid, ean))
+                        if updated.rowcount:
+                            con.execute("""UPDATE locate_jobs SET state='review',url=?,detail=?,updated_at=?
+                                WHERE competitor_id=? AND ean=?""", (url, detail, _iso(self._now()), cid, ean))
                     self._finish(job, "review", detail or "Variantes ambiguas: revisar identidad")
                     return ""
                 sample = {"page": asdict(page), "at": sampled_at,

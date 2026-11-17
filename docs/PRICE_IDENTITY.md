@@ -34,6 +34,8 @@ oferta concuerdan. No se consulta una URL adicional y se conserva la URL
 aceptada junto con la trazabilidad de la selección; diferencias o GTIN
 contradictorios siguen en revisión. Las trazas de lecturas manuales se
 auditan mediante huellas de URL y IDs de recibo, incluso ante rechazo.
+Una lectura contradictoria queda en revision y no se importa como oferta;
+no modifica la ficha verificada por una persona ni su nota de aceptacion.
 
 ## Revision conjunta del 1 de noviembre de 2026
 

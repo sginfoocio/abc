@@ -201,6 +201,26 @@ def test_diagnostic_can_capture_verified_url_with_failed_read(expanded_review, m
     assert url not in service.diagnostic_candidates(cid, ean)
 
 
+def test_rejected_post_acceptance_read_keeps_human_identity(expanded_review, monkeypatch):
+    service, store, _, cid, ean, url, _, monitor, task = expanded_review
+    from price_monitor import select_product_variant
+
+    def contradicted(page, product):
+        return replace(select_product_variant(page, product), color="OTHER999")
+
+    monkeypatch.setattr("price_monitor.select_product_variant", contradicted)
+    monitor.review_refresh_tick()
+    with store._connect() as con:
+        identity = con.execute("""SELECT status,source,note FROM competitor_product_urls
+            WHERE competitor_id=? AND ean=? AND url=?""", (cid, ean, url)).fetchone()
+        request = con.execute("SELECT status,detail FROM manual_review_refreshes WHERE id=?", (task,)).fetchone()
+        assert con.execute("SELECT COUNT(*) FROM offers WHERE ean=? AND competitor_id=?", (ean, cid)).fetchone()[0] == 0
+    assert identity["status"] == "verified" and identity["source"] == "user"
+    assert "Synthetic review" in identity["note"]
+    assert request["status"] == "error" and "color" in request["detail"].lower()
+    assert url in service.diagnostic_candidates(cid, ean)
+
+
 def test_identity_change_before_offer_commit_never_creates_observation(expanded_review, monkeypatch):
     _, store, _, cid, ean, url, _, monitor, task = expanded_review
     original = WebPriceSearch.record
