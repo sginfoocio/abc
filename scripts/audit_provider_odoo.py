@@ -33,7 +33,8 @@ def audit_partner(connection, partner_id: int) -> dict:
         f"WHERE po.partner_id IN ({marks}) AND po.state != 'cancel'"), ids)]
     info = [r[0] for r in connection.execute(text(
         f"SELECT pp.barcode FROM product_supplierinfo si JOIN product_product pp "
-        f"ON pp.product_tmpl_id = si.product_tmpl_id WHERE si.partner_id IN ({marks})"), ids)]
+        f"ON pp.product_tmpl_id = si.product_tmpl_id AND (si.product_id IS NULL OR si.product_id = pp.id) "
+        f"WHERE si.name IN ({marks})"), ids)]
 
     def quality(barcodes):
         clean = [(b or "").strip() for b in barcodes]

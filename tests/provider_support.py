@@ -44,7 +44,7 @@ def fake_odoo(orders: dict[int, list[tuple[int, str, str | None]]]):
             "CREATE TABLE purchase_order_line(id INTEGER PRIMARY KEY, order_id INTEGER, product_id INTEGER,"
             " name TEXT, product_qty REAL, display_type TEXT)",
             "CREATE TABLE product_product(id INTEGER PRIMARY KEY, barcode TEXT, product_tmpl_id INTEGER)",
-            "CREATE TABLE product_supplierinfo(id INTEGER PRIMARY KEY, partner_id INTEGER, product_tmpl_id INTEGER)",
+            "CREATE TABLE product_supplierinfo(id INTEGER PRIMARY KEY, name INTEGER, product_tmpl_id INTEGER, product_id INTEGER)",
         ):
             c.execute(text(ddl))
         c.execute(text("INSERT INTO res_partner VALUES (573,'Marcolin',1,1,573),(574,'Marcolin contacto',1,0,573),"

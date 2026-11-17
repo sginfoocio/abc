@@ -26,20 +26,21 @@ def sources(tmp_path):
     with engine.begin() as c:
         for ddl in (
             "CREATE TABLE product_product(id INTEGER PRIMARY KEY, barcode TEXT, default_code TEXT, product_tmpl_id INTEGER)",
-            "CREATE TABLE product_template(id INTEGER PRIMARY KEY, name TEXT, brand_id INTEGER)",
+            "CREATE TABLE product_template(id INTEGER PRIMARY KEY, name TEXT, brand_id INTEGER, modelo TEXT, color_proveedor TEXT)",
             "CREATE TABLE diagonal_product_brand(id INTEGER PRIMARY KEY, name TEXT)",
-            "CREATE TABLE product_supplierinfo(id INTEGER PRIMARY KEY, product_tmpl_id INTEGER, partner_id INTEGER)",
+            "CREATE TABLE product_supplierinfo(id INTEGER PRIMARY KEY, product_tmpl_id INTEGER, name INTEGER, product_id INTEGER)",
             "CREATE TABLE res_partner(id INTEGER PRIMARY KEY, name TEXT)",
             "CREATE TABLE purchase_order(id INTEGER PRIMARY KEY, partner_id INTEGER, state TEXT)",
             "CREATE TABLE purchase_order_line(id INTEGER PRIMARY KEY, order_id INTEGER, product_id INTEGER, display_type TEXT)",
         ):
             c.execute(text(ddl))
         c.execute(text("INSERT INTO diagonal_product_brand VALUES (1, 'Marca simulada')"))
-        c.execute(text("INSERT INTO product_template VALUES (1, 'Producto sin stock', 1), (2, 'Otro', 1)"))
+        c.execute(text("INSERT INTO product_template VALUES "
+                       "(1, 'Producto sin stock', 1, 'MODEL', '001'), (2, 'Otro', 1, 'OTHER', '002')"))
         c.execute(text("INSERT INTO product_product VALUES (1, :ean, 'REF', 1), (2, :other, 'OTRA', 2)"),
                   {"ean": EAN, "other": EANS[0]})
         c.execute(text("INSERT INTO res_partner VALUES (10, 'Proveedor simulado'), (11, 'Otro proveedor')"))
-        c.execute(text("INSERT INTO product_supplierinfo VALUES (1, 1, 10)"))
+        c.execute(text("INSERT INTO product_supplierinfo VALUES (1, 1, 10, NULL)"))
         c.execute(text("INSERT INTO purchase_order VALUES (1, 10, 'purchase')"))
         c.execute(text("INSERT INTO purchase_order_line VALUES (1, 1, 1, NULL)"))
     links = tmp_path / "links"
@@ -68,6 +69,24 @@ def test_inputs_keep_zeros_equivalences_and_invalid_duplicates():
     assert parsed["duplicates"] == 3 and parsed["invalid"] == ["123"]
     with pytest.raises(ValueError):
         bulk.group_inputs([UPC] * (bulk.MAX_INPUTS + 1))
+
+
+def test_real_supplierinfo_contract_preserves_variant_identity(sources):
+    products, suppliers, purchases = bulk.read_odoo(sources[2], [UPC])
+    product = products[UPC.zfill(14)][0]
+    assert (product["product_id"], product["barcode"], product["default_code"]) == (1, EAN, "REF")
+    assert (product["brand"], product["model"], product["color"]) == ("Marca simulada", "MODEL", "001")
+    assert suppliers[1][0]["partner_id"] == purchases[1][0]["partner_id"] == 10
+
+
+def test_variant_supplier_does_not_leak_to_siblings_but_real_conflict_is_reviewed(sources):
+    with sources[2].begin() as connection:
+        connection.execute(text("INSERT INTO product_product VALUES (3, :ean, 'SIBLING', 1)"), {"ean": EANS[2]})
+        connection.execute(text("INSERT INTO product_supplierinfo VALUES (2, 1, 11, 3)"))
+    assert analyze(sources, [UPC])["rows"][0]["proposal"]["status"] == "Portal candidato"
+    with sources[2].begin() as connection:
+        connection.execute(text("INSERT INTO product_supplierinfo VALUES (3, 1, 11, 1)"))
+    assert analyze(sources, [UPC])["rows"][0]["proposal"]["status"] == "Revisión"
 
 
 def test_read_only_identity_coverage_and_no_new_copies(sources, tmp_path):
