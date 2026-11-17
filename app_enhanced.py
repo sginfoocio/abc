@@ -2099,6 +2099,7 @@ LUXOPTICA_IMAGES_PAGE = st.Page(
         render_sidebar_shell=render_sidebar_shell,
         require_admin_access=require_admin_access,
         render_footer=render_footer,
+        engine_factory=get_db_engine,
     ),
     title="Biblioteca de imágenes",
     icon=NAV_ICONS["luxoptica_images"],

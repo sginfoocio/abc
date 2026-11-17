@@ -1,16 +1,22 @@
 """Explicit, read-only bulk image and Odoo lookup. No repository or provider is initialised."""
 from __future__ import annotations
 
+import csv
 import hashlib
+from io import BytesIO, StringIO
 import json
 import os
 from pathlib import Path
+import re
+from zipfile import BadZipFile, ZipFile
+
+from openpyxl import load_workbook
 
 from sqlalchemy import bindparam, text
 from sqlalchemy.exc import SQLAlchemyError
 
 from image_repository import ImageRecord, image_fingerprint
-from provider_images import ean_key, ean_valid
+from provider_images import ean_key, ean_valid, parse_ean_file, parse_ean_text
 from provider_odoo_orders import _read_only, load_links
 from repository_catalog_readonly import (
     CatalogUnavailable, DEFAULT_REQUIRED_VIEWS, MAX_FILE_BYTES, code_variants,
@@ -21,6 +27,85 @@ from repository_storage import check_image_root
 MAX_INPUTS = 500
 MAX_ROWS = 5000
 PORTALS = {"kering", "luxottica", "marcolin", "safilo", "nuorder"}
+MAX_INPUT_FILE_BYTES = 1024 * 1024
+EAN_INPUT_COLUMNS = {"ean", "upc", "barcode", "gtin", "codigo de barras"}
+
+
+def _csv_ean_codes(content: bytes) -> list[str]:
+    value = content.decode("utf-8-sig")
+    try:
+        dialect = csv.Sniffer().sniff(value[:4096], delimiters=",;\t")
+    except csv.Error:
+        # A single-column list has no sniffable delimiter.
+        dialect = csv.excel
+    try:
+        rows = list(csv.reader(StringIO(value), dialect, strict=True))
+    except csv.Error as error:
+        raise ValueError(f"CSV no valido: {error}") from error
+    column = next((i for i, cell in enumerate(rows[0]) if cell.strip().casefold() in EAN_INPUT_COLUMNS),
+                  None) if rows else None
+    if column is not None:
+        return [row[column].strip() for row in rows[1:] if len(row) > column and row[column].strip()]
+    return parse_ean_text(" ".join(cell for row in rows for cell in row))
+
+
+def parse_ean_upload(content: bytes, filename: str) -> list[str]:
+    """Local list input only; Excel identifiers retain text and zero-padding."""
+    if len(content) > MAX_INPUT_FILE_BYTES:
+        raise ValueError("El archivo supera 1 MiB.")
+    suffix = Path(filename).suffix.lower()
+    if suffix == ".csv":
+        return _csv_ean_codes(content)
+    if suffix == ".txt":
+        content.decode("utf-8-sig")
+        return parse_ean_file(content)
+    if suffix != ".xlsx":
+        raise ValueError("Utilice Excel .xlsx, CSV o TXT.")
+    try:
+        with ZipFile(BytesIO(content)) as archive:
+            if len(archive.infolist()) > 2000 or sum(
+                item.file_size for item in archive.infolist()
+            ) > 16 * 1024 * 1024:
+                raise ValueError("El Excel descomprimido supera el limite de 16 MiB / 2000 entradas.")
+        workbook = load_workbook(BytesIO(content), read_only=True, data_only=False, keep_links=False)
+    except (BadZipFile, KeyError, SyntaxError) as error:
+        raise ValueError("El archivo no es un Excel .xlsx valido.") from error
+    try:
+        sheet = workbook.active
+        if sheet is None:
+            raise ValueError("El Excel no contiene una hoja activa.")
+        if (sheet.max_row or 0) > MAX_INPUTS + 1 or (sheet.max_column or 0) > 50:
+            raise ValueError(f"El Excel admite hasta {MAX_INPUTS} filas de datos y 50 columnas.")
+        values = []
+        column = None
+        for index, row in enumerate(sheet.iter_rows()):
+            if index == 0:
+                column = next((i for i, cell in enumerate(row) if str(cell.value or "").strip().casefold()
+                               in EAN_INPUT_COLUMNS), None)
+                if column is not None:
+                    continue
+            for cell in ((row[column],) if column is not None else row):
+                value = cell.value
+                if value is None or value == "":
+                    continue
+                if cell.data_type == "f":
+                    raise ValueError(f"Celda {cell.coordinate}: sustituya la formula por un codigo como texto.")
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    if value < 0 or int(value) != value:
+                        raise ValueError(f"Celda {cell.coordinate}: el codigo debe ser un entero o texto.")
+                    value = str(int(value))
+                    if re.fullmatch(r"0+", cell.number_format):
+                        value = value.zfill(len(cell.number_format))
+                    elif cell.number_format not in {"General", "@"}:
+                        raise ValueError(f"Celda {cell.coordinate}: use texto o un formato de ceros sin separadores.")
+                if not isinstance(value, str):
+                    raise ValueError(f"Celda {cell.coordinate}: el codigo debe guardarse como texto.")
+                values.append(value.strip())
+                if len(values) > MAX_INPUTS:
+                    raise ValueError(f"El limite es {MAX_INPUTS} entradas.")
+        return values
+    finally:
+        workbook.close()
 
 
 def group_inputs(values):
