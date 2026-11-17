@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 import pandas as pd
@@ -951,6 +951,27 @@ class PriceComparatorStore:
                     );
                     CREATE INDEX IF NOT EXISTS manual_review_refreshes_queue_idx
                         ON manual_review_refreshes(status,retry_at,lease_until,id);
+                    CREATE TABLE IF NOT EXISTS manual_review_http_attribution (
+                        refresh_id INTEGER PRIMARY KEY REFERENCES manual_review_refreshes(id),
+                        base_requests INTEGER NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS manual_review_identity (
+                        refresh_id INTEGER PRIMARY KEY REFERENCES manual_review_refreshes(id),
+                        snapshot TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS manual_review_recorded_samples (
+                        refresh_id INTEGER PRIMARY KEY REFERENCES manual_review_refreshes(id),
+                        sampled_at TEXT NOT NULL,
+                        sample_digest TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS manual_review_recovery_grants (
+                        refresh_id INTEGER PRIMARY KEY REFERENCES manual_review_refreshes(id),
+                        continuity_id INTEGER NOT NULL REFERENCES price_continuity(id),
+                        actor TEXT NOT NULL,
+                        note TEXT NOT NULL,
+                        build_commit TEXT NOT NULL,
+                        granted_at TEXT NOT NULL
+                    );
                     CREATE TABLE IF NOT EXISTS monitor_schedule (
                         competitor_id TEXT PRIMARY KEY REFERENCES competitors(id),
                         enabled INTEGER NOT NULL DEFAULT 0,
@@ -1208,13 +1229,27 @@ class PriceComparatorStore:
                     errors.append(f"Fila {index + 2}: {exc}")
         return ImportReport(imported, 0, tuple(errors))
 
-    def import_offers(self, frame: pd.DataFrame) -> ImportReport:
+    def import_offers(self, frame: pd.DataFrame, *,
+                      validate: Callable[[sqlite3.Connection], None] | None = None,
+                      review_sample: tuple[int, str, str] | None = None) -> ImportReport:
         required = {"EAN", "Competidor", "Precio", "Moneda", "Mercado", "URL", "Disponibilidad",
                     "Estado coincidencia", "Evidencia", "Método"}
         _required_columns(frame, required, "Ofertas")
         imported = updated = rejected = 0
         errors: list[str] = []
         with self._connect() as connection, connection:
+            if review_sample is not None and (validate is None or len(frame) != 1):
+                raise ValueError("La muestra de revisión requiere una única oferta y validación")
+            if validate is not None:
+                connection.execute("BEGIN IMMEDIATE")
+                validate(connection)
+            if review_sample is not None:
+                recorded = connection.execute("""SELECT sampled_at,sample_digest
+                    FROM manual_review_recorded_samples WHERE refresh_id=?""", (review_sample[0],)).fetchone()
+                if recorded:
+                    if tuple(recorded) != review_sample[1:]:
+                        raise ValueError("La muestra registrada de esta revisión ha cambiado")
+                    return ImportReport(0, 0, ())
             competitors = {row["name"].casefold(): row for row in connection.execute("SELECT * FROM competitors")}
             competitors.update({row["id"].casefold(): row for row in connection.execute("SELECT * FROM competitors")})
             for index, row in frame.iterrows():
@@ -1363,6 +1398,12 @@ class PriceComparatorStore:
                 except ValueError as exc:
                     rejected += 1
                     errors.append(f"Fila {index + 2}: {exc}")
+            if review_sample is not None:
+                if rejected:
+                    connection.rollback()
+                else:
+                    connection.execute("""INSERT INTO manual_review_recorded_samples
+                        (refresh_id,sampled_at,sample_digest) VALUES(?,?,?)""", review_sample)
         return ImportReport(imported, updated, tuple(errors))
 
     @staticmethod
