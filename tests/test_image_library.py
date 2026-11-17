@@ -89,7 +89,9 @@ def test_detail_images_are_never_promoted_to_v2():
 
 
 @pytest.mark.parametrize("aliases", [2, 5])
-def test_sixteen_and_forty_representations_remain_eight_photos(aliases):
+def test_sixteen_and_forty_representations_remain_eight_photos(aliases, monkeypatch, capsys):
+    import scripts.diagnose_image_library as diagnose
+
     records = []
     for asset in range(8):
         original = record("0012", "frontal", id=asset + 1)
@@ -100,6 +102,11 @@ def test_sixteen_and_forty_representations_remain_eight_photos(aliases):
     assert len(group.photos) == 8 and len(group.records) == 8 * aliases
     counts = library.summary([group])
     assert counts["images"] == 8 and counts["representations"] == 8 * aliases
+    coverage = library.metadata_coverage(records)[0]
+    assert coverage["images"] == 8 and coverage["representations"] == 8 * aliases
+    monkeypatch.setattr(diagnose, "ImageRepository", lambda: Mock(catalog_records=lambda: records))
+    assert diagnose.main() == 0
+    assert f"Fotografías únicas: 8  Representaciones: {8 * aliases}" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("signature", ["checksum", "pixels"])
