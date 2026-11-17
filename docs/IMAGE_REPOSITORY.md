@@ -20,10 +20,128 @@ de checksum/huella compartidos entre EAN; estas coincidencias son candidatos a
 revision de variante/color, no prueba de que una asociacion sea incorrecta.
 No se consulta Odoo al navegar, no se fusionan EAN y no se reclasifica ni borra.
 
-El ZIP completo existente no cambia: conserva nombres, alias y manifiesto, y
-solo se genera al pulsar. La galeria seleccionada para exportacion es una
-propuesta separada, no un cambio implicito del ZIP ni de los originales:
+El ZIP individual existente no cambia: conserva sus nombres y alias y
+solo se genera al pulsar. El ZIP conjunto descrito abajo es una descarga
+independiente. Una seleccion comercial persistente y revisada manualmente sigue
+siendo una propuesta separada, no una reclasificacion implicita:
 [validacion de proveedores y reconstruccion futura](IMAGE_PROVIDER_VALIDATION_AND_REBUILD.md).
+
+## Busqueda local multiple y ZIP conjunto
+
+En **Repositorio de imagenes**, abrir **Buscar varios EAN y descargar ZIP**.
+Admite un codigo o varios separados por comas, punto y coma, espacios, tabuladores
+o saltos de linea; tambien CSV/TXT UTF-8 y Excel `.xlsx` (hoja activa).
+Reutiliza la validacion y agrupacion GTIN de `bulk_image_search.group_inputs`
+(#131) y las fotografias unicas y trazabilidad de `image_library` (#138).
+No ejecuta el analisis de pedidos/proveedores de la pagina de busqueda masiva,
+ni inicia solicitudes, conectores, recepcion, publicacion o descargas externas.
+
+Los codigos se mantienen como texto. UPC/EAN equivalentes se agrupan por la
+identidad GTIN existente, conservando el primer literal introducido, incluidos
+sus ceros, para la seleccion y carpeta de descarga. En Excel, usar texto o
+formato numerico de ceros (`0000000000000`); no es posible recuperar ceros que
+Excel ya haya eliminado. No se admiten formulas ni decimales. Puede emplearse
+una columna EAN/Barcode/GTIN, o una lista sin cabecera; Excel tambien reconoce
+UPC. No se importa Master Data ni se cambia la fecha de ningun pedido.
+
+El resumen separa repetidos, invalidos y codigos sin imagenes en el catalogo
+local; esto ultimo no significa que el producto no exista en Odoo.
+La tabla muestra EAN solicitado, EAN del catalogo, modelo, color disponible,
+vistas, proveedor, fotos unicas, representaciones y coincidencias a revisar.
+La galeria inferior queda limitada al listado y mantiene todos sus filtros
+y el detalle existente. **Mostrar todo el catalogo** retira esta limitacion.
+
+Se pueden descargar todos los EAN encontrados o una seleccion. Los filtros de
+la galeria no cambian silenciosamente esa seleccion del ZIP. Cambiar entrada,
+seleccion, formato o actualizar el catalogo invalida la descarga preparada.
+No se genera un ZIP durante la navegacion ni antes de pulsar **Preparar ZIP
+conjunto**; **Descargar ZIP conjunto** entrega esa instantanea verificada.
+
+| Formato | Carpetas/nombres y reglas conservadas |
+| --- | --- |
+| Original | `<primer EAN literal>/<nombre original saneado>`. Una foto por SHA-256 e identidad GTIN, preferentemente con nombre de representacion original. Incluye todas las vistas, detalles, lifestyle y desconocidas; no deduplica por vista ni por similitud visual. |
+| Farfetch | `Farfetch/<EAN>/<ID externo>_V1.png`, `_V2.png`, `_V3.png`. Reutiliza el plan de publicacion existente: PNG se conserva, JPEG/WEBP admitidos se convierten en la copia PNG sin reducir resolucion. |
+| Miinto | `Miinto/<EAN>/<ID externo>_V1.jpeg`, `_V2.jpeg`, `_V3.jpeg`. Conserva PNG bajo extension `.jpeg`, como el contrato historico, y JPEG sin recodificar. WEBP sigue sin conversion aprobada. |
+
+Las reglas de nombre originales estan en
+`graph_mail_downloader._market_image_names` e
+`image_naming.market_view_from_image_name`: `noshad__fr` -> V1,
+`noshad__qt` -> V2, `shad__lt` -> V3. El plan compatible de vistas/formatos
+esta en `market_publication.create_publication_plan`; la descarga nueva lo
+reutiliza sin llamar a `publish_market_images` ni escribir copias permanentes.
+El proceso anterior de copias pendientes sigue accesible en **Pendiente
+Luxoptica**, y el publicador CLI sigue siendo una operacion distinta y manual.
+
+Los IDs comerciales **no son el EAN, SKU, modelo ni color**. Solo al preparar
+Farfetch/Miinto se leen de `diagonal_product_website.product_website_id`,
+relacionado por `product_id = product_product.id`; `siteweb_id = 3` significa
+Farfetch y `2` Miinto. `read_export_market_ids` usa transaccion PostgreSQL
+`READ ONLY`, timeout SQL de 20 segundos, rollback y limite de 5000 filas.
+La consulta nueva conserva esas relaciones existentes y detecta varias
+variantes por codigo o varios IDs distintos para el canal; no elige el ultimo
+ni inventa un sustituto. La navegacion, busqueda y formato Original no necesitan
+Odoo. La disponibilidad/esquema de esta consulta se prueba offline, no constituye
+una validacion nueva de los IDs reales de produccion.
+
+Farfetch/Miinto conservan la politica existente de vistas acreditadas
+Luxoptica/Kering y revisiones Kering; no se amplian por inferencia a otros
+proveedores. Detalles, lifestyle, vistas no acreditadas, alternativas de la
+misma vista y formatos no aprobados se enumeran como exclusiones explicitas
+antes de descargar y en `manifest.json`, de acuerdo con la decision funcional
+de esta fase. Original permite conservar todas las fotos de cualquier proveedor.
+Si algun EAN seleccionado carece de ID inequívoco o de toda foto publicable,
+no se entrega un ZIP parcial: se muestra el error y puede retirarse ese EAN o
+elegirse Original. No se cambia ninguna regla de renombrado para las adicionales.
+
+Original resuelve colisiones, tambien de mayusculas/minusculas, mediante el
+checksum completo. En formatos especiales no se añaden sufijos nuevos: las
+carpetas separan los EAN y una colision real dentro del mismo EAN bloquea el ZIP.
+Un ID repetido entre EAN puede producir nombres base iguales, pero no rutas
+duplicadas ni mezcla de variantes. El manifiesto conserva EAN, modelo/color
+disponibles, SHA de origen/salida y todas las representaciones relacionadas,
+con proveedor, origen, vista, mercado, nombre e identificador.
+
+Por seguridad, checksum o huella compartidos con otro GTIN distinto, o metadatos
+de modelo/color contradictorios dentro de una identidad, bloquean la seleccion
+completa. Son sospechas, no una reclasificacion automatica ni prueba de cual
+asociacion es incorrecta. Deben revisarse por separado; no hay override automatico.
+Los GTIN equivalentes con ceros iniciales no se consideran otros colores.
+Archivo ausente, corrupto, cambiado o catalogo modificado durante la preparacion
+tambien producen error sin entregar un ZIP parcial.
+
+Limites por operacion: 500 entradas, 1 MiB por listado; Excel descomprimido
+16 MiB/2000 entradas ZIP, 500 filas de datos y 50 columnas; 2000 fotografias
+unicas, 64 MiB por ZIP incluido manifiesto, 30 MiB/25 MP por foto.
+El ZIP usa almacenamiento temporal con spool de 8 MiB y borra sus temporales
+al terminar o fallar; Streamlit conserva una unica descarga conjunta preparada
+por sesion, hasta 64 MiB. La verificacion/recodificacion trabaja con archivos
+limitados, sin generar copias permanentes ni reducir la calidad del original.
+El presupuesto de 60 segundos se comprueba entre lecturas y antes de entregar
+el archivo: no interrumpe por la fuerza una E/S de NAS o conexion bloqueada
+en el sistema operativo. No se debe interpretar como un timeout duro del NFS.
+
+### Validacion y activacion separadas
+
+Pruebas offline: `tests/test_repository_multi_export.py`,
+`tests/test_image_library.py` y regresiones existentes de repositorio, busqueda,
+publicacion y descargas Kering. Cubren 16/40 representaciones -> ocho fotos,
+ceros, entrada repetida/invalida/inexistente, variantes/colores, los tres
+formatos, integridad, conversion, colisiones, limites, errores y permisos.
+La prueba de navegador debe usar exclusivamente catalogo y Odoo sinteticos:
+buscar dos EAN, preparar/descargar los tres formatos, revisar ZIP/manifiesto,
+probar subida CSV/XLSX y ancho movil, sin acceso a portales ni NAS real.
+
+Tras revision y autorizacion de fusion, exigir CI del HEAD definitivo y de
+main. El despliegue de la aplicacion requiere otra autorizacion y debe utilizar
+el procedimiento Cloud vigente, verificando SHA, montajes y acceso administrativo.
+Validar primero en staging con una muestra autorizada y existentes en el
+repositorio; Original no debe emitir SQL y los especiales solo SELECT de IDs,
+sin pedidos ni solicitudes. Verificar tambien descarga individual y filtros.
+Rollback: volver a la imagen anterior de la aplicacion, sin restaurar ni migrar
+catalogo, pues esta mejora no cambia su esquema ni archivos originales.
+**No actualizar ni reiniciar el worker Kering como parte de esta mejora**:
+su plan independiente sigue en
+[KERING_WORKER_RELEASE.md](../deployment/cloud/KERING_WORKER_RELEASE.md).
 
 ## Inventario de contratos previo a cambiar rutas
 

@@ -67,6 +67,55 @@ def run(role="admin"):
     return app
 
 
+def test_repository_multi_search_zip_selection_and_invalidation(repository, monkeypatch):
+    from zipfile import ZipFile
+    import image_exports
+
+    lookup = Mock(side_effect=AssertionError("Browsing/Original must not access Odoo"))
+    monkeypatch.setattr(image_exports, "read_export_market_ids", lookup)
+    add(repository, "036000291452", "frontal", 1)
+    add(repository, "4006381333931", "detalle", 7)
+    app = run()
+    app.text_area(key="lib_multi_text").set_value("0036000291452,036000291452 4006381333931\n1234567890128 123").run()
+    app.button(key="lib_multi_search").click().run()
+    assert not app.exception
+    assert any("Repetidos/equivalentes: 1" in item.value for item in app.caption)
+    assert any("1234567890128" in item.value for item in app.warning)
+    assert any("Códigos inválidos: 123" in item.value for item in app.warning)
+    app.button(key="lib_multi_prepare").click().run()
+    assert not app.exception
+    with ZipFile(BytesIO(app.session_state["lib_multi_zip"]["bytes"])) as zipped:
+        assert len(zipped.namelist()) == 3
+    app.checkbox(key="lib_multi_all").uncheck().run()
+    app.multiselect(key="lib_multi_selected").set_value(["0036000291452"]).run()
+    assert "lib_multi_zip" not in app.session_state
+    app.button(key="lib_multi_prepare").click().run()
+    assert not app.exception
+    with ZipFile(BytesIO(app.session_state["lib_multi_zip"]["bytes"])) as zipped:
+        assert len(zipped.namelist()) == 2
+        assert all(name.startswith("0036000291452/") or name == "manifest.json" for name in zipped.namelist())
+    app.text_area(key="lib_multi_text").set_value("4006381333931").run()
+    assert "lib_multi_zip" not in app.session_state
+    assert any("El listado ha cambiado" in item.value for item in app.warning)
+    lookup.assert_not_called()
+
+
+def test_multi_search_preserves_existing_gallery_filters_and_details(repository):
+    add(repository, "036000291452", "frontal", 1)
+    add(repository, "4006381333931", "detalle", 7, provider="Luxoptica")
+    app = run()
+    app.selectbox(key="lib_provider").select("Kering").run()
+    app.text_area(key="lib_multi_text").set_value("0036000291452 4006381333931").run()
+    app.button(key="lib_multi_search").click().run()
+    assert app.selectbox(key="lib_provider").value == "Kering"
+    assert len([b for b in app.button if str(b.key).startswith("lib_open_")]) == 1
+    app.button(key="lib_open_036000291452").click().run()
+    app.button(key="lib_back").click().run()
+    assert not app.exception
+    assert app.text_area(key="lib_multi_text").value == "0036000291452 4006381333931"
+    assert app.selectbox(key="lib_provider").value == "Kering"
+
+
 def test_groups_one_card_per_ean_keeping_leading_zeros_and_semantics():
     records = [
         record("0012", "frontal", id=1, model="M1"), record("0012", "lateral", id=2, model="M1"),
