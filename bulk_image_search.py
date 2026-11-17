@@ -75,15 +75,15 @@ def read_catalog(codes, catalog, root):
 
 PRODUCT_QUERY = text("""
     SELECT pp.id AS product_id, pp.barcode, pp.default_code, pt.id AS template_id,
-           pt.name AS product, dpb.name AS brand
+           pt.name AS product, dpb.name AS brand, pt.modelo AS model, pt.color_proveedor AS color
     FROM product_product pp JOIN product_template pt ON pt.id = pp.product_tmpl_id
     LEFT JOIN diagonal_product_brand dpb ON dpb.id = pt.brand_id
     WHERE pp.barcode IN :codes ORDER BY pp.id LIMIT :limit
 """).bindparams(bindparam("codes", expanding=True))
 
 SUPPLIER_QUERY = text("""
-    SELECT DISTINCT si.product_tmpl_id AS template_id, p.id AS partner_id, p.name AS partner
-    FROM product_supplierinfo si JOIN res_partner p ON p.id = si.partner_id
+    SELECT DISTINCT si.product_tmpl_id AS template_id, si.product_id, p.id AS partner_id, p.name AS partner
+    FROM product_supplierinfo si JOIN res_partner p ON p.id = si.name
     WHERE si.product_tmpl_id IN :templates ORDER BY si.product_tmpl_id, p.id LIMIT :limit
 """).bindparams(bindparam("templates", expanding=True))
 
@@ -131,7 +131,8 @@ def route(products, suppliers, purchases, links, explicit_routes=()):
                 "reason": "Varias variantes comparten esta identidad.", "evidence": []}
     product = products[0]
     evidence = []
-    template = suppliers.get(product["template_id"], [])
+    template = [row for row in suppliers.get(product["template_id"], [])
+                if row.get("product_id") in (None, product["product_id"])]
     history = purchases.get(product["product_id"], [])
     partners = {r["partner_id"]: r["partner"] for r in [*template, *history]}
     if template:

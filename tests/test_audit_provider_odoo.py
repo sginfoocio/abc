@@ -13,7 +13,7 @@ def test_audit_reports_counts_only_and_separates_partners():
     engine = fake_odoo({573: [(1, "P1", EANS[0]), (2, "P2", None)], 574: [(3, "P3", EANS[1]), (5, "P5", "123")],
                         900: [(4, "P4", EANS[1])]})
     with engine.begin() as c:
-        c.execute(text("INSERT INTO product_supplierinfo VALUES (1, 900, 4)"))
+        c.execute(text("INSERT INTO product_supplierinfo VALUES (1, 900, 4, NULL)"))
     report = run_audit(engine, {"marcolin": 573, "other": 900, "ghost": 12345}, ["otro", "zzz"])
     marcolin = report["partners"]["marcolin"]
     assert marcolin["family_size"] == 2
@@ -23,3 +23,12 @@ def test_audit_reports_counts_only_and_separates_partners():
     assert report["candidates_to_confirm"][0]["partners"] == [{"id": 900, "name": "Otro"}]
     assert all("_eans" not in p for p in report["partners"].values())
     json.dumps(report)
+
+
+def test_variant_supplierinfo_does_not_attribute_other_variants():
+    engine = fake_odoo({900: [(1, "P1", EANS[0])]})
+    with engine.begin() as connection:
+        connection.execute(text("INSERT INTO product_product VALUES (2, :ean, 1)"), {"ean": EANS[1]})
+        connection.execute(text("INSERT INTO product_supplierinfo VALUES (1, 900, 1, 1)"))
+    report = run_audit(engine, {"supplier": 900})
+    assert report["partners"]["supplier"]["via_supplierinfo"]["distinct_ean"] == 1
