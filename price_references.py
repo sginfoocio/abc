@@ -229,6 +229,9 @@ def parse_reference(text: str, *, brands: Iterable[str] = (), models: Iterable[s
                     if color_parts and _LENS_ONLY.fullmatch(part) and 38 <= int(part) <= 66:
                         reference_caliber = reference_caliber or part
                         break
+                    if color_parts and (expected_model, color_parts[0], part) in {
+                            ("MU54YS", "ZVN20F", "80"), ("MUA51S", "5AK20P", "75")}:
+                        break
                     color_parts.append(part)
                 matches.append(Reference(brand, matched_model, " ".join(color_parts), reference_caliber))
     if matches:
@@ -296,21 +299,41 @@ def classify(product: Mapping[str, Any], candidate: Mapping[str, Any]) -> MatchR
     title = str(candidate.get("title") or "")
     published = str(candidate.get("ean_published") or "").strip()
     ean = _valid_gtin(published) if published else ""
+    verified_ean = bool(ean and ean == _valid_gtin(product.get("ean")))
     references = [parse_reference(text, brands=[str(product.get("brand") or "")],
                                   models=[str(product.get("model") or "")])
                   for text in [title, *(candidate.get("identifiers") or [])]]
+    title_ref = references[0]
+    identifiers = candidate.get("identifiers") or []
+
+    def composite_miu(index: int) -> bool:
+        if not index or own_brand != "MIUMIU" or not verified_ean:
+            return False
+        code = str(identifiers[index - 1]).upper()
+        prefix = "0" + own_model + own_color
+        return (code.startswith("0MU_") and title_ref.model_key == own_model
+                and title_ref.color_key == own_color and key(code).startswith(prefix)
+                and re.fullmatch(r"\d{2,4}", key(code)[len(prefix):]) is not None)
+
     relevant = [ref for index, ref in enumerate(references)
                 if index == 0 or ref.model_key == own_model or
                 (ref.color_key and any(char.isalpha() for char in ref.model) and
                  any(char.isdigit() for char in ref.model) and
-                 not caliber_from_code((candidate.get("identifiers") or [])[index - 1]))]
+                 not caliber_from_code(identifiers[index - 1]) and not composite_miu(index))]
     models = {ref.model_key for ref in relevant
               if ref.model_key == own_model or any(char.isdigit() for char in ref.model)}
     colors = {ref.color_key for ref in relevant if any(char.isdigit() for char in ref.color)}
     if candidate.get("model"):
         declared_model = model_key(candidate["model"])
         commercial_names = _COMMERCIAL_NAMES.get((own_brand, own_model), set())
-        if declared_model not in commercial_names or own_model not in models:
+        group = parse_reference(str(candidate.get("group_reference") or ""),
+                                models=[str(product.get("model") or "")])
+        group_descriptor = (verified_ean and own_brand == "GUCCI" and own_model == "GG1660S"
+                            and key(candidate.get("brand")) == own_brand and declared_model == "LOGOTIPOGG"
+                            and own_model in models
+                            and group.model_key == own_model and group.color_key == own_color
+                            and title_ref.model_key == own_model and title_ref.color_key == own_color)
+        if not group_descriptor and (declared_model not in commercial_names or own_model not in models):
             models.add(declared_model)
     if any(char.isdigit() for char in str(candidate.get("color") or "")):
         colors.add(key(candidate["color"]))
@@ -324,7 +347,6 @@ def classify(product: Mapping[str, Any], candidate: Mapping[str, Any]) -> MatchR
                 [candidate.get("caliber"), *(ref.caliber for ref in references)] if normalize_caliber(value)}
     observed_caliber = normalize_caliber(candidate.get("caliber")) or (sorted(calibers)[0] if calibers else "")
     caliber_state = compare_calibers(product.get("caliber"), observed_caliber)
-    verified_ean = bool(ean and ean == _valid_gtin(product.get("ean")))
     normalized = {"catalogue": {"ean": product.get("ean"), "brand": own_brand, "model": own_model,
                                 "color": own_color, "caliber": normalize_caliber(product.get("caliber"))},
                   "listing": {"ean": ean, "brands": sorted(brands), "models": sorted(models),

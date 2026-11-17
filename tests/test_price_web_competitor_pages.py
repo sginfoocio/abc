@@ -1,5 +1,6 @@
 """Estructuras reales de fichas de competidores (observadas el 2026-10-30), reducidas y sin conexión."""
 from pathlib import Path
+import hashlib
 import json
 
 import pytest
@@ -27,6 +28,69 @@ CASES = [
 
 def load(name, url):
     return extract_product((FIXTURES / f"{name}.html").read_text(encoding="utf-8"), url)
+
+
+@pytest.mark.parametrize("number,url,product,digest,price,stock", [
+    (7, "https://www.amevista.com/es/gucci-gg1660s-001",
+     {"ean": "0889652494821", "brand": "Gucci", "model": "GG1660S", "color": "001"},
+     "cf239f7c16c29e5d05743eef881dd34e349a76ecfb73948574aea5b0f5ffa533", 188.5, "available"),
+    (8, "https://visual-click.com/products/miu-miu-mu-54ys-zvn20f-80",
+     {"ean": "8056262142585", "brand": "Miu Miu", "model": "MU 54YS", "color": "ZVN20F"},
+     "f2ba1ef3f70781330ae9d57f5052484867db919099262092467a4273a52e2397", 331.0, "unknown"),
+    (9, "https://domanci.com/es/gafas-de-sol/miu-miu-mu-a51s-5ak20p-75.html",
+     {"ean": "8056262412367", "brand": "Miu Miu", "model": "MU A51S", "color": "5AK20P"},
+     "ca16dece3bb302298932d35dfc049795c888dbb8b4adae98f8dbd8720d3446fa", 305.5, "available"),
+])
+def test_sanitized_partial_diagnostic_captures(number, url, product, digest, price, stock):
+    # These are partial JSON-LD captures, not complete pages or commercial market evidence.
+    content = (FIXTURES / f"partial_20261117_{number}.html").read_bytes().rstrip(b"\r\n")
+    assert hashlib.sha256(content).hexdigest() == digest
+    page = select_product_variant(extract_product(content.decode("utf-8"), url), product)
+    assert classify(product, page.candidate()).status == "exact_match"
+    assert (page.price, page.currency, page.availability) == (price, "EUR", stock)
+    if number == 8:
+        assert page.ean_published == ""
+        assert page.url_trace["selected_variant_url"].endswith("?variant=48783648653611")
+
+
+def test_partial_capture_gucci_descriptor_requires_group_and_matching_ean():
+    url = "https://www.amevista.com/es/gucci-gg1660s-001"
+    product = {"ean": "0889652494821", "brand": "Gucci", "model": "GG1660S", "color": "001"}
+    page = select_product_variant(load("partial_20261117_7", url), product)
+    candidate = page.candidate()
+    candidate["group_reference"] = "GG1660S-002"
+    assert classify(product, candidate).status != "exact_match"
+    candidate["group_reference"] = "GG1660S-001"
+    candidate["model"] = "OTHER999"
+    assert classify(product, candidate).status != "exact_match"
+    candidate["model"] = "Logotipo Gg"
+    candidate["ean_published"] = "8056262412367"
+    assert classify(product, candidate).status != "exact_match"
+
+
+def test_partial_capture_composite_identifier_does_not_hide_conflicting_color():
+    url = "https://domanci.com/es/gafas-de-sol/miu-miu-mu-a51s-5ak20p-75.html"
+    product = {"ean": "8056262412367", "brand": "Miu Miu", "model": "MU A51S", "color": "5AK20P"}
+    page = load("partial_20261117_9", url)
+    candidate = page.candidate()
+    candidate["identifiers"] = ["0MU_A51S5AK20Q7514"]
+    assert classify(product, candidate).status != "exact_match"
+    candidate = page.candidate()
+    candidate["color"] = "5AK20Q"
+    assert classify(product, candidate).status != "exact_match"
+
+
+def test_partial_capture_sku_binding_requires_exact_unique_sku_and_no_gtin_conflict():
+    url = "https://visual-click.com/products/miu-miu-mu-54ys-zvn20f-80"
+    html = (FIXTURES / "partial_20261117_8.html").read_text(encoding="utf-8")
+    mismatched = html.replace('"sku":"8056262142585-0000000013-@3-5","availability"',
+                              '"sku":"different","availability"')
+    conflicting = html.replace('"sku":"8056262142585-0000000013-@3-5","brand"',
+                               '"gtin13":"invalid","sku":"8056262142585-0000000013-@3-5","brand"')
+    for modified in (mismatched, conflicting):
+        page = extract_product(modified, url)
+        assert page.price is None
+        assert page.availability == "unknown"
 
 
 @pytest.mark.parametrize("name,url,product,price,tax,market,caliber", CASES)

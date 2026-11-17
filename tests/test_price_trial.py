@@ -570,6 +570,27 @@ def test_diagnostic_capture_preserves_reviews_and_offers(trial):
         assert audit["actor"] == "operator" and audit["note"] == "review"
 
 
+def test_diagnostic_preserves_specific_pilot_refusal(trial, monkeypatch):
+    from price_pilot import PilotError
+
+    service, store, _, cid, ean, url, site = _diagnostic_review(trial)
+
+    def deny(_store):
+        raise PilotError("Piloto desactivado; no se autoriza su comprobación puntual")
+
+    monkeypatch.setattr("price_pilot.pilot_scope", deny)
+    with pytest.raises(PilotError):
+        service.capture_diagnostic(cid, ean, url, actor="operator", note="review",
+                                   build_commit="b" * 40, approved=True)
+    with store._connect() as con:
+        audit = json.loads(con.execute("SELECT current FROM access_audit WHERE action='capture_diagnostic_html'")
+                           .fetchone()[0])
+    assert audit["stage"] == "lock_and_scope"
+    assert audit["reason"] == "Piloto desactivado; no se autoriza su comprobación puntual"
+    assert audit["requests"] == []
+    assert site.calls == []
+
+
 def test_diagnostic_queue_survives_busy_worker_pause_and_session_restart(trial):
     from concurrent.futures import ThreadPoolExecutor
     import hashlib

@@ -1403,7 +1403,7 @@ class PriceTrial:
                            _queue_id: int | None = None) -> dict:
         """Collect candidate HTML without changing any pair, identity, offer or review."""
         from price_batch import WatchBatch
-        from price_pilot import PricePilot, pilot_scope
+        from price_pilot import PilotError, PricePilot, pilot_scope
         from price_web import validate_competitor_url
         from price_diagnostic import EvidenceError, expire, has_capacity, limits, require_private_database, sanitise
 
@@ -1507,7 +1507,7 @@ class PriceTrial:
         except (ValueError, RuntimeError, Timeout) as exc:
             result.update(status="rejected", error_type=type(exc).__name__)
             from price_web_fetch import RobotsDenied
-            if isinstance(exc, (EvidenceError, DiagnosticRetryError, RobotsDenied)):
+            if isinstance(exc, (EvidenceError, DiagnosticRetryError, RobotsDenied, PilotError)):
                 result["reason"] = str(exc)
             elif str(exc) in {"La respuesta supera el tamaño máximo permitido",
                               "Capacidad insuficiente para conservar la respuesta"}:
