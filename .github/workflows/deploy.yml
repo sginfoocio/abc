@@ -112,6 +112,7 @@ jobs:
           import app_exports, app_navigation, app_pages.alerts, app_pages.luxoptica
           import provider_images, provider_images_ui, provider_odoo_orders, repository_catalog_readonly, marcolin_images, safilo_images, nuorder_images
           import cloud_dashboard, kering_images_ui, kering_portal, kering_jobs, graph_mail_downloader, abcd_snapshots, image_exports, luxoptica_auto_upload, repository_storage, market_publication
+          import gio_cloud, gio_reports, app_pages.gio
           import price_pilot, price_scheduler, price_web, price_monitor, price_url_candidates, app_pages.price_comparator
           from competitor_requirements import COMPETITORS, business_tax_policy_for
           policies = [business_tax_policy_for(url) for _, url in COMPETITORS]
@@ -285,6 +286,7 @@ jobs:
 
       - name: Lint with flake8
         run: |
+          flake8 gio_cloud.py gio_reports.py app_pages/gio.py tests/test_gio.py --count --select=E9,F63,F7,F82,F401,F841 --show-source --statistics
           flake8 deployment/cloud/cloud_production_deploy.py deployment/cloud/validate_luxottica.py deployment/cloud/runner_job_gate.py deployment/cloud/verify_compose_transition.py tests/test_cloud_production_deploy.py tests/test_validate_luxottica.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 app_enhanced.py app_exports.py app_navigation.py app_pages db_loader.py engine.py abcd_snapshots.py save_abcd_weekly_snapshot.py auth_session.py order_alerts.py graph_mail_downloader.py tests/test_app_exports.py tests/test_app_navigation.py tests/test_abcd_snapshots.py tests/test_auth_session.py tests/test_order_alerts.py tests/test_graph_mail_downloader.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 app_enhanced.py app_exports.py app_navigation.py app_pages db_loader.py engine.py abcd_snapshots.py save_abcd_weekly_snapshot.py auth_session.py order_alerts.py graph_mail_downloader.py tests/test_app_exports.py tests/test_app_navigation.py tests/test_abcd_snapshots.py tests/test_auth_session.py tests/test_order_alerts.py tests/test_graph_mail_downloader.py --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
@@ -310,6 +312,7 @@ jobs:
 
       - name: Check syntax
         run: |
+          python -m py_compile gio_cloud.py gio_reports.py app_pages/gio.py tests/test_gio.py
           python -m py_compile deployment/cloud/cloud_production_deploy.py deployment/cloud/validate_luxottica.py deployment/cloud/runner_job_gate.py deployment/cloud/verify_compose_transition.py tests/test_cloud_production_deploy.py tests/test_validate_luxottica.py
           sh -n deployment/cloud/runner_job_gate.sh
           python -m py_compile app_enhanced.py app_exports.py app_navigation.py app_pages/alerts.py app_pages/luxoptica.py tests/test_app_exports.py tests/test_app_navigation.py

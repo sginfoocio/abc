@@ -92,6 +92,7 @@ def test_every_production_destination_uses_one_native_icon_family_without_route_
         "LUXOPTICA_PENDING_PAGE": "pendiente-luxoptica", "ALERTA_PEDIDOS_PAGE": "alerta-pedidos",
         "SETTINGS_PAGE": "config", "ODOO_RECONCILIATION_PAGE": "conciliacion-odoo",
         "PRICE_COMPARATOR_PAGE": "comparador-precios",
+        "GIO_PAGE": "gio",
     }
     found = {}
     tree = ast.parse((ROOT / "app_enhanced.py").read_text(encoding="utf-8"))

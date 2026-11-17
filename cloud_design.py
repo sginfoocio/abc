@@ -32,6 +32,7 @@ NAV_ICONS = {
     "masterdata_kering_images": ":material/photo_library:", "provider_images": ":material/storefront:",
     "luxoptica_images": ":material/image:", "luxoptica_pending": ":material/pending_actions:",
     "alerts": ":material/notifications:", "reconciliation": ":material/account_balance:",
+    "gio": ":material/receipt_long:",
     "price_comparator": ":material/price_check:", "settings": ":material/settings:",
 }
 

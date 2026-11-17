@@ -32,6 +32,7 @@ id_rsa*
 id_ed25519*
 
 # Database dumps and sensitive data
+docs/Gio/
 database/*.sql
 database/*.csv
 

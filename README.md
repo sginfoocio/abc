@@ -9,6 +9,13 @@ Configuración cifrada, selección de pedidos Odoo e historial persistente:
 Adaptador Playwright basado en el portal autenticado observado; consulta la guía
 para distinguir validación offline, evidencia real y comprobaciones pendientes.
 
+## GIO en Cloud (offline; activacion pendiente)
+
+Ventas por fecha/centro, validacion decimal, CSV candidatos para Odoo e
+historial protegido: [configuracion, evidencia y recuperacion](docs/GIO_CLOUD.md).
+Automatico bloqueado hasta verificar la descarga autenticada; sin envios reales
+habilitados por defecto ni escrituras Odoo.
+
 ## Repositorio común de imágenes por EAN
 
 Luxoptica y Kering comparten `IMAGE_REPOSITORY_ROOT`, sin copias por pedido o

@@ -7,6 +7,7 @@ from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from pathlib import Path
 import tempfile
+import base64
 import json
 import os
 import re
@@ -303,6 +304,8 @@ def send_alert_email(
     html_body: str,
     to_address: str | list[str],
     config: M365Config | None = None,
+    *,
+    attachments: list[tuple[str, bytes]] | None = None,
 ) -> None:
     """Envia un email desde el buzon configurado (requiere permiso Mail.Send)."""
     config = config or load_m365_config()
@@ -320,6 +323,12 @@ def send_alert_email(
         },
         "saveToSentItems": True,
     }
+    if attachments:
+        payload["message"]["attachments"] = [
+            {"@odata.type": "#microsoft.graph.fileAttachment", "name": name,
+             "contentType": "text/csv", "contentBytes": base64.b64encode(content).decode("ascii")}
+            for name, content in attachments
+        ]
     with closing(requests.post(
         f"https://graph.microsoft.com/v1.0/users/{config.mailbox}/sendMail",
         headers={**_graph_headers(token), "Content-Type": "application/json"},
