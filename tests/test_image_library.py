@@ -1,3 +1,4 @@
+from dataclasses import replace
 from hashlib import sha256
 from io import BytesIO
 from unittest.mock import Mock
@@ -601,4 +602,3 @@ def test_warm_library_page_does_not_rewrite_the_cache_index(repository, monkeypa
     app = run()
     assert not app.exception and writes == []
     assert len(saved) == 6
-from dataclasses import replace
