@@ -7,6 +7,7 @@ reclassified here, so the Kering positional rule stays where it is applied.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from math import ceil
 from pathlib import PureWindowsPath
@@ -53,6 +54,19 @@ class ProductGroup:
     cover: ImageRecord
     latest: str
     name: str = ""
+    related_eans: tuple[str, ...] = ()
+
+    @property
+    def photos(self) -> tuple[ImageRecord, ...]:
+        return unique_photos(self.records)
+
+    @property
+    def visual_equivalents(self) -> tuple[tuple[ImageRecord, ...], ...]:
+        fingerprints: dict[str, list[ImageRecord]] = {}
+        for record in self.photos:
+            if record.pixels:
+                fingerprints.setdefault(record.pixels, []).append(record)
+        return tuple(tuple(items) for items in fingerprints.values() if len(items) > 1)
 
     @property
     def providers(self) -> tuple[str, ...]:
@@ -118,6 +132,28 @@ def record_sort_key(record: ImageRecord) -> tuple:
     return (VIEW_ORDER.get(record.view, len(VIEW_ORDER)), bool(record.market), record.market, record.name)
 
 
+def unique_photos(records: Iterable[ImageRecord]) -> tuple[ImageRecord, ...]:
+    """Collapse representations of the same EAN/checksum, never views or pixel matches."""
+    assets: dict[tuple[str, str], list[ImageRecord]] = {}
+    for record in records:
+        assets.setdefault((record.ean, record.checksum), []).append(record)
+    return tuple(sorted((min(items, key=record_sort_key) for items in assets.values()), key=record_sort_key))
+
+
+def _related_eans(records: list[ImageRecord]) -> dict[str, tuple[str, ...]]:
+    signatures: dict[tuple[str, str], set[str]] = {}
+    for record in records:
+        for kind, value in (("checksum", record.checksum), ("pixels", record.pixels)):
+            if value:
+                signatures.setdefault((kind, value), set()).add(record.ean)
+    related: dict[str, set[str]] = {}
+    for eans in signatures.values():
+        if len(eans) > 1:
+            for ean in eans:
+                related.setdefault(ean, set()).update(eans - {ean})
+    return {ean: tuple(sorted(others)) for ean, others in related.items()}
+
+
 def _cover(records: list[ImageRecord]) -> ImageRecord:
     """Representative image: the original V1 if stored, otherwise the first view in order."""
     return min(records, key=lambda r: (bool(r.market), VIEW_ORDER.get(r.view, len(VIEW_ORDER)), r.name))
@@ -168,6 +204,7 @@ def group_records(records: list[ImageRecord]) -> list[ProductGroup]:
     for record in records:
         by_ean.setdefault(record.ean, []).append(record)
     groups = []
+    related = _related_eans(records)
     for ean, items in by_ean.items():
         items.sort(key=record_sort_key)
         groups.append(ProductGroup(
@@ -179,6 +216,7 @@ def group_records(records: list[ImageRecord]) -> list[ProductGroup]:
             cover=_cover(items),
             latest=max(r.date for r in items),
             name=_meta(items, *NAME_KEYS),
+            related_eans=related.get(ean, ()),
         ))
     groups.sort(key=lambda g: (g.latest, g.ean), reverse=True)
     return groups
@@ -236,9 +274,10 @@ def paginate(items: list, number: int, size: int) -> Page:
 
 
 def summary(groups: list[ProductGroup]) -> dict[str, int]:
-    """Counters with explicit semantics: images, distinct EAN, distinct verified models."""
+    """Unique catalog photos and representations, distinct EAN and verified models."""
     return {
-        "images": sum(len(g.records) for g in groups),
+        "images": sum(len(g.photos) for g in groups),
+        "representations": sum(len(g.records) for g in groups),
         "eans": len(groups),
         "models": len({g.model or g.name for g in groups if g.model or g.name}),
     }
@@ -266,7 +305,8 @@ def metadata_coverage(records: list[ImageRecord]) -> list[dict]:
             else:
                 empty += 1
         rows.append({
-            "provider": provider, "images": sum(len(items) for items in eans.values()), "eans": len(eans),
+            "provider": provider, "images": sum(len(unique_photos(items)) for items in eans.values()),
+            "representations": sum(len(items) for items in eans.values()), "eans": len(eans),
             "eans_with_verified_model": verified, "eans_with_technical_model_only": technical,
             "eans_without_model": empty, "distinct_models": len(models),
         })
