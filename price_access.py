@@ -430,7 +430,11 @@ class GovernedFetcher(WebFetcher):
                 self.access.finish(request_id, "not_sent: trial_window")
                 raise
             if request_reserved is not None:
-                request_reserved(url, self.ean)
+                try:
+                    request_reserved(url, self.ean)
+                except (ConnectorError, ValueError):
+                    self.access.finish(request_id, "not_sent: request_guard")
+                    raise
             try:
                 status, response_headers, body = inner(url, headers, timeout)
             except ConnectorError as exc:

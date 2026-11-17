@@ -115,12 +115,13 @@ def test_individual_review_ui_records_acceptance_and_refresh_without_http(tmp_pa
 
 
 def test_review_request_reuses_normal_monitor_read_completed_after_acceptance(tmp_path):
-    store, locator, monitor, _, cid, site, rows, urls = _review_env(tmp_path)
+    store, locator, monitor, clock, cid, site, rows, urls = _review_env(tmp_path)
     ean = rows[0][0]
     row = _candidate(locator, ean)
     task = locator.review(ean, cid, urls[0], accept=True, actor="ana", note="Evitar consulta duplicada",
                           update_price=True, expected_candidate=_expected(row))
 
+    clock.advance(microseconds=1)
     normal = monitor.run([cid], max_jobs=1, eans=[ean])
     assert normal.processed == 1
     before_calls = list(site.calls)
@@ -171,7 +172,7 @@ def test_manual_acceptance_is_atomic_durable_and_uses_fresh_shared_monitor(tmp_p
                              (task_id,)).fetchone()
         assert accepted["status"] == "verified" and accepted["source"] == "user"
         assert all(value in accepted["note"] for value in ("ana", "Identidad revisada"))
-        assert accepted["verified_at"] == clock().isoformat()
+        assert accepted["verified_at"] == clock().isoformat(timespec="microseconds")
         assert queued["status"] == "pending" and queued["actor"] == "ana"
         assert queued["reason"] == "Identidad revisada" and queued["url"] == urls[0]
         assert con.execute("SELECT state FROM locate_jobs WHERE ean=? AND competitor_id=?",

@@ -953,13 +953,14 @@ class WebPriceSearch:
             "IVA incluido": tax, "Tipo IVA": "" if page is None or page.vat_rate is None else page.vat_rate,
         }
 
-    def record(self, outcome: Outcome) -> str:
+    def record(self, outcome: Outcome, *, validate=None) -> str:
         """Store a located page through the existing importer. Returns '' when stored, else the reason."""
         if outcome.page is None or outcome.state not in {"exact", "probable", "rejected"}:
             return "Nada que registrar"
         config, product = self.config(outcome.competitor_id), self._product(outcome.ean)
         frame = pd.DataFrame([self.frame_row(product, config, outcome, _iso(self._now()))])
-        report = self.store.import_offers(frame)
+        report = (self.store.import_offers(frame, validate=validate) if validate is not None
+                  else self.store.import_offers(frame))
         if report.rejected:
             return report.rejected[0]
         with self.store._connect() as connection, connection:

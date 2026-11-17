@@ -570,10 +570,16 @@ def _render_locator(store: PriceComparatorStore, names: dict[str, str]) -> None:
                 st.rerun()
 
     st.markdown("**Progreso persistente de confirmaciones y lecturas**")
-    progress = PriceMonitor(store).review_refreshes()
+    monitor = PriceMonitor(store)
+    progress = monitor.review_refreshes()
     if progress.empty:
         st.caption("Todavía no hay solicitudes de lectura por revisión manual.")
     else:
+        st.caption("La tabla muestra las últimas 100 solicitudes; el CSV incluye el inventario completo. "
+                   "Importe la columna EAN como texto para conservar los ceros iniciales.")
+        st.download_button("Exportar todas las solicitudes de lectura (CSV)",
+                           monitor.review_refreshes(limit=None).to_csv(index=False).encode("utf-8-sig"),
+                           "solicitudes-lectura-manual.csv", "text/csv", key="review_refresh_export")
         progress = progress.copy()
         progress["Resultado"] = progress.apply(
             lambda row: ("Oferta comparable" if pd.notna(row["eligible"]) and bool(row["eligible"])
