@@ -54,6 +54,8 @@ y el detalle existente. **Mostrar todo el catalogo** retira esta limitacion.
 Se pueden descargar todos los EAN encontrados o una seleccion. Los filtros de
 la galeria no cambian silenciosamente esa seleccion del ZIP. Cambiar entrada,
 seleccion, formato o actualizar el catalogo invalida la descarga preparada.
+El listado procesado se conserva al entrar y volver del detalle, aunque
+Streamlit vacie el selector de archivo al desmontar ese widget.
 No se genera un ZIP durante la navegacion ni antes de pulsar **Preparar ZIP
 conjunto**; **Descargar ZIP conjunto** entrega esa instantanea verificada.
 

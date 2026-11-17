@@ -6,7 +6,6 @@ covers (grid) or the selected product (detail) from storage.
 """
 from __future__ import annotations
 
-from hashlib import sha256
 from pathlib import Path
 from typing import Callable
 
@@ -169,21 +168,23 @@ def _render_pager(page) -> None:
                   disabled=page.number >= page.pages, on_click=_goto, args=(page.number + 1,))
 
 
+def _multi_input_changed() -> None:
+    st.session_state["lib_multi_dirty"] = True
+    st.session_state.pop("lib_multi_zip", None)
+
+
 def _render_multi_search(repository, groups, engine_factory):
     with st.expander("Buscar varios EAN y descargar ZIP", expanded="lib_multi_values" in st.session_state):
         pasted = st.text_area("EAN/UPC del listado", key="lib_multi_text",
-                              placeholder="Un EAN o varios, separados por comas, espacios o saltos de línea.")
+                              placeholder="Un EAN o varios, separados por comas, espacios o saltos de línea.",
+                              on_change=_multi_input_changed)
         uploaded = st.file_uploader("Importar listado EAN", type=["xlsx", "csv", "txt"], key="lib_multi_file",
                                     max_upload_size=1,
+                                    on_change=_multi_input_changed,
                                     help="Hasta 1 MiB / 500 entradas. Excel: columna EAN, Barcode o GTIN, "
                                          "o una lista sin cabecera. Use texto o formato de ceros para conservarlos.")
-        file_signature = None if uploaded is None else (
-            uploaded.name, uploaded.size,
-            sha256(uploaded.getvalue()).hexdigest() if uploaded.size <= MAX_INPUT_FILE_BYTES else "oversize",
-        )
-        input_signature = (pasted, file_signature)
         if st.button("Buscar EAN en el repositorio", key="lib_multi_search"):
-            for key in ("lib_multi_values", "lib_multi_zip", "lib_multi_selected"):
+            for key in ("lib_multi_values", "lib_multi_zip", "lib_multi_selected", "lib_multi_source"):
                 st.session_state.pop(key, None)
             try:
                 if len(pasted.encode("utf-8")) > MAX_INPUT_FILE_BYTES:
@@ -197,7 +198,8 @@ def _render_multi_search(repository, groups, engine_factory):
                 if not result["rows"] and not result["invalid"]:
                     raise ValueError("Introduzca al menos un EAN/UPC.")
                 st.session_state["lib_multi_values"] = values
-                st.session_state["lib_multi_input_signature"] = input_signature
+                st.session_state["lib_multi_dirty"] = False
+                st.session_state["lib_multi_source"] = uploaded.name if uploaded is not None else None
             except (OSError, ValueError, UnicodeError) as error:
                 st.error(f"Listado no válido: {error}")
         values = st.session_state.get("lib_multi_values")
@@ -205,11 +207,14 @@ def _render_multi_search(repository, groups, engine_factory):
             return None
         result = library.search_eans(groups, values)
         if st.button("Mostrar todo el catálogo", key="lib_multi_clear"):
-            for key in ("lib_multi_values", "lib_multi_zip", "lib_multi_selected"):
+            for key in ("lib_multi_values", "lib_multi_zip", "lib_multi_selected", "lib_multi_source", "lib_multi_dirty"):
                 st.session_state.pop(key, None)
             st.rerun()
         if result["invalid"]:
             st.warning("Códigos inválidos: " + ", ".join(result["invalid"]))
+        if st.session_state.get("lib_multi_source"):
+            st.caption(f"Listado activo importado de {st.session_state['lib_multi_source']}. "
+                       "El resultado se conserva al consultar el detalle, aunque el selector de archivo se vacíe.")
         found = [row["code"] for row in result["rows"] if row["groups"]]
         missing = [row["code"] for row in result["rows"] if not row["groups"]]
         st.caption(f"Entradas: {result['total']} · Repetidos/equivalentes: {result['duplicates']} · "
@@ -233,8 +238,7 @@ def _render_multi_search(repository, groups, engine_factory):
             st.warning("Sin imágenes en el catálogo local (no acredita ausencia en Odoo): " + ", ".join(missing))
         if not found:
             return scoped
-        if st.session_state.get("lib_multi_input_signature") != input_signature:
-            st.session_state.pop("lib_multi_zip", None)
+        if st.session_state.get("lib_multi_dirty"):
             st.warning("El listado ha cambiado. Pulse Buscar EAN en el repositorio para actualizar los resultados y el ZIP.")
             return scoped
         st.caption("La galería inferior mantiene sus filtros. El ZIP utiliza los EAN seleccionados del listado, "

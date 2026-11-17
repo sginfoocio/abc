@@ -116,6 +116,19 @@ def test_multi_search_preserves_existing_gallery_filters_and_details(repository)
     assert app.selectbox(key="lib_provider").value == "Kering"
 
 
+def test_imported_search_remains_exportable_when_uploader_unmounts_on_detail(repository):
+    add(repository, "036000291452", "frontal", 1)
+    app = run()
+    app.session_state["lib_multi_values"] = ["0036000291452"]
+    app.session_state["lib_multi_source"] = "list.xlsx"
+    app.run()
+    app.button(key="lib_open_036000291452").click().run()
+    app.button(key="lib_back").click().run()
+    app.button(key="lib_multi_prepare").click().run()
+    assert not app.exception
+    assert app.session_state["lib_multi_zip"]["bytes"]
+
+
 def test_groups_one_card_per_ean_keeping_leading_zeros_and_semantics():
     records = [
         record("0012", "frontal", id=1, model="M1"), record("0012", "lateral", id=2, model="M1"),
