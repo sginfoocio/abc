@@ -449,6 +449,7 @@ def _from_json_ld(html: str, url: str) -> ProductPage | None:
             page.variant_id = variant_parameters[0][1]
         page.variant_scoped = True
         page.url_trace["selected_variant_url"] = facts["bound_variant_url"]
+        page.url_trace["offer_variant_url"] = facts["bound_variant_url"]
     page.offer_binding_unresolved = bool(len(matching) == 1 and facts["variant_conflict"] and not page.ambiguous)
     page.ambiguous |= facts["ambiguous"]
     if facts["variant_conflict"]:
@@ -1079,10 +1080,15 @@ def extract_product(html: str, url: str, *, price_selector: str = "", availabili
         else:
             page.market, page.market_source = explicit, "ficha:product:market"
     bound_variant_url = page.url_trace.get("selected_variant_url", "")
+    offer_variant_url = page.url_trace.get("offer_variant_url", "")
     page.url_trace = {**(url_trace or {}), "final_url": requested_url,
                       "selected_variant_url": url if selected_size else bound_variant_url,
                       "canonical_urls": list(dict.fromkeys(urljoin(requested_url, href)
                                                            for href in parsed.canonicals))}
+    if offer_variant_url:
+        page.url_trace["offer_variant_url"] = offer_variant_url
+    if radio_selected:
+        page.url_trace["selected_variant_source"] = "checked_radio"
     return page
 
 

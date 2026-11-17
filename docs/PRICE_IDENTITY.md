@@ -28,6 +28,13 @@ identico y URL base coherente, sin interpretar el SKU como GTIN. Esta
 vinculacion no acredita el stock del EAN solicitado: se conserva la senal
 original, pero la disponibilidad utilizada queda desconocida.
 
+En Edel, una URL base aceptada solo admite una resolución interna
+`selectedSize` si un único radio marcado, el GTIN exacto y la URL de la
+oferta concuerdan. No se consulta una URL adicional y se conserva la URL
+aceptada junto con la trazabilidad de la selección; diferencias o GTIN
+contradictorios siguen en revisión. Las trazas de lecturas manuales se
+auditan mediante huellas de URL y IDs de recibo, incluso ante rechazo.
+
 ## Revision conjunta del 1 de noviembre de 2026
 
 Base cotejada: `9d240daf38ae5a9629d370d32641986cf9ef4cad`. Al iniciar

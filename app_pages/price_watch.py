@@ -1386,8 +1386,9 @@ def _render_continuity_capture(service, frozen: dict, *, active: bool = True) ->
             st.download_button("Descargar evidencia de captura", json.dumps(result, ensure_ascii=False).encode("utf-8"),
                                "price-continuity-capture.json", "application/json", key="continuity_capture_download")
 
-    with st.expander("Diagnóstico supervisado de candidatas en revisión"):
-        st.caption("Consulta una candidata ya documentada sin aceptar la revisión ni modificar ofertas o plazos. "
+    with st.expander("Diagnóstico supervisado de fichas en revisión"):
+        st.caption("Consulta una candidata documentada o ficha aceptada cuya lectura falló, sin aceptar otra "
+                   "revisión ni modificar ofertas o plazos. "
                    "Usa permisos, robots y presupuestos existentes; los rechazos también se auditan. Introduzca "
                    "su identidad real; el campo no autentica al responsable.")
         cid = st.selectbox("Competidor", options=list(frozen["competitors"]),
@@ -1397,13 +1398,26 @@ def _render_continuity_capture(service, frozen: dict, *, active: bool = True) ->
         st.button("Actualizar estado", key="diagnostic_refresh")
         results = service.diagnostic_results(cid, ean)
         retried_ids = {r["retry_of"] for r in results if r["retry_of"] is not None}
+        retryable_ids = set()
+        for result in results:
+            if result["status"] != "rejected" or result["id"] in retried_ids:
+                continue
+            try:
+                audit = json.loads(result["result"])
+            except (TypeError, json.JSONDecodeError):
+                st.warning(f"Resultado diagnóstico {result['id']} ilegible; no se propone reintento.")
+                continue
+            if (isinstance(audit, dict) and audit.get("stage") == "lock_and_scope"
+                    and audit.get("requests") == []
+                    and (audit.get("error_type") == "PilotError"
+                         or (audit.get("error_type") == "EvidenceError"
+                             and result["reason"] == "El almacenamiento no acredita permisos privados"))):
+                retryable_ids.add(result["id"])
         if results:
             labels = {"pending": "pendiente", "running": "ejecutando", "captured": "capturado",
                       "deferred": "aplazado", "expired": "caducado", "rejected": "rechazado"}
             display = [{**r, "estado": ("reintentable (sujeto a comprobación)"
-                        if r["status"] == "rejected"
-                        and r["id"] not in retried_ids
-                        and r["reason"] == "El almacenamiento no acredita permisos privados"
+                        if r["id"] in retryable_ids
                         else labels.get(r["status"], r["status"]))} for r in results]
             st.dataframe(pd.DataFrame(display), hide_index=True)
             available = [r for r in results if r["available"]]
@@ -1418,13 +1432,11 @@ def _render_continuity_capture(service, frozen: dict, *, active: bool = True) ->
                 except (ValueError, sqlite3.Error) as exc:
                     st.warning(f"Evidencia no disponible: {exc}")
         if not candidates:
-            st.info("No hay candidatas documentadas pendientes de revisión para este par.")
+            st.info("No hay fichas documentadas elegibles para diagnóstico de este par.")
             return
-        url = st.selectbox("URL candidata documentada", candidates, key="diagnostic_url")
+        url = st.selectbox("URL documentada o ficha aceptada", candidates, key="diagnostic_url")
         info = load_build_info()
-        retryable = [r for r in results if r["id"] not in retried_ids
-                     and r["url"] == url and r["status"] == "rejected"
-                     and r["reason"] == "El almacenamiento no acredita permisos privados"]
+        retryable = [r for r in results if r["id"] in retryable_ids and r["url"] == url]
         with st.form("diagnostic_capture_form"):
             actor = st.text_input("Responsable", value="")
             note = st.text_input("Motivo del diagnóstico")

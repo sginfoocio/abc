@@ -156,6 +156,27 @@ def test_edel_selected_radio_resolves_variant_id_and_scopes_offer_facts():
     assert any("Product Id 1907958 resuelto" in note for note in page.notes)
 
 
+def test_edel_internal_selection_requires_radio_offer_and_exact_gtin():
+    from dataclasses import replace
+    from price_monitor import _accepted_edel_resolution
+
+    product = {"ean": "8056597875349", "brand": "Prada", "model": "PR 27ZS", "color": "16K08Z"}
+    url = "https://www.edel-optics.es/PR-27ZS-16K08Z-de-Prada.html"
+    node = _edel_variant_node("1907958", product["ean"], 243.5, "InStock")
+    html = ('<input type="radio" id="prd1907958" checked>'
+            '<script type="application/ld+json">' + json.dumps(node) + '</script>')
+    page = extract_product(html, url, url_trace={"candidate_url": url})
+    assert _accepted_edel_resolution(page, url, product)
+    assert not _accepted_edel_resolution(page, url, {**product, "ean": "8056597875226"})
+    assert not _accepted_edel_resolution(replace(page, ambiguous=True), url, product)
+    assert not _accepted_edel_resolution(
+        replace(page, url_trace={**page.url_trace, "offer_variant_url": url + "?selectedSize=1907959"}),
+        url, product)
+    assert not _accepted_edel_resolution(
+        replace(page, url_trace={**page.url_trace, "selected_variant_source": ""}), url, product)
+    assert not _accepted_edel_resolution(page, url + "?selectedSize=1907959", product)
+
+
 def test_edel_selected_variant_uses_common_model_color_price_and_its_own_stock():
     base = "https://www.edel-optics.es/PR-27ZS-16K08Z-de-Prada.html"
     variants = []
