@@ -169,6 +169,16 @@ Las URLs confirmadas se guardan en la tabla existente `competitor_product_urls` 
 - Un único proceso por competidor (`FileLock` compartido con el piloto).
 - Sin servicios externos de búsqueda.
 
+### Revisión manual y lectura inmediata de precio
+
+En el grid de revisión manual se puede combinar filtros de competidor, marca, modelo/referencia, EAN/UPC, color y motivo/tipo; los filtros abarcan todas las revisiones, y EAN/UPC se conserva como texto. La tabla permite ordenar, seleccionar filas individualmente, seleccionar exactamente los resultados filtrados o limpiar la selección. La vista previa muestra el conjunto que se enviaría. Filtrar, seleccionar y previsualizar no aceptan fichas ni generan HTTP.
+
+La confirmación individual («Confirmar ficha y actualizar precio») o múltiple requiere motivo explícito y revalida el snapshot de cada candidata. Responsable, decisión, fecha, URL y solicitud durable de lectura se registran atómicamente. La acción múltiple se limita a las filas seleccionadas; las candidatas cambiadas o ya resueltas se excluyen y se explican sin perder el resultado de las demás.
+
+El trabajador persistente existente recoge las solicitudes manuales, también entre ciclos diarios, y las procesa con `PriceMonitor.run` y los mismos bloqueos, permisos, robots, pausas, reservas y presupuestos compartidos. Una interrupción deja la solicitud recuperable; la reserva evita ejecuciones concurrentes o duplicadas. Las restricciones vigentes (`not_before`, bloqueos y límites) pueden aplazar la lectura y se muestran como estado y motivo.
+
+Aceptar confirma únicamente la identidad revisada; no acredita oferta, precio, stock ni comparabilidad. La lectura posterior conserva el comportamiento comercial normal: identidad sin contradicciones, precio válido, moneda/mercado e IVA configurados, disponibilidad y vigencia. Si la lectura falla, la aceptación permanece con su motivo pendiente; si descubre una contradicción de identidad, no registra esa oferta comparable y la ficha vuelve a revisión. No se modifican frecuencias generales ni se reprograman otros pares.
+
 ### Prueba funcional (`tests/test_price_locator.py`)
 
 Competidor simulado con 5 marcas, 100 modelos, 6 colores por modelo (uno no vigilado), calibres distintos y EAN publicado solo en un tercio de las fichas. Se añaden 500 EAN sin URL:
@@ -178,6 +188,8 @@ Competidor simulado con 5 marcas, 100 modelos, 6 colores por modelo (uno no vigi
 - Cada página de listado se consulta una sola vez en total; los colores no vigilados nunca se consultan; una nueva ejecución no hace ninguna petición.
 
 Domanci se valida con un sitio simulado con sus reglas de robots.txt: sin autorización todo queda `unavailable` sin peticiones; con una autorización **simulada** de catálogo y fichas, se localiza por `/es/marca/{brand}` sin tocar `/es/busqueda`. En producción **no** se habilita nada para Domanci: la fuente `/es/marca/{brand}` se registra, pero no se usa mientras los métodos sigan pendientes.
+
+Las confirmaciones manuales y sus lecturas inmediatas se cubren en `tests/test_price_review_refresh.py` con transporte sintético: recuperación tras interrupción, deduplicación concurrente, selección limitada, snapshot obsoleto, robots, aplazamientos, presupuesto, EAN con ceros iniciales y exclusión de ofertas sin stock o con identidad contradictoria. La UI se revisó visualmente con tres candidatas sintéticas; esa comprobación no produjo consultas comerciales ([captura](./revision-manual-ui-sintetico.png)).
 
 ## Fase 3: descubrimiento ampliado y planificación
 

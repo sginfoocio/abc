@@ -684,17 +684,37 @@ class PriceLocator:
             report.requests += session.requests
 
     # human review -----------------------------------------------------------------------------
-    def review(self, ean: str, competitor_id: str, url: str, *, accept: bool, actor: str, note: str) -> None:
-        """Decide a doubtful candidate. A rejection keeps it out of future automatic checks."""
+    def review(self, ean: str, competitor_id: str, url: str, *, accept: bool, actor: str, note: str,
+               update_price: bool = False, expected_candidate: dict | None = None) -> int | None:
+        """Decide a doubtful candidate and optionally persist an immediate monitor request."""
         actor, note = actor.strip(), note.strip()
         if not actor or not note:
             raise ValueError("Indique quién revisa y el motivo")
         now = _iso(self._now())
         with self.store._connect() as connection, connection:
-            row = connection.execute("""SELECT status FROM competitor_product_urls WHERE competitor_id=? AND ean=?
-                AND url=?""", (competitor_id, ean, url)).fetchone()
-            if row is None or row["status"] not in ("probable", "pending_verification"):
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("""SELECT u.status AS candidate_status,u.match_status,u.model_code,u.color_code,
+                    u.caliber,u.ean_published,u.source AS candidate_source,u.note AS candidate_note,
+                    u.verified_at AS candidate_verified_at,
+                    j.id AS job_id,j.state AS job_state,j.url AS job_url,j.updated_at AS job_updated_at,
+                    EXISTS(SELECT 1 FROM watch_products w WHERE w.ean=u.ean AND w.active=1) AS watch_active,
+                    EXISTS(SELECT 1 FROM competitors c WHERE c.id=u.competitor_id AND c.active=1)
+                        AS competitor_active
+                FROM competitor_product_urls u LEFT JOIN locate_jobs j
+                  ON j.competitor_id=u.competitor_id AND j.ean=u.ean
+                WHERE u.competitor_id=? AND u.ean=? AND u.url=?""",
+                                        (competitor_id, ean, url)).fetchone()
+            if row is None or row["candidate_status"] not in ("probable", "pending_verification"):
                 raise ValueError("No hay ningún candidato pendiente con esa URL")
+            snapshot = dict(row)
+            if expected_candidate is not None and any(snapshot.get(key) != value
+                                                      for key, value in expected_candidate.items()):
+                raise ValueError("El candidato cambió desde la vista previa; actualice la selección")
+            if update_price and (not accept or not row["job_id"] or row["job_state"] != "review"
+                                 or row["job_url"] != url):
+                raise ValueError("El trabajo de revisión ya cambió o no corresponde a esta ficha")
+            if update_price and (not row["watch_active"] or not row["competitor_active"]):
+                raise ValueError("El par dejó de estar en vigilancia activa; no se confirma fuera de alcance")
             connection.execute("""UPDATE competitor_product_urls SET status=?,source=?,note=?,verified_at=?,
                 match_status=CASE WHEN ? THEN 'exact_match' ELSE match_status END
                 WHERE competitor_id=? AND ean=? AND url=?""",
@@ -702,13 +722,78 @@ class PriceLocator:
                                 f"Revisión de {actor}: {note}", now, int(accept), competitor_id, ean, url))
             job = connection.execute("SELECT id FROM locate_jobs WHERE competitor_id=? AND ean=?",
                                      (competitor_id, ean)).fetchone()
+            refresh_id = None
             if job is not None:
                 state = "done" if accept else "pending"
                 connection.execute("""UPDATE locate_jobs SET state=?,url=?,detail=?,priority=?,not_before=NULL,
                     attempts=0,updated_at=? WHERE id=?""",
                                    (state, url if accept else "", f"Revisión de {actor}: {note}",
                                     PRIORITY_RETRY, now, job["id"]))
-                self._event(connection, job["id"], state, "review", url, f"{actor}: {note}", 0)
+                self._event(connection, job["id"], state, "review" if not update_price else "review+price",
+                            url, f"{actor}: {note}", 0)
+            if update_price:
+                from price_monitor import _done_job_restriction
+
+                monitor_job = connection.execute("""SELECT * FROM monitor_jobs
+                    WHERE competitor_id=? AND ean=?""", (competitor_id, ean)).fetchone()
+                if monitor_job is None:
+                    monitor_job_id = connection.execute("""INSERT INTO monitor_jobs(
+                        ean,competitor_id,url,state,updated_at) VALUES(?,?,?,'pending',?)""",
+                                                        (ean, competitor_id, url, now)).lastrowid
+                    monitor_job = connection.execute("SELECT * FROM monitor_jobs WHERE id=?",
+                                                     (monitor_job_id,)).fetchone()
+                else:
+                    monitor_job_id = monitor_job["id"]
+
+                retry_at = None
+                refresh_state, refresh_detail = "pending", "Lectura solicitada tras confirmar la ficha"
+                monitor_state = monitor_job["state"]
+                if monitor_state == "running" and monitor_job["lease_until"]:
+                    lease = datetime.fromisoformat(monitor_job["lease_until"])
+                    if lease > self._now():
+                        retry_at = lease
+                        refresh_detail = "Otra lectura ya está en curso; se reutilizará su resultado"
+                if monitor_state == "done":
+                    restriction = _done_job_restriction(dict(monitor_job))
+                    if restriction and restriction > self._now():
+                        retry_at = restriction
+                        refresh_detail = "Aplazada por una restricción vigente del trabajo de monitorización"
+                if (retry_at is None and monitor_state in {"pending", "waiting", "blocked", "unavailable"}
+                        and monitor_job["not_before"]):
+                    not_before = datetime.fromisoformat(monitor_job["not_before"])
+                    if not_before > self._now():
+                        retry_at = not_before
+                        refresh_detail = "Aplazada por la fecha vigente del trabajo de monitorización"
+                if monitor_state in {"failed", "gone", "inactive"}:
+                    refresh_state = "blocked"
+                    refresh_detail = (f"El trabajo de monitorización está en estado {monitor_state}; "
+                                      "requiere resolución manual")
+                elif int(monitor_job["attempts"] or 0) >= MAX_ATTEMPTS:
+                    refresh_state = "blocked"
+                    refresh_detail = "Máximo de intentos alcanzado; no se reinicia automáticamente"
+                elif retry_at is not None:
+                    refresh_state = "deferred"
+                    refresh_detail = f"{refresh_detail} hasta {_iso(retry_at)}"
+                elif monitor_state == "review":
+                    connection.execute("""UPDATE monitor_jobs SET state='pending',url=?,eligible=0,
+                        lease_until=NULL,updated_at=? WHERE id=?""", (url, now, monitor_job_id))
+                elif monitor_state == "done":
+                    connection.execute("""UPDATE monitor_jobs SET url=?,updated_at=? WHERE id=?""",
+                                       (url, now, monitor_job_id))
+                elif monitor_job["url"] != url:
+                    connection.execute("UPDATE monitor_jobs SET url=?,updated_at=? WHERE id=?",
+                                       (url, now, monitor_job_id))
+
+                refresh_id = connection.execute("""INSERT INTO manual_review_refreshes(
+                    locate_job_id,monitor_job_id,ean,competitor_id,url,actor,reason,status,detail,
+                    requested_at,retry_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                                (job["id"], monitor_job_id, ean, competitor_id, url, actor, note,
+                                                 refresh_state, refresh_detail, now,
+                                                 _iso(retry_at) if retry_at else None, now)).lastrowid
+                connection.execute("""INSERT INTO monitor_events(job_id,at,state,detail) VALUES(?,?,?,?)""",
+                                   (monitor_job_id, now, refresh_state,
+                                    f"Revisión manual {refresh_id}: {refresh_detail}"[:1000]))
+            return refresh_id
 
     # discovery sources ------------------------------------------------------------------------
     def seed_sources(self) -> int:
@@ -874,17 +959,32 @@ class PriceLocator:
             return pd.read_sql_query("""SELECT c.name AS competitor,j.state,COUNT(*) AS jobs FROM locate_jobs j
                 JOIN competitors c ON c.id=j.competitor_id GROUP BY c.name,j.state ORDER BY c.name""", connection)
 
-    def jobs(self, *, states: tuple[str, ...] | None = None, limit: int = 500):
+    def jobs(self, *, states: tuple[str, ...] | None = None, limit: int | None = 500):
         query = """SELECT j.id,j.ean,p.brand,p.model,p.color,c.name AS competitor,j.competitor_id,j.kind,j.state,
-                j.attempts,j.not_before,j.url,j.method,j.detail,j.updated_at FROM locate_jobs j
-                JOIN products p ON p.ean=j.ean JOIN competitors c ON c.id=j.competitor_id"""
+                j.attempts,j.not_before,j.url,j.method,j.detail,j.updated_at,
+                u.status AS candidate_status,u.match_status,u.model_code,u.color_code,u.caliber,u.ean_published,
+                u.source AS candidate_source,u.note AS candidate_note,u.verified_at AS candidate_verified_at,
+                j.url AS job_url,j.state AS job_state,j.updated_at AS job_updated_at,
+                EXISTS(SELECT 1 FROM watch_products w WHERE w.ean=j.ean AND w.active=1) AS watch_active,
+                c.active AS competitor_active
+                FROM locate_jobs j JOIN products p ON p.ean=j.ean JOIN competitors c ON c.id=j.competitor_id
+                LEFT JOIN competitor_product_urls u ON u.competitor_id=j.competitor_id AND u.ean=j.ean
+                    AND u.url=j.url AND u.status IN ('probable','pending_verification')"""
         params: list = []
         if states:
             query += f" WHERE j.state IN ({','.join('?' * len(states))})"
             params += list(states)
+            if "review" in states:
+                query += " AND u.status IN ('probable','pending_verification')"
+        suffix = " ORDER BY j.updated_at DESC"
+        if limit is not None:
+            suffix += " LIMIT ?"
+            params.append(limit)
         with self.store._connect() as connection:
-            return pd.read_sql_query(query + " ORDER BY j.updated_at DESC LIMIT ?", connection,
-                                     params=(*params, limit))
+            rows = pd.read_sql_query(query + suffix, connection, params=params)
+        if not rows.empty:
+            rows["ean"] = rows["ean"].astype(str)
+        return rows
 
     def index_summary(self):
         with self.store._connect() as connection:
