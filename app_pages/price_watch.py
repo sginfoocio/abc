@@ -4,7 +4,9 @@ Opening these screens never performs HTTP requests.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import sqlite3
 import pandas as pd
 import streamlit as st
 from typing import TYPE_CHECKING
@@ -26,6 +28,24 @@ from app_pages.price_options import ordered, product_eans
 
 def _actor() -> str:
     return str(st.session_state.get("auth_user") or st.session_state.get("auth_role") or "admin")
+
+
+_REVIEW_EXPECTED_FIELDS = (
+    "candidate_status", "match_status", "model_code", "color_code", "caliber", "ean_published",
+    "candidate_source", "candidate_note", "candidate_verified_at", "job_state", "job_url",
+    "job_updated_at", "watch_active", "competitor_active",
+)
+
+
+def _review_expected_candidate(row, *, job_id=None) -> dict:
+    def scalar(value):
+        if pd.isna(value):
+            return None
+        return value.item() if hasattr(value, "item") else value
+
+    job_id = row["id"] if job_id is None else job_id
+    return {"job_id": scalar(job_id),
+            **{name: scalar(row[name]) for name in _REVIEW_EXPECTED_FIELDS}}
 
 
 def _show_report(report: WatchReport) -> None:
@@ -342,31 +362,237 @@ def _render_locator(store: PriceComparatorStore, names: dict[str, str]) -> None:
             index="competitor", columns="state", values="jobs", aggfunc="sum", fill_value=0)
         st.dataframe(pivot, width="stretch")
 
-    review = locator.jobs(states=("review",))
+    review = locator.jobs(states=("review",), limit=None)
     st.markdown(f"**Revisión manual** ({len(review)})")
+    if report := st.session_state.pop("manual_review_action_results", None):
+        st.dataframe(pd.DataFrame(report), hide_index=True, width="stretch")
     if review.empty:
-        st.caption("No hay coincidencias dudosas pendientes.")
+        st.caption("No hay candidatas pendientes de revisión manual.")
     else:
-        st.dataframe(review[["ean", "brand", "model", "color", "competitor", "url", "detail", "updated_at"]].rename(
-            columns={"ean": "EAN", "brand": "Marca", "model": "Modelo", "color": "Color", "competitor": "Competidor",
-                     "url": "Ficha", "detail": "Evidencia", "updated_at": "Fecha"}),
-            hide_index=True, width="stretch", column_config={"Ficha": st.column_config.LinkColumn("Ficha")})
-        labels = {row.id: f"{row.brand} · {row.model} · {row.color} · {row.competitor} · {row.ean}"
-                  for row in review.itertuples()}
-        with st.form("locate_review_form"):
-            job_id = st.selectbox("Candidato", ordered(labels, labels.get), format_func=labels.get, key="locate_review_job")
-            note = st.text_input("Motivo de la decisión", key="locate_review_note")
-            accept, reject = st.columns(2)
-            decision = ("accept" if accept.form_submit_button("Confirmar ficha") else
-                        "reject" if reject.form_submit_button("Descartar ficha") else "")
+        if st.button("Restablecer filtros", key="review_reset_filters"):
+            for key in ("review_competitor_filter", "review_brand_filter", "review_model_filter",
+                        "review_ean_filter", "review_color_filter", "review_type_filter",
+                        "review_reason_filter", "review_sort_column", "review_sort_direction"):
+                st.session_state.pop(key, None)
+            st.session_state["manual_review_selected_ids"] = []
+            st.session_state["manual_review_grid_revision"] = (
+                int(st.session_state.get("manual_review_grid_revision", 0)) + 1)
+            st.session_state.pop("manual_review_bulk_preview", None)
+            st.rerun()
+        identity_fields = ["id", "ean", "competitor_id", "url", "detail", "updated_at",
+                           *_REVIEW_EXPECTED_FIELDS]
+        candidate_signature = hashlib.sha256(json.dumps(
+            review[identity_fields].astype("string").fillna("").to_dict("records"),
+            ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+        c1, c2 = st.columns(2)
+        competitors = c1.multiselect("Competidores", ordered(review["competitor"].unique()),
+                                    key="review_competitor_filter")
+        brands = c2.multiselect("Marcas", ordered(review["brand"].unique()), key="review_brand_filter")
+        c1, c2, c3 = st.columns(3)
+        model_query = c1.text_input("Modelo o referencia", key="review_model_filter").strip()
+        ean_query = c2.text_input("EAN/UPC", key="review_ean_filter").strip()
+        color_query = c3.text_input("Código de color", key="review_color_filter").strip()
+        c1, c2, c3 = st.columns([1.2, 1.5, 1])
+        review_types = c1.multiselect("Tipo de revisión", ordered(review["kind"].fillna("").unique()),
+                                      key="review_type_filter")
+        reason_query = c2.text_input("Motivo de revisión", key="review_reason_filter").strip()
+        sort_column = c3.selectbox(
+            "Ordenar por", ["updated_at", "ean", "brand", "model", "color", "competitor", "kind", "detail"],
+            format_func=lambda value: {"updated_at": "Fecha", "ean": "EAN", "brand": "Marca",
+                                       "model": "Modelo", "color": "Color", "competitor": "Competidor",
+                                       "kind": "Tipo", "detail": "Motivo"}[value],
+            key="review_sort_column")
+        ascending = st.selectbox("Dirección", ["Descendente", "Ascendente"],
+                                 key="review_sort_direction") == "Ascendente"
+        filter_signature = hashlib.sha256(json.dumps({
+            "competitors": sorted(competitors), "brands": sorted(brands), "model": model_query,
+            "ean": ean_query, "color": color_query, "types": sorted(review_types), "reason": reason_query,
+            "sort": sort_column, "ascending": ascending,
+        }, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+        previous_filter = st.session_state.get("review_filter_signature")
+        previous_candidates = st.session_state.get("review_candidates_signature")
+        selection_reset = bool((previous_filter and previous_filter != filter_signature)
+                               or (previous_candidates and previous_candidates != candidate_signature))
+        if selection_reset:
+            st.session_state["manual_review_selected_ids"] = []
+            st.session_state.pop("manual_review_bulk_preview", None)
+            st.session_state["manual_review_grid_revision"] = (
+                int(st.session_state.get("manual_review_grid_revision", 0)) + 1)
+            st.warning("Cambió el filtro o el conjunto de candidatas. Se limpió la selección y la vista previa.")
+        st.session_state["review_filter_signature"] = filter_signature
+        st.session_state["review_candidates_signature"] = candidate_signature
+
+        filtered = review.copy()
+        if competitors:
+            filtered = filtered[filtered["competitor"].isin(competitors)]
+        if brands:
+            filtered = filtered[filtered["brand"].isin(brands)]
+        for value, column in ((model_query, "model"), (ean_query, "ean"), (color_query, "color")):
+            if value:
+                # Cast to text before matching so leading zeroes in EAN/UPC are never lost.
+                filtered = filtered[filtered[column].fillna("").astype(str).str.contains(
+                    value, case=False, regex=False)]
+        if review_types:
+            filtered = filtered[filtered["kind"].isin(review_types)]
+        if reason_query:
+            reason = filtered["detail"].fillna("").astype(str) + " " + filtered["kind"].fillna("").astype(str)
+            filtered = filtered[reason.str.contains(reason_query, case=False, regex=False)]
+        filtered = filtered.sort_values(sort_column, ascending=ascending, kind="stable", na_position="last")
+
+        selected_ids = set(st.session_state.get("manual_review_selected_ids", []))
+        st.session_state["manual_review_selected_ids"] = [
+            int(value) for value in selected_ids if int(value) in set(review["id"].astype(int))]
+        metrics = st.columns(3)
+        metrics[0].metric("Total de revisiones", len(review))
+        metrics[1].metric("Resultados filtrados", len(filtered))
+        metrics[2].metric("Filas seleccionadas", len(st.session_state["manual_review_selected_ids"]))
+        grid = filtered[["id", "ean", "brand", "model", "color", "competitor", "kind", "detail", "url",
+                         "updated_at"]].copy()
+        grid.insert(0, "Seleccionar", grid["id"].astype(int).isin(
+            st.session_state["manual_review_selected_ids"]))
+        grid = grid.rename(columns={
+            "id": "ID", "ean": "EAN", "brand": "Marca", "model": "Modelo / referencia", "color": "Color",
+            "competitor": "Competidor", "kind": "Tipo", "detail": "Motivo / evidencia", "url": "URL",
+            "updated_at": "Fecha"})
+        revision = int(st.session_state.get("manual_review_grid_revision", 0))
+        grid_key = f"manual_review_grid_{filter_signature[:10]}_{candidate_signature[:10]}_{revision}"
+        edited = st.data_editor(
+            grid, key=grid_key, hide_index=True, width="stretch", num_rows="fixed",
+            disabled=[column for column in grid.columns if column != "Seleccionar"],
+            column_config={
+                "Seleccionar": st.column_config.CheckboxColumn("Seleccionar", default=False),
+                "URL": st.column_config.LinkColumn("URL"),
+            })
+        if "Seleccionar" in edited:
+            st.session_state["manual_review_selected_ids"] = [
+                int(row_id) for row_id in edited.loc[edited["Seleccionar"], "ID"].tolist()]
+        selected_ids = set(st.session_state["manual_review_selected_ids"])
+        controls = st.columns(2)
+        if controls[0].button(f"Seleccionar resultados filtrados ({len(filtered)})",
+                              key="review_select_filtered", disabled=filtered.empty):
+            st.session_state["manual_review_selected_ids"] = filtered["id"].astype(int).tolist()
+            st.session_state["manual_review_grid_revision"] = revision + 1
+            st.session_state.pop("manual_review_bulk_preview", None)
+            st.rerun()
+        if controls[1].button("Limpiar selección", key="review_clear_selection", disabled=not selected_ids):
+            st.session_state["manual_review_selected_ids"] = []
+            st.session_state["manual_review_grid_revision"] = revision + 1
+            st.session_state.pop("manual_review_bulk_preview", None)
+            st.rerun()
+
+        if st.button("Preparar vista previa de seleccionadas", key="review_prepare_bulk",
+                     disabled=not selected_ids):
+            indexed = review.set_index("id")
+            snapshots = {int(job_id): _review_expected_candidate(indexed.loc[job_id], job_id=job_id)
+                         for job_id in sorted(selected_ids) if job_id in indexed.index}
+            st.session_state["manual_review_bulk_preview"] = {
+                "filter_signature": filter_signature, "candidate_signature": candidate_signature,
+                "snapshots": snapshots,
+            }
+        preview = st.session_state.get("manual_review_bulk_preview")
+        if preview and (preview["filter_signature"] != filter_signature
+                        or preview["candidate_signature"] != candidate_signature):
+            st.session_state.pop("manual_review_bulk_preview", None)
+            preview = None
+            st.warning("La vista previa quedó obsoleta; vuelva a seleccionar y previsualizar las fichas.")
+        if preview:
+            preview_rows = review[review["id"].astype(int).isin(preview["snapshots"])]
+            st.markdown(f"**Vista previa: {len(preview_rows)} fichas seleccionadas**")
+            st.dataframe(preview_rows[["ean", "brand", "model", "color", "competitor", "url"]].rename(
+                columns={"ean": "EAN", "brand": "Marca", "model": "Modelo", "color": "Color",
+                         "competitor": "Competidor", "url": "URL"}), hide_index=True, width="stretch",
+                column_config={"URL": st.column_config.LinkColumn("URL")})
+            with st.form("review_bulk_confirm_form"):
+                st.text_input("Responsable", value=_actor(), disabled=True, key="review_bulk_actor")
+                bulk_note = st.text_input("Motivo de confirmación", key="review_bulk_note")
+                confirmed = st.checkbox(
+                    f"Confirmo expresamente este conjunto de {len(preview_rows)} fichas",
+                    key="review_bulk_confirmed")
+                apply_bulk = st.form_submit_button("Confirmar seleccionadas y actualizar precios")
+            if apply_bulk:
+                if not bulk_note.strip() or not confirmed or preview_rows.empty:
+                    st.error("Indique el motivo y confirme expresamente el conjunto previsualizado.")
+                else:
+                    results = []
+                    indexed = review.set_index("id")
+                    for job_id, expected in preview["snapshots"].items():
+                        row = indexed.loc[job_id]
+                        try:
+                            refresh_id = locator.review(
+                                row["ean"], row["competitor_id"], row["url"], accept=True,
+                                actor=_actor(), note=bulk_note, update_price=True,
+                                expected_candidate=expected)
+                            results.append({"ID": job_id, "EAN": row["ean"], "Competidor": row["competitor"],
+                                            "Resultado": f"Ficha aceptada; lectura {refresh_id} en cola"})
+                        except (ValueError, sqlite3.Error) as exc:
+                            results.append({"ID": job_id, "EAN": row["ean"], "Competidor": row["competitor"],
+                                            "Resultado": f"Excluida: {exc}"})
+                    st.session_state["manual_review_action_results"] = results
+                    st.session_state["manual_review_selected_ids"] = []
+                    st.session_state.pop("manual_review_bulk_preview", None)
+                    st.session_state["manual_review_grid_revision"] = revision + 1
+                    st.rerun()
+
+        filtered_ids = filtered["id"].astype(int).tolist()
+        individual_ids = filtered_ids
+        if individual_ids:
+            indexed = review.set_index("id")
+            labels = {job_id: (f"{indexed.loc[job_id, 'brand']} · {indexed.loc[job_id, 'model']} · "
+                               f"{indexed.loc[job_id, 'color']} · {indexed.loc[job_id, 'competitor']} · "
+                               f"{indexed.loc[job_id, 'ean']}") for job_id in individual_ids}
+            with st.form("locate_review_form"):
+                job_id = st.selectbox("Ficha para confirmar o descartar", individual_ids,
+                                      format_func=lambda value: labels[value], key="locate_review_job")
+                note = st.text_input("Motivo de la decisión individual", key="locate_review_note")
+                accept, reject = st.columns(2)
+                decision = ("accept" if accept.form_submit_button("Confirmar ficha y actualizar precio") else
+                            "reject" if reject.form_submit_button("Descartar ficha") else "")
             if decision:
-                row = review.set_index("id").loc[job_id]
+                row = indexed.loc[job_id]
                 try:
                     locator.review(row["ean"], row["competitor_id"], row["url"], accept=decision == "accept",
-                                   actor=_actor(), note=note)
-                    _refresh("Decisión registrada y auditada.")
-                except ValueError as exc:
-                    st.error(str(exc))
+                                   actor=_actor(), note=note, update_price=decision == "accept",
+                                   expected_candidate=_review_expected_candidate(row, job_id=job_id))
+                    st.session_state["manual_review_action_results"] = [{
+                        "ID": int(job_id), "EAN": row["ean"], "Competidor": row["competitor"],
+                        "Resultado": ("Ficha aceptada; lectura inmediata en cola" if decision == "accept"
+                                      else "Ficha descartada"),
+                    }]
+                except (ValueError, sqlite3.Error) as exc:
+                    st.session_state["manual_review_action_results"] = [{
+                        "ID": int(job_id), "EAN": row["ean"], "Competidor": row["competitor"],
+                        "Resultado": f"No aplicada: {exc}",
+                    }]
+                st.session_state["manual_review_selected_ids"] = []
+                st.session_state.pop("manual_review_bulk_preview", None)
+                st.session_state["manual_review_grid_revision"] = revision + 1
+                st.rerun()
+
+    st.markdown("**Progreso persistente de confirmaciones y lecturas**")
+    progress = PriceMonitor(store).review_refreshes()
+    if progress.empty:
+        st.caption("Todavía no hay solicitudes de lectura por revisión manual.")
+    else:
+        progress = progress.copy()
+        progress["Resultado"] = progress.apply(
+            lambda row: ("Oferta comparable" if pd.notna(row["eligible"]) and bool(row["eligible"])
+                         else "No comparable")
+            if row["status"] == "done" else {
+                "pending": "Ficha aceptada · lectura pendiente",
+                "running": "Ficha aceptada · leyendo",
+                "deferred": "Aplazada por control",
+                "blocked": "Aceptada · bloqueada",
+                "error": "Error / revisión de identidad",
+            }.get(row["status"], row["status"]), axis=1)
+        st.dataframe(progress[["id", "ean", "brand", "model", "color", "competitor", "url", "actor",
+                              "reason", "Resultado", "detail", "http_requests", "requested_at", "retry_at"]]
+                     .rename(columns={"id": "Lectura", "ean": "EAN", "brand": "Marca", "model": "Modelo",
+                                      "color": "Color", "competitor": "Competidor", "url": "URL",
+                                      "actor": "Responsable", "reason": "Motivo", "detail": "Detalle",
+                                      "http_requests": "Peticiones registradas", "requested_at": "Solicitada",
+                                      "retry_at": "Reintento más próximo"}),
+                     hide_index=True, width="stretch", column_config={"URL": st.column_config.LinkColumn("URL")})
 
     with st.expander("Últimas búsquedas"):
         recent = locator.jobs(limit=200)

@@ -323,6 +323,211 @@ class PriceMonitor:
         self.check_stale(competitor_ids, eans)
         return report
 
+    def review_refresh_tick(self, *, max_jobs: int = 5, deadline_seconds: float = 180) -> dict:
+        """Drain durable manual-review reads through the normal governed monitor engine."""
+        if not 1 <= max_jobs <= 50 or not 1 <= deadline_seconds <= 900:
+            raise ValueError("Lote de 1-50 lecturas y plazo de 1-900 segundos")
+        started = time.monotonic()
+        completed = 0
+        deferred = 0
+        errors = []
+        try:
+            queue_lock = FileLock(f"{self.store.database_path}.manual-review-refresh.lock", timeout=0)
+            queue_lock.acquire()
+        except Timeout:
+            return {"skipped": "Otra instancia está procesando lecturas de revisión manual",
+                    "processed": 0, "deferred": 0, "errors": []}
+        try:
+            while completed + deferred < max_jobs and time.monotonic() - started < deadline_seconds:
+                now = self._now()
+                now_text = _iso(now)
+                with self.store._connect() as con:
+                    con.execute("BEGIN IMMEDIATE")
+                    row = con.execute("""SELECT r.*,j.state AS monitor_state,j.not_before AS monitor_not_before,
+                            j.lease_until AS monitor_lease_until,j.attempts AS monitor_attempts,
+                            j.eligible AS monitor_eligible,j.detail AS monitor_detail,
+                    j.last_ok_at AS monitor_last_ok_at,j.sampled_at AS monitor_sampled_at,
+                    j.valid_until AS monitor_valid_until,j.sample AS monitor_sample,
+                            j.previous_sample AS monitor_previous_sample,
+                            EXISTS(SELECT 1 FROM competitor_product_urls u WHERE u.competitor_id=r.competitor_id
+                                AND u.ean=r.ean AND u.url=r.url AND u.status='verified') AS url_verified,
+                            EXISTS(SELECT 1 FROM watch_products w WHERE w.ean=r.ean AND w.active=1)
+                                AS watch_active,
+                            EXISTS(SELECT 1 FROM competitors c WHERE c.id=r.competitor_id AND c.active=1)
+                                AS competitor_active
+                        FROM manual_review_refreshes r
+                        LEFT JOIN monitor_jobs j ON j.id=r.monitor_job_id
+                        WHERE ((r.status IN ('pending','deferred') AND
+                                (r.retry_at IS NULL OR r.retry_at<=?))
+                               OR (r.status='running' AND r.lease_until<=?))
+                        ORDER BY r.requested_at,r.id LIMIT 1""", (now_text, now_text)).fetchone()
+                    if row is None:
+                        con.commit()
+                        break
+                    task = dict(row)
+                    if not task["url_verified"] or not task["watch_active"] or not task["competitor_active"]:
+                        con.execute("""UPDATE manual_review_refreshes SET status='blocked',
+                            detail='Ficha, producto o competidor ya no está activo; no se consulta',
+                            lease_until=NULL,retry_at=NULL,finished_at=?,updated_at=? WHERE id=?""",
+                                    (now_text, now_text, task["id"]))
+                        con.commit()
+                        errors.append({"id": task["id"], "detail": "Par fuera de alcance o ficha no verificada"})
+                        continue
+                    if (task["monitor_state"] == "done" and task["monitor_sampled_at"]
+                            and datetime.fromisoformat(task["monitor_sampled_at"])
+                            >= datetime.fromisoformat(task["requested_at"])):
+                        sample = json.loads(task["monitor_sample"] or task["monitor_previous_sample"] or "{}")
+                        page = sample.get("page", {})
+                        if task["monitor_eligible"] and page.get("price") is not None:
+                            detail = (f"Oferta comparable: {page['price']} {page.get('currency') or ''} · "
+                                      f"{page.get('availability') or 'disponibilidad no indicada'}")
+                        else:
+                            reason = sample.get("gap") or task["monitor_detail"] or page.get(
+                                "availability") or "faltan datos comerciales"
+                            detail = f"Lectura terminada; no comparable: {reason}"
+                        con.execute("""UPDATE manual_review_refreshes SET status='done',detail=?,
+                            lease_until=NULL,retry_at=NULL,finished_at=?,updated_at=? WHERE id=?""",
+                                    (detail[:1000], now_text, now_text, task["id"]))
+                        con.commit()
+                        completed += 1
+                        continue
+                    if task["monitor_state"] in {"failed", "gone", "inactive"}:
+                        detail = f"El trabajo monitor está en estado {task['monitor_state']}; requiere resolución manual"
+                        con.execute("""UPDATE manual_review_refreshes SET status='blocked',detail=?,
+                            lease_until=NULL,retry_at=NULL,finished_at=?,updated_at=? WHERE id=?""",
+                                    (detail, now_text, now_text, task["id"]))
+                        con.commit()
+                        errors.append({"id": task["id"], "detail": detail})
+                        continue
+                    if task["monitor_state"] == "blocked" and not task["monitor_not_before"]:
+                        detail = task["monitor_detail"] or "El trabajo monitor tiene un bloqueo sin fecha de reintento"
+                        con.execute("""UPDATE manual_review_refreshes SET status='blocked',detail=?,
+                            lease_until=NULL,retry_at=NULL,finished_at=?,updated_at=? WHERE id=?""",
+                                    (detail[:1000], now_text, now_text, task["id"]))
+                        con.commit()
+                        errors.append({"id": task["id"], "detail": detail})
+                        continue
+                    if int(task["monitor_attempts"] or 0) >= MAX_ATTEMPTS:
+                        detail = "Máximo de intentos alcanzado; no se reinicia automáticamente"
+                        con.execute("""UPDATE manual_review_refreshes SET status='blocked',detail=?,
+                            lease_until=NULL,retry_at=NULL,finished_at=?,updated_at=? WHERE id=?""",
+                                    (detail, now_text, now_text, task["id"]))
+                        con.commit()
+                        errors.append({"id": task["id"], "detail": detail})
+                        continue
+                    retry_at = None
+                    if task["monitor_state"] == "running" and task["monitor_lease_until"]:
+                        lease = datetime.fromisoformat(task["monitor_lease_until"])
+                        if lease > now:
+                            retry_at = lease
+                    elif task["monitor_state"] == "done":
+                        monitor_row = {"state": "done", "not_before": task["monitor_not_before"],
+                                       "sampled_at": task["monitor_sampled_at"],
+                                       "last_ok_at": task["monitor_last_ok_at"],
+                                       "valid_until": task["monitor_valid_until"]}
+                        restriction = _done_job_restriction(monitor_row)
+                        if restriction and restriction > now:
+                            retry_at = restriction
+                    elif task["monitor_not_before"]:
+                        not_before = datetime.fromisoformat(task["monitor_not_before"])
+                        if not_before > now:
+                            retry_at = not_before
+                    if retry_at is not None:
+                        detail = f"Aplazada hasta {_iso(retry_at)} por un control vigente"
+                        con.execute("""UPDATE manual_review_refreshes SET status='deferred',detail=?,
+                            retry_at=?,lease_until=NULL,updated_at=? WHERE id=?""",
+                                    (detail, _iso(retry_at), now_text, task["id"]))
+                        con.commit()
+                        deferred += 1
+                        continue
+                    if task["monitor_state"] == "review":
+                        detail = "La verificación del monitor volvió a revisión; no se fuerza otra lectura"
+                        con.execute("""UPDATE manual_review_refreshes SET status='error',detail=?,
+                            lease_until=NULL,retry_at=NULL,finished_at=?,updated_at=? WHERE id=?""",
+                                    (detail, now_text, now_text, task["id"]))
+                        con.commit()
+                        errors.append({"id": task["id"], "detail": detail})
+                        continue
+                    lease_until = _iso(now + LEASE)
+                    con.execute("""UPDATE manual_review_refreshes SET status='running',attempts=attempts+1,
+                        started_at=COALESCE(started_at,?),lease_until=?,retry_at=NULL,updated_at=? WHERE id=?""",
+                                (now_text, lease_until, now_text, task["id"]))
+                    con.commit()
+
+                report = self.run([task["competitor_id"]], max_jobs=1,
+                                  deadline_seconds=max(1, min(120, deadline_seconds)),
+                                  eans=[task["ean"]], point_check=True)
+                with self.store._connect() as con:
+                    current = con.execute("""SELECT state,not_before,lease_until,attempts,eligible,detail,
+                            last_ok_at,sampled_at,sample FROM monitor_jobs WHERE id=?""",
+                                          (task["monitor_job_id"],)).fetchone()
+                finished_at = _iso(self._now())
+                retry_at = None
+                status, detail = "pending", ""
+                requests = report.requests
+                if current is None:
+                    status, detail = "error", "Desapareció el trabajo de monitorización"
+                else:
+                    current = dict(current)
+                    if current["state"] == "done":
+                        done_after_request = bool(current["sampled_at"] and
+                                                  datetime.fromisoformat(current["sampled_at"]) >=
+                                                  datetime.fromisoformat(task["requested_at"]))
+                        if report.processed or done_after_request:
+                            status = "done"
+                            sample = json.loads(current["sample"] or current.get("previous_sample") or "{}")
+                            page = sample.get("page", {})
+                            if current["eligible"] and page.get("price") is not None:
+                                detail = (f"Oferta comparable: {page['price']} {page.get('currency') or ''} · "
+                                          f"{page.get('availability') or 'disponibilidad no indicada'}")
+                            else:
+                                reason = sample.get("gap") or current["detail"] or page.get(
+                                    "availability") or "faltan datos comerciales"
+                                detail = f"Lectura terminada; no comparable: {reason}"
+                        else:
+                            status = "deferred"
+                            retry_at = self._now() + timedelta(seconds=30)
+                            detail = "Otra ejecución mantiene el bloqueo; se revisará en el siguiente turno"
+                    elif current["state"] in {"waiting", "pending"}:
+                        retry_at = (datetime.fromisoformat(current["not_before"])
+                                    if current["not_before"] else self._now() + timedelta(seconds=30))
+                        status = "deferred"
+                        detail = current["detail"] or report.stopped.get(
+                            task["competitor_id"], "Aplazada por la cola de monitorización")
+                    elif current["state"] == "running":
+                        retry_at = (datetime.fromisoformat(current["lease_until"])
+                                    if current["lease_until"] else self._now() + timedelta(seconds=30))
+                        status = "deferred"
+                        detail = "Lectura en curso en otra ejecución"
+                    elif current["state"] in {"blocked", "unavailable"}:
+                        not_before = (datetime.fromisoformat(current["not_before"])
+                                      if current["not_before"] else None)
+                        if not_before and not_before > self._now():
+                            status, retry_at = "deferred", not_before
+                            detail = current["detail"] or f"Acceso aplazado hasta {_iso(not_before)}"
+                        else:
+                            status, detail = "blocked", current["detail"] or "Acceso no disponible"
+                    elif current["state"] in {"review", "gone", "failed", "inactive"}:
+                        status, detail = "error", current["detail"] or f"Monitorización: {current['state']}"
+                    else:
+                        status, detail = "error", current["detail"] or f"Estado inesperado: {current['state']}"
+                with self.store._connect() as con, con:
+                    con.execute("""UPDATE manual_review_refreshes SET status=?,detail=?,
+                        http_requests=http_requests+?,
+                        retry_at=?,lease_until=NULL,finished_at=?,updated_at=? WHERE id=?""",
+                                (status, detail[:1000], requests, _iso(retry_at) if retry_at else None,
+                                 finished_at if status in {"done", "blocked", "error"} else None,
+                                 finished_at, task["id"]))
+                if status in {"done", "blocked", "error"}:
+                    completed += 1
+                    if status != "done":
+                        errors.append({"id": task["id"], "detail": detail})
+                else:
+                    deferred += 1
+        finally:
+            queue_lock.release()
+        return {"skipped": "", "processed": completed, "deferred": deferred, "errors": errors}
+
     def _process(self, job: dict, config: dict, fetcher: GovernedFetcher, own_price: float | None,
                  *, fresh: bool = False) -> str:
         cid, ean, url = job["competitor_id"], job["ean"], job["url"]
@@ -539,6 +744,20 @@ class PriceMonitor:
         with self.store._connect() as con:
             return pd.read_sql_query("""SELECT j.*,c.name AS competitor FROM monitor_jobs j
                 JOIN competitors c ON c.id=j.competitor_id ORDER BY j.updated_at DESC,j.id DESC""", con)
+
+    def review_refreshes(self, limit: int = 100) -> pd.DataFrame:
+        with self.store._connect() as con:
+            rows = pd.read_sql_query("""SELECT r.id,r.ean,p.brand,p.model,p.color,r.competitor_id,
+                    c.name AS competitor,r.url,r.actor,r.reason,r.status,r.detail,r.http_requests,
+                    r.requested_at,r.started_at,r.finished_at,r.retry_at,r.attempts,
+                    j.state AS monitor_state,j.eligible,j.last_ok_at
+                FROM manual_review_refreshes r JOIN products p ON p.ean=r.ean
+                JOIN competitors c ON c.id=r.competitor_id
+                LEFT JOIN monitor_jobs j ON j.id=r.monitor_job_id
+                ORDER BY r.requested_at DESC,r.id DESC LIMIT ?""", con, params=(limit,))
+        if not rows.empty:
+            rows["ean"] = rows["ean"].astype(str)
+        return rows
 
     def retry_failed(self, cid: str, *, actor: str) -> int:
         if not actor.strip():

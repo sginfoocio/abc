@@ -1801,6 +1801,8 @@ def serve(command):
                     service.tick()
                     service.continuity_tick()
                     service.diagnostic_tick()
+                    from price_monitor import PriceMonitor
+                    PriceMonitor(store).review_refresh_tick()
             except Exception:
                 LOG.exception("Price watch worker failed; no automatic reactivation")
             stopped.wait(30)

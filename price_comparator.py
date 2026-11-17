@@ -929,6 +929,28 @@ class PriceComparatorStore:
                         state TEXT NOT NULL,
                         detail TEXT NOT NULL DEFAULT ''
                     );
+                    CREATE TABLE IF NOT EXISTS manual_review_refreshes (
+                        id INTEGER PRIMARY KEY,
+                        locate_job_id INTEGER NOT NULL REFERENCES locate_jobs(id),
+                        monitor_job_id INTEGER REFERENCES monitor_jobs(id),
+                        ean TEXT NOT NULL REFERENCES products(ean),
+                        competitor_id TEXT NOT NULL REFERENCES competitors(id),
+                        url TEXT NOT NULL,
+                        actor TEXT NOT NULL,
+                        reason TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        detail TEXT NOT NULL DEFAULT '',
+                        http_requests INTEGER NOT NULL DEFAULT 0,
+                        requested_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        started_at TEXT,
+                        finished_at TEXT,
+                        retry_at TEXT,
+                        lease_until TEXT,
+                        attempts INTEGER NOT NULL DEFAULT 0
+                    );
+                    CREATE INDEX IF NOT EXISTS manual_review_refreshes_queue_idx
+                        ON manual_review_refreshes(status,retry_at,lease_until,id);
                     CREATE TABLE IF NOT EXISTS monitor_schedule (
                         competitor_id TEXT PRIMARY KEY REFERENCES competitors(id),
                         enabled INTEGER NOT NULL DEFAULT 0,
