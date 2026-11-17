@@ -84,7 +84,8 @@ def _load(repository, refresh: bool):
 def _stats(groups) -> tuple[tuple[str, str], ...]:
     counts = library.summary(groups)
     return (
-        (f"{counts['images']:,}".replace(",", "."), "imágenes"),
+        (f"{counts['images']:,}".replace(",", "."), "fotografías únicas"),
+        (f"{counts['representations']:,}".replace(",", "."), "representaciones"),
         (f"{counts['eans']:,}".replace(",", "."), "EAN"),
         (f"{counts['models']:,}".replace(",", "."), "modelos"),
     )
@@ -141,7 +142,7 @@ def _render_grid(repository, page, refresh: bool, signature: tuple) -> None:
                 design.render(design.product_card_html(
                     title=group.title, provider=", ".join(group.providers), brand=group.brand,
                     reference=group.reference, ean=group.ean, named=group.has_commercial_title,
-                    count=len(group.records), views=_card_views(group),
+                    count=len(group.photos), views=_card_views(group),
                     preview=_preview(previews, group.cover),
                 ))
                 st.button("Ver fotografías", key=f"lib_open_{group.ean}", width="stretch",
@@ -183,7 +184,8 @@ def _render_browser(repository, groups, refresh: bool) -> None:
         return
     if filters != library.LibraryFilters():
         counts = library.summary(results)
-        st.caption(f"{page.total:,} productos · {counts['images']:,} imágenes con los filtros actuales".replace(",", "."))
+        st.caption(f"{page.total:,} productos · {counts['images']:,} fotografías únicas · "
+                   f"{counts['representations']:,} representaciones con los filtros actuales".replace(",", "."))
     _render_grid(repository, page, refresh, signature)
     _render_pager(page)
 
@@ -265,11 +267,22 @@ def _render_details(group, records) -> None:
     if st.session_state.get("auth_role") != "admin":
         return
     with st.expander("Detalles técnicos y trazabilidad"):
-        frame = pd.DataFrame([{
-            "Vista": library.view_name(r.view), "Archivo original": r.name, "Checksum": r.checksum,
-            "Ruta": str(r.path), "Incorporada": r.date, "Origen": r.origin, "Proveedor": r.provider,
-            "Mercado": library.market_label(r.market),
-        } for r in records])
+        rows = []
+        for record in records:
+            identity = record.metadata.get("identity")
+            identity = identity if isinstance(identity, dict) else {}
+            rows.append({
+                "Representación": record.id, "EAN/UPC": record.ean,
+                "Modelo": record.metadata.get("modelo") or identity.get("model") or group.model,
+                "Color": record.metadata.get("color_proveedor") or record.metadata.get("color")
+                or identity.get("color") or "",
+                "Vista": library.view_name(record.view), "Archivo original": record.name,
+                "Checksum": record.checksum, "Huella visual": record.pixels,
+                "Ruta": str(record.path), "Incorporada": record.date,
+                "Origen": record.origin, "Proveedor": record.provider,
+                "Mercado": library.market_label(record.market),
+            })
+        frame = pd.DataFrame(rows)
         st.dataframe(frame, hide_index=True, width="stretch")
 
 
@@ -277,7 +290,8 @@ def _render_product(repository, group) -> None:
     st.button("Volver a la biblioteca", icon=":material/arrow_back:", key="lib_back", on_click=_close)
     subtitle = " · ".join(part for part in (", ".join(group.providers), group.brand, f"EAN {group.ean}") if part)
     design.render(design.page_header_html(group.title, subtitle, (
-        (str(len(group.records)), "imagen" if len(group.records) == 1 else "imágenes"),
+        (str(len(group.photos)), "fotografías únicas"),
+        (str(len(group.records)), "representaciones"),
         (str(len(group.providers)), "origen" if len(group.providers) == 1 else "orígenes"),
     )))
     if group.missing_core:
@@ -286,11 +300,17 @@ def _render_product(repository, group) -> None:
             + ". Las vistas no se deducen del aspecto de la imagen.", "warning"))
     else:
         design.render(design.notice_html("Disponibles las vistas V1, V2 y V3.", "success"))
-    records = list(group.records)
+    if group.related_eans:
+        st.warning("Archivos o huellas coincidentes con otros EAN: " + ", ".join(group.related_eans)
+                   + ". Revisar modelo y color; no se han fusionado productos ni eliminado fotografías.")
+    if group.visual_equivalents:
+        st.info(f"{len(group.visual_equivalents)} grupos de archivos distintos comparten huella visual. "
+                "Se conservan todos; la coincidencia no demuestra una asociación correcta.")
+    records = list(group.photos)
     access = visible_access(repository, records, "image_gallery_detail_access", selection=group.ean)
     previews = _visible_previews(repository, records, access)
     _render_viewer(repository, group, records, access, previews)
-    st.subheader("Todas las fotografías")
+    st.subheader("Fotografías únicas")
     with st.container(horizontal=True, wrap=True, key="lib_thumbs"):
         for record in records:
             with st.container(key=f"lib_thumb_{record.id}"):
@@ -300,7 +320,7 @@ def _render_product(repository, group) -> None:
                 st.button("Ver", key=f"lib_photo_{record.id}", width="stretch",
                           on_click=_select, args=(record.id,))
     _render_zip(repository, group)
-    _render_details(group, records)
+    _render_details(group, group.records)
 
 
 def render_images_page(

@@ -7,6 +7,7 @@ from PIL import Image
 
 import bulk_image_search as bulk
 import cloud_design as design
+from image_library import unique_photos
 from image_repository import repository_root
 from provider_images import parse_ean_file, parse_ean_text
 from provider_images_ui import data_root
@@ -63,7 +64,7 @@ def _detail(row, root):
     if not row["records"]:
         return
     try:
-        records = bulk.photo_records(row["records"], root)
+        records = unique_photos(bulk.photo_records(row["records"], root))
     except (OSError, ValueError, RuntimeError):
         st.warning("Almacenamiento de imágenes no disponible.")
         return
@@ -76,6 +77,7 @@ def _detail(row, root):
             previews[record.id], access[record.id] = "original no verificable", None
     if records:
         st.subheader("Fotografías existentes")
+        st.caption(f"{len(records)} fotografías únicas · {len(row['records'])} representaciones.")
         _render_viewer(None, None, records, access, previews, readonly=True)
 
 

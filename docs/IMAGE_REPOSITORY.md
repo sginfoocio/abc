@@ -1,5 +1,30 @@
 # Repositorio comun de imagenes por EAN
 
+## Galeria: fotografias y representaciones (17/11/2026)
+
+La biblioteca y el detalle de busqueda masiva muestran una fotografia por
+`(EAN literal, checksum)`, no una miniatura por representacion. Los contadores
+separan fotografias unicas de representaciones: 16 o 40 representaciones pueden
+seguir siendo ocho fotografias. Son recuentos del catalogo, no un inventario
+fisico exhaustivo del NAS ni garantia de que todos los archivos sean accesibles.
+La visualizacion mantiene los avisos existentes para archivos no disponibles.
+
+Todos los registros originales permanecen en el catalogo y en la trazabilidad
+administrativa: proveedor, origen, EAN/UPC, modelo/color disponibles, vista,
+checksum, huella y representaciones. La seleccion de una representacion para la
+miniatura no cambia la clasificacion guardada.
+
+Archivos de checksum diferente se conservan aunque tengan la misma vista o
+huella visual. La biblioteca avisa de huellas iguales entre archivos distintos y
+de checksum/huella compartidos entre EAN; estas coincidencias son candidatos a
+revision de variante/color, no prueba de que una asociacion sea incorrecta.
+No se consulta Odoo al navegar, no se fusionan EAN y no se reclasifica ni borra.
+
+El ZIP completo existente no cambia: conserva nombres, alias y manifiesto, y
+solo se genera al pulsar. La galeria seleccionada para exportacion es una
+propuesta separada, no un cambio implicito del ZIP ni de los originales:
+[validacion de proveedores y reconstruccion futura](IMAGE_PROVIDER_VALIDATION_AND_REBUILD.md).
+
 ## Inventario de contratos previo a cambiar rutas
 
 Revision de `main` 25a6252 (2026-10-10), sin acceso ni migracion en Cloud.
