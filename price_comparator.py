@@ -959,6 +959,11 @@ class PriceComparatorStore:
                         refresh_id INTEGER PRIMARY KEY REFERENCES manual_review_refreshes(id),
                         snapshot TEXT NOT NULL
                     );
+                    CREATE TABLE IF NOT EXISTS manual_review_recorded_samples (
+                        refresh_id INTEGER PRIMARY KEY REFERENCES manual_review_refreshes(id),
+                        sampled_at TEXT NOT NULL,
+                        sample_digest TEXT NOT NULL
+                    );
                     CREATE TABLE IF NOT EXISTS manual_review_recovery_grants (
                         refresh_id INTEGER PRIMARY KEY REFERENCES manual_review_refreshes(id),
                         continuity_id INTEGER NOT NULL REFERENCES price_continuity(id),
@@ -1225,16 +1230,26 @@ class PriceComparatorStore:
         return ImportReport(imported, 0, tuple(errors))
 
     def import_offers(self, frame: pd.DataFrame, *,
-                      validate: Callable[[sqlite3.Connection], None] | None = None) -> ImportReport:
+                      validate: Callable[[sqlite3.Connection], None] | None = None,
+                      review_sample: tuple[int, str, str] | None = None) -> ImportReport:
         required = {"EAN", "Competidor", "Precio", "Moneda", "Mercado", "URL", "Disponibilidad",
                     "Estado coincidencia", "Evidencia", "Método"}
         _required_columns(frame, required, "Ofertas")
         imported = updated = rejected = 0
         errors: list[str] = []
         with self._connect() as connection, connection:
+            if review_sample is not None and (validate is None or len(frame) != 1):
+                raise ValueError("La muestra de revisión requiere una única oferta y validación")
             if validate is not None:
                 connection.execute("BEGIN IMMEDIATE")
                 validate(connection)
+            if review_sample is not None:
+                recorded = connection.execute("""SELECT sampled_at,sample_digest
+                    FROM manual_review_recorded_samples WHERE refresh_id=?""", (review_sample[0],)).fetchone()
+                if recorded:
+                    if tuple(recorded) != review_sample[1:]:
+                        raise ValueError("La muestra registrada de esta revisión ha cambiado")
+                    return ImportReport(0, 0, ())
             competitors = {row["name"].casefold(): row for row in connection.execute("SELECT * FROM competitors")}
             competitors.update({row["id"].casefold(): row for row in connection.execute("SELECT * FROM competitors")})
             for index, row in frame.iterrows():
@@ -1383,6 +1398,12 @@ class PriceComparatorStore:
                 except ValueError as exc:
                     rejected += 1
                     errors.append(f"Fila {index + 2}: {exc}")
+            if review_sample is not None:
+                if rejected:
+                    connection.rollback()
+                else:
+                    connection.execute("""INSERT INTO manual_review_recorded_samples
+                        (refresh_id,sampled_at,sample_digest) VALUES(?,?,?)""", review_sample)
         return ImportReport(imported, updated, tuple(errors))
 
     @staticmethod

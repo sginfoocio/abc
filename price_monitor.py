@@ -516,7 +516,7 @@ class PriceMonitor:
                                 before = con.execute("SELECT COALESCE(MAX(id),0) FROM access_requests").fetchone()[0]
                             if review_id is not None:
                                 stop = self._process(job, config, fetcher, own.get(job["ean"]),
-                                                     fresh=True, validate=validate_review)
+                                                     fresh=True, validate=validate_review, review_id=review_id)
                             else:
                                 stop = (self._process(job, config, fetcher, own.get(job["ean"]), fresh=True)
                                         if point_check else self._process(job, config, fetcher, own.get(job["ean"])))
@@ -741,7 +741,9 @@ class PriceMonitor:
                         if not_before > now:
                             retry_at = not_before
                     if retry_at is not None:
-                        detail = f"Aplazada hasta {_iso(retry_at)} por un control vigente"
+                        reason = ("Lectura en curso en otra ejecución" if task["monitor_state"] == "running"
+                                  else task["monitor_detail"] or "Restricción vigente del monitor")
+                        detail = f"{reason} · aplazada hasta {_iso(retry_at)}"
                         con.execute("""UPDATE manual_review_refreshes SET status='deferred',detail=?,
                             retry_at=?,lease_until=NULL,updated_at=? WHERE id=?""",
                                     (detail, _iso(retry_at), now_text, task["id"]))
@@ -859,7 +861,7 @@ class PriceMonitor:
         return {"skipped": "", "processed": completed, "deferred": deferred, "errors": errors}
 
     def _process(self, job: dict, config: dict, fetcher: GovernedFetcher, own_price: float | None,
-                 *, fresh: bool = False, validate=None) -> str:
+                 *, fresh: bool = False, validate=None, review_id: int | None = None) -> str:
         cid, ean, url = job["competitor_id"], job["ean"], job["url"]
         with self.store._connect() as con:
             verified = con.execute("""SELECT 1 FROM competitor_product_urls
@@ -939,7 +941,7 @@ class PriceMonitor:
             if validate is not None:
                 with self.store._connect() as con:
                     validate(con)
-                self._commit_sample(job, config, sample, own_price, validate)
+                self._commit_sample(job, config, sample, own_price, validate, review_id)
             else:
                 self._commit_sample(job, config, sample, own_price)
         except PageGone as exc:
@@ -966,15 +968,18 @@ class PriceMonitor:
         return ""
 
     def _commit_sample(self, job: dict, config: dict, sample: dict, own_price: float | None,
-                       validate=None) -> None:
+                       validate=None, review_id: int | None = None) -> None:
         page = ProductPage(**sample["page"])
         at = datetime.fromisoformat(sample["at"])
         outcome = Outcome(job["ean"], job["competitor_id"], config["name"], "exact",
                           url=job["url"], page=page, match_status=EXACT, method="web:monitor",
                           detail="Identidad revalidada: marca + modelo + color; calibre no vinculante")
-        # A receipt is replayed with its original timestamp, so the existing importer is idempotent.
         search = WebPriceSearch(self.store, clock=lambda: at)
-        problem = search.record(outcome, validate=validate) if validate is not None else search.record(outcome)
+        if review_id is not None:
+            digest = hashlib.sha256(json.dumps(sample, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+            problem = search.record(outcome, validate=validate, review_sample=(review_id, sample["at"], digest))
+        else:
+            problem = search.record(outcome, validate=validate) if validate is not None else search.record(outcome)
         if problem:
             raise ValueError(f"No se pudo registrar la observación: {problem}")
         hours = self.watch.monitor_interval_hours(job["ean"], job["competitor_id"]) or 24

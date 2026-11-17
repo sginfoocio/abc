@@ -131,11 +131,11 @@ def test_identity_change_before_offer_commit_never_creates_observation(expanded_
     _, store, _, cid, ean, url, _, monitor, task = expanded_review
     original = WebPriceSearch.record
 
-    def change_identity(search, outcome, *, validate=None):
+    def change_identity(search, outcome, *, validate=None, review_sample=None):
         with store._connect() as con, con:
             con.execute("""UPDATE competitor_product_urls SET color_code='OTHER'
                 WHERE competitor_id=? AND ean=? AND url=?""", (cid, ean, url))
-        return original(search, outcome, validate=validate)
+        return original(search, outcome, validate=validate, review_sample=review_sample)
 
     monkeypatch.setattr(WebPriceSearch, "record", change_identity)
     monitor.review_refresh_tick()
@@ -250,6 +250,58 @@ def test_interrupted_request_without_sample_is_not_replayed(tmp_path):
                           (task,)).fetchone()
     assert row["status"] == "blocked" and "reserva" in row["detail"]
     assert row["http_requests"] == 2
+
+
+@pytest.mark.parametrize("existing_offer", [False, True])
+def test_restart_after_offer_import_does_not_count_an_extra_observation(tmp_path, monkeypatch, existing_offer):
+    store, locator, monitor, clock, cid, site, rows, urls = _review_env(tmp_path)
+    ean = rows[0][0]
+    locator.review(ean, cid, urls[0], accept=True, actor="operator", note="Synthetic review",
+                   update_price=True, expected_candidate=_expected(_candidate(locator, ean)))
+    clock.advance(microseconds=1)
+    original = WebPriceSearch.record
+
+    def interrupt_after_import(search, outcome, *, validate=None, review_sample=None):
+        if existing_offer:
+            assert original(search, outcome, validate=validate) == ""
+        assert original(search, outcome, validate=validate, review_sample=review_sample) == ""
+        raise Crash()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(WebPriceSearch, "record", interrupt_after_import)
+        with pytest.raises(Crash):
+            monitor.review_refresh_tick()
+    with store._connect() as con:
+        before = [tuple(row) for row in con.execute(
+            "SELECT last_offer_id,last_ok_at,checks FROM offer_checks WHERE competitor_id=? AND ean=?", (cid, ean))]
+        offers_before = con.execute("SELECT COUNT(*) FROM offers WHERE competitor_id=? AND ean=?",
+                                    (cid, ean)).fetchone()[0]
+    clock.advance(minutes=11)
+    monitor.review_refresh_tick()
+    with store._connect() as con:
+        after = [tuple(row) for row in con.execute(
+            "SELECT last_offer_id,last_ok_at,checks FROM offer_checks WHERE competitor_id=? AND ean=?", (cid, ean))]
+        offers_after = con.execute("SELECT COUNT(*) FROM offers WHERE competitor_id=? AND ean=?",
+                                   (cid, ean)).fetchone()[0]
+    assert site.calls.count(urls[0]) == 1
+    assert offers_after == offers_before
+    assert after == before
+    assert len(before) == int(existing_offer)
+
+
+def test_rejected_import_does_not_record_the_sample_receipt(tmp_path):
+    store, locator, _, clock, cid, _, rows, urls = _review_env(tmp_path)
+    ean = rows[0][0]
+    task = locator.review(ean, cid, urls[0], accept=True, actor="operator", note="Synthetic review",
+                          update_price=True, expected_candidate=_expected(_candidate(locator, ean)))
+    frame = pd.DataFrame([{"EAN": ean, "Competidor": cid, "Precio": "invalid", "Moneda": "EUR",
+                           "Mercado": "ES", "URL": urls[0], "Disponibilidad": "available",
+                           "Estado coincidencia": "exact_match", "Evidencia": "Synthetic", "Método": "web:monitor"}])
+    report = store.import_offers(frame, validate=lambda con: None,
+                                 review_sample=(task, clock().isoformat(), "synthetic"))
+    assert report.rejected
+    with store._connect() as con:
+        assert con.execute("SELECT COUNT(*) FROM manual_review_recorded_samples").fetchone()[0] == 0
 
 
 def _legacy_request(store, clock, task, *, deferred=False):

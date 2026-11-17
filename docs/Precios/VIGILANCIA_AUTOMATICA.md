@@ -189,7 +189,9 @@ anteriores de pares de continuidad no se ejecutan hasta su autorización auditad
 solo se reutiliza si se acredita la misma ficha, su fecha posterior a la solicitud y su vigencia; se conserva
 su fecha original. Cuando una interrupción deja una reserva o petición sin muestra, o el orden temporal no
 puede acreditarse, se bloquea para revisión en lugar de repetir HTTP. Los recibos nuevos se atribuyen al ID
-de solicitud. La tabla de la interfaz muestra las últimas 100 filas; su CSV exporta todas.
+de solicitud. La importación de la muestra y su marca de idempotencia se guardan en la misma transacción,
+para que una interrupción posterior no cuente dos veces la observación. La tabla de la interfaz muestra las
+últimas 100 filas; su CSV exporta todas.
 
 #### Recuperación supervisada después del despliegue
 
