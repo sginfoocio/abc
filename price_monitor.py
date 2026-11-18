@@ -19,7 +19,7 @@ from numbers import Number
 import os
 import time
 from typing import AbstractSet, Callable
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlparse
 
 from filelock import FileLock, Timeout
 import pandas as pd
@@ -122,6 +122,30 @@ def _review_sample_ambiguous(task: dict) -> bool:
     sampled = _inventory_datetime(task["monitor_sampled_at"])
     return ("." not in task["requested_at"].split("T", 1)[-1]
             and requested <= sampled < requested + timedelta(seconds=1))
+
+
+def _accepted_edel_resolution(page: ProductPage, accepted_url: str, product: dict) -> bool:
+    from price_comparator import normalize_gtin
+
+    accepted, selected = urlparse(accepted_url), urlparse(page.url)
+    original_query = parse_qsl(accepted.query, keep_blank_values=True)
+    selected_query = parse_qsl(selected.query, keep_blank_values=True)
+    if ((accepted.hostname or "").lower().removeprefix("www.") != "edel-optics.es"
+            or accepted._replace(query="") != selected._replace(query="")
+            or any(key == "selectedSize" for key, _ in original_query)
+            or selected_query != [*original_query, ("selectedSize", page.variant_id)]
+            or not page.variant_id.isdigit()
+            or page.url_trace.get("candidate_url") != accepted_url
+            or page.url_trace.get("final_url") != accepted_url
+            or page.url_trace.get("selected_variant_url") != page.url
+            or page.url_trace.get("offer_variant_url") != page.url
+            or page.url_trace.get("selected_variant_source") != "checked_radio"
+            or page.ambiguous or not page.ean_published):
+        return False
+    try:
+        return normalize_gtin(page.ean_published) == normalize_gtin(product["ean"])
+    except (ValueError, KeyError):
+        return False
 
 
 def _review_sample_policy_reason(con, task: dict, now: datetime, interval: float | None) -> str:
@@ -903,9 +927,6 @@ class PriceMonitor:
                     sampled_at = _iso(self._now())
                     product = self.search._product(ean)
                     page = select_product_variant(page, product)
-                if validate is not None and page is not None and page.url != url:
-                    self._finish(job, "review", "La variante extraída no corresponde a la URL aceptada")
-                    return ""
                 match = classify(product, page.candidate()) if page else None
                 from price_web_extract import product_page_rejection
                 self._job_trace = {
@@ -915,21 +936,63 @@ class PriceMonitor:
                     "identity_reasons": list(match.reasons) if match else [],
                     "rejection": product_page_rejection(fetched.text, fetched.url) if page is None else "",
                 }
+                if review_id is not None and not reuse_shared:
+                    trace = page.url_trace if page else fetched.trace
+                    hashed_urls = {name: hashlib.sha256(str(trace[name]).encode("utf-8")).hexdigest()
+                                   for name in ("candidate_url", "final_url", "selected_variant_url",
+                                                "offer_variant_url")
+                                   if trace.get(name)}
+                    if page:
+                        hashed_urls["extracted_url"] = hashlib.sha256(page.url.encode("utf-8")).hexdigest()
+                    with self.store._connect() as con, con:
+                        receipt_ids = [r[0] for r in con.execute(
+                            "SELECT id FROM access_requests WHERE purpose=? ORDER BY id",
+                            (f"manual_review:{review_id}",))]
+                        con.execute("""INSERT INTO access_audit(scope,scope_id,action,previous,current,actor,note,at)
+                            VALUES('manual_review',?,'record_read_trace','',?,'worker','',?)""",
+                                    (str(review_id), json.dumps({"url_sha256": hashed_urls,
+                                                               "receipt_ids": receipt_ids,
+                                                               "identity_status": self._job_trace["identity_status"],
+                                                               "selected_variant_source":
+                                                                   trace.get("selected_variant_source", "")}),
+                                     _iso(self._now())))
                 observer = _capture_observer.get()
                 if not reuse_shared and observer is not None:
                     observer(cid, ean, fetched, page, self._job_trace)
+                if validate is not None and page is not None and page.url != url:
+                    if (match and match.status == EXACT and _accepted_edel_resolution(page, url, product)):
+                        page.url = url
+                    else:
+                        self._finish(job, "review", "La variante extraída no corresponde a la URL aceptada")
+                        return ""
                 if page is None or match is None or match.status != EXACT or page.ambiguous:
                     detail = ("; ".join(match.reasons) if match else "Sin datos legibles de producto")
                     with self.store._connect() as con, con:
-                        con.execute("""UPDATE competitor_product_urls
-                            SET status='probable',match_status='manual_review',
-                            note=substr(? || ' · ' || note,1,1000)
-                            WHERE competitor_id=? AND ean=? AND url=?""", (detail, cid, ean, url))
+                        lower_detail = detail.casefold()
+                        identity_conflict = any(token in lower_detail for token in ("ean", "gtin", "upc"))
+                        if identity_conflict:
+                            updated = con.execute("""UPDATE competitor_product_urls
+                                SET status='probable',match_status='manual_review',
+                                note=substr(? || ' · ' || note,1,1000)
+                                WHERE competitor_id=? AND ean=? AND url=?""",
+                                                  (detail, cid, ean, url))
+                        elif review_id is not None:
+                            updated = con.execute("""UPDATE competitor_product_urls
+                                SET status='verified',match_status='exact_match'
+                                WHERE competitor_id=? AND ean=? AND url=? AND source='user'""",
+                                                  (cid, ean, url))
+                        else:
+                            updated = con.execute("""UPDATE competitor_product_urls
+                                SET status='probable',match_status='manual_review',
+                                note=substr(? || ' · ' || note,1,1000)
+                                WHERE competitor_id=? AND ean=? AND url=?""",
+                                                  (detail, cid, ean, url))
                         if page:
                             con.execute("""UPDATE discovery_index SET facts=?,checked_at=? WHERE competitor_id=?
                                 AND url=?""", (json.dumps(asdict(page), ensure_ascii=False), sampled_at, cid, url))
-                        con.execute("""UPDATE locate_jobs SET state='review',url=?,detail=?,updated_at=?
-                            WHERE competitor_id=? AND ean=?""", (url, detail, _iso(self._now()), cid, ean))
+                        if updated.rowcount:
+                            con.execute("""UPDATE locate_jobs SET state='review',url=?,detail=?,updated_at=?
+                                WHERE competitor_id=? AND ean=?""", (url, detail, _iso(self._now()), cid, ean))
                     self._finish(job, "review", detail or "Variantes ambiguas: revisar identidad")
                     return ""
                 sample = {"page": asdict(page), "at": sampled_at,
@@ -991,9 +1054,11 @@ class PriceMonitor:
                 validate(con)
             previous = json.loads(job["previous_sample"]) if job["previous_sample"] else None
             self._changes(con, job, previous, sample, eligible, own_price)
+            offer_url = page.url_trace.get("selected_variant_url") or job["url"]
             offer = con.execute("""SELECT id FROM offers WHERE ean=? AND competitor_id=? AND url=?
+                AND julianday(captured_at)<=julianday(?)
                 ORDER BY captured_at DESC,id DESC LIMIT 1""",
-                                (job["ean"], job["competitor_id"], job["url"])).fetchone()
+                                (job["ean"], job["competitor_id"], offer_url, sample["at"])).fetchone()
             last_ok = sample["at"] if page.has_price else job["last_ok_at"]
             valid_until = _iso(at + timedelta(hours=hours)) if page.has_price else job["valid_until"]
             offer_id = offer["id"] if offer and page.has_price else job["last_offer_id"]

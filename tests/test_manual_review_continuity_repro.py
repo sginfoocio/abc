@@ -124,7 +124,101 @@ def test_extracted_other_variant_is_not_recorded(expanded_review, monkeypatch):
     with store._connect() as con:
         row = con.execute("SELECT status,detail FROM manual_review_refreshes WHERE id=?", (task,)).fetchone()
         assert con.execute("SELECT COUNT(*) FROM offers WHERE ean=? AND competitor_id=?", (ean, cid)).fetchone()[0] == 0
+        trace = json.loads(con.execute("""SELECT current FROM access_audit
+            WHERE scope='manual_review' AND scope_id=? AND action='record_read_trace'""", (str(task),)).fetchone()[0])
     assert row["status"] == "error" and "variante" in row["detail"].lower()
+    assert trace["receipt_ids"] and trace["url_sha256"]["candidate_url"]
+
+
+def test_accepted_edel_base_url_records_checked_variant_without_new_http(tmp_path):
+    from price_monitor import PriceMonitor
+    from tests.test_price_locator import Site, _env
+    from tests.test_price_web_competitor_pages import _edel_variant_node
+
+    site = Site(base="https://www.edel-optics.es")
+    store, _, locator, clock, cid = _env(tmp_path, site, name="Edel-Optics", methods=("ficha",), template=None)
+    ean = "8056597875349"
+    url = site.base + "/PR-27ZS-16K08Z-de-Prada.html"
+    node = _edel_variant_node("1907958", ean, 243.5, "InStock")
+    site.pages[url] = ('<input type="radio" id="prd1907958" checked>'
+                       '<script type="application/ld+json">' + json.dumps(node) + '</script>')
+    _watch(store, [(ean, "Prada", "PR 27ZS", "16K08Z", "54-21")])
+    locator.enqueue([cid], [ean])
+    with store._connect() as con, con:
+        con.execute("UPDATE competitor_web_config SET tax_policy='included' WHERE competitor_id=?", (cid,))
+        con.execute("""INSERT INTO competitor_product_urls(competitor_id,ean,url,match_status,status,verified_at)
+            VALUES(?,?,?,'manual_review','probable',?)""", (cid, ean, url, clock().isoformat()))
+        con.execute("UPDATE locate_jobs SET state='review',url=? WHERE competitor_id=? AND ean=?", (url, cid, ean))
+    task = locator.review(ean, cid, url, accept=True, actor="operator", note="Synthetic review",
+                          update_price=True, expected_candidate=_expected(_candidate(locator, ean)))
+    monitor = PriceMonitor(store, clock=clock, transport=site, sleep=lambda seconds: clock.advance(seconds=seconds))
+    monitor.review_refresh_tick()
+    with store._connect() as con:
+        request = con.execute("SELECT status,detail FROM manual_review_refreshes WHERE id=?", (task,)).fetchone()
+        job = con.execute("SELECT sample,last_offer_id FROM monitor_jobs WHERE competitor_id=? AND ean=?",
+                          (cid, ean)).fetchone()
+        offer = con.execute("SELECT url,captured_at FROM offers WHERE id=?", (job["last_offer_id"],)).fetchone()
+    assert request["status"] == "done", request["detail"]
+    sample = json.loads(job["sample"])
+    assert sample["page"]["url"] == url
+    assert sample["page"]["url_trace"]["offer_variant_url"] == url + "?selectedSize=1907958"
+    assert offer and offer["url"] == url + "?selectedSize=1907958"
+    assert site.calls.count(url) == 1
+    assert not any("?selectedSize=" in call for call in site.calls)
+    calls = list(site.calls)
+    monitor.review_refresh_tick()
+    assert site.calls == calls
+    with store._connect() as con:
+        assert con.execute("SELECT COUNT(*) FROM offers WHERE competitor_id=? AND ean=?", (cid, ean)).fetchone()[0] == 1
+
+
+def test_diagnostic_can_capture_verified_url_with_failed_read(expanded_review, monkeypatch):
+    service, store, _, cid, ean, url, site, monitor, task = expanded_review
+    from price_monitor import select_product_variant
+
+    def other_variant(page, product):
+        return replace(select_product_variant(page, product), url=url + "?variant=other")
+
+    monkeypatch.setattr("price_monitor.select_product_variant", other_variant)
+    monkeypatch.setattr("price_diagnostic.require_private_database", lambda path: None)
+    monitor.review_refresh_tick()
+    with store._connect() as con:
+        assert con.execute("SELECT status FROM manual_review_refreshes WHERE id=?", (task,)).fetchone()[0] == "error"
+        assert con.execute("SELECT status FROM competitor_product_urls WHERE competitor_id=? AND ean=? AND url=?",
+                           (cid, ean, url)).fetchone()[0] == "verified"
+    assert url in service.diagnostic_candidates(cid, ean)
+    request = service.request_diagnostic(cid, ean, url, actor="operator", note="review failed read",
+                                         build_commit="b" * 40, approved=True)
+    service.diagnostic_tick()
+    with store._connect() as con:
+        row = con.execute("SELECT status,result FROM price_diagnostic_requests WHERE id=?", (request["id"],)).fetchone()
+        assert row["status"] == "captured", row["result"]
+        assert con.execute("SELECT status FROM competitor_product_urls WHERE competitor_id=? AND ean=? AND url=?",
+                           (cid, ean, url)).fetchone()[0] == "verified"
+    with store._connect() as con, con:
+        con.execute("UPDATE competitor_product_urls SET color_code='OTHER' WHERE competitor_id=? AND ean=? AND url=?",
+                    (cid, ean, url))
+    assert url not in service.diagnostic_candidates(cid, ean)
+
+
+def test_rejected_post_acceptance_read_keeps_human_identity(expanded_review, monkeypatch):
+    service, store, _, cid, ean, url, _, monitor, task = expanded_review
+    from price_monitor import select_product_variant
+
+    def contradicted(page, product):
+        return replace(select_product_variant(page, product), color="OTHER999")
+
+    monkeypatch.setattr("price_monitor.select_product_variant", contradicted)
+    monitor.review_refresh_tick()
+    with store._connect() as con:
+        identity = con.execute("""SELECT status,source,note FROM competitor_product_urls
+            WHERE competitor_id=? AND ean=? AND url=?""", (cid, ean, url)).fetchone()
+        request = con.execute("SELECT status,detail FROM manual_review_refreshes WHERE id=?", (task,)).fetchone()
+        assert con.execute("SELECT COUNT(*) FROM offers WHERE ean=? AND competitor_id=?", (ean, cid)).fetchone()[0] == 0
+    assert identity["status"] == "verified" and identity["source"] == "user"
+    assert "Synthetic review" in identity["note"]
+    assert request["status"] == "error" and "color" in request["detail"].lower()
+    assert url in service.diagnostic_candidates(cid, ean)
 
 
 def test_identity_change_before_offer_commit_never_creates_observation(expanded_review, monkeypatch):

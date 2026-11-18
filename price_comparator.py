@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import closing
+from contextlib import closing, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -1231,17 +1231,21 @@ class PriceComparatorStore:
 
     def import_offers(self, frame: pd.DataFrame, *,
                       validate: Callable[[sqlite3.Connection], None] | None = None,
-                      review_sample: tuple[int, str, str] | None = None) -> ImportReport:
+                      review_sample: tuple[int, str, str] | None = None,
+                      connection: sqlite3.Connection | None = None) -> ImportReport:
         required = {"EAN", "Competidor", "Precio", "Moneda", "Mercado", "URL", "Disponibilidad",
                     "Estado coincidencia", "Evidencia", "Método"}
         _required_columns(frame, required, "Ofertas")
         imported = updated = rejected = 0
         errors: list[str] = []
-        with self._connect() as connection, connection:
+        external = connection is not None
+        context = nullcontext(connection) if external else self._connect()
+        with context as connection, connection:
             if review_sample is not None and (validate is None or len(frame) != 1):
                 raise ValueError("La muestra de revisión requiere una única oferta y validación")
             if validate is not None:
-                connection.execute("BEGIN IMMEDIATE")
+                if not external:
+                    connection.execute("BEGIN IMMEDIATE")
                 validate(connection)
             if review_sample is not None:
                 recorded = connection.execute("""SELECT sampled_at,sample_digest

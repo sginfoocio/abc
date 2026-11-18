@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from pathlib import Path
 import pandas as pd
 import streamlit as st
 from typing import TYPE_CHECKING
@@ -323,6 +324,46 @@ def _render_incidents(access: AccessControl, names: dict[str, str]) -> None:
                 st.error(str(exc))
 
 
+def _render_saved_reevaluation(store: PriceComparatorStore) -> None:
+    from filelock import Timeout
+    from price_saved_reevaluation import SavedSampleReevaluation
+
+    evidence = Path(__file__).resolve().parents[1] / "docs" / "Precios" / "100_EAN" / \
+        "Paquete_revision_7_casos_20261117.zip"
+    with st.expander("Reevaluación local de muestra guardada"):
+        st.caption("Sin HTTP: revalida una solicitud histórica, conserva su fecha y no renueva muestras caducadas.")
+        if not evidence.is_file():
+            st.error("Paquete histórico no disponible.")
+            return
+        request_id = st.number_input("ID de solicitud manual", min_value=1, step=1, key="saved_reeval_request")
+        if st.button("Previsualizar reevaluación", key="saved_reeval_preview"):
+            try:
+                st.session_state["saved_reeval_preview"] = SavedSampleReevaluation(
+                    store, evidence).preview(int(request_id))
+            except (ValueError, KeyError, OSError, sqlite3.Error) as exc:
+                st.error(str(exc))
+        preview = st.session_state.get("saved_reeval_preview")
+        if preview:
+            st.json(preview)
+            with st.form("saved_reeval_apply"):
+                actor = st.text_input("Responsable", value=_actor(), key="saved_reeval_actor")
+                note = st.text_input("Motivo", key="saved_reeval_note")
+                approved = st.checkbox("Confirmo reevaluación local sin HTTP", key="saved_reeval_confirm")
+                commit = st.text_input("Versión/commit de 40 caracteres", key="saved_reeval_commit")
+                submitted = st.form_submit_button("Aplicar reevaluación auditada")
+            if submitted:
+                try:
+                    if not approved:
+                        raise ValueError("Confirmación expresa obligatoria")
+                    result = SavedSampleReevaluation(store, evidence).apply(
+                        int(request_id), actor=actor, note=note, build_commit=commit,
+                        approved=True)
+                    st.json(result)
+                    st.session_state.pop("saved_reeval_preview", None)
+                except (ValueError, Timeout, TimeoutError, sqlite3.Error) as exc:
+                    st.error(str(exc))
+
+
 def _render_locator(store: PriceComparatorStore, names: dict[str, str]) -> None:
     st.caption("Motor propio: busca cada producto vigilado por marca + modelo + código de color en las fuentes "
                "autorizadas (URL ya verificada, feed, sitemap, páginas de marca/catálogo, buscador interno), guarda "
@@ -568,6 +609,8 @@ def _render_locator(store: PriceComparatorStore, names: dict[str, str]) -> None:
                 st.session_state.pop("manual_review_bulk_preview", None)
                 st.session_state["manual_review_grid_revision"] = revision + 1
                 st.rerun()
+
+    _render_saved_reevaluation(store)
 
     st.markdown("**Progreso persistente de confirmaciones y lecturas**")
     monitor = PriceMonitor(store)
@@ -1386,8 +1429,9 @@ def _render_continuity_capture(service, frozen: dict, *, active: bool = True) ->
             st.download_button("Descargar evidencia de captura", json.dumps(result, ensure_ascii=False).encode("utf-8"),
                                "price-continuity-capture.json", "application/json", key="continuity_capture_download")
 
-    with st.expander("Diagnóstico supervisado de candidatas en revisión"):
-        st.caption("Consulta una candidata ya documentada sin aceptar la revisión ni modificar ofertas o plazos. "
+    with st.expander("Diagnóstico supervisado de fichas en revisión"):
+        st.caption("Consulta una candidata documentada o ficha aceptada cuya lectura falló, sin aceptar otra "
+                   "revisión ni modificar ofertas o plazos. "
                    "Usa permisos, robots y presupuestos existentes; los rechazos también se auditan. Introduzca "
                    "su identidad real; el campo no autentica al responsable.")
         cid = st.selectbox("Competidor", options=list(frozen["competitors"]),
@@ -1397,13 +1441,26 @@ def _render_continuity_capture(service, frozen: dict, *, active: bool = True) ->
         st.button("Actualizar estado", key="diagnostic_refresh")
         results = service.diagnostic_results(cid, ean)
         retried_ids = {r["retry_of"] for r in results if r["retry_of"] is not None}
+        retryable_ids = set()
+        for result in results:
+            if result["status"] != "rejected" or result["id"] in retried_ids:
+                continue
+            try:
+                audit = json.loads(result["result"])
+            except (TypeError, json.JSONDecodeError):
+                st.warning(f"Resultado diagnóstico {result['id']} ilegible; no se propone reintento.")
+                continue
+            if (isinstance(audit, dict) and audit.get("stage") == "lock_and_scope"
+                    and audit.get("requests") == []
+                    and (audit.get("error_type") == "PilotError"
+                         or (audit.get("error_type") == "EvidenceError"
+                             and result["reason"] == "El almacenamiento no acredita permisos privados"))):
+                retryable_ids.add(result["id"])
         if results:
             labels = {"pending": "pendiente", "running": "ejecutando", "captured": "capturado",
                       "deferred": "aplazado", "expired": "caducado", "rejected": "rechazado"}
             display = [{**r, "estado": ("reintentable (sujeto a comprobación)"
-                        if r["status"] == "rejected"
-                        and r["id"] not in retried_ids
-                        and r["reason"] == "El almacenamiento no acredita permisos privados"
+                        if r["id"] in retryable_ids
                         else labels.get(r["status"], r["status"]))} for r in results]
             st.dataframe(pd.DataFrame(display), hide_index=True)
             available = [r for r in results if r["available"]]
@@ -1418,13 +1475,11 @@ def _render_continuity_capture(service, frozen: dict, *, active: bool = True) ->
                 except (ValueError, sqlite3.Error) as exc:
                     st.warning(f"Evidencia no disponible: {exc}")
         if not candidates:
-            st.info("No hay candidatas documentadas pendientes de revisión para este par.")
+            st.info("No hay fichas documentadas elegibles para diagnóstico de este par.")
             return
-        url = st.selectbox("URL candidata documentada", candidates, key="diagnostic_url")
+        url = st.selectbox("URL documentada o ficha aceptada", candidates, key="diagnostic_url")
         info = load_build_info()
-        retryable = [r for r in results if r["id"] not in retried_ids
-                     and r["url"] == url and r["status"] == "rejected"
-                     and r["reason"] == "El almacenamiento no acredita permisos privados"]
+        retryable = [r for r in results if r["id"] in retryable_ids and r["url"] == url]
         with st.form("diagnostic_capture_form"):
             actor = st.text_input("Responsable", value="")
             note = st.text_input("Motivo del diagnóstico")
