@@ -972,7 +972,7 @@ class PriceMonitor:
                             SET status='probable',match_status='manual_review',
                             note=substr(? || ' · ' || note,1,1000)
                             WHERE competitor_id=? AND ean=? AND url=?
-                            AND NOT (status='verified' AND source='user')""", (detail, cid, ean, url))
+                            """, (detail, cid, ean, url))
                         if page:
                             con.execute("""UPDATE discovery_index SET facts=?,checked_at=? WHERE competitor_id=?
                                 AND url=?""", (json.dumps(asdict(page), ensure_ascii=False), sampled_at, cid, url))
