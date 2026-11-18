@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import datetime
 from io import BytesIO
 import logging
 import json
 import sqlite3
 import threading
 from zipfile import BadZipFile
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
@@ -26,6 +28,12 @@ from price_web import (
     EXTRACTION_TEXT, LOCATION_TEXT, OPERABILITY_TEXT, WebPriceSearch, WebSearchError, validate_competitor_url,
 )
 from vytria_price_sync import ISSUE_LABELS, STATUS_LABELS, SyncInProgress, VytriaPriceSync
+
+TOP_LEVEL_SECTIONS = ("Inicio", "Productos", "Tiendas", "Por revisar", "Ajustes avanzados")
+
+
+def _madrid_timestamp() -> str:
+    return datetime.now(ZoneInfo("Europe/Madrid")).isoformat(timespec="minutes")
 
 
 OWN_PRICE_COLUMNS = [
@@ -1972,6 +1980,108 @@ def _render_admin_history(store: PriceComparatorStore) -> None:
                            "recuperaciones-piloto.csv", "text/csv", key="admin_recovery_audit_export")
 
 
+def _render_inicio(store: PriceComparatorStore, data: dict) -> None:
+    from price_trial import PriceTrial, trial_row
+
+    st.caption(f"Pantalla actualizada: {_madrid_timestamp()} · horario de Madrid")
+    watch_count = int(store.watch_count()) if hasattr(store, "watch_count") else 0
+    with store._connect() as connection:
+        if watch_count == 0:
+            watch_count = connection.execute(
+                "SELECT COUNT(*) FROM watch_products WHERE active=1").fetchone()[0]
+        active_competitors = connection.execute(
+            "SELECT COUNT(*) FROM competitors WHERE active=1").fetchone()[0]
+        heartbeat = connection.execute(
+            "SELECT value FROM comparator_settings WHERE key='price_trial_worker_heartbeat'").fetchone()
+
+    offers = data["offers"]
+    valid_eans = int(offers["ean"].nunique()) if not offers.empty and "ean" in offers else 0
+    cols = st.columns(4)
+    cols[0].metric("Productos con comparación válida", f"{valid_eans}/{watch_count}")
+    cols[1].metric("Vigilancia activa", "Sí" if watch_count else "No")
+    cols[2].metric("Tiendas activas", active_competitors)
+    cols[3].metric("EAN protegidos", len(store.watchlist()) if hasattr(store, "watchlist") else watch_count)
+
+    trial = PriceTrial(store)
+    continuity = trial.continuity_report()
+    st.subheader("Estado operativo")
+    if continuity:
+        status = continuity["status"]
+        heartbeat_at = continuity.get("heartbeat_at_madrid")
+        st.write({
+            "prepared": "Configurada para la próxima activación",
+            "active": "Vigilancia de continuidad activa",
+            "paused": "Vigilancia de continuidad pausada",
+            "stopped": "Vigilancia de continuidad detenida",
+        }.get(status, f"Estado: {status}"))
+        st.caption(f"Última señal del trabajador: {heartbeat_at or 'sin señal reciente'} · Madrid")
+    else:
+        st.write("Sin continuidad configurada")
+        st.caption("No hay una vigilancia independiente preparada o activada.")
+
+    sync = _make_sync(store)
+    if sync.is_running():
+        st.info("Hay una lectura de precios de Odoo realmente en ejecución.")
+    else:
+        st.caption("No hay una lectura de precios de Odoo en ejecución ahora.")
+    last_sync = sync.last_successful_run()
+    st.caption(
+        "Última sincronización completada: "
+        + (last_sync["finished_at"][:16].replace("T", " ") if last_sync else "sin registro")
+        + " UTC"
+    )
+
+    st.subheader("Acciones habituales")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        approved = st.checkbox("He revisado el alcance autorizado", key="inicio_odoo_scope")
+        if st.button("Actualizar mis precios", key="inicio_odoo_sync",
+                     disabled=approved is False or sync.is_running()):
+            try:
+                result = sync.run(trigger="watch:manual", watched_only=True)
+                st.success(
+                    f"Seleccionados: {result.monitored}. Procesados: "
+                    f"{result.inserted + result.changed + result.unchanged}. "
+                    f"Pendientes/incidencias: {result.issues}. "
+                    f"Estado: {result.status}."
+                )
+                if result.monitored == 0:
+                    st.warning("Se procesaron 0 productos. Comprueba que la continuidad activa contiene el manifiesto exacto.")
+            except SyncInProgress as exc:
+                st.warning(str(exc))
+    with c2:
+        st.button("Revisar pendientes", key="inicio_review",
+                  on_click=lambda: st.session_state.update({"inicio_jump_review": True}))
+    with c3:
+        if continuity and continuity["status"] in {"active", "paused"}:
+            actor = st.text_input("Responsable", key="inicio_continuity_actor")
+            pause = continuity["status"] == "active"
+            if st.button("Pausar vigilancia" if pause else "Reanudar vigilancia",
+                         key="inicio_continuity_control", disabled=not actor.strip()):
+                try:
+                    (trial.pause_continuity(actor=actor) if pause
+                     else trial.resume_continuity(actor=actor))
+                    st.success("Vigilancia actualizada. No se duplican trabajos.")
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+
+    st.subheader("Qué necesita atención")
+    pending = 0
+    with store._connect() as connection:
+        pending = connection.execute(
+            "SELECT COUNT(*) FROM locate_jobs WHERE state IN ('pending','waiting','running','review','failed')"
+        ).fetchone()[0]
+        pending += connection.execute(
+            "SELECT COUNT(*) FROM monitor_jobs WHERE state IN ('pending','waiting','running','review','failed')"
+        ).fetchone()[0]
+    if pending:
+        st.warning(f"{pending} trabajos necesitan revisión o espera normal.")
+    else:
+        st.success("No hay incidencias pendientes registradas.")
+    st.caption("El heartbeat sólo confirma una señal del trabajador; no demuestra por sí solo que la cola avance.")
+
+
 def render_price_comparator_page() -> None:
     page_title(
         "Comparador de precios",
@@ -1989,15 +2099,34 @@ def render_price_comparator_page() -> None:
     _show_pending_reports()
     data = _load(store)
     _render_shared_filters(data)
-    summary_tab, products_tab, pending_tab, admin_tab = st.tabs(
-        ["Resumen", "Productos", "Pendientes", "Administración"])
-    with summary_tab:
-        _render_summary(store, data)
+    inicio_tab, products_tab, stores_tab, pending_tab, advanced_tab = st.tabs(list(TOP_LEVEL_SECTIONS))
+    with inicio_tab:
+        _render_inicio(store, data)
     with products_tab:
         _render_products(store, data)
+    with stores_tab:
+        st.caption(
+            "Configuración declarada: 14 tiendas · mercado español · EUR · IVA incluido. "
+            "La declaración del responsable no sustituye una evidencia de mercado o impuestos de una ficha."
+        )
+        competitors = store.competitors()
+        if competitors.empty:
+            st.info("No hay tiendas registradas.")
+        else:
+            shown = competitors.copy()
+            st.dataframe(
+                shown[["name", "domain", "market", "currency", "active", "url"]].rename(columns={
+                    "name": "Tienda", "domain": "Dominio", "market": "Mercado",
+                    "currency": "Moneda", "active": "Activa", "url": "URL",
+                }),
+                hide_index=True,
+                width="stretch",
+                column_config={"URL": st.column_config.LinkColumn("URL")},
+            )
+        st.caption("La configuración detallada, autorizaciones, presupuestos y bloqueos está en Ajustes avanzados.")
     with pending_tab:
         _render_pending_reviews(PricePilot(store))
-    with admin_tab:
+    with advanced_tab:
         from app_pages.price_watch import render_admin
 
         render_admin(store, data)

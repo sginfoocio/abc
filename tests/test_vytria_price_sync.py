@@ -238,14 +238,28 @@ def test_discrepancy_is_recorded_without_altering_source_price(tmp_path) -> None
 
 def test_special_map_65_percent_is_flagged_for_review(tmp_path) -> None:
     store, odoo = _store(tmp_path, ["8056262398043"]), OdooFixture(tmp_path / "odoo.sqlite3")
-    # The 59 pricelist applies 45 % to the map named 65 %: price is consistent but exceptional.
+    # The 59 pricelist applies 45 % to the map named 65 %: the descriptive name is not a rejection.
     odoo.product("8056262398043", 400, 220, maps=(odoo.map_rule("Vytria España (65%)", 45),))
 
     _sync(store, odoo).run()
 
     row = _current(store, "8056262398043")
-    assert (row["price"], row["validation_status"], row["comparable"]) == (220, "exceptional_rule", 0)
-    assert "aplica 45" in row["validation_detail"]
+    assert (row["price"], row["validation_status"], row["comparable"]) == (220, "validated", 1)
+    assert "describe 65" in row["validation_detail"] and "aplica 45" in row["validation_detail"]
+
+
+@pytest.mark.parametrize("ean", [
+    "0889214402530", "0889214402547", "0889214519788", "0889214602701",
+])
+def test_four_audited_eans_accept_received_45_percent_tariff_price(tmp_path, ean) -> None:
+    store, odoo = _store(tmp_path, [ean]), OdooFixture(tmp_path / "odoo.sqlite3")
+    odoo.product(ean, 400, 220, maps=(odoo.map_rule("Vytria España (65%)", 45),))
+
+    result = _sync(store, odoo).run()
+
+    row = _current(store, ean)
+    assert result.status == "ok"
+    assert (row["price"], row["validation_status"], row["comparable"]) == (220, "validated", 1)
 
 
 def test_special_map_ct0649s_negative_discount_is_flagged(tmp_path) -> None:

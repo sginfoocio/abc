@@ -323,6 +323,7 @@ def _map_expected(product: OdooProduct) -> tuple[Decimal | None, str, str]:
         return None, "exceptional_rule", "sin precio de lista"
     expectations: dict[Decimal, str] = {}
     exceptional: list[str] = []
+    descriptive: list[str] = []
     missing = 0
     for rule in product.maps:
         if not rule.has_rule:
@@ -338,7 +339,9 @@ def _map_expected(product: OdooProduct) -> tuple[Decimal | None, str, str]:
         if discount < 0:
             exceptional.append(f"{rule.map_name}: descuento negativo {discount}%")
         if named and Decimal(named.group(1).replace(",", ".")) != discount:
-            exceptional.append(f"{rule.map_name}: la tarifa aplica {discount}%")
+            descriptive.append(
+                f"la etiqueta describe {named.group(1).replace(',', '.')} %, pero la regla vigente aplica {discount} %"
+            )
         value = product.list_price * (1 - discount / 100) + (rule.surcharge or 0)
         expectations[_rounded(value, rule.rounding)] = rule.map_name
     if not expectations:
@@ -351,6 +354,8 @@ def _map_expected(product: OdooProduct) -> tuple[Decimal | None, str, str]:
         if product.product_rules:
             extra.append("reglas específicas por producto/plantilla")
         return expected, "exceptional_rule", "; ".join(extra)
+    if descriptive:
+        return expected, "", "; ".join(descriptive)
     return expected, "", ""
 
 
@@ -374,7 +379,7 @@ def validate_product(product: OdooProduct, row: PriceRow) -> Validation:
                           .strip(), expected, False)
     if problem == "exceptional_rule":
         return Validation("exceptional_rule", detail, expected, False)
-    return Validation(VALIDATED, "", expected, True)
+    return Validation(VALIDATED, detail, expected, True)
 
 
 def _fingerprint(*values: Any) -> str:
@@ -489,6 +494,7 @@ class VytriaPriceSync:
     def _run_locked(self, trigger: str, *, watched_only: bool = False,
                     eans: list[str] | None = None) -> SyncResult:
         from price_trial import TrialDenied, active_execution, require_sync, trial_row
+        from price_trial import continuity_row
         if eans is not None:
             if len(eans) != len(set(eans)) or any(normalize_gtin(e) != e for e in eans):
                 raise ValueError("Selección de sincronización no normalizada o duplicada")
@@ -499,9 +505,14 @@ class VytriaPriceSync:
                     "SELECT ean FROM watch_products WHERE active=1 ORDER BY ean" if watched_only else
                     "SELECT ean FROM products ORDER BY ean")]
             row = trial_row(self.store)
+            continuity = continuity_row(self.store)
             if row and not active_execution(self.store):
-                owned = set(json.loads(row["manifest"])["eans"])
-                selected = [ean for ean in selected if ean not in owned]
+                if continuity and continuity["status"] == "active":
+                    manifest = json.loads(continuity["manifest"])
+                    selected = [ean for ean in selected if ean in set(manifest["eans"])]
+                else:
+                    owned = set(json.loads(row["manifest"])["eans"])
+                    selected = [ean for ean in selected if ean not in owned]
         require_sync(self.store, selected, self._now())
         with self.store._connect() as connection, connection:
             # Holding the lock means any run still marked as running died without closing.

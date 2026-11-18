@@ -191,8 +191,15 @@ def require_sync(store, eans: list[str], now: datetime) -> None:
                 or now >= datetime.fromisoformat(row["expires_at"])
                 or execution.competitor_id or set(eans) != frozen or len(eans) != len(frozen)):
             raise TrialDenied("Sincronización fuera de alcance o ventana del piloto")
-    elif frozen.intersection(eans):
-        raise TrialDenied("EAN reservados al sincronizador filtrado del piloto de 72 h")
+    else:
+        continuity = continuity_row(store)
+        if continuity and continuity["status"] == "active":
+            selected = set(json.loads(continuity["manifest"])["eans"])
+            if set(eans) == selected and len(eans) == len(set(eans)):
+                return
+            raise TrialDenied("Sincronización fuera del manifiesto activo de continuidad")
+        elif frozen.intersection(eans):
+            raise TrialDenied("EAN reservados al sincronizador filtrado del piloto de 72 h")
 
 
 def budget_limits(store, cid: str, budget: dict) -> dict:
