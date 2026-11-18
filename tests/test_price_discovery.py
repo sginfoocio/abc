@@ -377,6 +377,7 @@ def test_pending_candidate_ui_exposes_discard_and_validates_reviewer_note(pilot,
     app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
                               "render_price_comparator_page()").run(timeout=60)
     assert not app.exception
+    app.radio(key="top_level_section").set_value("Por revisar").run(timeout=60)
     assert app.selectbox(key="pending_candidate").value == int(discovery.candidates().iloc[0].id)
     assert app.button(key="discovery_discard_candidate").label == "Descartar candidato"
     app.button(key="discovery_discard_candidate").click().run(timeout=60)
@@ -561,6 +562,7 @@ def test_product_discovery_unauthorized_warning_is_readable_and_offline(pilot, m
         "from app_pages.price_comparator import render_price_comparator_page\n"
         "render_price_comparator_page()").run(timeout=60)
     if key_prefix == "products":
+        app.radio(key="top_level_section").set_value("Productos").run(timeout=60)
         app.selectbox(key="products_selected_ean").set_value(EAN).run(timeout=60)
     else:
         app.selectbox(key="dashboard_product").set_value(EAN).run(timeout=60)

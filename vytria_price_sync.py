@@ -323,6 +323,7 @@ def _map_expected(product: OdooProduct) -> tuple[Decimal | None, str, str]:
         return None, "exceptional_rule", "sin precio de lista"
     expectations: dict[Decimal, str] = {}
     exceptional: list[str] = []
+    informative: list[str] = []
     descriptive: list[str] = []
     missing = 0
     for rule in product.maps:
@@ -332,10 +333,12 @@ def _map_expected(product: OdooProduct) -> tuple[Decimal | None, str, str]:
         discount = rule.discount or Decimal(0)
         named = re.search(r"\((\d+(?:[.,]\d+)?)\s*%\)", rule.map_name)
         if rule.compute_price != "formula" or rule.base != "list_price":
-            exceptional.append(f"{rule.map_name}: cálculo {rule.compute_price}/{rule.base}")
+            informative.append(f"{rule.map_name}: cálculo vigente distinto de la reproducción local "
+                               f"{rule.compute_price}/{rule.base}; se acredita el importe recibido")
             continue
         if rule.surcharge or rule.min_quantity not in (None, 0, 1) or rule.has_dates:
-            exceptional.append(f"{rule.map_name}: recargo, cantidad mínima o fechas")
+            informative.append(f"{rule.map_name}: recargo, cantidad mínima o fechas vigentes; "
+                               "se acredita el importe recibido")
         if discount < 0:
             exceptional.append(f"{rule.map_name}: descuento negativo {discount}%")
         if named and Decimal(named.group(1).replace(",", ".")) != discount:
@@ -349,13 +352,17 @@ def _map_expected(product: OdooProduct) -> tuple[Decimal | None, str, str]:
     if len(expectations) > 1:
         return None, "multiple_maps", "mapas con resultados distintos: " + ", ".join(sorted(expectations.values()))
     expected = next(iter(expectations))
-    if exceptional or product.product_rules:
-        extra = list(exceptional)
-        if product.product_rules:
-            extra.append("reglas específicas por producto/plantilla")
-        return expected, "exceptional_rule", "; ".join(extra)
+    if exceptional:
+        return expected, "exceptional_rule", "; ".join(exceptional)
+    extra = list(informative)
+    if product.product_rules:
+        extra.append("reglas específicas vigentes por producto/plantilla; se acredita el importe recibido")
+    if extra:
+        if descriptive:
+            extra.extend(descriptive)
+        return expected, "informative_rule", "; ".join(extra)
     if descriptive:
-        return expected, "", "; ".join(descriptive)
+        return expected, "informative_rule", "; ".join(descriptive)
     return expected, "", ""
 
 
@@ -374,11 +381,15 @@ def validate_product(product: OdooProduct, row: PriceRow) -> Validation:
         return Validation("tax_issue", "el impuesto de venta no está incluido en el precio", expected, False)
     if problem in ("no_map", "multiple_maps"):
         return Validation(problem, detail, expected, False)
+    if problem == "informative_rule":
+        return Validation(VALIDATED, detail, expected, True)
     if expected is not None and abs(expected - found) > PRICE_TOLERANCE:
         return Validation("price_mismatch", f"tarifa {found} frente a {expected} recalculado ({detail or 'fórmula'})"
                           .strip(), expected, False)
     if problem == "exceptional_rule":
         return Validation("exceptional_rule", detail, expected, False)
+    if problem == "informative_rule":
+        return Validation(VALIDATED, detail, expected, True)
     return Validation(VALIDATED, detail, expected, True)
 
 

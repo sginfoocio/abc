@@ -274,7 +274,7 @@ def test_special_map_ct0649s_negative_discount_is_flagged(tmp_path) -> None:
     assert "negativo" in row["validation_detail"]
 
 
-def test_product_specific_rule_is_exceptional(tmp_path) -> None:
+def test_product_specific_rule_uses_authoritative_received_price(tmp_path) -> None:
     store, odoo = _store(tmp_path, ["8056262398043"]), OdooFixture(tmp_path / "odoo.sqlite3")
     pid = odoo.product("8056262398043", 360, 252, maps=(odoo.map_rule("Vytria España (30%)", 30),))
     odoo.execute("""INSERT INTO product_pricelist_item(id,pricelist_id,applied_on,product_id,compute_price,base,active)
@@ -282,7 +282,21 @@ def test_product_specific_rule_is_exceptional(tmp_path) -> None:
 
     _sync(store, odoo).run()
 
-    assert _current(store, "8056262398043")["validation_status"] == "exceptional_rule"
+    row = _current(store, "8056262398043")
+    assert (row["price"], row["validation_status"], row["comparable"]) == (252, "validated", 1)
+    assert "importe recibido" in row["validation_detail"]
+
+
+def test_local_formula_limitation_does_not_invalidate_authoritative_received_price(tmp_path) -> None:
+    store, odoo = _store(tmp_path, ["8056262398043"]), OdooFixture(tmp_path / "odoo.sqlite3")
+    odoo.product("8056262398043", 360, 252,
+                 maps=(odoo.map_rule("Vytria España con recargo", 30, surcharge=5),))
+
+    _sync(store, odoo).run()
+
+    row = _current(store, "8056262398043")
+    assert (row["price"], row["validation_status"], row["comparable"]) == (252, "validated", 1)
+    assert "recargo" in row["validation_detail"] and "importe recibido" in row["validation_detail"]
 
 
 def test_product_without_map_is_not_comparable(tmp_path) -> None:

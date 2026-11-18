@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 import logging
 import json
@@ -1981,9 +1981,12 @@ def _render_admin_history(store: PriceComparatorStore) -> None:
 
 
 def _render_inicio(store: PriceComparatorStore, data: dict) -> None:
-    from price_trial import PriceTrial, trial_row
+    from price_trial import PriceTrial
 
     st.caption(f"Pantalla actualizada: {_madrid_timestamp()} · horario de Madrid")
+    filtered = data.get("filtered_summary")
+    if filtered is None:
+        filtered = data["summary"]
     watch_count = int(store.watch_count()) if hasattr(store, "watch_count") else 0
     with store._connect() as connection:
         if watch_count == 0:
@@ -1991,45 +1994,88 @@ def _render_inicio(store: PriceComparatorStore, data: dict) -> None:
                 "SELECT COUNT(*) FROM watch_products WHERE active=1").fetchone()[0]
         active_competitors = connection.execute(
             "SELECT COUNT(*) FROM competitors WHERE active=1").fetchone()[0]
-        heartbeat = connection.execute(
-            "SELECT value FROM comparator_settings WHERE key='price_trial_worker_heartbeat'").fetchone()
-
-    offers = data["offers"]
-    valid_eans = int(offers["ean"].nunique()) if not offers.empty and "ean" in offers else 0
+    if filtered is not None and not filtered.empty:
+        valid_eans = int(((filtered["own_price_eur"].notna()) &
+                          (filtered["competitor_count"].fillna(0) > 0)).sum())
+        protected_eans = len(filtered)
+    else:
+        valid_eans, protected_eans = 0, watch_count
+    protected_eans = max(protected_eans, watch_count)
     cols = st.columns(4)
-    cols[0].metric("Productos con comparación válida", f"{valid_eans}/{watch_count}")
-    cols[1].metric("Vigilancia activa", "Sí" if watch_count else "No")
+    cols[0].metric("Productos con comparación válida", f"{valid_eans}/{protected_eans}")
+    cols[1].metric("Productos vigilados", watch_count)
     cols[2].metric("Tiendas activas", active_competitors)
-    cols[3].metric("EAN protegidos", len(store.watchlist()) if hasattr(store, "watchlist") else watch_count)
+    cols[3].metric("EAN protegidos", protected_eans)
 
     trial = PriceTrial(store)
     continuity = trial.continuity_report()
     st.subheader("Estado operativo")
     if continuity:
         status = continuity["status"]
-        heartbeat_at = continuity.get("heartbeat_at_madrid")
-        st.write({
+        configured = {
             "prepared": "Configurada para la próxima activación",
             "active": "Vigilancia de continuidad activa",
             "paused": "Vigilancia de continuidad pausada",
             "stopped": "Vigilancia de continuidad detenida",
-        }.get(status, f"Estado: {status}"))
-        st.caption(f"Última señal del trabajador: {heartbeat_at or 'sin señal reciente'} · Madrid")
+        }.get(status, f"Estado configurado: {status}")
+        st.write(configured)
+        raw_heartbeat = continuity.get("heartbeat_at")
+        heartbeat_recent = False
+        if raw_heartbeat:
+            try:
+                heartbeat_dt = datetime.fromisoformat(raw_heartbeat)
+                if heartbeat_dt.tzinfo is None:
+                    heartbeat_dt = heartbeat_dt.replace(tzinfo=timezone.utc)
+                age = datetime.now(timezone.utc) - heartbeat_dt.astimezone(timezone.utc)
+                heartbeat_recent = timedelta(0) <= age < timedelta(minutes=2)
+            except (TypeError, ValueError):
+                heartbeat_recent = False
+        worker = ("Trabajador disponible con señal reciente" if status == "active" and heartbeat_recent
+                  else "Trabajador sin señal reciente" if status == "active"
+                  else "Trabajador no iniciado desde este estado")
+        st.caption(f"Estado configurado: {status}. {worker}. "
+                   f"Última señal: {continuity.get('heartbeat_at_madrid') or 'sin señal reciente'} · Madrid")
     else:
         st.write("Sin continuidad configurada")
         st.caption("No hay una vigilancia independiente preparada o activada.")
 
     sync = _make_sync(store)
-    if sync.is_running():
-        st.info("Hay una lectura de precios de Odoo realmente en ejecución.")
+    running_jobs = int(sync.is_running())
+    waiting_jobs = decision_jobs = blocked_jobs = 0
+    with store._connect() as connection:
+        for table in ("locate_jobs", "monitor_jobs"):
+            running_jobs += connection.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE state='running'").fetchone()[0]
+            waiting_jobs += connection.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE state IN ('pending','waiting')").fetchone()[0]
+            decision_jobs += connection.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE state='review'").fetchone()[0]
+            blocked_jobs += connection.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE state IN ('failed','blocked','unavailable')").fetchone()[0]
+        if continuity:
+            running_jobs += connection.execute(
+                "SELECT COUNT(*) FROM price_continuity_pairs WHERE continuity_id=? AND state='running'",
+                (continuity["id"],)).fetchone()[0]
+    if running_jobs:
+        st.info(f"Trabajo realmente en ejecución: {running_jobs}.")
     else:
-        st.caption("No hay una lectura de precios de Odoo en ejecución ahora.")
-    last_sync = sync.last_successful_run()
-    st.caption(
-        "Última sincronización completada: "
-        + (last_sync["finished_at"][:16].replace("T", " ") if last_sync else "sin registro")
-        + " UTC"
-    )
+        st.caption("No hay trabajo realmente en ejecución.")
+    if waiting_jobs:
+        st.caption(f"Esperando normalmente: {waiting_jobs} trabajos.")
+    if decision_jobs:
+        st.warning(f"Necesita una decisión: {decision_jobs} revisiones.")
+    if blocked_jobs:
+        st.error(f"Bloqueado o con error: {blocked_jobs} trabajos.")
+    if continuity:
+        sync_receipt = continuity.get("sync_receipt") or {}
+        sync_status = sync_receipt.get("status") if isinstance(sync_receipt, dict) else None
+        last_task = ("sin registro" if not sync_status else
+                     {"running": "en ejecución", "ok": "completada correctamente",
+                      "partial": "completada con incidencias", "failed": "falló",
+                      "error": "falló"}.get(sync_status, sync_status))
+        st.caption(f"Última tarea de sincronización: {last_task}.")
+        next_sync = continuity.get("next_sync_at_madrid")
+        st.caption("Próxima tarea: " + (next_sync + " · Madrid" if next_sync else "sin fecha confirmada"))
 
     st.subheader("Acciones habituales")
     c1, c2, c3 = st.columns(3)
@@ -2037,21 +2083,38 @@ def _render_inicio(store: PriceComparatorStore, data: dict) -> None:
         approved = st.checkbox("He revisado el alcance autorizado", key="inicio_odoo_scope")
         if st.button("Actualizar mis precios", key="inicio_odoo_sync",
                      disabled=approved is False or sync.is_running()):
-            try:
-                result = sync.run(trigger="watch:manual", watched_only=True)
-                st.success(
-                    f"Seleccionados: {result.monitored}. Procesados: "
-                    f"{result.inserted + result.changed + result.unchanged}. "
-                    f"Pendientes/incidencias: {result.issues}. "
-                    f"Estado: {result.status}."
-                )
-                if result.monitored == 0:
-                    st.warning("Se procesaron 0 productos. Comprueba que la continuidad activa contiene el manifiesto exacto.")
-            except SyncInProgress as exc:
-                st.warning(str(exc))
+            if not continuity or continuity["status"] != "active":
+                st.error("La actualización no puede iniciar: la continuidad no está activa.")
+            else:
+                actor = str(st.session_state.get("auth_user") or st.session_state.get("auth_role") or "operador")
+                try:
+                    report = trial.run_continuity_sync_now(actor=actor)
+                    receipt = report["sync_receipt"]
+                    selected = receipt.get("monitored", 0)
+                    processed = receipt.get("inserted", 0) + receipt.get("changed", 0) + receipt.get("unchanged", 0)
+                    issues = receipt.get("issues", 0)
+                    status = receipt.get("status", "unknown")
+                    if selected == 0:
+                        st.warning("Se procesaron 0 productos. No se inició una actualización útil: "
+                                   "comprueba el manifiesto activo y el contexto autorizado.")
+                    elif status == "ok":
+                        st.success(f"Seleccionados: {selected}. Procesados: {processed}. "
+                                   f"Incidencias: {issues}. Pendientes: {issues}.")
+                    elif status == "partial":
+                        st.warning(f"Seleccionados: {selected}. Procesados: {processed}. "
+                                   f"Incidencias: {issues}. Pendientes: {issues}. "
+                                   "Parte de la actualización requiere revisión.")
+                    else:
+                        st.error(f"Seleccionados: {selected}. Procesados: {processed}. "
+                                 f"Incidencias: {issues}. Pendientes: {selected - processed}. "
+                                 f"Motivo: {receipt.get('error') or 'error de sincronización'}")
+                    st.rerun()
+                except ValueError as exc:
+                    st.warning(str(exc))
     with c2:
-        st.button("Revisar pendientes", key="inicio_review",
-                  on_click=lambda: st.session_state.update({"inicio_jump_review": True}))
+        if st.button("Revisar pendientes", key="inicio_review"):
+            st.session_state["top_level_requested"] = "Por revisar"
+            st.rerun()
     with c3:
         if continuity and continuity["status"] in {"active", "paused"}:
             actor = st.text_input("Responsable", key="inicio_continuity_actor")
@@ -2067,19 +2130,17 @@ def _render_inicio(store: PriceComparatorStore, data: dict) -> None:
                     st.error(str(exc))
 
     st.subheader("Qué necesita atención")
-    pending = 0
-    with store._connect() as connection:
-        pending = connection.execute(
-            "SELECT COUNT(*) FROM locate_jobs WHERE state IN ('pending','waiting','running','review','failed')"
-        ).fetchone()[0]
-        pending += connection.execute(
-            "SELECT COUNT(*) FROM monitor_jobs WHERE state IN ('pending','waiting','running','review','failed')"
-        ).fetchone()[0]
-    if pending:
-        st.warning(f"{pending} trabajos necesitan revisión o espera normal.")
+    if decision_jobs:
+        st.warning(f"{decision_jobs} fichas necesitan confirmación o rechazo.")
+    elif blocked_jobs:
+        st.error(f"{blocked_jobs} trabajos están bloqueados o terminaron con error.")
+    elif waiting_jobs:
+        st.info(f"{waiting_jobs} trabajos están esperando normalmente. No hace falta intervenir.")
     else:
         st.success("No hay incidencias pendientes registradas.")
     st.caption("El heartbeat sólo confirma una señal del trabajador; no demuestra por sí solo que la cola avance.")
+
+    _render_summary(store, data)
 
 
 def render_price_comparator_page() -> None:
@@ -2099,34 +2160,27 @@ def render_price_comparator_page() -> None:
     _show_pending_reports()
     data = _load(store)
     _render_shared_filters(data)
-    inicio_tab, products_tab, stores_tab, pending_tab, advanced_tab = st.tabs(list(TOP_LEVEL_SECTIONS))
-    with inicio_tab:
+    requested = st.session_state.pop("top_level_requested", None)
+    if requested in TOP_LEVEL_SECTIONS:
+        st.session_state["top_level_section"] = requested
+    section = st.radio("Sección", TOP_LEVEL_SECTIONS, horizontal=True, key="top_level_section")
+    if section == "Inicio":
         _render_inicio(store, data)
-    with products_tab:
+    elif section == "Productos":
         _render_products(store, data)
-    with stores_tab:
+    elif section == "Tiendas":
         st.caption(
             "Configuración declarada: 14 tiendas · mercado español · EUR · IVA incluido. "
             "La declaración del responsable no sustituye una evidencia de mercado o impuestos de una ficha."
         )
-        competitors = store.competitors()
-        if competitors.empty:
-            st.info("No hay tiendas registradas.")
-        else:
-            shown = competitors.copy()
-            st.dataframe(
-                shown[["name", "domain", "market", "currency", "active", "url"]].rename(columns={
-                    "name": "Tienda", "domain": "Dominio", "market": "Mercado",
-                    "currency": "Moneda", "active": "Activa", "url": "URL",
-                }),
-                hide_index=True,
-                width="stretch",
-                column_config={"URL": st.column_config.LinkColumn("URL")},
-            )
-        st.caption("La configuración detallada, autorizaciones, presupuestos y bloqueos está en Ajustes avanzados.")
-    with pending_tab:
+        _render_competitors(store, data)
+    elif section == "Por revisar":
+        names = {row["id"]: row["name"] for row in store.competitors().to_dict("records")}
+        from app_pages.price_watch import _render_locator
+        st.subheader("Revisiones actuales")
+        _render_locator(store, names)
         _render_pending_reviews(PricePilot(store))
-    with advanced_tab:
+    else:
         from app_pages.price_watch import render_admin
 
         render_admin(store, data)

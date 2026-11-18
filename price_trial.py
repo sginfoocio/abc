@@ -864,6 +864,33 @@ class PriceTrial:
             con.execute("UPDATE price_continuity SET sync_receipt=?,error='' WHERE id=?",
                         (json.dumps(receipt, ensure_ascii=False), row["id"]))
 
+    def run_continuity_sync_now(self, *, actor: str) -> dict:
+        """Request one continuity Odoo sync under the existing exact manifest and sync lock."""
+        from vytria_price_sync import SyncInProgress
+        actor = actor.strip()
+        if not actor:
+            raise ValueError("Indique el responsable de la actualización")
+        try:
+            with self.continuity_lock():
+                row = continuity_row(self.store)
+                if not row or row["status"] != "active":
+                    raise ValueError("La continuidad debe estar activa para actualizar los precios")
+                manifest = json.loads(row["manifest"])
+                if len(manifest.get("eans", [])) != 100 or len(set(manifest["eans"])) != 100:
+                    raise ValueError("El manifiesto activo no contiene exactamente los 100 EAN protegidos")
+                with self.store._connect() as con, con:
+                    con.execute("""INSERT INTO access_audit(
+                        scope,scope_id,action,previous,current,actor,note,at
+                    ) VALUES('price_continuity',?,'manual_sync_requested',?,?,?,'Actualización solicitada desde Inicio',?)""",
+                                (str(row["id"]), row["sync_receipt"], json.dumps({"status": "running"}),
+                                 actor, self.clock().isoformat()))
+                self._run_continuity_sync(row)
+                return self.continuity_report()
+        except SyncInProgress as exc:
+            raise ValueError("Ya hay una actualización de precios en ejecución; no se inició otra") from exc
+        except Timeout as exc:
+            raise ValueError("Ya hay una actualización de continuidad en ejecución; no se inició otra") from exc
+
     def continuity_tick(self, *, max_pairs: int = 20, deadline_seconds: int = 240,
                         exact_pair: tuple[str, str] | None = None) -> int | None:
         try:

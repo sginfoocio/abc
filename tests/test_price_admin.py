@@ -215,6 +215,41 @@ def test_observation_export_preserves_original_history_and_provenance(tmp_path):
     assert pd.isna(previous["valid_until"]) and previous["checked_at"] == previous["captured_at"]
 
 
+def test_inicio_valid_comparison_requires_own_and_competitor_price(tmp_path, monkeypatch):
+    store, _, _, monitor, _, _, _ = _monitor_env(tmp_path, count=1)
+    monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
+    app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
+                              "render_price_comparator_page()").run(timeout=30)
+    app.radio(key="top_level_section").set_value("Inicio").run(timeout=30)
+    metrics = {m.label: m.value for m in app.metric}
+    assert metrics["Productos con comparación válida"].startswith("0/")
+
+
+def test_store_card_exposes_url_and_authorization_tasks(tmp_path, monkeypatch):
+    store, _, _, _, _, cid, _ = _monitor_env(tmp_path, count=1)
+    monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
+    app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
+                              "render_price_comparator_page()").run(timeout=30)
+    app.radio(key="top_level_section").set_value("Tiendas").run(timeout=30)
+    app.selectbox(key="competitor_card_section").set_value("URLs y fichas").run(timeout=30)
+    assert any(getattr(element, "key", "").startswith("store_url_value_")
+               for element in app.text_input)
+    app.selectbox(key="competitor_card_section").set_value("Acceso y métodos").run(timeout=30)
+    assert app.selectbox(key="access_method")
+    assert not app.exception
+
+
+def test_inicio_review_button_opens_pending_tray(tmp_path, monkeypatch):
+    store, _, _, _, _, _, _ = _monitor_env(tmp_path)
+    monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
+    app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
+                              "render_price_comparator_page()").run(timeout=30)
+    app.radio(key="top_level_section").set_value("Inicio").run(timeout=30)
+    app.button(key="inicio_review").click().run(timeout=30)
+    assert app.radio(key="top_level_section").value == "Por revisar"
+    assert not app.exception
+
+
 def test_six_sections_and_all_competitor_controls_are_offline(tmp_path, monkeypatch):
     store, _, _, monitor, _, _, _ = _monitor_env(tmp_path)
     monitor.run()
@@ -222,11 +257,13 @@ def test_six_sections_and_all_competitor_controls_are_offline(tmp_path, monkeypa
     monkeypatch.setattr("requests.get", lambda *a, **k: pytest.fail("No real HTTP"))
     app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
                              "render_price_comparator_page()").run(timeout=30)
-    assert app.selectbox(key="price_admin_section").options == list(ADMIN_SECTIONS)
-    for section in ADMIN_SECTIONS:
-        app.selectbox(key="price_admin_section").set_value(section).run(timeout=30)
+    assert app.radio(key="top_level_section").options == ["Inicio", "Productos", "Tiendas", "Por revisar", "Ajustes avanzados"]
+    for section in ["Inicio", "Productos", "Tiendas", "Por revisar", "Ajustes avanzados"]:
+        app.radio(key="top_level_section").set_value(section).run(timeout=30)
         assert not app.exception, section
-        if section == "Competidores":
+        if section == "Ajustes avanzados":
+            assert app.selectbox(key="price_admin_section").options == list(ADMIN_SECTIONS)
+        if section == "Tiendas":
             for task in app.selectbox(key="competitor_card_section").options:
                 app.selectbox(key="competitor_card_section").set_value(task).run(timeout=30)
                 assert not app.exception, task

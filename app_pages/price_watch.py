@@ -8,6 +8,7 @@ import hashlib
 import json
 import sqlite3
 from pathlib import Path
+from datetime import datetime, timezone
 import pandas as pd
 import streamlit as st
 from typing import TYPE_CHECKING
@@ -18,7 +19,7 @@ if TYPE_CHECKING:
 
 from price_access import (DEFAULT_BUDGETS, INCIDENT_KINDS, METHOD_STATES, METHODS, AccessControl,
                           external_search_enabled)
-from price_comparator import PriceComparatorStore
+from price_comparator import PriceComparatorStore, normalize_gtin
 from price_locator import (ADAPTERS, JOB_STATES, MAX_DEPTH, SCHEDULE_ENV, SOURCE_KINDS, PriceLocator,
                            schedule_enabled)
 from price_monitor import (ALERTS, STATES, SCHEDULE_ENV as MONITOR_ENV, PriceMonitor,
@@ -975,6 +976,76 @@ def _render_overview(store: PriceComparatorStore) -> None:
         st.dataframe(alerts, hide_index=True, width="stretch")
 
 
+def _render_store_urls(store: PriceComparatorStore, cid: str) -> None:
+    from price_monitor import PriceMonitor
+    from price_web import WebPriceSearch, validate_competitor_url
+
+    competitor = store.competitors().set_index("id").loc[cid]
+    st.subheader("URLs y fichas")
+    with store._connect() as connection:
+        urls = pd.read_sql_query(
+            "SELECT ean,url,status,source,note,submitted_at,verified_at FROM competitor_product_urls "
+            "WHERE competitor_id=? ORDER BY ean,url",
+            connection,
+            params=(cid,),
+        )
+    if urls.empty:
+        st.info("Todavía no hay URLs guardadas para esta tienda.")
+    else:
+        st.dataframe(urls.rename(columns={
+            "ean": "EAN", "url": "URL", "status": "Estado", "source": "Origen",
+            "note": "Nota", "submitted_at": "Guardada", "verified_at": "Verificada",
+        }), hide_index=True, width="stretch",
+            column_config={"URL": st.column_config.LinkColumn("URL")})
+    watched = PriceWatch(store).watchlist()
+    options = watched["ean"].tolist() if not watched.empty else []
+    if not options:
+        st.info("Añada primero los productos que desea vigilar.")
+        return
+    ean = st.selectbox("Producto", options, key=f"store_url_ean_{cid}")
+    url = st.text_input("URL candidata o sustituta", key=f"store_url_value_{cid}",
+                        placeholder="https://...")
+    replace = st.checkbox("Sustituir las URL actuales de este producto",
+                          value=False, key=f"store_url_replace_{cid}",
+                          help="Conserva las URL anteriores como histórico y marca la sustitución.")
+    if st.button("Guardar URL", key=f"store_url_save_{cid}", disabled=not url.strip()):
+        try:
+            normalized = normalize_gtin(ean)
+            search = WebPriceSearch(store)
+            config = search.config(cid)
+            validated = validate_competitor_url(url.strip(), config["domain"])
+            stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            with store._connect() as connection, connection:
+                connection.execute("""INSERT INTO competitor_product_urls(
+                    competitor_id,ean,url,match_status,status,verified_at,source,note,submitted_at
+                ) VALUES(?,?,'manual_review','pending_verification',?,'user','Aportada manualmente; pendiente de verificar',?)
+                ON CONFLICT(competitor_id,ean,url) DO UPDATE SET status='pending_verification',
+                    note=excluded.note,submitted_at=excluded.submitted_at""",
+                                   (cid, normalized, validated, stamp, stamp))
+                if replace:
+                    connection.execute("""UPDATE competitor_product_urls SET status='replaced'
+                        WHERE competitor_id=? AND ean=? AND url<>? AND status IN
+                        ('verified','probable','pending_verification','needs_relocation')""",
+                                       (cid, normalized, validated))
+                connection.execute("""INSERT INTO access_audit(
+                    scope,scope_id,action,previous,current,actor,note,at
+                ) VALUES('competitor_url',?,?,'',?,'user','URL guardada sin confirmar identidad ni oferta',?)""",
+                                   (f"{cid}:{normalized}", "saved",
+                                    "Sustituida" if replace else "Añadida", stamp))
+            st.success("URL guardada como candidata. Esta acción no confirma identidad, oferta, stock ni autorización.")
+        except (ValueError, sqlite3.Error) as exc:
+            st.error(str(exc))
+
+    if st.button("Solicitar lectura actual", key=f"store_url_request_{cid}",
+                 disabled=not url.strip()):
+        try:
+            normalized = normalize_gtin(ean)
+            refresh = PriceMonitor(store).enqueue([cid], [normalized])
+            st.info(f"Solicitud registrada: {refresh}. El trabajador decidirá reutilización, espera o bloqueo.")
+        except (ValueError, sqlite3.Error) as exc:
+            st.error(str(exc))
+
+
 def render_competitor_card(store: PriceComparatorStore, cid: str, search: WebPriceSearch,
                            scheduler: CompetitorScheduler, states_frame: pd.DataFrame) -> None:
     from app_pages.price_comparator import _render_competitor_panels
@@ -1002,10 +1073,12 @@ def render_competitor_card(store: PriceComparatorStore, cid: str, search: WebPri
                 except ValueError as exc:
                     st.error(str(exc))
     task = st.selectbox("Configuración del competidor", [
-        "Acceso y métodos", "Fuentes y conectores", "Presupuestos y límites",
+        "URLs y fichas", "Acceso y métodos", "Fuentes y conectores", "Presupuestos y límites",
         "Frecuencia de actualización", "Incidencias y bloqueos",
     ], key="competitor_card_section")
-    if task == "Acceso y métodos":
+    if task == "URLs y fichas":
+        _render_store_urls(store, cid)
+    elif task == "Acceso y métodos":
         _render_methods(access, cid)
     elif task == "Fuentes y conectores":
         _render_sources(PriceLocator(store), names)

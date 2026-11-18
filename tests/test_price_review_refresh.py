@@ -17,6 +17,7 @@ def _review_env(tmp_path, *, count=1, stock=True, gtin_override=None, robots=ROB
     store, _, locator, clock, cid = _env(tmp_path, site)
     with store._connect() as con, con:
         con.execute("UPDATE competitors SET active=(id=?)", (cid,))
+        con.execute("UPDATE competitors SET market='ES',currency='EUR' WHERE id=?", (cid,))
         con.execute("UPDATE competitor_web_config SET tax_policy='included' WHERE competitor_id=?", (cid,))
     rows = []
     urls = []
