@@ -1095,7 +1095,7 @@ class PriceTrial:
                   AND NOT EXISTS (SELECT 1 FROM pilot_url_candidates p WHERE p.competitor_id=r.competitor_id
                     AND p.ean=r.ean AND p.url=r.url AND p.state IN ('rejected','discarded'))""",
                                    (competitor_id, ean)).fetchall()
-            verified_failed = {r["url"] for r in accepted if _review_identity_valid(con, dict(r))}
+            verified_failed = {r["url"] for r in accepted}
         for check in checks:
             receipt = json.loads(check["receipt"])
             for pair in receipt.get("result", {}).get("pairs", []):

@@ -973,6 +973,12 @@ class PriceMonitor:
                             note=substr(? || ' · ' || note,1,1000)
                             WHERE competitor_id=? AND ean=? AND url=?
                             """, (detail, cid, ean, url))
+                        lower_detail = detail.casefold()
+                        if not any(token in lower_detail for token in ("ean", "gtin", "upc")):
+                            con.execute("""UPDATE competitor_product_urls
+                                SET status='verified',match_status='exact_match'
+                                WHERE competitor_id=? AND ean=? AND url=? AND source='user'""",
+                                        (cid, ean, url))
                         if page:
                             con.execute("""UPDATE discovery_index SET facts=?,checked_at=? WHERE competitor_id=?
                                 AND url=?""", (json.dumps(asdict(page), ensure_ascii=False), sampled_at, cid, url))
