@@ -1,0 +1,3778 @@
+{
+  "light-home-desktop": {
+    "overflow": false,
+    "appBackground": "rgb(255, 255, 255)",
+    "primary": [
+      {
+        "text": "refreshActualizar",
+        "disabled": false,
+        "background": "rgb(65, 123, 123)",
+        "color": "rgb(255, 255, 255)",
+        "width": 116.03125,
+        "height": 40
+      }
+    ],
+    "font": "Inter, sans-serif, \"Source Sans\", sans-serif",
+    "interLoaded": true,
+    "fontFaces": [
+      "loaded"
+    ],
+    "tags": [],
+    "nav": [
+      {
+        "label": "homeInicio",
+        "current": "page",
+        "color": "rgb(65, 123, 123)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "bar_chartInicio",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "searchBuscar Producto",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "monitoringReportes ABCD",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "calendar_monthHist\u00f3rico Semanal",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "query_statsAn\u00e1lisis Detallado",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "upload_fileImportador Masterdata",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "menu_bookDiccionario",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "scienceDry-run Odoo",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageBiblioteca de im\u00e1genes",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageB\u00fasqueda masiva por EAN",
+        "current": null,
+        "color": "rgb(65, 123, 123)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "storefrontProveedores de im\u00e1genes",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "notificationsAlerta Pedidos",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "account_balanceConciliaci\u00f3n Odoo",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "price_checkComparador de precios",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "settingsConfiguraci\u00f3n",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      }
+    ],
+    "tabs": []
+  },
+  "light-home-mobile": {
+    "overflow": false,
+    "appBackground": "rgb(255, 255, 255)",
+    "primary": [
+      {
+        "text": "refreshActualizar",
+        "disabled": false,
+        "background": "rgb(65, 123, 123)",
+        "color": "rgb(255, 255, 255)",
+        "width": 116.03125,
+        "height": 40
+      }
+    ],
+    "font": "Inter, sans-serif, \"Source Sans\", sans-serif",
+    "interLoaded": true,
+    "fontFaces": [
+      "loaded"
+    ],
+    "tags": [],
+    "nav": [
+      {
+        "label": "homeInicio",
+        "current": "page",
+        "color": "rgb(65, 123, 123)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "bar_chartInicio",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "searchBuscar Producto",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "monitoringReportes ABCD",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "calendar_monthHist\u00f3rico Semanal",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "query_statsAn\u00e1lisis Detallado",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "upload_fileImportador Masterdata",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "menu_bookDiccionario",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "scienceDry-run Odoo",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageBiblioteca de im\u00e1genes",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      }
+    ],
+    "tabs": []
+  },
+  "light-controls-desktop": {
+    "overflow": false,
+    "appBackground": "rgb(255, 255, 255)",
+    "primary": [
+      {
+        "text": "Buscar",
+        "disabled": false,
+        "background": "rgb(65, 123, 123)",
+        "color": "rgb(255, 255, 255)",
+        "width": 72.109375,
+        "height": 40
+      },
+      {
+        "text": "Actualizar",
+        "disabled": true,
+        "background": "rgba(0, 0, 0, 0)",
+        "color": "rgba(49, 51, 63, 0.4)",
+        "width": 92.03125,
+        "height": 40
+      },
+      {
+        "text": "Guardar",
+        "disabled": false,
+        "background": "rgb(65, 123, 123)",
+        "color": "rgb(255, 255, 255)",
+        "width": 79.328125,
+        "height": 40
+      }
+    ],
+    "font": "Inter, sans-serif, \"Source Sans\", sans-serif",
+    "interLoaded": true,
+    "fontFaces": [
+      "loaded"
+    ],
+    "tags": [],
+    "nav": [
+      {
+        "label": "homeInicio",
+        "current": "page",
+        "color": "rgb(65, 123, 123)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "bar_chartInicio",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "searchBuscar Producto",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "monitoringReportes ABCD",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "calendar_monthHist\u00f3rico Semanal",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "query_statsAn\u00e1lisis Detallado",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "upload_fileImportador Masterdata",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "menu_bookDiccionario",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "scienceDry-run Odoo",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageBiblioteca de im\u00e1genes",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageB\u00fasqueda masiva por EAN",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "storefrontProveedores de im\u00e1genes",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "notificationsAlerta Pedidos",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "account_balanceConciliaci\u00f3n Odoo",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "price_checkComparador de precios",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "settingsConfiguraci\u00f3n",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      }
+    ],
+    "tabs": [
+      {
+        "selected": "true",
+        "color": "rgb(65, 123, 123)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(49, 51, 63)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(49, 51, 63)"
+      }
+    ]
+  },
+  "light-controls-mobile": {
+    "overflow": false,
+    "appBackground": "rgb(255, 255, 255)",
+    "primary": [
+      {
+        "text": "Buscar",
+        "disabled": false,
+        "background": "rgb(65, 123, 123)",
+        "color": "rgb(255, 255, 255)",
+        "width": 72.109375,
+        "height": 40
+      },
+      {
+        "text": "Actualizar",
+        "disabled": true,
+        "background": "rgba(0, 0, 0, 0)",
+        "color": "rgba(49, 51, 63, 0.4)",
+        "width": 92.03125,
+        "height": 40
+      },
+      {
+        "text": "Guardar",
+        "disabled": false,
+        "background": "rgb(65, 123, 123)",
+        "color": "rgb(255, 255, 255)",
+        "width": 79.328125,
+        "height": 40
+      }
+    ],
+    "font": "Inter, sans-serif, \"Source Sans\", sans-serif",
+    "interLoaded": true,
+    "fontFaces": [
+      "loaded"
+    ],
+    "tags": [],
+    "nav": [
+      {
+        "label": "homeInicio",
+        "current": "page",
+        "color": "rgb(65, 123, 123)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "bar_chartInicio",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "searchBuscar Producto",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "monitoringReportes ABCD",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "calendar_monthHist\u00f3rico Semanal",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "query_statsAn\u00e1lisis Detallado",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "upload_fileImportador Masterdata",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "menu_bookDiccionario",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "scienceDry-run Odoo",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageBiblioteca de im\u00e1genes",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      }
+    ],
+    "tabs": [
+      {
+        "selected": "true",
+        "color": "rgb(65, 123, 123)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(49, 51, 63)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(49, 51, 63)"
+      }
+    ]
+  },
+  "light-library-desktop": {
+    "overflow": false,
+    "appBackground": "rgb(255, 255, 255)",
+    "primary": [],
+    "font": "Inter, sans-serif, \"Source Sans\", sans-serif",
+    "interLoaded": true,
+    "fontFaces": [
+      "loaded"
+    ],
+    "tags": [],
+    "nav": [
+      {
+        "label": "homeInicio",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "bar_chartInicio",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "searchBuscar Producto",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "monitoringReportes ABCD",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "calendar_monthHist\u00f3rico Semanal",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "query_statsAn\u00e1lisis Detallado",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "upload_fileImportador Masterdata",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "menu_bookDiccionario",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "scienceDry-run Odoo",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageBiblioteca de im\u00e1genes",
+        "current": "page",
+        "color": "rgb(65, 123, 123)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageB\u00fasqueda masiva por EAN",
+        "current": null,
+        "color": "rgb(65, 123, 123)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "storefrontProveedores de im\u00e1genes",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "notificationsAlerta Pedidos",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "account_balanceConciliaci\u00f3n Odoo",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "price_checkComparador de precios",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "settingsConfiguraci\u00f3n",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      }
+    ],
+    "tabs": []
+  },
+  "light-library-mobile": {
+    "overflow": false,
+    "appBackground": "rgb(255, 255, 255)",
+    "primary": [],
+    "font": "Inter, sans-serif, \"Source Sans\", sans-serif",
+    "interLoaded": true,
+    "fontFaces": [
+      "loaded"
+    ],
+    "tags": [],
+    "nav": [
+      {
+        "label": "homeInicio",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "bar_chartInicio",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "searchBuscar Producto",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "monitoringReportes ABCD",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "calendar_monthHist\u00f3rico Semanal",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "query_statsAn\u00e1lisis Detallado",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "upload_fileImportador Masterdata",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "menu_bookDiccionario",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "scienceDry-run Odoo",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageBiblioteca de im\u00e1genes",
+        "current": "page",
+        "color": "rgb(65, 123, 123)",
+        "background": "rgba(0, 0, 0, 0)"
+      }
+    ],
+    "tabs": []
+  },
+  "light-comparator-desktop": {
+    "overflow": false,
+    "appBackground": "rgb(255, 255, 255)",
+    "primary": [],
+    "font": "Inter, sans-serif, \"Source Sans\", sans-serif",
+    "interLoaded": true,
+    "fontFaces": [
+      "loaded"
+    ],
+    "tags": [],
+    "nav": [
+      {
+        "label": "homeInicio",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "bar_chartInicio",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "searchBuscar Producto",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "monitoringReportes ABCD",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "calendar_monthHist\u00f3rico Semanal",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "query_statsAn\u00e1lisis Detallado",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "upload_fileImportador Masterdata",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "menu_bookDiccionario",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "scienceDry-run Odoo",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageBiblioteca de im\u00e1genes",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageB\u00fasqueda masiva por EAN",
+        "current": null,
+        "color": "rgb(65, 123, 123)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "storefrontProveedores de im\u00e1genes",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "notificationsAlerta Pedidos",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "account_balanceConciliaci\u00f3n Odoo",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "price_checkComparador de precios",
+        "current": "page",
+        "color": "rgb(65, 123, 123)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "settingsConfiguraci\u00f3n",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      }
+    ],
+    "tabs": []
+  },
+  "light-comparator-mobile": {
+    "overflow": false,
+    "appBackground": "rgb(255, 255, 255)",
+    "primary": [],
+    "font": "Inter, sans-serif, \"Source Sans\", sans-serif",
+    "interLoaded": true,
+    "fontFaces": [
+      "loaded"
+    ],
+    "tags": [],
+    "nav": [
+      {
+        "label": "homeInicio",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "bar_chartInicio",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "searchBuscar Producto",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "monitoringReportes ABCD",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "calendar_monthHist\u00f3rico Semanal",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "query_statsAn\u00e1lisis Detallado",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "upload_fileImportador Masterdata",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "menu_bookDiccionario",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "scienceDry-run Odoo",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageBiblioteca de im\u00e1genes",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      }
+    ],
+    "tabs": []
+  },
+  "light-marcolin-desktop": {
+    "overflow": false,
+    "appBackground": "rgb(255, 255, 255)",
+    "primary": [],
+    "font": "Inter, sans-serif, \"Source Sans\", sans-serif",
+    "interLoaded": true,
+    "fontFaces": [
+      "loaded"
+    ],
+    "tags": [],
+    "nav": [
+      {
+        "label": "homeInicio",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "bar_chartInicio",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "searchBuscar Producto",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "monitoringReportes ABCD",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "calendar_monthHist\u00f3rico Semanal",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "query_statsAn\u00e1lisis Detallado",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "upload_fileImportador Masterdata",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "menu_bookDiccionario",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "scienceDry-run Odoo",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageBiblioteca de im\u00e1genes",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageB\u00fasqueda masiva por EAN",
+        "current": null,
+        "color": "rgb(65, 123, 123)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "storefrontProveedores de im\u00e1genes",
+        "current": "page",
+        "color": "rgb(65, 123, 123)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "notificationsAlerta Pedidos",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "account_balanceConciliaci\u00f3n Odoo",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "price_checkComparador de precios",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "settingsConfiguraci\u00f3n",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      }
+    ],
+    "tabs": [
+      {
+        "selected": "true",
+        "color": "rgb(65, 123, 123)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(49, 51, 63)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(49, 51, 63)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(49, 51, 63)"
+      }
+    ]
+  },
+  "light-marcolin-mobile": {
+    "overflow": false,
+    "appBackground": "rgb(255, 255, 255)",
+    "primary": [],
+    "font": "Inter, sans-serif, \"Source Sans\", sans-serif",
+    "interLoaded": true,
+    "fontFaces": [
+      "loaded"
+    ],
+    "tags": [],
+    "nav": [
+      {
+        "label": "homeInicio",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "bar_chartInicio",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "searchBuscar Producto",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "monitoringReportes ABCD",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "calendar_monthHist\u00f3rico Semanal",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "query_statsAn\u00e1lisis Detallado",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "upload_fileImportador Masterdata",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "menu_bookDiccionario",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "scienceDry-run Odoo",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageBiblioteca de im\u00e1genes",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      }
+    ],
+    "tabs": [
+      {
+        "selected": "true",
+        "color": "rgb(65, 123, 123)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(49, 51, 63)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(49, 51, 63)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(49, 51, 63)"
+      }
+    ]
+  },
+  "light-nuorder-desktop": {
+    "overflow": false,
+    "appBackground": "rgb(255, 255, 255)",
+    "primary": [],
+    "font": "Inter, sans-serif, \"Source Sans\", sans-serif",
+    "interLoaded": true,
+    "fontFaces": [
+      "loaded"
+    ],
+    "tags": [],
+    "nav": [
+      {
+        "label": "homeInicio",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "bar_chartInicio",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "searchBuscar Producto",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "monitoringReportes ABCD",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "calendar_monthHist\u00f3rico Semanal",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "query_statsAn\u00e1lisis Detallado",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "upload_fileImportador Masterdata",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "menu_bookDiccionario",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "scienceDry-run Odoo",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageBiblioteca de im\u00e1genes",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageB\u00fasqueda masiva por EAN",
+        "current": null,
+        "color": "rgb(65, 123, 123)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "storefrontProveedores de im\u00e1genes",
+        "current": "page",
+        "color": "rgb(65, 123, 123)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "notificationsAlerta Pedidos",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "account_balanceConciliaci\u00f3n Odoo",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "price_checkComparador de precios",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "settingsConfiguraci\u00f3n",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      }
+    ],
+    "tabs": [
+      {
+        "selected": "true",
+        "color": "rgb(65, 123, 123)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(49, 51, 63)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(49, 51, 63)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(49, 51, 63)"
+      }
+    ]
+  },
+  "light-nuorder-mobile": {
+    "overflow": false,
+    "appBackground": "rgb(255, 255, 255)",
+    "primary": [],
+    "font": "Inter, sans-serif, \"Source Sans\", sans-serif",
+    "interLoaded": true,
+    "fontFaces": [
+      "loaded"
+    ],
+    "tags": [],
+    "nav": [
+      {
+        "label": "homeInicio",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "bar_chartInicio",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "searchBuscar Producto",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "monitoringReportes ABCD",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "calendar_monthHist\u00f3rico Semanal",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "query_statsAn\u00e1lisis Detallado",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "upload_fileImportador Masterdata",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "menu_bookDiccionario",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "scienceDry-run Odoo",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageBiblioteca de im\u00e1genes",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      }
+    ],
+    "tabs": [
+      {
+        "selected": "true",
+        "color": "rgb(65, 123, 123)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(49, 51, 63)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(49, 51, 63)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(49, 51, 63)"
+      }
+    ]
+  },
+  "light-safilo-desktop": {
+    "overflow": false,
+    "appBackground": "rgb(255, 255, 255)",
+    "primary": [],
+    "font": "Inter, sans-serif, \"Source Sans\", sans-serif",
+    "interLoaded": true,
+    "fontFaces": [
+      "loaded"
+    ],
+    "tags": [],
+    "nav": [
+      {
+        "label": "homeInicio",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "bar_chartInicio",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "searchBuscar Producto",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "monitoringReportes ABCD",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "calendar_monthHist\u00f3rico Semanal",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "query_statsAn\u00e1lisis Detallado",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "upload_fileImportador Masterdata",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "menu_bookDiccionario",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "scienceDry-run Odoo",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageBiblioteca de im\u00e1genes",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageB\u00fasqueda masiva por EAN",
+        "current": null,
+        "color": "rgb(65, 123, 123)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "storefrontProveedores de im\u00e1genes",
+        "current": "page",
+        "color": "rgb(65, 123, 123)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "notificationsAlerta Pedidos",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "account_balanceConciliaci\u00f3n Odoo",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "price_checkComparador de precios",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "settingsConfiguraci\u00f3n",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      }
+    ],
+    "tabs": [
+      {
+        "selected": "true",
+        "color": "rgb(65, 123, 123)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(49, 51, 63)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(49, 51, 63)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(49, 51, 63)"
+      }
+    ]
+  },
+  "light-safilo-mobile": {
+    "overflow": false,
+    "appBackground": "rgb(255, 255, 255)",
+    "primary": [],
+    "font": "Inter, sans-serif, \"Source Sans\", sans-serif",
+    "interLoaded": true,
+    "fontFaces": [
+      "loaded"
+    ],
+    "tags": [],
+    "nav": [
+      {
+        "label": "homeInicio",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "bar_chartInicio",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "searchBuscar Producto",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "monitoringReportes ABCD",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "calendar_monthHist\u00f3rico Semanal",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "query_statsAn\u00e1lisis Detallado",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "upload_fileImportador Masterdata",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "menu_bookDiccionario",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "scienceDry-run Odoo",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageBiblioteca de im\u00e1genes",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      }
+    ],
+    "tabs": [
+      {
+        "selected": "true",
+        "color": "rgb(65, 123, 123)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(49, 51, 63)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(49, 51, 63)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(49, 51, 63)"
+      }
+    ]
+  },
+  "light-a-desktop": {
+    "overflow": false,
+    "appBackground": "rgb(255, 255, 255)",
+    "primary": [
+      {
+        "text": "Actualizar",
+        "disabled": false,
+        "background": "rgb(65, 123, 123)",
+        "color": "rgb(255, 255, 255)",
+        "width": 92.03125,
+        "height": 40
+      }
+    ],
+    "font": "Inter, sans-serif, \"Source Sans\", sans-serif",
+    "interLoaded": true,
+    "fontFaces": [
+      "loaded"
+    ],
+    "tags": [],
+    "nav": [
+      {
+        "label": "homeInicio",
+        "current": "page",
+        "color": "rgb(65, 123, 123)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "bar_chartInicio",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "searchBuscar Producto",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "monitoringReportes ABCD",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "calendar_monthHist\u00f3rico Semanal",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "query_statsAn\u00e1lisis Detallado",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "upload_fileImportador Masterdata",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "menu_bookDiccionario",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "scienceDry-run Odoo",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageBiblioteca de im\u00e1genes",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageB\u00fasqueda masiva por EAN",
+        "current": null,
+        "color": "rgb(65, 123, 123)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "storefrontProveedores de im\u00e1genes",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "notificationsAlerta Pedidos",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "account_balanceConciliaci\u00f3n Odoo",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "price_checkComparador de precios",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "settingsConfiguraci\u00f3n",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      }
+    ],
+    "tabs": []
+  },
+  "light-a-mobile": {
+    "overflow": false,
+    "appBackground": "rgb(255, 255, 255)",
+    "primary": [
+      {
+        "text": "Actualizar",
+        "disabled": false,
+        "background": "rgb(65, 123, 123)",
+        "color": "rgb(255, 255, 255)",
+        "width": 92.03125,
+        "height": 40
+      }
+    ],
+    "font": "Inter, sans-serif, \"Source Sans\", sans-serif",
+    "interLoaded": true,
+    "fontFaces": [
+      "loaded"
+    ],
+    "tags": [],
+    "nav": [
+      {
+        "label": "homeInicio",
+        "current": "page",
+        "color": "rgb(65, 123, 123)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "bar_chartInicio",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "searchBuscar Producto",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "monitoringReportes ABCD",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "calendar_monthHist\u00f3rico Semanal",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "query_statsAn\u00e1lisis Detallado",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "upload_fileImportador Masterdata",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "menu_bookDiccionario",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "scienceDry-run Odoo",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageBiblioteca de im\u00e1genes",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      }
+    ],
+    "tabs": []
+  },
+  "light-b-desktop": {
+    "overflow": false,
+    "appBackground": "rgb(255, 255, 255)",
+    "primary": [
+      {
+        "text": "Actualizar",
+        "disabled": false,
+        "background": "rgb(65, 123, 123)",
+        "color": "rgb(255, 255, 255)",
+        "width": 92.03125,
+        "height": 40
+      }
+    ],
+    "font": "Inter, sans-serif, \"Source Sans\", sans-serif",
+    "interLoaded": true,
+    "fontFaces": [
+      "loaded"
+    ],
+    "tags": [],
+    "nav": [
+      {
+        "label": "homeInicio",
+        "current": "page",
+        "color": "rgb(65, 123, 123)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "bar_chartInicio",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "searchBuscar Producto",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "monitoringReportes ABCD",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "calendar_monthHist\u00f3rico Semanal",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "query_statsAn\u00e1lisis Detallado",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "upload_fileImportador Masterdata",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "menu_bookDiccionario",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "scienceDry-run Odoo",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageBiblioteca de im\u00e1genes",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageB\u00fasqueda masiva por EAN",
+        "current": null,
+        "color": "rgb(65, 123, 123)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "storefrontProveedores de im\u00e1genes",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "notificationsAlerta Pedidos",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "account_balanceConciliaci\u00f3n Odoo",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "price_checkComparador de precios",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "settingsConfiguraci\u00f3n",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      }
+    ],
+    "tabs": []
+  },
+  "light-b-mobile": {
+    "overflow": false,
+    "appBackground": "rgb(255, 255, 255)",
+    "primary": [
+      {
+        "text": "Actualizar",
+        "disabled": false,
+        "background": "rgb(65, 123, 123)",
+        "color": "rgb(255, 255, 255)",
+        "width": 92.03125,
+        "height": 40
+      }
+    ],
+    "font": "Inter, sans-serif, \"Source Sans\", sans-serif",
+    "interLoaded": true,
+    "fontFaces": [
+      "loaded"
+    ],
+    "tags": [],
+    "nav": [
+      {
+        "label": "homeInicio",
+        "current": "page",
+        "color": "rgb(65, 123, 123)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "bar_chartInicio",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "searchBuscar Producto",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "monitoringReportes ABCD",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "calendar_monthHist\u00f3rico Semanal",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "query_statsAn\u00e1lisis Detallado",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "upload_fileImportador Masterdata",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "menu_bookDiccionario",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "scienceDry-run Odoo",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageBiblioteca de im\u00e1genes",
+        "current": null,
+        "color": "rgb(66, 64, 59)",
+        "background": "rgba(0, 0, 0, 0)"
+      }
+    ],
+    "tabs": []
+  },
+  "dark-home-desktop": {
+    "overflow": false,
+    "appBackground": "rgb(14, 17, 23)",
+    "primary": [
+      {
+        "text": "refreshActualizar",
+        "disabled": false,
+        "background": "rgb(131, 185, 185)",
+        "color": "rgb(14, 17, 23)",
+        "width": 116.03125,
+        "height": 40
+      }
+    ],
+    "font": "Inter, sans-serif, \"Source Sans\", sans-serif",
+    "interLoaded": true,
+    "fontFaces": [
+      "loaded"
+    ],
+    "tags": [],
+    "nav": [
+      {
+        "label": "homeInicio",
+        "current": "page",
+        "color": "rgb(131, 185, 185)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "bar_chartInicio",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "searchBuscar Producto",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "monitoringReportes ABCD",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "calendar_monthHist\u00f3rico Semanal",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "query_statsAn\u00e1lisis Detallado",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "upload_fileImportador Masterdata",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "menu_bookDiccionario",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "scienceDry-run Odoo",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageBiblioteca de im\u00e1genes",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageB\u00fasqueda masiva por EAN",
+        "current": null,
+        "color": "rgb(131, 185, 185)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "storefrontProveedores de im\u00e1genes",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "notificationsAlerta Pedidos",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "account_balanceConciliaci\u00f3n Odoo",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "price_checkComparador de precios",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "settingsConfiguraci\u00f3n",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      }
+    ],
+    "tabs": []
+  },
+  "dark-home-mobile": {
+    "overflow": false,
+    "appBackground": "rgb(14, 17, 23)",
+    "primary": [
+      {
+        "text": "refreshActualizar",
+        "disabled": false,
+        "background": "rgb(131, 185, 185)",
+        "color": "rgb(14, 17, 23)",
+        "width": 116.03125,
+        "height": 40
+      }
+    ],
+    "font": "Inter, sans-serif, \"Source Sans\", sans-serif",
+    "interLoaded": true,
+    "fontFaces": [
+      "loaded"
+    ],
+    "tags": [],
+    "nav": [
+      {
+        "label": "homeInicio",
+        "current": "page",
+        "color": "rgb(131, 185, 185)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "bar_chartInicio",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "searchBuscar Producto",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "monitoringReportes ABCD",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "calendar_monthHist\u00f3rico Semanal",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "query_statsAn\u00e1lisis Detallado",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "upload_fileImportador Masterdata",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "menu_bookDiccionario",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "scienceDry-run Odoo",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageBiblioteca de im\u00e1genes",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      }
+    ],
+    "tabs": []
+  },
+  "dark-controls-desktop": {
+    "overflow": false,
+    "appBackground": "rgb(14, 17, 23)",
+    "primary": [
+      {
+        "text": "Buscar",
+        "disabled": false,
+        "background": "rgb(131, 185, 185)",
+        "color": "rgb(14, 17, 23)",
+        "width": 72.109375,
+        "height": 40
+      },
+      {
+        "text": "Actualizar",
+        "disabled": true,
+        "background": "rgba(0, 0, 0, 0)",
+        "color": "rgba(250, 250, 250, 0.4)",
+        "width": 92.03125,
+        "height": 40
+      },
+      {
+        "text": "Guardar",
+        "disabled": false,
+        "background": "rgb(131, 185, 185)",
+        "color": "rgb(14, 17, 23)",
+        "width": 79.328125,
+        "height": 40
+      }
+    ],
+    "font": "Inter, sans-serif, \"Source Sans\", sans-serif",
+    "interLoaded": true,
+    "fontFaces": [
+      "loaded"
+    ],
+    "tags": [],
+    "nav": [
+      {
+        "label": "homeInicio",
+        "current": "page",
+        "color": "rgb(131, 185, 185)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "bar_chartInicio",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "searchBuscar Producto",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "monitoringReportes ABCD",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "calendar_monthHist\u00f3rico Semanal",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "query_statsAn\u00e1lisis Detallado",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "upload_fileImportador Masterdata",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "menu_bookDiccionario",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "scienceDry-run Odoo",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageBiblioteca de im\u00e1genes",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageB\u00fasqueda masiva por EAN",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "storefrontProveedores de im\u00e1genes",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "notificationsAlerta Pedidos",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "account_balanceConciliaci\u00f3n Odoo",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "price_checkComparador de precios",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "settingsConfiguraci\u00f3n",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      }
+    ],
+    "tabs": [
+      {
+        "selected": "true",
+        "color": "rgb(131, 185, 185)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(250, 250, 250)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(250, 250, 250)"
+      }
+    ]
+  },
+  "dark-controls-mobile": {
+    "overflow": false,
+    "appBackground": "rgb(14, 17, 23)",
+    "primary": [
+      {
+        "text": "Buscar",
+        "disabled": false,
+        "background": "rgb(131, 185, 185)",
+        "color": "rgb(14, 17, 23)",
+        "width": 72.109375,
+        "height": 40
+      },
+      {
+        "text": "Actualizar",
+        "disabled": true,
+        "background": "rgba(0, 0, 0, 0)",
+        "color": "rgba(250, 250, 250, 0.4)",
+        "width": 92.03125,
+        "height": 40
+      },
+      {
+        "text": "Guardar",
+        "disabled": false,
+        "background": "rgb(131, 185, 185)",
+        "color": "rgb(14, 17, 23)",
+        "width": 79.328125,
+        "height": 40
+      }
+    ],
+    "font": "Inter, sans-serif, \"Source Sans\", sans-serif",
+    "interLoaded": true,
+    "fontFaces": [
+      "loaded"
+    ],
+    "tags": [],
+    "nav": [
+      {
+        "label": "homeInicio",
+        "current": "page",
+        "color": "rgb(131, 185, 185)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "bar_chartInicio",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "searchBuscar Producto",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "monitoringReportes ABCD",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "calendar_monthHist\u00f3rico Semanal",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "query_statsAn\u00e1lisis Detallado",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "upload_fileImportador Masterdata",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "menu_bookDiccionario",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "scienceDry-run Odoo",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageBiblioteca de im\u00e1genes",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      }
+    ],
+    "tabs": [
+      {
+        "selected": "true",
+        "color": "rgb(131, 185, 185)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(250, 250, 250)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(250, 250, 250)"
+      }
+    ]
+  },
+  "dark-library-desktop": {
+    "overflow": false,
+    "appBackground": "rgb(14, 17, 23)",
+    "primary": [],
+    "font": "Inter, sans-serif, \"Source Sans\", sans-serif",
+    "interLoaded": true,
+    "fontFaces": [
+      "loaded"
+    ],
+    "tags": [],
+    "nav": [
+      {
+        "label": "homeInicio",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "bar_chartInicio",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "searchBuscar Producto",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "monitoringReportes ABCD",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "calendar_monthHist\u00f3rico Semanal",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "query_statsAn\u00e1lisis Detallado",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "upload_fileImportador Masterdata",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "menu_bookDiccionario",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "scienceDry-run Odoo",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageBiblioteca de im\u00e1genes",
+        "current": "page",
+        "color": "rgb(131, 185, 185)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageB\u00fasqueda masiva por EAN",
+        "current": null,
+        "color": "rgb(131, 185, 185)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "storefrontProveedores de im\u00e1genes",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "notificationsAlerta Pedidos",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "account_balanceConciliaci\u00f3n Odoo",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "price_checkComparador de precios",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "settingsConfiguraci\u00f3n",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      }
+    ],
+    "tabs": []
+  },
+  "dark-library-mobile": {
+    "overflow": false,
+    "appBackground": "rgb(14, 17, 23)",
+    "primary": [],
+    "font": "Inter, sans-serif, \"Source Sans\", sans-serif",
+    "interLoaded": true,
+    "fontFaces": [
+      "loaded"
+    ],
+    "tags": [],
+    "nav": [
+      {
+        "label": "homeInicio",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "bar_chartInicio",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "searchBuscar Producto",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "monitoringReportes ABCD",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "calendar_monthHist\u00f3rico Semanal",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "query_statsAn\u00e1lisis Detallado",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "upload_fileImportador Masterdata",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "menu_bookDiccionario",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "scienceDry-run Odoo",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageBiblioteca de im\u00e1genes",
+        "current": "page",
+        "color": "rgb(131, 185, 185)",
+        "background": "rgba(0, 0, 0, 0)"
+      }
+    ],
+    "tabs": []
+  },
+  "dark-comparator-desktop": {
+    "overflow": false,
+    "appBackground": "rgb(14, 17, 23)",
+    "primary": [],
+    "font": "Inter, sans-serif, \"Source Sans\", sans-serif",
+    "interLoaded": true,
+    "fontFaces": [
+      "loaded"
+    ],
+    "tags": [],
+    "nav": [
+      {
+        "label": "homeInicio",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "bar_chartInicio",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "searchBuscar Producto",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "monitoringReportes ABCD",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "calendar_monthHist\u00f3rico Semanal",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "query_statsAn\u00e1lisis Detallado",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "upload_fileImportador Masterdata",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "menu_bookDiccionario",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "scienceDry-run Odoo",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageBiblioteca de im\u00e1genes",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageB\u00fasqueda masiva por EAN",
+        "current": null,
+        "color": "rgb(131, 185, 185)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "storefrontProveedores de im\u00e1genes",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "notificationsAlerta Pedidos",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "account_balanceConciliaci\u00f3n Odoo",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "price_checkComparador de precios",
+        "current": "page",
+        "color": "rgb(131, 185, 185)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "settingsConfiguraci\u00f3n",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      }
+    ],
+    "tabs": []
+  },
+  "dark-comparator-mobile": {
+    "overflow": false,
+    "appBackground": "rgb(14, 17, 23)",
+    "primary": [],
+    "font": "Inter, sans-serif, \"Source Sans\", sans-serif",
+    "interLoaded": true,
+    "fontFaces": [
+      "loaded"
+    ],
+    "tags": [],
+    "nav": [
+      {
+        "label": "homeInicio",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "bar_chartInicio",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "searchBuscar Producto",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "monitoringReportes ABCD",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "calendar_monthHist\u00f3rico Semanal",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "query_statsAn\u00e1lisis Detallado",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "upload_fileImportador Masterdata",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "menu_bookDiccionario",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "scienceDry-run Odoo",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageBiblioteca de im\u00e1genes",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      }
+    ],
+    "tabs": []
+  },
+  "dark-marcolin-desktop": {
+    "overflow": false,
+    "appBackground": "rgb(14, 17, 23)",
+    "primary": [],
+    "font": "Inter, sans-serif, \"Source Sans\", sans-serif",
+    "interLoaded": true,
+    "fontFaces": [
+      "loaded"
+    ],
+    "tags": [],
+    "nav": [
+      {
+        "label": "homeInicio",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "bar_chartInicio",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "searchBuscar Producto",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "monitoringReportes ABCD",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "calendar_monthHist\u00f3rico Semanal",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "query_statsAn\u00e1lisis Detallado",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "upload_fileImportador Masterdata",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "menu_bookDiccionario",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "scienceDry-run Odoo",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageBiblioteca de im\u00e1genes",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageB\u00fasqueda masiva por EAN",
+        "current": null,
+        "color": "rgb(131, 185, 185)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "storefrontProveedores de im\u00e1genes",
+        "current": "page",
+        "color": "rgb(131, 185, 185)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "notificationsAlerta Pedidos",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "account_balanceConciliaci\u00f3n Odoo",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "price_checkComparador de precios",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "settingsConfiguraci\u00f3n",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      }
+    ],
+    "tabs": [
+      {
+        "selected": "true",
+        "color": "rgb(131, 185, 185)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(250, 250, 250)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(250, 250, 250)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(250, 250, 250)"
+      }
+    ]
+  },
+  "dark-marcolin-mobile": {
+    "overflow": false,
+    "appBackground": "rgb(14, 17, 23)",
+    "primary": [],
+    "font": "Inter, sans-serif, \"Source Sans\", sans-serif",
+    "interLoaded": true,
+    "fontFaces": [
+      "loaded"
+    ],
+    "tags": [],
+    "nav": [
+      {
+        "label": "homeInicio",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "bar_chartInicio",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "searchBuscar Producto",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "monitoringReportes ABCD",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "calendar_monthHist\u00f3rico Semanal",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "query_statsAn\u00e1lisis Detallado",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "upload_fileImportador Masterdata",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "menu_bookDiccionario",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "scienceDry-run Odoo",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageBiblioteca de im\u00e1genes",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      }
+    ],
+    "tabs": [
+      {
+        "selected": "true",
+        "color": "rgb(131, 185, 185)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(250, 250, 250)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(250, 250, 250)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(250, 250, 250)"
+      }
+    ]
+  },
+  "dark-nuorder-desktop": {
+    "overflow": false,
+    "appBackground": "rgb(14, 17, 23)",
+    "primary": [],
+    "font": "Inter, sans-serif, \"Source Sans\", sans-serif",
+    "interLoaded": true,
+    "fontFaces": [
+      "loaded"
+    ],
+    "tags": [],
+    "nav": [
+      {
+        "label": "homeInicio",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "bar_chartInicio",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "searchBuscar Producto",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "monitoringReportes ABCD",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "calendar_monthHist\u00f3rico Semanal",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "query_statsAn\u00e1lisis Detallado",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "upload_fileImportador Masterdata",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "menu_bookDiccionario",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "scienceDry-run Odoo",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageBiblioteca de im\u00e1genes",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageB\u00fasqueda masiva por EAN",
+        "current": null,
+        "color": "rgb(131, 185, 185)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "storefrontProveedores de im\u00e1genes",
+        "current": "page",
+        "color": "rgb(131, 185, 185)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "notificationsAlerta Pedidos",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "account_balanceConciliaci\u00f3n Odoo",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "price_checkComparador de precios",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "settingsConfiguraci\u00f3n",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      }
+    ],
+    "tabs": [
+      {
+        "selected": "true",
+        "color": "rgb(131, 185, 185)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(250, 250, 250)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(250, 250, 250)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(250, 250, 250)"
+      }
+    ]
+  },
+  "dark-nuorder-mobile": {
+    "overflow": false,
+    "appBackground": "rgb(14, 17, 23)",
+    "primary": [],
+    "font": "Inter, sans-serif, \"Source Sans\", sans-serif",
+    "interLoaded": true,
+    "fontFaces": [
+      "loaded"
+    ],
+    "tags": [],
+    "nav": [
+      {
+        "label": "homeInicio",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "bar_chartInicio",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "searchBuscar Producto",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "monitoringReportes ABCD",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "calendar_monthHist\u00f3rico Semanal",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "query_statsAn\u00e1lisis Detallado",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "upload_fileImportador Masterdata",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "menu_bookDiccionario",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "scienceDry-run Odoo",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageBiblioteca de im\u00e1genes",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      }
+    ],
+    "tabs": [
+      {
+        "selected": "true",
+        "color": "rgb(131, 185, 185)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(250, 250, 250)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(250, 250, 250)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(250, 250, 250)"
+      }
+    ]
+  },
+  "dark-safilo-desktop": {
+    "overflow": false,
+    "appBackground": "rgb(14, 17, 23)",
+    "primary": [],
+    "font": "Inter, sans-serif, \"Source Sans\", sans-serif",
+    "interLoaded": true,
+    "fontFaces": [
+      "loaded"
+    ],
+    "tags": [],
+    "nav": [
+      {
+        "label": "homeInicio",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "bar_chartInicio",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "searchBuscar Producto",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "monitoringReportes ABCD",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "calendar_monthHist\u00f3rico Semanal",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "query_statsAn\u00e1lisis Detallado",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "upload_fileImportador Masterdata",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "menu_bookDiccionario",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "scienceDry-run Odoo",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageBiblioteca de im\u00e1genes",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageB\u00fasqueda masiva por EAN",
+        "current": null,
+        "color": "rgb(131, 185, 185)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "storefrontProveedores de im\u00e1genes",
+        "current": "page",
+        "color": "rgb(131, 185, 185)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "notificationsAlerta Pedidos",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "account_balanceConciliaci\u00f3n Odoo",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "price_checkComparador de precios",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "settingsConfiguraci\u00f3n",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      }
+    ],
+    "tabs": [
+      {
+        "selected": "true",
+        "color": "rgb(131, 185, 185)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(250, 250, 250)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(250, 250, 250)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(250, 250, 250)"
+      }
+    ]
+  },
+  "dark-safilo-mobile": {
+    "overflow": false,
+    "appBackground": "rgb(14, 17, 23)",
+    "primary": [],
+    "font": "Inter, sans-serif, \"Source Sans\", sans-serif",
+    "interLoaded": true,
+    "fontFaces": [
+      "loaded"
+    ],
+    "tags": [],
+    "nav": [
+      {
+        "label": "homeInicio",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "bar_chartInicio",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "searchBuscar Producto",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "monitoringReportes ABCD",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "calendar_monthHist\u00f3rico Semanal",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "query_statsAn\u00e1lisis Detallado",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "upload_fileImportador Masterdata",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "menu_bookDiccionario",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "scienceDry-run Odoo",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageBiblioteca de im\u00e1genes",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      }
+    ],
+    "tabs": [
+      {
+        "selected": "true",
+        "color": "rgb(131, 185, 185)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(250, 250, 250)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(250, 250, 250)"
+      },
+      {
+        "selected": "false",
+        "color": "rgb(250, 250, 250)"
+      }
+    ]
+  },
+  "dark-a-desktop": {
+    "overflow": false,
+    "appBackground": "rgb(14, 17, 23)",
+    "primary": [
+      {
+        "text": "Actualizar",
+        "disabled": false,
+        "background": "rgb(131, 185, 185)",
+        "color": "rgb(14, 17, 23)",
+        "width": 92.03125,
+        "height": 40
+      }
+    ],
+    "font": "Inter, sans-serif, \"Source Sans\", sans-serif",
+    "interLoaded": true,
+    "fontFaces": [
+      "loaded"
+    ],
+    "tags": [],
+    "nav": [
+      {
+        "label": "homeInicio",
+        "current": "page",
+        "color": "rgb(131, 185, 185)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "bar_chartInicio",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "searchBuscar Producto",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "monitoringReportes ABCD",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "calendar_monthHist\u00f3rico Semanal",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "query_statsAn\u00e1lisis Detallado",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "upload_fileImportador Masterdata",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "menu_bookDiccionario",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "scienceDry-run Odoo",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageBiblioteca de im\u00e1genes",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageB\u00fasqueda masiva por EAN",
+        "current": null,
+        "color": "rgb(131, 185, 185)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "storefrontProveedores de im\u00e1genes",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "notificationsAlerta Pedidos",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "account_balanceConciliaci\u00f3n Odoo",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "price_checkComparador de precios",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "settingsConfiguraci\u00f3n",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      }
+    ],
+    "tabs": []
+  },
+  "dark-a-mobile": {
+    "overflow": false,
+    "appBackground": "rgb(14, 17, 23)",
+    "primary": [
+      {
+        "text": "Actualizar",
+        "disabled": false,
+        "background": "rgb(131, 185, 185)",
+        "color": "rgb(14, 17, 23)",
+        "width": 92.03125,
+        "height": 40
+      }
+    ],
+    "font": "Inter, sans-serif, \"Source Sans\", sans-serif",
+    "interLoaded": true,
+    "fontFaces": [
+      "loaded"
+    ],
+    "tags": [],
+    "nav": [
+      {
+        "label": "homeInicio",
+        "current": "page",
+        "color": "rgb(131, 185, 185)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "bar_chartInicio",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "searchBuscar Producto",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "monitoringReportes ABCD",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "calendar_monthHist\u00f3rico Semanal",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "query_statsAn\u00e1lisis Detallado",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "upload_fileImportador Masterdata",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "menu_bookDiccionario",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "scienceDry-run Odoo",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageBiblioteca de im\u00e1genes",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      }
+    ],
+    "tabs": []
+  },
+  "dark-b-desktop": {
+    "overflow": false,
+    "appBackground": "rgb(14, 17, 23)",
+    "primary": [
+      {
+        "text": "Actualizar",
+        "disabled": false,
+        "background": "rgb(131, 185, 185)",
+        "color": "rgb(14, 17, 23)",
+        "width": 92.03125,
+        "height": 40
+      }
+    ],
+    "font": "Inter, sans-serif, \"Source Sans\", sans-serif",
+    "interLoaded": true,
+    "fontFaces": [
+      "loaded"
+    ],
+    "tags": [],
+    "nav": [
+      {
+        "label": "homeInicio",
+        "current": "page",
+        "color": "rgb(131, 185, 185)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "bar_chartInicio",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "searchBuscar Producto",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "monitoringReportes ABCD",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "calendar_monthHist\u00f3rico Semanal",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "query_statsAn\u00e1lisis Detallado",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "upload_fileImportador Masterdata",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "menu_bookDiccionario",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "scienceDry-run Odoo",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageBiblioteca de im\u00e1genes",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageB\u00fasqueda masiva por EAN",
+        "current": null,
+        "color": "rgb(131, 185, 185)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "storefrontProveedores de im\u00e1genes",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "notificationsAlerta Pedidos",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "account_balanceConciliaci\u00f3n Odoo",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "price_checkComparador de precios",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "settingsConfiguraci\u00f3n",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      }
+    ],
+    "tabs": []
+  },
+  "dark-b-mobile": {
+    "overflow": false,
+    "appBackground": "rgb(14, 17, 23)",
+    "primary": [
+      {
+        "text": "Actualizar",
+        "disabled": false,
+        "background": "rgb(131, 185, 185)",
+        "color": "rgb(14, 17, 23)",
+        "width": 92.03125,
+        "height": 40
+      }
+    ],
+    "font": "Inter, sans-serif, \"Source Sans\", sans-serif",
+    "interLoaded": true,
+    "fontFaces": [
+      "loaded"
+    ],
+    "tags": [],
+    "nav": [
+      {
+        "label": "homeInicio",
+        "current": "page",
+        "color": "rgb(131, 185, 185)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "bar_chartInicio",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "searchBuscar Producto",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "monitoringReportes ABCD",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "calendar_monthHist\u00f3rico Semanal",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "query_statsAn\u00e1lisis Detallado",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "upload_fileImportador Masterdata",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "menu_bookDiccionario",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "scienceDry-run Odoo",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      },
+      {
+        "label": "imageBiblioteca de im\u00e1genes",
+        "current": null,
+        "color": "rgb(220, 218, 212)",
+        "background": "rgba(0, 0, 0, 0)"
+      }
+    ],
+    "tabs": []
+  }
+}
