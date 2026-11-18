@@ -215,6 +215,33 @@ def test_observation_export_preserves_original_history_and_provenance(tmp_path):
     assert pd.isna(previous["valid_until"]) and previous["checked_at"] == previous["captured_at"]
 
 
+def test_inicio_full_selection_and_partial_filter_use_matching_denominators(tmp_path, monkeypatch):
+    store, _, _, _, _, _, _ = _monitor_env(tmp_path, count=2)
+    monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
+    app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
+                              "render_price_comparator_page()").run(timeout=30)
+    app.radio(key="top_level_section").set_value("Inicio").run(timeout=30)
+    metrics = {m.label: m.value for m in app.metric}
+    assert metrics["Total de la vigilancia"] == "0/2"
+
+    app.text_input(key="dashboard_search").set_value("does-not-exist").run(timeout=30)
+    metrics = {m.label: m.value for m in app.metric}
+    assert "Productos con comparación válida" in metrics
+    assert metrics["Productos con comparación válida"] == "0/0"
+
+
+def test_inicio_partial_filter_keeps_filtered_numerator_and_denominator(tmp_path, monkeypatch):
+    store, _, _, _, _, _, _ = _monitor_env(tmp_path, count=2)
+    monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
+    app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
+                              "render_price_comparator_page()").run(timeout=30)
+    app.radio(key="top_level_section").set_value("Inicio").run(timeout=30)
+    app.text_input(key="dashboard_search").set_value(store.products().iloc[0]["ean"]).run(timeout=30)
+    metrics = {m.label: m.value for m in app.metric}
+    assert "Productos con comparación válida" in metrics
+    assert metrics["Productos con comparación válida"] == "0/1"
+
+
 def test_inicio_valid_comparison_requires_own_and_competitor_price(tmp_path, monkeypatch):
     store, _, _, monitor, _, _, _ = _monitor_env(tmp_path, count=1)
     monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
@@ -222,7 +249,19 @@ def test_inicio_valid_comparison_requires_own_and_competitor_price(tmp_path, mon
                               "render_price_comparator_page()").run(timeout=30)
     app.radio(key="top_level_section").set_value("Inicio").run(timeout=30)
     metrics = {m.label: m.value for m in app.metric}
-    assert metrics["Productos con comparación válida"].startswith("0/")
+    assert metrics["Total de la vigilancia"] == "0/1"
+
+
+def test_por_revisar_shows_only_review_tray_not_locator_controls(tmp_path, monkeypatch):
+    store, _, _, _, _, _, _ = _monitor_env(tmp_path, count=1)
+    monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
+    app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
+                              "render_price_comparator_page()").run(timeout=30)
+    app.radio(key="top_level_section").set_value("Por revisar").run(timeout=30)
+    assert not app.exception
+    assert not any(button.key == "locate_enqueue" for button in app.button)
+    assert not any(button.key == "locate_run" for button in app.button)
+    assert not any("Preparar cola" in button.label for button in app.button)
 
 
 def test_store_card_exposes_url_and_authorization_tasks(tmp_path, monkeypatch):

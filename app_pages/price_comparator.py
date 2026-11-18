@@ -1994,15 +1994,27 @@ def _render_inicio(store: PriceComparatorStore, data: dict) -> None:
                 "SELECT COUNT(*) FROM watch_products WHERE active=1").fetchone()[0]
         active_competitors = connection.execute(
             "SELECT COUNT(*) FROM competitors WHERE active=1").fetchone()[0]
-    if filtered is not None and not filtered.empty:
+    has_filters = bool(st.session_state.get("dashboard_brand")
+                       or st.session_state.get("dashboard_competitor")
+                       or st.session_state.get("dashboard_search")
+                       or st.session_state.get("dashboard_state") not in (None, analytics.STATE_ALL)
+                       or st.session_state.get("dashboard_period") not in (None, "30 días"))
+    if filtered is not None and filtered.empty:
+        valid_eans, protected_eans = 0, 0
+        st.info("Sin productos para estos filtros")
+    elif filtered is not None:
         valid_eans = int(((filtered["own_price_eur"].notna()) &
                           (filtered["competitor_count"].fillna(0) > 0)).sum())
         protected_eans = len(filtered)
     else:
-        valid_eans, protected_eans = 0, watch_count
-    protected_eans = max(protected_eans, watch_count)
+        valid_eans, protected_eans = 0, 0
+    if not has_filters:
+        protected_eans = watch_count if watch_count else (len(filtered) if filtered is not None and not filtered.empty else 0)
     cols = st.columns(4)
-    cols[0].metric("Productos con comparación válida", f"{valid_eans}/{protected_eans}")
+    cols[0].metric(
+        "Productos con comparación válida" if has_filters else "Total de la vigilancia",
+        f"{valid_eans}/{protected_eans}",
+    )
     cols[1].metric("Productos vigilados", watch_count)
     cols[2].metric("Tiendas activas", active_competitors)
     cols[3].metric("EAN protegidos", protected_eans)
@@ -2178,7 +2190,7 @@ def render_price_comparator_page() -> None:
         names = {row["id"]: row["name"] for row in store.competitors().to_dict("records")}
         from app_pages.price_watch import _render_locator
         st.subheader("Revisiones actuales")
-        _render_locator(store, names)
+        _render_locator(store, names, advanced=False)
         _render_pending_reviews(PricePilot(store))
     else:
         from app_pages.price_watch import render_admin

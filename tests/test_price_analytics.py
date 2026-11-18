@@ -329,7 +329,7 @@ def test_page_shows_insufficient_data_message_and_renders_with_data(tmp_path, mo
     assert not app.exception
     assert any("Datos insuficientes para medir competitividad" in item.value for item in app.info)
     assert [m.label for m in app.metric[:4]] == [
-        "Productos con comparación válida", "Productos vigilados",
+        "Total de la vigilancia", "Productos vigilados",
         "Tiendas activas", "EAN protegidos",
     ]
     rendered_headers = {item.value for item in app.header}

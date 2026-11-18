@@ -259,7 +259,7 @@ def test_competitor_panels_have_separate_web_and_scheduler_sections_with_the_sch
     assert not _rows(ui, "SELECT 1 FROM competitor_schedule WHERE enabled=1")
     app.radio(key="top_level_section").set_value("Inicio").run(timeout=60)
     assert {metric.label: metric.value for metric in app.metric
-            }["Productos con comparación válida"].startswith("0/")
+            }["Total de la vigilancia"].startswith("0/")
     # Registered URLs remain configuration only; they do not create comparable price observations.
     assert not app.error
 

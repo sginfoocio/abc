@@ -51,7 +51,7 @@ CREATE TABLE product_pricelist_map(id INTEGER PRIMARY KEY, name TEXT);
 CREATE TABLE product_pricelist_map_product_template_rel(product_template_id INTEGER, product_pricelist_map_id INTEGER);
 CREATE TABLE product_pricelist_item(id INTEGER PRIMARY KEY, pricelist_id INTEGER, applied_on TEXT,
     product_pricelist_map_id INTEGER, product_id INTEGER, product_tmpl_id INTEGER, compute_price TEXT, base TEXT,
-    price_discount NUMERIC, price_surcharge NUMERIC, price_round NUMERIC, min_quantity NUMERIC,
+    price_discount NUMERIC, price_surcharge NUMERIC, price_round NUMERIC, fixed_price NUMERIC, min_quantity NUMERIC,
     date_start TEXT, date_end TEXT, active BOOLEAN);
 INSERT INTO res_currency VALUES (1,'EUR'),(2,'USD');
 """
@@ -105,9 +105,12 @@ class OdooFixture:
             self._maps[name] = self._id()
             self.execute("INSERT INTO product_pricelist_map VALUES(:i,:n)", i=self._maps[name], n=name)
             self.execute("""INSERT INTO product_pricelist_item(id,pricelist_id,applied_on,product_pricelist_map_id,
-                compute_price,base,price_discount,price_surcharge,price_round,min_quantity,active)
-                VALUES(:i,59,'1_pricelist_map',:m,'formula','list_price',:d,:s,1.0,0,1)""",
-                         i=self._id(), m=self._maps[name], d=discount, s=extra.get("surcharge", 0))
+                compute_price,base,price_discount,price_surcharge,price_round,fixed_price,min_quantity,active)
+                VALUES(:i,59,'1_pricelist_map',:m,:compute,:base,:d,:s,1.0,:fixed,0,1)""",
+                         i=self._id(), m=self._maps[name],
+                         compute=extra.get("compute_price", "formula"), base=extra.get("base", "list_price"),
+                         d=discount, s=extra.get("surcharge", 0),
+                         fixed=extra.get("fixed_price"))
         return self._maps[name]
 
     def product(self, ean: str, list_price: float, price: float | None, *, vat: int | None = 21,
@@ -297,6 +300,31 @@ def test_local_formula_limitation_does_not_invalidate_authoritative_received_pri
     row = _current(store, "8056262398043")
     assert (row["price"], row["validation_status"], row["comparable"]) == (252, "validated", 1)
     assert "recargo" in row["validation_detail"] and "importe recibido" in row["validation_detail"]
+
+
+def test_fixed_map_uses_authoritative_received_price_not_fixed_label(tmp_path) -> None:
+    store, odoo = _store(tmp_path, ["8056262398043"]), OdooFixture(tmp_path / "odoo.sqlite3")
+    odoo.product("8056262398043", 360, 222,
+                 maps=(odoo.map_rule("Vytria fijo promocional", 30,
+                                     compute_price="fixed", fixed_price=222),))
+
+    _sync(store, odoo).run()
+
+    row = _current(store, "8056262398043")
+    assert (row["price"], row["validation_status"], row["comparable"]) == (222, "validated", 1)
+    assert "precio fijo acreditado" in row["validation_detail"]
+
+
+def test_fixed_map_preserves_received_price_when_label_differs(tmp_path) -> None:
+    store, odoo = _store(tmp_path, ["8056262398043"]), OdooFixture(tmp_path / "odoo.sqlite3")
+    odoo.product("8056262398043", 360, 237,
+                 maps=(odoo.map_rule("Vytria España (65%)", 30,
+                                     compute_price="fixed", fixed_price=237),))
+
+    _sync(store, odoo).run()
+
+    row = _current(store, "8056262398043")
+    assert (row["price"], row["validation_status"], row["comparable"]) == (237, "validated", 1)
 
 
 def test_product_without_map_is_not_comparable(tmp_path) -> None:
