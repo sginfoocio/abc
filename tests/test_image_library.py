@@ -1,3 +1,4 @@
+from dataclasses import replace
 from hashlib import sha256
 from io import BytesIO
 from unittest.mock import Mock
@@ -66,6 +67,68 @@ def run(role="admin"):
     return app
 
 
+def test_repository_multi_search_zip_selection_and_invalidation(repository, monkeypatch):
+    from zipfile import ZipFile
+    import image_exports
+
+    lookup = Mock(side_effect=AssertionError("Browsing/Original must not access Odoo"))
+    monkeypatch.setattr(image_exports, "read_export_market_ids", lookup)
+    add(repository, "036000291452", "frontal", 1)
+    add(repository, "4006381333931", "detalle", 7)
+    app = run()
+    app.text_area(key="lib_multi_text").set_value("0036000291452,036000291452 4006381333931\n1234567890128 123").run()
+    app.button(key="lib_multi_search").click().run()
+    assert not app.exception
+    assert any("Repetidos/equivalentes: 1" in item.value for item in app.caption)
+    assert any("1234567890128" in item.value for item in app.warning)
+    assert any("Códigos inválidos: 123" in item.value for item in app.warning)
+    app.button(key="lib_multi_prepare").click().run()
+    assert not app.exception
+    with ZipFile(BytesIO(app.session_state["lib_multi_zip"]["bytes"])) as zipped:
+        assert len(zipped.namelist()) == 3
+    app.checkbox(key="lib_multi_all").uncheck().run()
+    app.multiselect(key="lib_multi_selected").set_value(["0036000291452"]).run()
+    assert "lib_multi_zip" not in app.session_state
+    app.button(key="lib_multi_prepare").click().run()
+    assert not app.exception
+    with ZipFile(BytesIO(app.session_state["lib_multi_zip"]["bytes"])) as zipped:
+        assert len(zipped.namelist()) == 2
+        assert all(name.startswith("0036000291452/") or name == "manifest.json" for name in zipped.namelist())
+    app.text_area(key="lib_multi_text").set_value("4006381333931").run()
+    assert "lib_multi_zip" not in app.session_state
+    assert any("El listado ha cambiado" in item.value for item in app.warning)
+    lookup.assert_not_called()
+
+
+def test_multi_search_preserves_existing_gallery_filters_and_details(repository):
+    add(repository, "036000291452", "frontal", 1)
+    add(repository, "4006381333931", "detalle", 7, provider="Luxoptica")
+    app = run()
+    app.selectbox(key="lib_provider").select("Kering").run()
+    app.text_area(key="lib_multi_text").set_value("0036000291452 4006381333931").run()
+    app.button(key="lib_multi_search").click().run()
+    assert app.selectbox(key="lib_provider").value == "Kering"
+    assert len([b for b in app.button if str(b.key).startswith("lib_open_")]) == 1
+    app.button(key="lib_open_036000291452").click().run()
+    app.button(key="lib_back").click().run()
+    assert not app.exception
+    assert app.text_area(key="lib_multi_text").value == "0036000291452 4006381333931"
+    assert app.selectbox(key="lib_provider").value == "Kering"
+
+
+def test_imported_search_remains_exportable_when_uploader_unmounts_on_detail(repository):
+    add(repository, "036000291452", "frontal", 1)
+    app = run()
+    app.session_state["lib_multi_values"] = ["0036000291452"]
+    app.session_state["lib_multi_source"] = "list.xlsx"
+    app.run()
+    app.button(key="lib_open_036000291452").click().run()
+    app.button(key="lib_back").click().run()
+    app.button(key="lib_multi_prepare").click().run()
+    assert not app.exception
+    assert app.session_state["lib_multi_zip"]["bytes"]
+
+
 def test_groups_one_card_per_ean_keeping_leading_zeros_and_semantics():
     records = [
         record("0012", "frontal", id=1, model="M1"), record("0012", "lateral", id=2, model="M1"),
@@ -74,7 +137,7 @@ def test_groups_one_card_per_ean_keeping_leading_zeros_and_semantics():
     ]
     groups = library.group_records(records)
     assert sorted(g.ean for g in groups) == ["0012", "0099", "0100"]
-    assert library.summary(groups) == {"images": 5, "eans": 3, "models": 1}
+    assert library.summary(groups) == {"images": 5, "representations": 5, "eans": 3, "models": 1}
     first = next(g for g in groups if g.ean == "0012")
     assert first.cover.view == "frontal" and not first.cover.market
     assert first.missing_core == ("V2",)
@@ -85,6 +148,47 @@ def test_detail_images_are_never_promoted_to_v2():
     group = library.group_records([record("1", "detalle", id=i) for i in range(1, 4)])[0]
     assert group.missing_core == ("V1", "V2", "V3")
     assert library.view_label("detalle") == "Detalle" and library.view_label("raro") == "Sin clasificar"
+
+
+@pytest.mark.parametrize("aliases", [2, 5])
+def test_sixteen_and_forty_representations_remain_eight_photos(aliases, monkeypatch, capsys):
+    import scripts.diagnose_image_library as diagnose
+
+    records = []
+    for asset in range(8):
+        original = record("0012", "frontal", id=asset + 1)
+        records.extend(replace(original, id=asset * aliases + alias + 1,
+                               origin=f"source-{alias}", name=f"{asset}-{alias}.png")
+                       for alias in range(aliases))
+    group = library.group_records(records)[0]
+    assert len(group.photos) == 8 and len(group.records) == 8 * aliases
+    counts = library.summary([group])
+    assert counts["images"] == 8 and counts["representations"] == 8 * aliases
+    coverage = library.metadata_coverage(records)[0]
+    assert coverage["images"] == 8 and coverage["representations"] == 8 * aliases
+    monkeypatch.setattr(diagnose, "ImageRepository", lambda: Mock(catalog_records=lambda: records))
+    assert diagnose.main() == 0
+    assert f"Fotografías únicas: 8  Representaciones: {8 * aliases}" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("signature", ["checksum", "pixels"])
+def test_matches_across_products_are_flagged_without_merging_colors(signature):
+    first = replace(record("0012", "frontal", id=1), **{signature: "same"},
+                    metadata={"identity": {"model": "MODEL", "color": "001"}})
+    other = replace(record("0099", "frontal", id=2), **{signature: "same"},
+                    metadata={"identity": {"model": "MODEL", "color": "002"}})
+    groups = {g.ean: g for g in library.group_records([first, other])}
+    assert set(groups) == {"0012", "0099"}
+    assert groups["0012"].related_eans == ("0099",)
+    assert groups["0099"].related_eans == ("0012",)
+    assert all(len(group.photos) == 1 for group in groups.values())
+
+
+def test_visually_equivalent_distinct_files_are_kept_even_with_same_view():
+    records = [replace(record("0012", "detalle", id=n), pixels="same") for n in (1, 2)]
+    group = library.group_records(records)[0]
+    assert len(group.photos) == 2 and len(group.visual_equivalents) == 1
+    assert group.missing_core == ("V1", "V2", "V3")
 
 
 def test_filters_and_partial_ean_search():
@@ -171,6 +275,37 @@ def test_product_detail_zip_on_demand_download_and_originals_intact(repository, 
     assert zipper.call_count == 1 and len(app.get("download_button")) == 2
     app.run()
     assert zipper.call_count == 1
+    assert {r.path: sha256(r.path.read_bytes()).hexdigest() for r in saved} == before
+
+
+def test_unique_gallery_keeps_all_representations_traceability_and_zip(repository):
+    from zipfile import ZipFile
+
+    ean = "0001234567890"
+    saved = []
+    for asset in range(8):
+        content = photo((asset * 20, 40, 90))
+        for alias in range(5):
+            stored, _ = repository.save(
+                ean, f"{asset}-{alias}.png", content, provider="Luxoptica",
+                origin=f"source-{alias}", view="frontal",
+                metadata={"identity": {"model": "MODEL", "color": "001"}},
+            )
+            saved.append(stored)
+    repository.save("0001234567891", "other-color.png", saved[0].path.read_bytes(),
+                    provider="Luxoptica", origin="other-product", view="frontal",
+                    metadata={"identity": {"model": "MODEL", "color": "002"}})
+    before = {r.path: sha256(r.path.read_bytes()).hexdigest() for r in saved}
+    app = run()
+    app.button(key=f"lib_open_{ean}").click().run()
+    assert not app.exception
+    photos = [b for b in app.button if b.key.startswith("lib_photo_") and b.key[10:].isdigit()]
+    assert len(photos) == 8
+    assert len(app.dataframe[0].value) == 40
+    assert set(app.dataframe[0].value["Color"]) == {"001"}
+    assert any("0001234567891" in warning.value for warning in app.warning)
+    with ZipFile(BytesIO(repository.zip_eans_for_user([ean], role="admin"))) as archive:
+        assert len([name for name in archive.namelist() if name != "manifest.json"]) == 40
     assert {r.path: sha256(r.path.read_bytes()).hexdigest() for r in saved} == before
 
 
@@ -290,7 +425,7 @@ def test_images_stay_attached_to_their_ean_when_models_repeat():
         meta_record("2", "frontal", {"modelo": "RB3025"}, id=3),
     ])
     assert {g.ean: len(g.records) for g in groups} == {"1": 2, "2": 1}
-    assert library.summary(groups) == {"images": 3, "eans": 2, "models": 1}
+    assert library.summary(groups) == {"images": 3, "representations": 3, "eans": 2, "models": 1}
 
 
 def test_summary_does_not_count_file_names_as_models():

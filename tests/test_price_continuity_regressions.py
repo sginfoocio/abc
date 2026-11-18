@@ -106,7 +106,7 @@ def test_archived_133_partial_html_replays_without_promoting_candidates(tmp_path
     visual_dir.mkdir()
     visual, visual_store, _ = _visit(visual_dir, target, visual_url, pages["visualclick-sanitizado.html"])
     assert visual.state == "rejected" and "Distinto color" in visual.detail
-    assert not visual.page.ean_published and visual.page.price is None
+    assert not visual.page.ean_published and visual.page.price == 124
     assert visual.page.availability == "unknown"
     assert any("no se interpreta como GTIN" in note for note in visual.page.notes)
     visual_search = WebPriceSearch(visual_store, clock=lambda: NOW)
@@ -144,7 +144,7 @@ def test_visualclick_sanitized_facts_reject_color_without_promoting_sku_to_ean(t
 
     assert outcome.state == "rejected" and "Distinto color" in outcome.detail
     assert not outcome.page.ean_published and outcome.page.caliber == "50"
-    assert outcome.page.price is None and outcome.page.availability == "unknown"
+    assert outcome.page.price == 124 and outcome.page.availability == "unknown"
     with store._connect() as con:
         assert con.execute("SELECT COUNT(*) FROM offers").fetchone()[0] == 0
     node["offers"][0]["url"] = url

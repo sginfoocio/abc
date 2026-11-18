@@ -23,7 +23,7 @@ EXPECTED_COUNTS = {
 
 
 def _time(value):
-    parsed = datetime.fromisoformat(value)
+    parsed = value if isinstance(value, datetime) else datetime.fromisoformat(value)
     if parsed.tzinfo is None:
         raise ValueError("Fecha sin zona horaria")
     return parsed.astimezone(timezone.utc)
@@ -73,13 +73,14 @@ def load_allowlist(path, report_path):
     return data
 
 
-def _scope(con, entries):
+def _scope(con, entries, *, allow_stopped=False):
     ids = {e["continuity_id"] for e in entries}
     if len(ids) != 1:
         raise ValueError("La lista debe pertenecer a una única continuidad")
     continuity_id = next(iter(ids))
     row = con.execute("SELECT * FROM price_continuity WHERE id=?", (continuity_id,)).fetchone()
-    if not row or row["status"] not in {"active", "paused"}:
+    allowed = {"active", "paused", "stopped"} if allow_stopped else {"active", "paused"}
+    if not row or row["status"] not in allowed:
         raise ValueError("Continuidad inexistente o no recuperable")
     frozen = json.loads(row["manifest"])
     expected_names = {name: (urlsplit(url).hostname or "").removeprefix("www.") for name, url in COMPETITORS}
@@ -300,17 +301,304 @@ def apply(database, allowlist_path, report_path, *, actor, note, build_commit, a
     return rows
 
 
+class _ReadOnlyStore:
+    def __init__(self, path):
+        self.database_path = Path(path).resolve()
+
+    def _connect(self):
+        return _connect(self.database_path, readonly=True)
+
+
+def _manual_review_rows(con, path, now):
+    from price_access import AccessControl
+    from price_locator import MAX_ATTEMPTS, job_deferral
+    from price_monitor import (_done_job_restriction, _review_identity_valid,
+                               _review_sample_ambiguous, _review_sample_matches, _review_sample_policy_reason)
+    from price_trial import PriceTrial, continuity_config
+    from price_watch import PriceWatch
+    from price_web_fetch import RobotsRules, user_agent
+
+    continuity_config()
+    continuity = con.execute("SELECT * FROM price_continuity ORDER BY id DESC LIMIT 1").fetchone()
+    if not continuity:
+        raise ValueError("No hay continuidad para validar el inventario")
+    continuity_id = _scope(con, [{"continuity_id": continuity["id"]}], allow_stopped=True)
+    trial = con.execute("SELECT status FROM price_trial WHERE id=1").fetchone()
+    if not trial or trial["status"] not in {"expired", "stopped"}:
+        raise ValueError("El piloto original no está cerrado")
+    frozen = json.loads(continuity["manifest"])
+    store = _ReadOnlyStore(path)
+    access = AccessControl(store, clock=lambda: now)
+    service = PriceTrial(store, clock=lambda: now)
+    watch = PriceWatch(store, clock=lambda: now)
+    rows = con.execute("""SELECT r.*,j.url AS monitor_url,j.state AS monitor_state,
+            j.not_before AS monitor_not_before,j.lease_until AS monitor_lease_until,
+            j.attempts AS monitor_attempts,j.eligible AS monitor_eligible,j.detail AS monitor_detail,
+            j.last_ok_at AS monitor_last_ok_at,j.sampled_at AS monitor_sampled_at,
+            j.valid_until AS monitor_valid_until,j.sample AS monitor_sample,
+            w.active AS watch_active,c.active AS competitor_active,
+            p.state AS continuity_pair_state,
+            EXISTS(SELECT 1 FROM manual_review_identity i WHERE i.refresh_id=r.id) AS identity_captured,
+            EXISTS(SELECT 1 FROM manual_review_recovery_grants g
+                   WHERE g.refresh_id=r.id AND g.continuity_id=?) AS recovery_granted
+        FROM manual_review_refreshes r
+        LEFT JOIN monitor_jobs j ON j.id=r.monitor_job_id
+        LEFT JOIN watch_products w ON w.ean=r.ean
+        LEFT JOIN competitors c ON c.id=r.competitor_id
+        LEFT JOIN price_continuity_pairs p ON p.continuity_id=? AND p.competitor_id=r.competitor_id AND p.ean=r.ean
+        ORDER BY r.requested_at,r.id""", (continuity_id, continuity_id)).fetchall()
+    result = []
+    for record in rows:
+        task = dict(record)
+        cid, ean = task["competitor_id"], task["ean"]
+        category, action, reason = "excluded", "", ""
+        if continuity["status"] != "active":
+            reason = f"Continuidad no activa: {continuity['status']}"
+        elif not continuity["started_at"] or _time(continuity["started_at"]) > now:
+            reason = "Continuidad con fecha de inicio futura"
+        elif cid not in frozen["competitors"] or ean not in frozen["eans"] or not task["continuity_pair_state"]:
+            reason = "Par fuera del manifiesto"
+        elif not task["watch_active"] or not task["competitor_active"]:
+            reason = "Producto o competidor inactivo"
+        elif task["monitor_url"] != task["url"]:
+            reason = "La URL del monitor no coincide con la ficha aceptada"
+        else:
+            try:
+                identity_ok = _review_identity_valid(con, task)
+                sample_matches = _review_sample_matches(task)
+                ambiguous_sample = _review_sample_ambiguous(task)
+            except (KeyError, TypeError, ValueError) as exc:
+                reason = f"Identidad o muestra ilegible: {type(exc).__name__}"
+                identity_ok = sample_matches = ambiguous_sample = False
+            if not reason and not identity_ok:
+                reason = "La identidad aceptada cambió o no puede acreditarse"
+            if not reason and ambiguous_sample:
+                reason = "No se puede acreditar el orden entre la muestra y la solicitud"
+            if not reason and sample_matches and task["monitor_state"] == "done":
+                interval = watch.monitor_interval_hours(ean, cid)
+                try:
+                    policy_reason = _review_sample_policy_reason(con, task, now, interval)
+                except (KeyError, TypeError, ValueError) as exc:
+                    policy_reason = f"Muestra comercial ilegible: {type(exc).__name__}"
+                if not policy_reason:
+                    category, reason = "already_resolved", "Lectura posterior y vigente de la misma ficha"
+                    if (task["status"] == "pending" or
+                            (task["status"] == "deferred" and
+                             task["detail"] == "Par reservado al piloto de 72 h o ventana finalizada")):
+                        action = "reconcile"
+                else:
+                    reason = policy_reason
+            elif not reason and task["status"] == "done":
+                reason = "Solicitud terminada sin muestra posterior verificable de la misma ficha"
+            elif not reason and task["status"] not in {"pending", "deferred"}:
+                reason = f"Estado de solicitud no recuperable: {task['status']}"
+            elif (not reason and task["status"] == "deferred"
+                  and task["detail"] != "Par reservado al piloto de 72 h o ventana finalizada"):
+                reason = f"Aplazamiento ajeno al defecto: {task['detail']}"
+            elif not reason and task["continuity_pair_state"] == "running":
+                reason = "Lectura de continuidad en curso"
+            elif not reason and task["continuity_pair_state"] not in {"pending", "review"}:
+                reason = f"Restricción del par: {task['continuity_pair_state']}"
+            elif not reason and task["monitor_state"] == "running":
+                reason = "Lectura concurrente o interrupción sin resolver"
+            elif not reason and task["monitor_state"] in {"review", "failed", "gone", "inactive"}:
+                reason = f"El monitor requiere revisión: {task['monitor_state']}"
+            elif not reason and int(task["monitor_attempts"] or 0) >= MAX_ATTEMPTS:
+                reason = "Máximo de intentos del monitor alcanzado"
+            elif not reason and task["monitor_state"] == "blocked" and not task["monitor_not_before"]:
+                reason = task["monitor_detail"] or "Bloqueo de acceso sin fecha"
+            if not reason:
+                job = {"state": task["monitor_state"], "not_before": task["monitor_not_before"],
+                       "lease_until": task["monitor_lease_until"], "attempts": task["monitor_attempts"],
+                       "sampled_at": task["monitor_sampled_at"], "last_ok_at": task["monitor_last_ok_at"],
+                       "valid_until": task["monitor_valid_until"]}
+                restriction = _done_job_restriction(job) if job["state"] == "done" else None
+                if restriction and restriction > now:
+                    reason = f"Fecha futura del monitor: {restriction.isoformat()}"
+                elif task["status"] == "pending" and task["retry_at"] and _time(task["retry_at"]) > now:
+                    reason = f"Fecha futura de la solicitud: {task['retry_at']}"
+                else:
+                    reason = job_deferral(job, now, point_check=True, monitoring=True)
+            if not reason:
+                with service.execution(0, cid, ean, program="continuity", program_id=continuity_id):
+                    decision = access.check(cid, "ficha")
+                if not decision.allowed:
+                    reason = decision.message
+                    if decision.retry_at:
+                        reason += f" hasta {decision.retry_at.isoformat()}"
+            if not reason:
+                parsed = urlsplit(task["url"])
+                origin = f"{parsed.scheme}://{parsed.netloc}"
+                robots = con.execute("""SELECT status,rules_text,expires_at FROM price_robots_cache
+                    WHERE origin=? AND agent=?""", (origin, user_agent())).fetchone()
+                if robots and _time(robots["expires_at"]) > now and robots["status"] == 200:
+                    if not RobotsRules.parse(robots["rules_text"]).allowed(task["url"]):
+                        reason = "robots.txt vigente prohíbe esta ruta"
+            if not reason:
+                category = "recoverable"
+                action = ("requeue" if task["status"] == "deferred" else
+                          "authorize" if not task["identity_captured"] and not task["recovery_granted"]
+                          else "already_queued")
+                reason = ("Aplazamiento de reserva acreditado" if action == "requeue"
+                          else "Solicitud pendiente; requiere autorización auditada" if action == "authorize"
+                          else "Solicitud pendiente; ya está en la cola")
+        result.append({"id": task["id"], "ean": ean, "competitor_id": cid, "url": task["url"],
+                       "category": category, "action": action, "reason": reason,
+                       "status": task["status"], "requested_at": task["requested_at"],
+                       "retry_at": task["retry_at"], "attempts": task["attempts"],
+                       "sampled_at": task["monitor_sampled_at"], "detail": task["detail"],
+                       "classification": _classify_manual_row({
+                           "category": category, "action": action, "reason": reason})})
+    return continuity_id, result
+
+
+def _manual_summary(rows):
+    return {name: sum(row["category"] == name for row in rows)
+            for name in ("recoverable", "already_resolved", "excluded")}
+
+
+def _classify_manual_row(row):
+    reason = (row.get("reason") or "").casefold()
+    category = row.get("category")
+    action = row.get("action")
+    if category == "already_resolved":
+        return "1_ya_resuelta"
+    if action in {"reconcile", "local_reevaluation"}:
+        return "2_reevaluable_local"
+    if category == "recoverable":
+        return "3_recuperable_lectura_gobernada"
+    if any(word in reason for word in ("contrad", "identidad", "cambio")):
+        return "5_revision_contradiccion_real"
+    if any(word in reason for word in ("muestra", "captura", "evidencia", "históric", "anterior")):
+        return "4_necesita_captura_evidencia"
+    return "6_excluida_control_vigencia"
+
+
+def _classification_summary(rows):
+    names = (
+        "1_ya_resuelta",
+        "2_reevaluable_local",
+        "3_recuperable_lectura_gobernada",
+        "4_necesita_captura_evidencia",
+        "5_revision_contradiccion_real",
+        "6_excluida_control_vigencia",
+    )
+    result = {name: 0 for name in names}
+    for row in rows:
+        result[_classify_manual_row(row)] += 1
+    return result
+
+
+def preview_manual_reviews(database, *, now=None):
+    path = Path(database).resolve()
+    now = _time(now or datetime.now(timezone.utc))
+    with closing(_connect(path, readonly=True)) as con:
+        con.execute("BEGIN")
+        _, rows = _manual_review_rows(con, path, now)
+        con.rollback()
+    return {"counts": _manual_summary(rows), "classifications": _classification_summary(rows), "requests": rows}
+
+
+def apply_manual_reviews(database, *, actor, note, build_commit, approved=False, request_ids=None, now=None):
+    if not approved or not actor.strip() or not note.strip():
+        raise ValueError("Confirmación explícita, responsable y motivo obligatorios")
+    if len(build_commit) != 40 or any(c not in "0123456789abcdef" for c in build_commit):
+        raise ValueError("Commit válido de 40 caracteres requerido")
+    if request_ids is not None and (not request_ids or any(not isinstance(i, int) or i < 1 for i in request_ids)):
+        raise ValueError("Los IDs seleccionados deben ser enteros positivos")
+    path = Path(database).resolve()
+    now = _time(now or datetime.now(timezone.utc))
+    with FileLock(f"{path}.manual-review-refresh.lock", timeout=0), FileLock(
+            f"{path}.continuity.lock", timeout=0), ExitStack() as stack:
+        with closing(_connect(path, readonly=True)) as con:
+            row = con.execute("SELECT * FROM price_continuity ORDER BY id DESC LIMIT 1").fetchone()
+            if not row:
+                raise ValueError("No hay continuidad")
+            _scope(con, [{"continuity_id": row["id"]}], allow_stopped=True)
+            competitors = sorted(json.loads(row["manifest"])["competitors"])
+        for cid in competitors:
+            stack.enter_context(FileLock(f"{path}.competitor-{cid}.lock", timeout=0))
+        with closing(_connect(path, readonly=False)) as con:
+            con.execute("BEGIN IMMEDIATE")
+            continuity_id, rows = _manual_review_rows(con, path, now)
+            selected = set(request_ids) if request_ids is not None else {item["id"] for item in rows}
+            if not selected <= {item["id"] for item in rows}:
+                raise ValueError("Hay IDs de solicitud inexistentes")
+            changed = []
+            for item in rows:
+                if item["id"] not in selected or item["action"] not in {"requeue", "reconcile", "authorize"}:
+                    continue
+                before = dict(con.execute("SELECT * FROM manual_review_refreshes WHERE id=?",
+                                          (item["id"],)).fetchone())
+                if item["action"] in {"requeue", "authorize"}:
+                    previous_grant = con.execute(
+                        "SELECT * FROM manual_review_recovery_grants WHERE refresh_id=?", (item["id"],)).fetchone()
+                    if previous_grant:
+                        before["previous_grant"] = dict(previous_grant)
+                    con.execute("""INSERT INTO manual_review_recovery_grants
+                        (refresh_id,continuity_id,actor,note,build_commit,granted_at) VALUES(?,?,?,?,?,?)
+                        ON CONFLICT(refresh_id) DO UPDATE SET continuity_id=excluded.continuity_id,
+                            actor=excluded.actor,note=excluded.note,build_commit=excluded.build_commit,
+                            granted_at=excluded.granted_at""",
+                                (item["id"], continuity_id, actor.strip(), note.strip(), build_commit,
+                                 now.isoformat()))
+                if item["action"] == "requeue":
+                    status, detail = "pending", "Recuperación auditada de reserva; pendiente de lectura gobernada"
+                    finished = before["finished_at"]
+                elif item["action"] == "authorize":
+                    status, detail, finished = before["status"], before["detail"], before["finished_at"]
+                else:
+                    status = "done"
+                    detail = f"Lectura posterior reutilizada con fecha original {item['sampled_at']}"
+                    finished = now.isoformat()
+                if item["action"] != "authorize":
+                    con.execute("""UPDATE manual_review_refreshes SET status=?,detail=?,retry_at=NULL,lease_until=NULL,
+                        finished_at=?,updated_at=? WHERE id=?""",
+                                (status, detail, finished, now.isoformat(), item["id"]))
+                con.execute("""INSERT INTO access_audit(scope,scope_id,action,previous,current,actor,note,at)
+                    VALUES('manual_review',?,'recover_manual_review',?,?,?,?,?)""",
+                            (str(item["id"]), json.dumps(before, ensure_ascii=False),
+                             json.dumps({"status": status, "detail": detail}, ensure_ascii=False),
+                             actor.strip(), json.dumps({"reason": note.strip(), "build_commit": build_commit,
+                                                       "continuity_id": continuity_id}, ensure_ascii=False),
+                             now.isoformat()))
+                changed.append(item["id"])
+            con.execute("""INSERT INTO access_audit(scope,scope_id,action,previous,current,actor,note,at)
+                VALUES('price_continuity',?,'recover_manual_review_batch','',?,?,?,?)""",
+                        (str(continuity_id), json.dumps({"counts": _manual_summary(rows), "changed": changed,
+                                                        "selected": sorted(selected)}, ensure_ascii=False),
+                         actor.strip(), json.dumps({"reason": note.strip(), "build_commit": build_commit},
+                                                  ensure_ascii=False), now.isoformat()))
+            con.commit()
+    return {"counts": _manual_summary(rows), "classifications": _classification_summary(rows),
+            "requests": rows, "changed": changed}
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database", required=True, help="Base SQLite existente; no se inicializa")
-    parser.add_argument("--allowlist", required=True, help="Lista auditada con IDs esperados")
-    parser.add_argument("--report", required=True, help="Informe histórico cuya huella consta en la lista")
+    parser.add_argument("--allowlist", help="Lista auditada con IDs esperados")
+    parser.add_argument("--report", help="Informe histórico cuya huella consta en la lista")
+    parser.add_argument("--manual-reviews", action="store_true", help="Inventario completo de lecturas manuales")
+    parser.add_argument("--request-id", type=int, action="append", help="Limitar aplicación a solicitudes concretas")
     parser.add_argument("--apply", action="store_true", help="Aplicar únicamente los pares elegibles revalidados")
     parser.add_argument("--approved", action="store_true", help="Confirmación expresa de recuperación")
     parser.add_argument("--actor", default="")
     parser.add_argument("--note", default="")
     parser.add_argument("--commit", default="")
     args = parser.parse_args(argv)
+    if args.manual_reviews:
+        if args.apply:
+            result = apply_manual_reviews(args.database, actor=args.actor, note=args.note, build_commit=args.commit,
+                                          approved=args.approved, request_ids=args.request_id)
+        else:
+            if args.request_id:
+                parser.error("La vista previa siempre examina todas las solicitudes")
+            result = preview_manual_reviews(args.database)
+        print(json.dumps({"mode": "apply" if args.apply else "preview", **result}, ensure_ascii=False))
+        return
+    if not args.allowlist or not args.report or args.request_id:
+        parser.error("--allowlist y --report son obligatorios fuera de --manual-reviews")
     if args.apply:
         rows = apply(args.database, args.allowlist, args.report, actor=args.actor, note=args.note,
                      build_commit=args.commit, approved=args.approved)

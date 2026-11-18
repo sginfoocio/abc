@@ -570,6 +570,27 @@ def test_diagnostic_capture_preserves_reviews_and_offers(trial):
         assert audit["actor"] == "operator" and audit["note"] == "review"
 
 
+def test_diagnostic_preserves_specific_pilot_refusal(trial, monkeypatch):
+    from price_pilot import PilotError
+
+    service, store, _, cid, ean, url, site = _diagnostic_review(trial)
+
+    def deny(_store):
+        raise PilotError("Piloto desactivado; no se autoriza su comprobación puntual")
+
+    monkeypatch.setattr("price_pilot.pilot_scope", deny)
+    with pytest.raises(PilotError):
+        service.capture_diagnostic(cid, ean, url, actor="operator", note="review",
+                                   build_commit="b" * 40, approved=True)
+    with store._connect() as con:
+        audit = json.loads(con.execute("SELECT current FROM access_audit WHERE action='capture_diagnostic_html'")
+                           .fetchone()[0])
+    assert audit["stage"] == "lock_and_scope"
+    assert audit["reason"] == "Piloto desactivado; no se autoriza su comprobación puntual"
+    assert audit["requests"] == []
+    assert site.calls == []
+
+
 def test_diagnostic_queue_survives_busy_worker_pause_and_session_restart(trial):
     from concurrent.futures import ThreadPoolExecutor
     import hashlib
@@ -737,6 +758,23 @@ def test_diagnostic_rejects_unverifiable_private_storage_before_http(trial, monk
     assert not site.calls
 
 
+def test_diagnostic_oversize_records_fetch_receipt_and_never_automatically_retries(trial, monkeypatch):
+    service, store, _, cid, ean, url, site = _diagnostic_review(trial)
+    monkeypatch.setenv("PRICE_DIAGNOSTIC_BODY_BYTES", "1024")
+    site.pages[url] = "<html>" + "x" * 2048 + "</html>"
+    request = service.request_diagnostic(cid, ean, url, actor="operator", note="size limit",
+                                         build_commit="b" * 40, approved=True)
+    service.diagnostic_tick()
+    service.diagnostic_tick()
+    with store._connect() as con:
+        row = con.execute("SELECT status,reason,result,artifact FROM price_diagnostic_requests WHERE id=?",
+                          (request["id"],)).fetchone()
+    result = json.loads(row["result"])
+    assert row["status"] == "rejected" and "tamaño" in row["reason"]
+    assert result["stage"] == "fetch" and result["requests"]
+    assert row["artifact"] is None and site.calls.count(url) == 1
+
+
 def _privacy_rejected_diagnostic(trial, monkeypatch):
     from price_diagnostic import EvidenceError
 
@@ -755,6 +793,32 @@ def _privacy_rejected_diagnostic(trial, monkeypatch):
         original = dict(con.execute("SELECT * FROM price_diagnostic_requests WHERE id=?", (request["id"],)).fetchone())
     assert original["status"] == "rejected" and json.loads(original["result"])["requests"] == []
     return service, store, clock, cid, ean, url, site, request, kwargs, original
+
+
+def test_diagnostic_explicit_retry_for_proven_pilot_refusal_without_http(trial, monkeypatch):
+    from price_pilot import PilotError
+
+    service, store, _, cid, ean, url, site = _diagnostic_review(trial)
+    kwargs = {"actor": "operator", "note": "retry pilot refusal", "build_commit": "b" * 40, "approved": True}
+    request = service.request_diagnostic(cid, ean, url, **kwargs)
+    with monkeypatch.context() as patch:
+        def deny(_store):
+            raise PilotError("Reserva del piloto ocupada")
+
+        patch.setattr("price_pilot.pilot_scope", deny)
+        service.diagnostic_tick()
+    with store._connect() as con:
+        original = dict(con.execute("SELECT * FROM price_diagnostic_requests WHERE id=?", (request["id"],)).fetchone())
+    assert json.loads(original["result"])["requests"] == []
+    assert original["reason"] == "Reserva del piloto ocupada"
+    assert not site.calls
+    retry = service.retry_diagnostic(request["id"], **kwargs)
+    assert service.retry_diagnostic(request["id"], **kwargs)["id"] == retry["id"]
+    service.diagnostic_tick()
+    service.diagnostic_tick()
+    assert site.calls.count(url) == 1
+    with store._connect() as con:
+        assert dict(con.execute("SELECT * FROM price_diagnostic_requests WHERE id=?", (request["id"],)).fetchone()) == original
 
 
 def test_diagnostic_privacy_retry_preserves_original_and_runs_once(trial, monkeypatch):

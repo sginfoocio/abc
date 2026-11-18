@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import closing
+from contextlib import closing, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 import pandas as pd
@@ -77,19 +77,8 @@ CLOUD_DB_PATH = CLOUD_DATA_DIR / "price_comparator.sqlite3"
 # Default validity of a price for commercial comparisons; configurable through comparator_settings.
 SYNCED_PRICE_MAX_AGE_DAYS = 7
 RETENTION_MONTHS_OPTIONS = (3, 6, 12, 24)
-SETTING_DEFAULTS = {
-    "retention_months": "12",
-    "price_expiry_days": str(SYNCED_PRICE_MAX_AGE_DAYS),
-    "alert_threshold_pct": "5",
-    "business_competitor_market": "ES",
-    "business_competitor_currency": "EUR",
-    "business_competitor_vat_included": "1",
-    "business_competitor_declaration": (
-        "Los 14 competidores operan para esta comparación en mercado español, euros e IVA incluido; "
-        "declaración expresa del responsable del negocio registrada el 2026-11-12. "
-        "No acredita condiciones externas ni añade porcentajes de IVA."
-    ),
-}
+SETTING_DEFAULTS = {"retention_months": "12", "price_expiry_days": str(SYNCED_PRICE_MAX_AGE_DAYS),
+                    "alert_threshold_pct": "5"}
 # Only monitored pairs are gated; the existing supervised pilot and manual imports keep their behaviour.
 _MONITOR_OFFER_GUARD = """AND (NOT EXISTS(
     SELECT 1 FROM monitor_jobs m JOIN watch_products w ON w.ean=m.ean AND w.active=1
@@ -962,6 +951,27 @@ class PriceComparatorStore:
                     );
                     CREATE INDEX IF NOT EXISTS manual_review_refreshes_queue_idx
                         ON manual_review_refreshes(status,retry_at,lease_until,id);
+                    CREATE TABLE IF NOT EXISTS manual_review_http_attribution (
+                        refresh_id INTEGER PRIMARY KEY REFERENCES manual_review_refreshes(id),
+                        base_requests INTEGER NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS manual_review_identity (
+                        refresh_id INTEGER PRIMARY KEY REFERENCES manual_review_refreshes(id),
+                        snapshot TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS manual_review_recorded_samples (
+                        refresh_id INTEGER PRIMARY KEY REFERENCES manual_review_refreshes(id),
+                        sampled_at TEXT NOT NULL,
+                        sample_digest TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS manual_review_recovery_grants (
+                        refresh_id INTEGER PRIMARY KEY REFERENCES manual_review_refreshes(id),
+                        continuity_id INTEGER NOT NULL REFERENCES price_continuity(id),
+                        actor TEXT NOT NULL,
+                        note TEXT NOT NULL,
+                        build_commit TEXT NOT NULL,
+                        granted_at TEXT NOT NULL
+                    );
                     CREATE TABLE IF NOT EXISTS monitor_schedule (
                         competitor_id TEXT PRIMARY KEY REFERENCES competitors(id),
                         enabled INTEGER NOT NULL DEFAULT 0,
@@ -1000,8 +1010,7 @@ class PriceComparatorStore:
 
         Registers the 14 reference competitors, the general settings and one disabled
         schedule row per competitor with the default limits. Nothing is enabled or queried.
-        The general ES/EUR and IVA policy is recorded as an express business declaration.
-        A contradictory fiche currency, market or tax remains a review issue.
+        Competitor market/currency stay empty until verified: ES/EUR is only the comparison target.
         """
         from competitor_requirements import CHECKED_ON, COMPETITORS, METHOD_STATUS, requirement_for
 
@@ -1013,12 +1022,8 @@ class PriceComparatorStore:
                     competitor_id = re.sub(r"[^a-z0-9]+", "-", domain).strip("-")
                     added["competitors"] += connection.execute(
                         """INSERT OR IGNORE INTO competitors(id,name,url,domain,market,currency)
-                           VALUES(?,?,?,?,'ES','EUR')""",
+                           VALUES(?,?,?,?,'','')""",
                         (competitor_id, name, url, domain)).rowcount
-                    connection.execute("""UPDATE competitors
-                        SET market=CASE WHEN TRIM(COALESCE(market,''))='' THEN 'ES' ELSE market END,
-                            currency=CASE WHEN TRIM(COALESCE(currency,''))='' THEN 'EUR' ELSE currency END
-                        WHERE id=?""", (competitor_id,))
                     method, status = METHOD_STATUS[name]
                     added["coverage"] += connection.execute(
                         """INSERT OR IGNORE INTO competitor_coverage(competitor_id,method,integration_status,
@@ -1224,13 +1229,31 @@ class PriceComparatorStore:
                     errors.append(f"Fila {index + 2}: {exc}")
         return ImportReport(imported, 0, tuple(errors))
 
-    def import_offers(self, frame: pd.DataFrame) -> ImportReport:
+    def import_offers(self, frame: pd.DataFrame, *,
+                      validate: Callable[[sqlite3.Connection], None] | None = None,
+                      review_sample: tuple[int, str, str] | None = None,
+                      connection: sqlite3.Connection | None = None) -> ImportReport:
         required = {"EAN", "Competidor", "Precio", "Moneda", "Mercado", "URL", "Disponibilidad",
                     "Estado coincidencia", "Evidencia", "Método"}
         _required_columns(frame, required, "Ofertas")
         imported = updated = rejected = 0
         errors: list[str] = []
-        with self._connect() as connection, connection:
+        external = connection is not None
+        context = nullcontext(connection) if external else self._connect()
+        with context as connection, connection:
+            if review_sample is not None and (validate is None or len(frame) != 1):
+                raise ValueError("La muestra de revisión requiere una única oferta y validación")
+            if validate is not None:
+                if not external:
+                    connection.execute("BEGIN IMMEDIATE")
+                validate(connection)
+            if review_sample is not None:
+                recorded = connection.execute("""SELECT sampled_at,sample_digest
+                    FROM manual_review_recorded_samples WHERE refresh_id=?""", (review_sample[0],)).fetchone()
+                if recorded:
+                    if tuple(recorded) != review_sample[1:]:
+                        raise ValueError("La muestra registrada de esta revisión ha cambiado")
+                    return ImportReport(0, 0, ())
             competitors = {row["name"].casefold(): row for row in connection.execute("SELECT * FROM competitors")}
             competitors.update({row["id"].casefold(): row for row in connection.execute("SELECT * FROM competitors")})
             for index, row in frame.iterrows():
@@ -1379,6 +1402,12 @@ class PriceComparatorStore:
                 except ValueError as exc:
                     rejected += 1
                     errors.append(f"Fila {index + 2}: {exc}")
+            if review_sample is not None:
+                if rejected:
+                    connection.rollback()
+                else:
+                    connection.execute("""INSERT INTO manual_review_recorded_samples
+                        (refresh_id,sampled_at,sample_digest) VALUES(?,?,?)""", review_sample)
         return ImportReport(imported, updated, tuple(errors))
 
     @staticmethod

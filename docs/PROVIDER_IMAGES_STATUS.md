@@ -95,12 +95,26 @@ Secundario y de solo lectura (`SET TRANSACTION READ ONLY`, timeout de sentencia,
    contacta con ningún portal. Cada selección se anota en `provider_odoo_selections.jsonl` (aprobador, pedido, referencia).
 5. Odoo solo prueba el origen del EAN: la imagen descargada sigue necesitando manifiesto, metadatos o revisión.
 
-### Estado de la auditoría real (pendiente)
+### Contrato Odoo contrastado (17/11/2026)
 
-No se ha podido consultar el Odoo real desde el entorno de desarrollo (sin credenciales). Quedan por ejecutar con una
-cuenta de solo lectura, y registrar en #59: `python scripts/audit_provider_odoo.py --partner marcolin=573` (contactos,
-pedidos y EAN de MARCOLIN IBERICA), búsqueda de candidatos de Sáfilo y de las marcas NuORDER (Dita, Cutler, Akoni, Linda
-Farrow). Hasta validarlo, ninguna asociación está guardada.
+La auditoría real confirmó que `product_supplierinfo.name` enlaza con `res_partner.id`; no existe
+`product_supplierinfo.partner_id`. La búsqueda masiva y el script auditor usan ese contrato verificado, sin cambiar
+Odoo ni intentar nombres de columna alternativos. `product_id` nulo corresponde a plantilla; una relación específica
+de variante no se atribuye a sus hermanas. Modelo y color proceden de `product_template.modelo` y `color_proveedor`,
+manteniendo producto, referencia interna, marca y barcode literal.
+
+La corrección se validó en memoria, sin instalar archivos ni desplegar, contra las 28 variantes de la auditoría:
+identidad conservada, cero `42703` y el recambio con dos proveedores en revisión. La conexión estaba forzada a solo
+lectura y solo ejecutó tres SELECT, además de SET/SHOW. Las pruebas offline usan ahora las columnas reales y cubren
+proveedores de variantes hermanas.
+
+Esto acredita consultas, no acceso a portales ni rutas definitivas. Una compra histórica no decide el proveedor de
+imágenes; las asociaciones comerciales y los portales siguen separados. Sociedad y vigencia no se confirman por esta
+consulta y las relaciones de plantilla siguen siendo evidencia candidata. No se guardaron asociaciones ni se
+modificaron solicitudes; el ciclo real de Marcolin, Sáfilo y NuORDER sigue pendiente de autorización en #59.
+
+Rollback de código: revertir la corrección mediante PR; no hay migración de base de datos. Revertir reintroduciría el
+`42703` en este Odoo, por lo que la búsqueda debe quedar identificada como no disponible hasta corregirla.
 
 ## Originales
 

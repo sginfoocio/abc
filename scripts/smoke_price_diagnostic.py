@@ -13,7 +13,7 @@ from price_comparator import PriceComparatorStore, normalize_gtin
 from price_diagnostic import EvidenceError, require_private_database, sanitise
 from price_trial import PriceTrial
 from price_references import EXACT, PROBABLE, REJECTED, classify
-from price_web_extract import extract_product
+from price_web_extract import extract_product, select_product_variant
 
 
 def main():
@@ -37,12 +37,31 @@ def main():
     visual_url = "https://visual-click.com/products/ray-ban-rb2140-wayfarer-901-32-50"
     visual = extract_product(partial_pages["visualclick-sanitizado.html"].decode("utf-8"), visual_url)
     assert visual and classify(target, visual.candidate()).status == REJECTED
-    assert not visual.ean_published and visual.price is None and visual.availability == "unknown"
+    assert not visual.ean_published and visual.price == 124 and visual.availability == "unknown"
     assert any("no se interpreta como GTIN" in note for note in visual.notes)
     mia_url = "https://miaburton.com/de/sonnenbrillen/ray-ban/wayfarer-rb2140-901-58"
     mia = extract_product(partial_pages["mia-burton-sanitizado.html"].decode("utf-8"), mia_url)
     assert mia and classify(target, mia.candidate()).status == PROBABLE
     assert mia.price == 174 and mia.availability == "unknown" and not mia.ean_published
+    captures = [
+        (7, "cf239f7c16c29e5d05743eef881dd34e349a76ecfb73948574aea5b0f5ffa533",
+         "https://www.amevista.com/es/gucci-gg1660s-001",
+         {"ean": "0889652494821", "brand": "Gucci", "model": "GG1660S", "color": "001"}, 188.5),
+        (8, "f2ba1ef3f70781330ae9d57f5052484867db919099262092467a4273a52e2397",
+         "https://visual-click.com/products/miu-miu-mu-54ys-zvn20f-80",
+         {"ean": "8056262142585", "brand": "Miu Miu", "model": "MU 54YS", "color": "ZVN20F"}, 331),
+        (9, "ca16dece3bb302298932d35dfc049795c888dbb8b4adae98f8dbd8720d3446fa",
+         "https://domanci.com/es/gafas-de-sol/miu-miu-mu-a51s-5ak20p-75.html",
+         {"ean": "8056262412367", "brand": "Miu Miu", "model": "MU A51S", "color": "5AK20P"}, 305.5),
+    ]
+    fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "web_pages"
+    for number, digest, url, product, price in captures:
+        content = (fixture_dir / f"partial_20261117_{number}.html").read_bytes().rstrip(b"\r\n")
+        assert hashlib.sha256(content).hexdigest() == digest
+        page = select_product_variant(extract_product(content.decode("utf-8"), url), product)
+        assert page and classify(product, page.candidate()).status == EXACT and page.price == price
+        if number == 8:
+            assert not page.ean_published and page.availability == "unknown"
 
     with tempfile.TemporaryDirectory(dir=os.environ["CLOUD_SMOKE_DIRECTORY"]) as directory:
         os.umask(0o077)

@@ -690,7 +690,7 @@ class PriceLocator:
         actor, note = actor.strip(), note.strip()
         if not actor or not note:
             raise ValueError("Indique quién revisa y el motivo")
-        now = _iso(self._now())
+        now = self._now().astimezone(timezone.utc).isoformat(timespec="microseconds")
         with self.store._connect() as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute("""SELECT u.status AS candidate_status,u.match_status,u.model_code,u.color_code,
@@ -732,7 +732,7 @@ class PriceLocator:
                 self._event(connection, job["id"], state, "review" if not update_price else "review+price",
                             url, f"{actor}: {note}", 0)
             if update_price:
-                from price_monitor import _done_job_restriction
+                from price_monitor import _done_job_restriction, _review_identity
 
                 monitor_job = connection.execute("""SELECT * FROM monitor_jobs
                     WHERE competitor_id=? AND ean=?""", (competitor_id, ean)).fetchone()
@@ -790,6 +790,11 @@ class PriceLocator:
                                                 (job["id"], monitor_job_id, ean, competitor_id, url, actor, note,
                                                  refresh_state, refresh_detail, now,
                                                  _iso(retry_at) if retry_at else None, now)).lastrowid
+                identity = _review_identity(connection, {"id": refresh_id})
+                if identity is None:
+                    raise ValueError("No se pudo conservar la identidad aceptada")
+                connection.execute("INSERT INTO manual_review_identity(refresh_id,snapshot) VALUES(?,?)",
+                                   (refresh_id, json.dumps(identity, ensure_ascii=False)))
                 connection.execute("""INSERT INTO monitor_events(job_id,at,state,detail) VALUES(?,?,?,?)""",
                                    (monitor_job_id, now, refresh_state,
                                     f"Revisión manual {refresh_id}: {refresh_detail}"[:1000]))

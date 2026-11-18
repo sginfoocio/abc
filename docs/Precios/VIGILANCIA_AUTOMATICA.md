@@ -179,6 +179,48 @@ El trabajador persistente existente recoge las solicitudes manuales, también en
 
 Aceptar confirma únicamente la identidad revisada; no acredita oferta, precio, stock ni comparabilidad. La lectura posterior conserva el comportamiento comercial normal: identidad sin contradicciones, precio válido, moneda/mercado e IVA configurados, disponibilidad y vigencia. Si la lectura falla, la aceptación permanece con su motivo pendiente; si descubre una contradicción de identidad, no registra esa oferta comparable y la ficha vuelve a revisión. No se modifican frecuencias generales ni se reprograman otros pares.
 
+En continuidad, cada lectura manual usa el contexto del único par autorizado y comprueba el manifiesto de
+100 EAN y 14 competidores, el estado activo, la decisión y la URL exacta. No sigue redirecciones a otra URL
+ni admite una variante extraída con URL distinta. La reserva histórica del piloto no se elimina ni se
+prolonga. El calibre, incluido el ausente, no cambia el precio del mismo modelo y color.
+
+Las confirmaciones nuevas conservan una instantánea de identidad, sin vincular el calibre. Las solicitudes
+anteriores de pares de continuidad no se ejecutan hasta su autorización auditada. Una muestra ya guardada
+solo se reutiliza si se acredita la misma ficha, su fecha posterior a la solicitud y su vigencia; se conserva
+su fecha original. Cuando una interrupción deja una reserva o petición sin muestra, o el orden temporal no
+puede acreditarse, se bloquea para revisión en lugar de repetir HTTP. Los recibos nuevos se atribuyen al ID
+de solicitud. La importación de la muestra y su marca de idempotencia se guardan en la misma transacción,
+para que una interrupción posterior no cuente dos veces la observación. La tabla de la interfaz muestra las
+últimas 100 filas; su CSV exporta todas.
+
+#### Recuperación supervisada después del despliegue
+
+No se aceptan de nuevo las fichas ni se crean solicitudes. Tras instalar la versión y sus migraciones,
+usar la base existente del comparador y generar una vista previa de **todas** las solicitudes:
+
+```bash
+python price_recovery.py --database RUTA_BASE --manual-reviews
+```
+
+El JSON incluye cantidades y filas `recoverable`, `already_resolved` y `excluded`, con motivo. Es una
+fotografía local: permisos, presupuestos y estado pueden cambiar y se vuelven a comprobar al aplicar y
+al consultar. Se excluyen identidades históricas que no puedan acreditarse, restricciones vigentes y
+reservas inciertas. Si falta robots vigente, el trabajador lo comprobará antes de cualquier ficha.
+
+Primero, con aprobación expresa, seleccionar **una** solicitud elegible de la vista previa:
+
+```bash
+python price_recovery.py --database RUTA_BASE --manual-reviews --apply --approved \
+  --request-id ID --actor RESPONSABLE --note MOTIVO --commit COMMIT_COMPLETO
+```
+
+Comprobar el par, la URL, los recibos `access_requests` con propósito `manual_review:ID`, el resultado y
+su fecha. Solo después, repetir la vista previa y, si procede, aplicar al resto elegible omitiendo
+`--request-id`. La aplicación bloquea cola, continuidad y competidores, vuelve a evaluar el inventario,
+audita responsable, motivo, commit y estado anterior, y no hace HTTP. Repetirla no vuelve a encolar ni
+crea autorizaciones adicionales. Pausa, parada, condiciones comerciales y presupuestos siguen vigentes;
+no se reinician intentos, fechas de solicitud ni restricciones.
+
 ### Prueba funcional (`tests/test_price_locator.py`)
 
 Competidor simulado con 5 marcas, 100 modelos, 6 colores por modelo (uno no vigilado), calibres distintos y EAN publicado solo en un tercio de las fichas. Se añaden 500 EAN sin URL:

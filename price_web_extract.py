@@ -36,6 +36,7 @@ class ProductPage:
     title: str = ""
     brand: str = ""
     model: str = ""
+    group_reference: str = ""
     color: str = ""
     caliber: str = ""
     ean_published: str = ""
@@ -72,6 +73,7 @@ class ProductPage:
     def candidate(self) -> dict[str, Any]:
         """The listing as seen by ``price_references.classify``."""
         return {"brand": self.brand, "model": self.model, "color": self.color, "caliber": self.caliber,
+                "group_reference": self.group_reference,
                 "ean_published": self.ean_published, "title": self.title,
                 "identifiers": self.identifiers, "ambiguous": self.ambiguous,
                 "offer_binding_unresolved": self.offer_binding_unresolved}
@@ -225,7 +227,7 @@ def _offer_facts(node: dict, url: str) -> dict[str, Any]:
             for o, _ in variant_offers for key, _ in parse_qsl(urlparse(o["url"]).query))):
         selected_offers = [(o, restrictions) for o, restrictions in variant_offers
                            if _url_key(urljoin(url, o["url"])) == _url_key(url)]
-        if not selected_offers and len(offers) == len(variant_offers) == 1 and len(_gtins(node)) == 1:
+        if not selected_offers and len(offers) == len(variant_offers) == 1:
             offer = variant_offers[0][0]
             offer_url = urljoin(url, offer["url"])
             parts = urlparse(offer_url)
@@ -233,17 +235,24 @@ def _offer_facts(node: dict, url: str) -> dict[str, Any]:
             offer_gtins = _gtins(offer)
             has_offer_gtin = any(offer.get(field) is not None
                                  for field in ("gtin13", "gtin12", "gtin14", "gtin8", "gtin", "ean"))
+            node_gtins = _gtins(node)
+            node_has_gtin = any(node.get(field) is not None
+                                for field in ("gtin13", "gtin12", "gtin14", "gtin8", "gtin", "ean"))
+            sku_binding = (isinstance(node.get("sku"), str) and bool(node["sku"])
+                           and offer.get("sku") == node["sku"] and not has_offer_gtin and not node_has_gtin)
+            gtin_binding = (len(node_gtins) == 1 and _gtins_consistent(node, node_gtins[0])
+                            and (not has_offer_gtin or (offer_gtins == node_gtins
+                                                       and _gtins_consistent(offer, node_gtins[0]))))
             if (isinstance(node.get("url"), str) and _url_key(urljoin(url, node["url"])) == _url_key(url)
                     and not urlparse(url).query
                     and _url_key(parts._replace(query="").geturl()) == _url_key(url)
                     and len(parameters) == 1 and parameters[0][0] == "variant" and parameters[0][1]
-                    and _gtins_consistent(node, _gtins(node)[0])
-                    and (not has_offer_gtin or (offer_gtins == _gtins(node)
-                                                and _gtins_consistent(offer, _gtins(node)[0])))
+                    and (gtin_binding or sku_binding)
                     and (not offer.get("sku") or not node.get("sku") or offer["sku"] == node["sku"])):
                 selected_offers = variant_offers
                 facts["bound_variant_url"] = offer_url
-                facts["notes"].append("Oferta única vinculada al Product con GTIN y URL base publicados")
+                facts["sku_only_binding"] = bool(sku_binding)
+                facts["notes"].append("Oferta única vinculada al Product por GTIN o SKU idéntico y URL base")
         if not selected_offers:
             facts["ambiguous"] = True
             facts["variant_conflict"] = True
@@ -371,7 +380,8 @@ def _from_json_ld(html: str, url: str) -> ProductPage | None:
                 records.append({"product": node, "shared_offer": None})
             elif _is_type(node, "ProductGroup"):
                 common_offer = _common_group_offer(node)
-                inherited = {key: node[key] for key in ("name", "brand", "model", "color", "mpn", "sku", "url")
+                inherited = {key: node[key] for key in ("name", "brand", "model", "color", "mpn", "sku", "url",
+                                                         "productGroupID")
                              if node.get(key) is not None}
                 for variant in _as_list(node.get("hasVariant")):
                     if isinstance(variant, dict):
@@ -414,6 +424,7 @@ def _from_json_ld(html: str, url: str) -> ProductPage | None:
     page.title = _name(node.get("name"))
     page.brand = _name(node.get("brand"))
     page.model = _name(node.get("model"))
+    page.group_reference = _name(node.get("productGroupID"))
     page.color = _color_code(_name(node.get("color")))
     gtins = _gtins(node)
     page.ean_published = gtins[0] if gtins else ""
@@ -438,6 +449,7 @@ def _from_json_ld(html: str, url: str) -> ProductPage | None:
             page.variant_id = variant_parameters[0][1]
         page.variant_scoped = True
         page.url_trace["selected_variant_url"] = facts["bound_variant_url"]
+        page.url_trace["offer_variant_url"] = facts["bound_variant_url"]
     page.offer_binding_unresolved = bool(len(matching) == 1 and facts["variant_conflict"] and not page.ambiguous)
     page.ambiguous |= facts["ambiguous"]
     if facts["variant_conflict"]:
@@ -446,6 +458,9 @@ def _from_json_ld(html: str, url: str) -> ProductPage | None:
     page.price, page.currency = facts.get("price"), facts.get("currency", "")
     page.previous_price = facts.get("previous_price")
     page.availability = facts.get("availability", "unknown")
+    if facts.get("sku_only_binding"):
+        page.availability = "unknown"
+        page.notes.append("SKU vincula la oferta al Product, pero no acredita stock del EAN solicitado")
     page.includes_tax = facts.get("includes_tax")
     page.tax_conflict = facts.get("tax_conflict", False)
     page.market = facts.get("market", "")
@@ -1065,10 +1080,15 @@ def extract_product(html: str, url: str, *, price_selector: str = "", availabili
         else:
             page.market, page.market_source = explicit, "ficha:product:market"
     bound_variant_url = page.url_trace.get("selected_variant_url", "")
+    offer_variant_url = page.url_trace.get("offer_variant_url", "")
     page.url_trace = {**(url_trace or {}), "final_url": requested_url,
                       "selected_variant_url": url if selected_size else bound_variant_url,
                       "canonical_urls": list(dict.fromkeys(urljoin(requested_url, href)
                                                            for href in parsed.canonicals))}
+    if offer_variant_url:
+        page.url_trace["offer_variant_url"] = offer_variant_url
+    if radio_selected:
+        page.url_trace["selected_variant_source"] = "checked_radio"
     return page
 
 

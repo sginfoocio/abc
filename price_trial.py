@@ -1077,7 +1077,9 @@ class PriceTrial:
         return item
 
     def diagnostic_candidates(self, competitor_id: str, ean: str) -> list[str]:
-        """Only URLs already associated with this exact pair and still under review."""
+        """Only documented review URLs or accepted URLs with a failed read."""
+        from price_monitor import _review_identity_valid
+
         with self.store._connect() as con:
             urls = {r[0] for r in con.execute("""SELECT url FROM competitor_product_urls
                 WHERE competitor_id=? AND ean=? AND status IN ('probable','pending_verification')
@@ -1091,6 +1093,16 @@ class PriceTrial:
                 WHERE competitor_id=? AND ean=? AND status IN ('verified','rejected','discarded','replaced')
                 UNION SELECT url FROM pilot_url_candidates WHERE competitor_id=? AND ean=?
                 AND state IN ('rejected','discarded')""", (competitor_id, ean) * 2)}
+            accepted = con.execute("""SELECT r.* FROM manual_review_refreshes r
+                JOIN competitor_product_urls u ON u.competitor_id=r.competitor_id AND u.ean=r.ean
+                    AND u.url=r.url AND u.status='verified'
+                JOIN monitor_jobs j ON j.id=r.monitor_job_id AND j.competitor_id=r.competitor_id
+                    AND j.ean=r.ean AND j.url=r.url AND j.state='review'
+                WHERE r.competitor_id=? AND r.ean=? AND r.status='error'
+                  AND NOT EXISTS (SELECT 1 FROM pilot_url_candidates p WHERE p.competitor_id=r.competitor_id
+                    AND p.ean=r.ean AND p.url=r.url AND p.state IN ('rejected','discarded'))""",
+                                   (competitor_id, ean)).fetchall()
+            verified_failed = {r["url"] for r in accepted if _review_identity_valid(con, dict(r))}
         for check in checks:
             receipt = json.loads(check["receipt"])
             for pair in receipt.get("result", {}).get("pairs", []):
@@ -1099,7 +1111,7 @@ class PriceTrial:
                 for outcome in pair.get("outcomes", []):
                     if outcome.get("state") == "review" and outcome.get("url"):
                         urls.add(outcome["url"])
-        return sorted(urls - excluded)
+        return sorted((urls - excluded) | verified_failed)
 
     def request_diagnostic(self, competitor_id, ean, url, *, actor, note, build_commit, approved):
         from price_diagnostic import _SECRET
@@ -1159,10 +1171,16 @@ class PriceTrial:
             end = _utc_datetime(previous["finished_at"])
         except (ValueError, TypeError):
             raise DiagnosticRetryError("Resultado o fechas del intento anterior inválidos") from None
-        if (not isinstance(result, dict) or end < start or result.get("status") != "rejected"
-                or result.get("stage") != "lock_and_scope" or result.get("error_type") != "EvidenceError"
-                or result.get("reason") != "El almacenamiento no acredita permisos privados"
-                or previous["reason"] != result.get("reason")
+        if not isinstance(result, dict):
+            raise DiagnosticRetryError("Resultado del intento anterior inválido")
+        privacy_refusal = (result.get("error_type") == "EvidenceError"
+                           and result.get("reason") == "El almacenamiento no acredita permisos privados"
+                           and previous["reason"] == result["reason"])
+        pilot_refusal = (result.get("error_type") == "PilotError"
+                         and ((result.get("reason") and previous["reason"] == result["reason"])
+                              or ("reason" not in result and previous["reason"] == "PilotError")))
+        if (end < start or result.get("status") != "rejected"
+                or result.get("stage") != "lock_and_scope" or not (privacy_refusal or pilot_refusal)
                 or result.get("queue_id") != previous["id"] or result.get("requests") != []
                 or result.get("ean") != previous["ean"]
                 or result.get("url_sha256") != hashlib.sha256(previous["url"].encode()).hexdigest()
@@ -1410,7 +1428,7 @@ class PriceTrial:
                            _queue_id: int | None = None) -> dict:
         """Collect candidate HTML without changing any pair, identity, offer or review."""
         from price_batch import WatchBatch
-        from price_pilot import PricePilot, pilot_scope
+        from price_pilot import PilotError, PricePilot, pilot_scope
         from price_web import validate_competitor_url
         from price_diagnostic import EvidenceError, expire, has_capacity, limits, require_private_database, sanitise
 
@@ -1514,7 +1532,7 @@ class PriceTrial:
         except (ValueError, RuntimeError, Timeout) as exc:
             result.update(status="rejected", error_type=type(exc).__name__)
             from price_web_fetch import RobotsDenied
-            if isinstance(exc, (EvidenceError, DiagnosticRetryError, RobotsDenied)):
+            if isinstance(exc, (EvidenceError, DiagnosticRetryError, RobotsDenied, PilotError)):
                 result["reason"] = str(exc)
             elif str(exc) in {"La respuesta supera el tamaño máximo permitido",
                               "Capacidad insuficiente para conservar la respuesta"}:
@@ -1526,9 +1544,11 @@ class PriceTrial:
             raise
         finally:
             with self.store._connect() as con, con:
-                requests = [dict(r) for r in con.execute("""SELECT id,result,reserved_at FROM access_requests
+                receipts = [dict(r) for r in con.execute("""SELECT id,result,reserved_at,url FROM access_requests
                     WHERE purpose=? ORDER BY id""", (purpose,))]
-                result["requests"] = requests
+                result["requests"] = [{k: r[k] for k in ("id", "result", "reserved_at")} for r in receipts]
+                if result["status"] == "rejected" and result["stage"] == "candidate_and_deferrals" and receipts:
+                    result["stage"] = ("robots" if _is_robots_receipt(receipts[-1]) else "fetch")
                 audit_result = {k: v for k, v in result.items() if k != "html_base64"}
                 con.execute("UPDATE access_audit SET current=? WHERE id=?",
                             (json.dumps(audit_result, ensure_ascii=False), audit_id))
