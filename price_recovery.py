@@ -446,13 +446,47 @@ def _manual_review_rows(con, path, now):
                        "category": category, "action": action, "reason": reason,
                        "status": task["status"], "requested_at": task["requested_at"],
                        "retry_at": task["retry_at"], "attempts": task["attempts"],
-                       "sampled_at": task["monitor_sampled_at"], "detail": task["detail"]})
+                       "sampled_at": task["monitor_sampled_at"], "detail": task["detail"],
+                       "classification": _classify_manual_row({
+                           "category": category, "action": action, "reason": reason})})
     return continuity_id, result
 
 
 def _manual_summary(rows):
     return {name: sum(row["category"] == name for row in rows)
             for name in ("recoverable", "already_resolved", "excluded")}
+
+
+def _classify_manual_row(row):
+    reason = (row.get("reason") or "").casefold()
+    category = row.get("category")
+    action = row.get("action")
+    if category == "already_resolved":
+        return "1_ya_resuelta"
+    if action in {"reconcile", "local_reevaluation"}:
+        return "2_reevaluable_local"
+    if category == "recoverable":
+        return "3_recuperable_lectura_gobernada"
+    if any(word in reason for word in ("contrad", "identidad", "cambio")):
+        return "5_revision_contradiccion_real"
+    if any(word in reason for word in ("muestra", "captura", "evidencia", "históric", "anterior")):
+        return "4_necesita_captura_evidencia"
+    return "6_excluida_control_vigencia"
+
+
+def _classification_summary(rows):
+    names = (
+        "1_ya_resuelta",
+        "2_reevaluable_local",
+        "3_recuperable_lectura_gobernada",
+        "4_necesita_captura_evidencia",
+        "5_revision_contradiccion_real",
+        "6_excluida_control_vigencia",
+    )
+    result = {name: 0 for name in names}
+    for row in rows:
+        result[_classify_manual_row(row)] += 1
+    return result
 
 
 def preview_manual_reviews(database, *, now=None):
@@ -462,7 +496,7 @@ def preview_manual_reviews(database, *, now=None):
         con.execute("BEGIN")
         _, rows = _manual_review_rows(con, path, now)
         con.rollback()
-    return {"counts": _manual_summary(rows), "requests": rows}
+    return {"counts": _manual_summary(rows), "classifications": _classification_summary(rows), "requests": rows}
 
 
 def apply_manual_reviews(database, *, actor, note, build_commit, approved=False, request_ids=None, now=None):
@@ -536,7 +570,8 @@ def apply_manual_reviews(database, *, actor, note, build_commit, approved=False,
                          actor.strip(), json.dumps({"reason": note.strip(), "build_commit": build_commit},
                                                   ensure_ascii=False), now.isoformat()))
             con.commit()
-    return {"counts": _manual_summary(rows), "requests": rows, "changed": changed}
+    return {"counts": _manual_summary(rows), "classifications": _classification_summary(rows),
+            "requests": rows, "changed": changed}
 
 
 def main(argv=None):

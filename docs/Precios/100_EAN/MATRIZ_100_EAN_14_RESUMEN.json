@@ -1,0 +1,13 @@
+{
+  "snapshot_exported_at": "2026-11-17T22:45:34Z",
+  "historical_only": true,
+  "eans": 100,
+  "competitors": 14,
+  "pairs": 1400,
+  "unique_pairs": 1400,
+  "technical_coverage": 298,
+  "identity_verified": 3,
+  "saved_reads": 7,
+  "comparable_current": 0,
+  "matrix": "docs/Precios/100_EAN/MATRIZ_100_EAN_14_COMPETIDORES.csv"
+}

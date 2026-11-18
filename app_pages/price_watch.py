@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from pathlib import Path
 import pandas as pd
 import streamlit as st
 from typing import TYPE_CHECKING
@@ -323,6 +324,46 @@ def _render_incidents(access: AccessControl, names: dict[str, str]) -> None:
                 st.error(str(exc))
 
 
+def _render_saved_reevaluation(store: PriceComparatorStore) -> None:
+    from filelock import Timeout
+    from price_saved_reevaluation import SavedSampleReevaluation
+
+    evidence = Path(__file__).resolve().parents[1] / "docs" / "Precios" / "100_EAN" / \
+        "Paquete_revision_7_casos_20261117.zip"
+    with st.expander("Reevaluación local de muestra guardada"):
+        st.caption("Sin HTTP: revalida una solicitud histórica, conserva su fecha y no renueva muestras caducadas.")
+        if not evidence.is_file():
+            st.error("Paquete histórico no disponible.")
+            return
+        request_id = st.number_input("ID de solicitud manual", min_value=1, step=1, key="saved_reeval_request")
+        if st.button("Previsualizar reevaluación", key="saved_reeval_preview"):
+            try:
+                st.session_state["saved_reeval_preview"] = SavedSampleReevaluation(
+                    store, evidence).preview(int(request_id))
+            except (ValueError, KeyError, OSError, sqlite3.Error) as exc:
+                st.error(str(exc))
+        preview = st.session_state.get("saved_reeval_preview")
+        if preview:
+            st.json(preview)
+            with st.form("saved_reeval_apply"):
+                actor = st.text_input("Responsable", value=_actor(), key="saved_reeval_actor")
+                note = st.text_input("Motivo", key="saved_reeval_note")
+                approved = st.checkbox("Confirmo reevaluación local sin HTTP", key="saved_reeval_confirm")
+                commit = st.text_input("Versión/commit de 40 caracteres", key="saved_reeval_commit")
+                submitted = st.form_submit_button("Aplicar reevaluación auditada")
+            if submitted:
+                try:
+                    if not approved:
+                        raise ValueError("Confirmación expresa obligatoria")
+                    result = SavedSampleReevaluation(store, evidence).apply(
+                        int(request_id), actor=actor, note=note, build_commit=commit,
+                        approved=True)
+                    st.json(result)
+                    st.session_state.pop("saved_reeval_preview", None)
+                except (ValueError, Timeout, TimeoutError, sqlite3.Error) as exc:
+                    st.error(str(exc))
+
+
 def _render_locator(store: PriceComparatorStore, names: dict[str, str]) -> None:
     st.caption("Motor propio: busca cada producto vigilado por marca + modelo + código de color en las fuentes "
                "autorizadas (URL ya verificada, feed, sitemap, páginas de marca/catálogo, buscador interno), guarda "
@@ -568,6 +609,8 @@ def _render_locator(store: PriceComparatorStore, names: dict[str, str]) -> None:
                 st.session_state.pop("manual_review_bulk_preview", None)
                 st.session_state["manual_review_grid_revision"] = revision + 1
                 st.rerun()
+
+    _render_saved_reevaluation(store)
 
     st.markdown("**Progreso persistente de confirmaciones y lecturas**")
     monitor = PriceMonitor(store)
