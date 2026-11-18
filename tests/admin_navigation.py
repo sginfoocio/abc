@@ -10,17 +10,27 @@ def navigate(app, section, *, timeout=90):
         "Recuperación de búsquedas": "Recuperación de búsquedas",
     }
     if section in diagnostics:
+        if app.radio(key="top_level_section"):
+            app.radio(key="top_level_section").set_value("Ajustes avanzados").run(timeout=timeout)
         app.selectbox(key="price_admin_section").set_value("Configuración y diagnóstico").run(timeout=timeout)
         app.selectbox(key="watch_diagnostic_task").set_value(diagnostics[section]).run(timeout=timeout)
     else:
-        app.selectbox(key="price_admin_section").set_value(section).run(timeout=timeout)
         if section == "Competidores":
+            app.radio(key="top_level_section").set_value("Tiendas").run(timeout=timeout)
             app.selectbox(key="competitor_card_section").set_value(
                 "Fuentes y conectores").run(timeout=timeout)
+        else:
+            app.radio(key="top_level_section").set_value("Ajustes avanzados").run(timeout=timeout)
+            app.selectbox(key="price_admin_section").set_value(section).run(timeout=timeout)
     return app
 
 
 def watch_section(app, section, *, timeout=30):
+    try:
+        app.radio(key="top_level_section").set_value(
+            "Ajustes avanzados").run(timeout=timeout)
+    except KeyError:
+        pass
     if section in ("Productos vigilados", "Añadir productos", "Reglas de vigilancia", "Grupos y frecuencia"):
         app.selectbox(key="price_admin_section").set_value("Productos en vigilancia").run(timeout=timeout)
         task = {"Reglas de vigilancia": "Reglas", "Grupos y frecuencia": "Grupos y frecuencia"}.get(

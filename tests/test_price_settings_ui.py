@@ -45,6 +45,7 @@ def test_admin_sections_list_competitors_and_save_general_config(tmp_path, monke
     app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
                               "render_price_comparator_page()").run(timeout=30)
     assert not app.exception
+    app.radio(key="top_level_section").set_value("Ajustes avanzados").run(timeout=30)
     assert app.selectbox(key="price_admin_section").options == [
         "Panel general", "Productos en vigilancia", "Competidores", "Actualizaciones",
         "Alertas e incidencias", "Configuración y diagnóstico",

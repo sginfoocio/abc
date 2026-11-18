@@ -20,14 +20,20 @@ def test_seed_registers_14_competitors_with_safe_defaults(tmp_path):
 
     assert added["competitors"] == 14 and added["schedules"] == 14
     competitors = store.competitors()
-    assert set(competitors["market"]) == {""} and set(competitors["currency"]) == {""}
+    assert set(competitors["market"]) == {"ES"} and set(competitors["currency"]) == {"EUR"}
     assert sorted(competitors["name"]) == sorted(name for name, _ in COMPETITORS)
     with store._connect() as connection:
         rows = connection.execute("SELECT enabled,interval_hours,max_requests_per_run,pause_seconds,max_attempts,"
                                   "connector FROM competitor_schedule").fetchall()
         settings = dict(connection.execute("SELECT key,value FROM comparator_settings").fetchall())
     assert {tuple(row) for row in rows} == {(0, 24.0, 20, 2.0, 3, "")}  # nothing enabled, nothing queried
-    assert settings == {"retention_months": "12", "price_expiry_days": "7", "alert_threshold_pct": "5"}
+    assert settings["retention_months"] == "12"
+    assert settings["price_expiry_days"] == "7"
+    assert settings["alert_threshold_pct"] == "5"
+    assert settings["business_competitor_market"] == "ES"
+    assert settings["business_competitor_currency"] == "EUR"
+    assert settings["business_competitor_vat_included"] == "1"
+    assert "14 competidores" in settings["business_competitor_declaration"]
     assert "operational" not in {status for _, status in METHOD_STATUS.values()}
     assert store.coverage_table()["integration_status"].ne("operational").all()
 
@@ -59,7 +65,7 @@ def test_seed_keeps_blank_market_and_existing_competitor_ids(tmp_path):
         connection.execute("INSERT INTO competitors(id,name,url,domain) VALUES('blickers-com','Blickers','https://www.blickers.com/','blickers.com')")
     store.seed_defaults()
     legacy = store.competitors().set_index("id").loc["blickers-com"]
-    assert (legacy["market"], legacy["currency"], legacy["url"]) == ("", "", "https://www.blickers.com/")
+    assert (legacy["market"], legacy["currency"], legacy["url"]) == ("ES", "EUR", "https://www.blickers.com/")
     assert len(store.competitors()) == 14
 
 
@@ -161,7 +167,7 @@ def test_page_with_real_stored_offer_shows_gap_chart_and_competitor_requests(tmp
     app = AppTest.from_string(SCRIPT).run(timeout=60)
 
     assert not app.exception
-    assert [tab.label for tab in app.tabs] == ["Resumen", "Productos", "Pendientes", "Administración"]
+    app.radio(key="top_level_section").set_value("Inicio").run(timeout=60)
     values = {metric.label: metric.value for metric in app.metric}
     assert values["Productos comparados"] == "1 / 1"
     assert values["Más caro"] == "100,0 %"
@@ -172,6 +178,7 @@ def test_page_with_real_stored_offer_shows_gap_chart_and_competitor_requests(tmp
     edel = states[states["Competidor"] == "Edel-Optics"].iloc[0]
     assert edel["Operatividad"] == "Pendiente de revisión de condiciones"
     assert any("Necesitamos:" in markdown.value for markdown in app.markdown)
+    app.radio(key="top_level_section").set_value("Productos").run(timeout=60)
     assert EAN in app.selectbox(key="products_selected_ean").value
 
 
@@ -186,5 +193,5 @@ def test_page_creates_initial_configuration_on_first_access(tmp_path, monkeypatc
     assert len(reopened.competitors()) == 14
     with reopened._connect() as connection:
         assert connection.execute("SELECT COUNT(*) FROM competitor_schedule WHERE enabled=0").fetchone()[0] == 14
-        assert connection.execute("SELECT COUNT(*) FROM comparator_settings").fetchone()[0] == 3
+        assert connection.execute("SELECT COUNT(*) FROM comparator_settings").fetchone()[0] == 7
     assert any("importe el catálogo desde Administración" in item.value for item in app.info)

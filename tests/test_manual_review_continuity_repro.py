@@ -145,7 +145,10 @@ def test_accepted_edel_base_url_records_checked_variant_without_new_http(tmp_pat
     _watch(store, [(ean, "Prada", "PR 27ZS", "16K08Z", "54-21")])
     locator.enqueue([cid], [ean])
     with store._connect() as con, con:
-        con.execute("UPDATE competitor_web_config SET tax_policy='included' WHERE competitor_id=?", (cid,))
+        con.execute("UPDATE competitors SET market='ES',currency='EUR' WHERE id=?", (cid,))
+        con.execute("""UPDATE competitor_web_config SET tax_policy='included',
+            sales_market='ES',market_verified=1,market_evidence_url='synthetic://evidence',
+            market_note='Synthetic ES market' WHERE competitor_id=?""", (cid,))
         con.execute("""INSERT INTO competitor_product_urls(competitor_id,ean,url,match_status,status,verified_at)
             VALUES(?,?,?,'manual_review','probable',?)""", (cid, ean, url, clock().isoformat()))
         con.execute("UPDATE locate_jobs SET state='review',url=? WHERE competitor_id=? AND ean=?", (url, cid, ean))

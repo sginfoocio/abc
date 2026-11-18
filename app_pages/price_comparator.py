@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 import logging
 import json
 import sqlite3
 import threading
 from zipfile import BadZipFile
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
@@ -26,6 +28,12 @@ from price_web import (
     EXTRACTION_TEXT, LOCATION_TEXT, OPERABILITY_TEXT, WebPriceSearch, WebSearchError, validate_competitor_url,
 )
 from vytria_price_sync import ISSUE_LABELS, STATUS_LABELS, SyncInProgress, VytriaPriceSync
+
+TOP_LEVEL_SECTIONS = ("Inicio", "Productos", "Tiendas", "Por revisar", "Ajustes avanzados")
+
+
+def _madrid_timestamp() -> str:
+    return datetime.now(ZoneInfo("Europe/Madrid")).isoformat(timespec="minutes")
 
 
 OWN_PRICE_COLUMNS = [
@@ -1972,6 +1980,181 @@ def _render_admin_history(store: PriceComparatorStore) -> None:
                            "recuperaciones-piloto.csv", "text/csv", key="admin_recovery_audit_export")
 
 
+def _render_inicio(store: PriceComparatorStore, data: dict) -> None:
+    from price_trial import PriceTrial
+
+    st.caption(f"Pantalla actualizada: {_madrid_timestamp()} · horario de Madrid")
+    filtered = data.get("filtered_summary")
+    if filtered is None:
+        filtered = data["summary"]
+    watch_count = int(store.watch_count()) if hasattr(store, "watch_count") else 0
+    with store._connect() as connection:
+        if watch_count == 0:
+            watch_count = connection.execute(
+                "SELECT COUNT(*) FROM watch_products WHERE active=1").fetchone()[0]
+        active_competitors = connection.execute(
+            "SELECT COUNT(*) FROM competitors WHERE active=1").fetchone()[0]
+    has_filters = bool(st.session_state.get("dashboard_brand")
+                       or st.session_state.get("dashboard_competitor")
+                       or st.session_state.get("dashboard_search")
+                       or st.session_state.get("dashboard_state") not in (None, analytics.STATE_ALL)
+                       or st.session_state.get("dashboard_period") not in (None, "30 días"))
+    if filtered is not None and filtered.empty:
+        valid_eans, protected_eans = 0, 0
+        st.info("Sin productos para estos filtros")
+    elif filtered is not None:
+        valid_eans = int(((filtered["own_price_eur"].notna()) &
+                          (filtered["competitor_count"].fillna(0) > 0)).sum())
+        protected_eans = len(filtered)
+    else:
+        valid_eans, protected_eans = 0, 0
+    if not has_filters:
+        protected_eans = watch_count if watch_count else (len(filtered) if filtered is not None and not filtered.empty else 0)
+    cols = st.columns(4)
+    cols[0].metric(
+        "Productos con comparación válida" if has_filters else "Total de la vigilancia",
+        f"{valid_eans}/{protected_eans}",
+    )
+    cols[1].metric("Productos vigilados", watch_count)
+    cols[2].metric("Tiendas activas", active_competitors)
+    cols[3].metric("EAN protegidos", protected_eans)
+
+    trial = PriceTrial(store)
+    continuity = trial.continuity_report()
+    st.subheader("Estado operativo")
+    if continuity:
+        status = continuity["status"]
+        configured = {
+            "prepared": "Configurada para la próxima activación",
+            "active": "Vigilancia de continuidad activa",
+            "paused": "Vigilancia de continuidad pausada",
+            "stopped": "Vigilancia de continuidad detenida",
+        }.get(status, f"Estado configurado: {status}")
+        st.write(configured)
+        raw_heartbeat = continuity.get("heartbeat_at")
+        heartbeat_recent = False
+        if raw_heartbeat:
+            try:
+                heartbeat_dt = datetime.fromisoformat(raw_heartbeat)
+                if heartbeat_dt.tzinfo is None:
+                    heartbeat_dt = heartbeat_dt.replace(tzinfo=timezone.utc)
+                age = datetime.now(timezone.utc) - heartbeat_dt.astimezone(timezone.utc)
+                heartbeat_recent = timedelta(0) <= age < timedelta(minutes=2)
+            except (TypeError, ValueError):
+                heartbeat_recent = False
+        worker = ("Trabajador disponible con señal reciente" if status == "active" and heartbeat_recent
+                  else "Trabajador sin señal reciente" if status == "active"
+                  else "Trabajador no iniciado desde este estado")
+        st.caption(f"Estado configurado: {status}. {worker}. "
+                   f"Última señal: {continuity.get('heartbeat_at_madrid') or 'sin señal reciente'} · Madrid")
+    else:
+        st.write("Sin continuidad configurada")
+        st.caption("No hay una vigilancia independiente preparada o activada.")
+
+    sync = _make_sync(store)
+    running_jobs = int(sync.is_running())
+    waiting_jobs = decision_jobs = blocked_jobs = 0
+    with store._connect() as connection:
+        for table in ("locate_jobs", "monitor_jobs"):
+            running_jobs += connection.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE state='running'").fetchone()[0]
+            waiting_jobs += connection.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE state IN ('pending','waiting')").fetchone()[0]
+            decision_jobs += connection.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE state='review'").fetchone()[0]
+            blocked_jobs += connection.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE state IN ('failed','blocked','unavailable')").fetchone()[0]
+        if continuity:
+            running_jobs += connection.execute(
+                "SELECT COUNT(*) FROM price_continuity_pairs WHERE continuity_id=? AND state='running'",
+                (continuity["id"],)).fetchone()[0]
+    if running_jobs:
+        st.info(f"Trabajo realmente en ejecución: {running_jobs}.")
+    else:
+        st.caption("No hay trabajo realmente en ejecución.")
+    if waiting_jobs:
+        st.caption(f"Esperando normalmente: {waiting_jobs} trabajos.")
+    if decision_jobs:
+        st.warning(f"Necesita una decisión: {decision_jobs} revisiones.")
+    if blocked_jobs:
+        st.error(f"Bloqueado o con error: {blocked_jobs} trabajos.")
+    if continuity:
+        sync_receipt = continuity.get("sync_receipt") or {}
+        sync_status = sync_receipt.get("status") if isinstance(sync_receipt, dict) else None
+        last_task = ("sin registro" if not sync_status else
+                     {"running": "en ejecución", "ok": "completada correctamente",
+                      "partial": "completada con incidencias", "failed": "falló",
+                      "error": "falló"}.get(sync_status, sync_status))
+        st.caption(f"Última tarea de sincronización: {last_task}.")
+        next_sync = continuity.get("next_sync_at_madrid")
+        st.caption("Próxima tarea: " + (next_sync + " · Madrid" if next_sync else "sin fecha confirmada"))
+
+    st.subheader("Acciones habituales")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        approved = st.checkbox("He revisado el alcance autorizado", key="inicio_odoo_scope")
+        if st.button("Actualizar mis precios", key="inicio_odoo_sync",
+                     disabled=approved is False or sync.is_running()):
+            if not continuity or continuity["status"] != "active":
+                st.error("La actualización no puede iniciar: la continuidad no está activa.")
+            else:
+                actor = str(st.session_state.get("auth_user") or st.session_state.get("auth_role") or "operador")
+                try:
+                    report = trial.run_continuity_sync_now(actor=actor)
+                    receipt = report["sync_receipt"]
+                    selected = receipt.get("monitored", 0)
+                    processed = receipt.get("inserted", 0) + receipt.get("changed", 0) + receipt.get("unchanged", 0)
+                    issues = receipt.get("issues", 0)
+                    status = receipt.get("status", "unknown")
+                    if selected == 0:
+                        st.warning("Se procesaron 0 productos. No se inició una actualización útil: "
+                                   "comprueba el manifiesto activo y el contexto autorizado.")
+                    elif status == "ok":
+                        st.success(f"Seleccionados: {selected}. Procesados: {processed}. "
+                                   f"Incidencias: {issues}. Pendientes: {issues}.")
+                    elif status == "partial":
+                        st.warning(f"Seleccionados: {selected}. Procesados: {processed}. "
+                                   f"Incidencias: {issues}. Pendientes: {issues}. "
+                                   "Parte de la actualización requiere revisión.")
+                    else:
+                        st.error(f"Seleccionados: {selected}. Procesados: {processed}. "
+                                 f"Incidencias: {issues}. Pendientes: {selected - processed}. "
+                                 f"Motivo: {receipt.get('error') or 'error de sincronización'}")
+                    st.rerun()
+                except ValueError as exc:
+                    st.warning(str(exc))
+    with c2:
+        if st.button("Revisar pendientes", key="inicio_review"):
+            st.session_state["top_level_requested"] = "Por revisar"
+            st.rerun()
+    with c3:
+        if continuity and continuity["status"] in {"active", "paused"}:
+            actor = st.text_input("Responsable", key="inicio_continuity_actor")
+            pause = continuity["status"] == "active"
+            if st.button("Pausar vigilancia" if pause else "Reanudar vigilancia",
+                         key="inicio_continuity_control", disabled=not actor.strip()):
+                try:
+                    (trial.pause_continuity(actor=actor) if pause
+                     else trial.resume_continuity(actor=actor))
+                    st.success("Vigilancia actualizada. No se duplican trabajos.")
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+
+    st.subheader("Qué necesita atención")
+    if decision_jobs:
+        st.warning(f"{decision_jobs} fichas necesitan confirmación o rechazo.")
+    elif blocked_jobs:
+        st.error(f"{blocked_jobs} trabajos están bloqueados o terminaron con error.")
+    elif waiting_jobs:
+        st.info(f"{waiting_jobs} trabajos están esperando normalmente. No hace falta intervenir.")
+    else:
+        st.success("No hay incidencias pendientes registradas.")
+    st.caption("El heartbeat sólo confirma una señal del trabajador; no demuestra por sí solo que la cola avance.")
+
+    _render_summary(store, data)
+
+
 def render_price_comparator_page() -> None:
     page_title(
         "Comparador de precios",
@@ -1989,15 +2172,27 @@ def render_price_comparator_page() -> None:
     _show_pending_reports()
     data = _load(store)
     _render_shared_filters(data)
-    summary_tab, products_tab, pending_tab, admin_tab = st.tabs(
-        ["Resumen", "Productos", "Pendientes", "Administración"])
-    with summary_tab:
-        _render_summary(store, data)
-    with products_tab:
+    requested = st.session_state.pop("top_level_requested", None)
+    if requested in TOP_LEVEL_SECTIONS:
+        st.session_state["top_level_section"] = requested
+    section = st.radio("Sección", TOP_LEVEL_SECTIONS, horizontal=True, key="top_level_section")
+    if section == "Inicio":
+        _render_inicio(store, data)
+    elif section == "Productos":
         _render_products(store, data)
-    with pending_tab:
+    elif section == "Tiendas":
+        st.caption(
+            "Configuración declarada: 14 tiendas · mercado español · EUR · IVA incluido. "
+            "La declaración del responsable no sustituye una evidencia de mercado o impuestos de una ficha."
+        )
+        _render_competitors(store, data)
+    elif section == "Por revisar":
+        names = {row["id"]: row["name"] for row in store.competitors().to_dict("records")}
+        from app_pages.price_watch import _render_locator
+        st.subheader("Revisiones actuales")
+        _render_locator(store, names, advanced=False)
         _render_pending_reviews(PricePilot(store))
-    with admin_tab:
+    else:
         from app_pages.price_watch import render_admin
 
         render_admin(store, data)

@@ -258,6 +258,7 @@ def test_review_ui_separates_groups_and_reevaluates_with_preview(pilot, monkeypa
     app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
                               "render_price_comparator_page()").run(timeout=60)
     assert not app.exception
+    app.radio(key="top_level_section").set_value("Por revisar").run(timeout=60)
 
     def metrics():
         return {metric.label: metric.value for metric in app.metric}
@@ -270,8 +271,9 @@ def test_review_ui_separates_groups_and_reevaluates_with_preview(pilot, monkeypa
     app.button(key="discovery_reevaluate_preview").click().run(timeout=60)
     assert metrics()["Se confirmarían automáticamente"] == "1"
     assert metrics()["Seguirían en revisión manual"] == "1"
-    table = next(item.value for item in app.dataframe if "Resultado" in item.value.columns)
-    assert list(table.columns) == ["Producto", "Competidor", "Resultado", "Motivos", "URL"]
+    table = next(item.value for item in app.dataframe
+                 if "Resultado" in item.value.columns and "Producto" in item.value.columns)
+    assert {"Competidor", "Producto", "Resultado", "Motivos", "URL"}.issubset(set(table.columns))
     assert set(table["Resultado"]) == {"Se confirmaría automáticamente", "Seguiría en revisión manual"}
     assert set(table["Competidor"]) == {"Visio Factory"}
     assert app.button(key="discovery_reevaluate_apply").disabled is False

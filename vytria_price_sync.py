@@ -94,6 +94,7 @@ class MapRule:
     rounding: Decimal | None = None
     min_quantity: Decimal | None = None
     has_dates: bool = False
+    fixed_price: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -185,7 +186,7 @@ TAXES_SQL = text("""
 MAPS_SQL = text("""
     SELECT rel.product_template_id AS template_id, m.id AS map_id, CAST(m.name AS TEXT) AS map_name,
            i.id AS item_id, i.price_discount, i.price_surcharge, i.compute_price, i.base,
-           i.price_round, i.min_quantity, i.date_start, i.date_end
+           i.price_round, i.min_quantity, i.date_start, i.date_end, i.fixed_price
     FROM product_pricelist_map_product_template_rel rel
     JOIN product_pricelist_map m ON m.id = rel.product_pricelist_map_id
     LEFT JOIN product_pricelist_item i ON i.product_pricelist_map_id = m.id
@@ -280,7 +281,8 @@ class SqlOdooPriceReader:
                     surcharge=_dec(row["price_surcharge"]), compute_price=row["compute_price"] or "",
                     base=row["base"] or "", rounding=_dec(row["price_round"]),
                     min_quantity=_dec(row["min_quantity"]),
-                    has_dates=bool(row["date_start"] or row["date_end"])))
+                    has_dates=bool(row["date_start"] or row["date_end"]),
+                    fixed_price=_dec(row["fixed_price"])))
         for pid_chunk in _chunks(product_ids):
             for tid_chunk in _chunks(template_ids):
                 for row in connection.execute(PRODUCT_RULES_SQL, {
@@ -323,6 +325,8 @@ def _map_expected(product: OdooProduct) -> tuple[Decimal | None, str, str]:
         return None, "exceptional_rule", "sin precio de lista"
     expectations: dict[Decimal, str] = {}
     exceptional: list[str] = []
+    informative: list[str] = []
+    descriptive: list[str] = []
     missing = 0
     for rule in product.maps:
         if not rule.has_rule:
@@ -331,26 +335,46 @@ def _map_expected(product: OdooProduct) -> tuple[Decimal | None, str, str]:
         discount = rule.discount or Decimal(0)
         named = re.search(r"\((\d+(?:[.,]\d+)?)\s*%\)", rule.map_name)
         if rule.compute_price != "formula" or rule.base != "list_price":
-            exceptional.append(f"{rule.map_name}: cálculo {rule.compute_price}/{rule.base}")
+            if rule.fixed_price is not None:
+                fixed = _rounded(rule.fixed_price, rule.rounding)
+                informative.append(f"{rule.map_name}: precio fijo acreditado por la tarifa vigente "
+                                   f"(importe recibido: {fixed}); se conserva el precio recibido")
+            else:
+                informative.append(f"{rule.map_name}: regla vigente no reproducible localmente "
+                                   f"{rule.compute_price}/{rule.base}; se conserva el importe recibido")
             continue
         if rule.surcharge or rule.min_quantity not in (None, 0, 1) or rule.has_dates:
-            exceptional.append(f"{rule.map_name}: recargo, cantidad mínima o fechas")
+            informative.append(f"{rule.map_name}: recargo, cantidad mínima o fechas vigentes; "
+                               "se acredita el importe recibido")
         if discount < 0:
             exceptional.append(f"{rule.map_name}: descuento negativo {discount}%")
         if named and Decimal(named.group(1).replace(",", ".")) != discount:
-            exceptional.append(f"{rule.map_name}: la tarifa aplica {discount}%")
+            descriptive.append(
+                f"la etiqueta describe {named.group(1).replace(',', '.')} %, pero la regla vigente aplica {discount} %"
+            )
         value = product.list_price * (1 - discount / 100) + (rule.surcharge or 0)
         expectations[_rounded(value, rule.rounding)] = rule.map_name
     if not expectations:
+        if informative:
+            detail = "; ".join(informative)
+            if descriptive:
+                detail += "; " + "; ".join(descriptive)
+            return None, "informative_rule", detail
         return None, "no_map", "los mapas del producto no tienen regla en la tarifa 59" if missing else "sin reglas"
     if len(expectations) > 1:
         return None, "multiple_maps", "mapas con resultados distintos: " + ", ".join(sorted(expectations.values()))
     expected = next(iter(expectations))
-    if exceptional or product.product_rules:
-        extra = list(exceptional)
-        if product.product_rules:
-            extra.append("reglas específicas por producto/plantilla")
-        return expected, "exceptional_rule", "; ".join(extra)
+    if exceptional:
+        return expected, "exceptional_rule", "; ".join(exceptional)
+    extra = list(informative)
+    if product.product_rules:
+        extra.append("reglas específicas vigentes por producto/plantilla; se acredita el importe recibido")
+    if extra:
+        if descriptive:
+            extra.extend(descriptive)
+        return expected, "informative_rule", "; ".join(extra)
+    if descriptive:
+        return expected, "informative_rule", "; ".join(descriptive)
     return expected, "", ""
 
 
@@ -369,12 +393,16 @@ def validate_product(product: OdooProduct, row: PriceRow) -> Validation:
         return Validation("tax_issue", "el impuesto de venta no está incluido en el precio", expected, False)
     if problem in ("no_map", "multiple_maps"):
         return Validation(problem, detail, expected, False)
+    if problem == "informative_rule":
+        return Validation(VALIDATED, detail, expected, True)
     if expected is not None and abs(expected - found) > PRICE_TOLERANCE:
         return Validation("price_mismatch", f"tarifa {found} frente a {expected} recalculado ({detail or 'fórmula'})"
                           .strip(), expected, False)
     if problem == "exceptional_rule":
         return Validation("exceptional_rule", detail, expected, False)
-    return Validation(VALIDATED, "", expected, True)
+    if problem == "informative_rule":
+        return Validation(VALIDATED, detail, expected, True)
+    return Validation(VALIDATED, detail, expected, True)
 
 
 def _fingerprint(*values: Any) -> str:
@@ -489,6 +517,7 @@ class VytriaPriceSync:
     def _run_locked(self, trigger: str, *, watched_only: bool = False,
                     eans: list[str] | None = None) -> SyncResult:
         from price_trial import TrialDenied, active_execution, require_sync, trial_row
+        from price_trial import continuity_row
         if eans is not None:
             if len(eans) != len(set(eans)) or any(normalize_gtin(e) != e for e in eans):
                 raise ValueError("Selección de sincronización no normalizada o duplicada")
@@ -499,9 +528,14 @@ class VytriaPriceSync:
                     "SELECT ean FROM watch_products WHERE active=1 ORDER BY ean" if watched_only else
                     "SELECT ean FROM products ORDER BY ean")]
             row = trial_row(self.store)
+            continuity = continuity_row(self.store)
             if row and not active_execution(self.store):
-                owned = set(json.loads(row["manifest"])["eans"])
-                selected = [ean for ean in selected if ean not in owned]
+                if continuity and continuity["status"] == "active":
+                    manifest = json.loads(continuity["manifest"])
+                    selected = [ean for ean in selected if ean in set(manifest["eans"])]
+                else:
+                    owned = set(json.loads(row["manifest"])["eans"])
+                    selected = [ean for ean in selected if ean not in owned]
         require_sync(self.store, selected, self._now())
         with self.store._connect() as connection, connection:
             # Holding the lock means any run still marked as running died without closing.

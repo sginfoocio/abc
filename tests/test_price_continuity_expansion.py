@@ -40,6 +40,27 @@ def expand(service, **changes):
     })
 
 
+def test_manual_continuity_sync_uses_exact_100_ean_and_persists_receipt(trial):
+    service, store, _, clock = ready(trial)
+    reader = trial[8]
+
+    report = service.run_continuity_sync_now(actor="operator")
+
+    assert reader.calls == [manifest()["eans"]]
+    assert report["sync_receipt"]["monitored"] == 100
+    assert report["sync_receipt"]["status"] in {"ok", "partial"}
+    assert len(report["manifest"]["eans"]) == 100
+
+
+def test_manual_continuity_sync_does_not_duplicate_with_active_sync_lock(trial):
+    service, store, _, clock = ready(trial)
+
+    from filelock import FileLock
+    with FileLock(f"{store.database_path}.vytria-sync.lock", timeout=0):
+        with pytest.raises(ValueError, match="Ya hay una actualización"):
+            service.run_continuity_sync_now(actor="operator")
+
+
 def test_expansion_preserves_all_existing_work_and_is_idempotent(trial):
     service, store, _, _ = ready(trial)
     with store._connect() as con, con:
