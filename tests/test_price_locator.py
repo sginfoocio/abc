@@ -705,6 +705,19 @@ def test_link_prefilter_needs_model_and_colour_as_separate_tokens():
     assert not link_matches(signature("https://x.es/pr-27zs16k08z"), "PR 27ZS", "16K08Z")
 
 
+@pytest.mark.parametrize(("url", "model", "color"), [
+    ("https://www.visiofactory.es/gafas-de-sol/todas-las-solares/"
+     "cartier-core-range-ct0550s-001-56-18-oro.html", "CT0550S", "001"),
+    ("https://www.amevista.com/es/tom-ford-ft1044-01v-bronson", "FT1044", "01V"),
+    ("https://www.edel-optics.es/FT1301-52A-de-Tom-Ford.html", "FT1301", "52A"),
+    ("https://www.opticabassol.com/nl-nl/products/tom-ford-ft1301-52a-51", "FT1301", "52A"),
+    ("https://visual-click.com/products/tom-ford-ft1211-vladimir-52e-65", "FT1211", "52E"),
+    ("https://visual-click.com/products/tom-ford-ft5737-b-045-56", "FT5737B", "045"),
+])
+def test_documented_competitor_handles_keep_model_and_color_with_interleaved_names(url, model, color):
+    assert link_matches(signature(url), model, color)
+
+
 def test_discovered_facts_are_stored_as_evidence(tmp_path):
     site = Site()
     store, _, locator, _, cid = _env(tmp_path, site)

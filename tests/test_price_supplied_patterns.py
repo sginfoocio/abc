@@ -191,11 +191,14 @@ def test_amevista_uses_only_the_historically_observed_commercial_suffix(model, c
         "amevista.com",
     )
 
-    assert len(plan.candidates) == 1
-    candidate = plan.candidates[0]
+    assert len(plan.runnable) == 1
+    candidate = plan.runnable[0]
     assert candidate.url.endswith(f"-{suffix}")
     assert f"report2-check:{check_id}" in candidate.evidence
     assert "recibo histórico" in candidate.origin.lower()
+    foreign_candidates = [item for item in plan.candidates if item is not candidate]
+    assert all(item.state == "probable" and "no acredita mercado español" in item.reason
+               for item in foreign_candidates)
 
 
 def test_domanci_keeps_route_size_separate_from_ean_measurement():

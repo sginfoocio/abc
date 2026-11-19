@@ -34,17 +34,19 @@ def test_dockerfile_copies_local_dependencies_of_provider_modules():
 def test_docker_context_allows_only_the_required_documentary_resource():
     resource = "docs/PRICE_COVERAGE_MEASUREMENT_EVIDENCE.csv"
     evidence = "docs/Precios/100_EAN/evidencia_replay_133_20261116.zip"
+    routes = "docs/Precios/busqueda_38_20261119/38-fichas-y-rutas.json"
     rules = [line.strip() for line in (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
              if line.strip() and not line.startswith("#")]
     # Ordered Docker negation contract: reopen the directory, exclude its contents, allow one file.
     docs_rules = [rule for rule in rules if rule.lstrip("!").split("/")[0] == "docs"]
     assert docs_rules == ["docs/", "!docs/", "docs/**", "!" + resource,
-                          "!docs/Precios/", "!docs/Precios/100_EAN/", "!" + evidence]
+                          "!docs/Precios/", "!docs/Precios/100_EAN/", "!" + evidence,
+                          "!docs/Precios/busqueda_38_20261119/", "!" + routes]
     assert rules.index("*.csv") < rules.index("!" + resource)
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
     copied = _copied(dockerfile)
-    assert resource in copied and evidence in copied
-    assert (ROOT / resource).is_file() and (ROOT / evidence).is_file()
+    assert resource in copied and evidence in copied and routes in copied
+    assert (ROOT / resource).is_file() and (ROOT / evidence).is_file() and (ROOT / routes).is_file()
     assert "COPY docs " not in dockerfile
 
 
@@ -106,6 +108,10 @@ def test_provider_page_imports_with_only_the_files_the_image_copies(tmp_path):
         "assert plan.candidates[0].attributes['bridge'] == '20'\n"
         "assert plan.candidates[0].attributes['route_attributes'] == {'caliber': '51'}\n"
         "assert plan.candidates[0].state == 'probable'\n"
+        "route_plan = candidate_plan({'ean': '0889652468983', 'brand': 'Gucci', 'model': 'GG1579S', "
+        "'color': '001', 'category': 'All / Gafas de Sol'}, 'edel-optics.es')\n"
+        "assert any(c.url == 'https://www.edel-optics.es/GG1579S-001-de-Gucci.html' "
+        "and c.rule.startswith('documented_url:R38:') for c in route_plan.candidates)\n"
     )
     run = subprocess.run([sys.executable, "-c", code], cwd=tmp_path, capture_output=True, text=True,
                          env={**__import__("os").environ, "PYTHONPATH": str(image),
