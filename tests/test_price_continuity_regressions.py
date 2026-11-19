@@ -9,6 +9,7 @@ import pytest
 import requests
 
 from price_comparator import PriceComparatorStore
+from price_watch import PriceWatch
 from price_web import WebPriceSearch
 from price_web_extract import extract_product, select_product_variant
 from price_references import EXACT, classify
@@ -38,6 +39,7 @@ def _visit(tmp_path, target, url, body, tax="included", at=NOW):
         "COLOR": target["color"], "CALIBRE": target.get("caliber", ""),
     }]))
     store.import_competitors(pd.DataFrame([{"Competidor": "Synthetic shop", "Página web": origin}]))
+    PriceWatch(store).add([str(target["ean"])], actor="synthetic", source="manual")
     search = WebPriceSearch(store, fetcher_factory=site.factory, clock=lambda: at)
     cid = store.competitors().iloc[0]["id"]
     search.update_config(cid, tax_policy=tax, sales_market="ES", market_verified=True,

@@ -4,7 +4,6 @@ from pathlib import Path
 from urllib.parse import quote
 
 import pytest
-import requests
 from filelock import FileLock
 from streamlit.testing.v1 import AppTest
 
@@ -361,9 +360,7 @@ def test_discarding_last_candidate_does_not_claim_product_is_missing(pilot):
     assert int(coverage.candidates) == 0
 
 
-def test_pending_candidate_ui_exposes_discard_and_validates_reviewer_note(pilot, monkeypatch):
-    import app_pages.price_comparator as page
-
+def test_legacy_pilot_candidates_are_not_part_of_current_review_tray(pilot, monkeypatch):
     service, store, search, site, cid, _ = pilot
     configure(search, cid)
     only_pending(store, cid, [EAN])
@@ -371,23 +368,18 @@ def test_pending_candidate_ui_exposes_discard_and_validates_reviewer_note(pilot,
     service.enable()
     discovery = PilotDiscovery(store)
     run_all_pending(discovery, search)
+    calls_after_discovery = list(site.calls)
     monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
-    monkeypatch.setattr(page, "WebPriceSearch", lambda _: search)
 
     app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
                               "render_price_comparator_page()").run(timeout=60)
     assert not app.exception
-    app.radio(key="top_level_section").set_value("Por revisar").run(timeout=60)
-    assert app.selectbox(key="pending_candidate").value == int(discovery.candidates().iloc[0].id)
-    assert app.button(key="discovery_discard_candidate").label == "Descartar candidato"
-    app.button(key="discovery_discard_candidate").click().run(timeout=60)
-    assert any("Indique quién revisa" in error.value for error in app.error)
-
-    app.text_input(key="discovery_review_note").set_value("Revisor: descarta la ficha ambigua")
-    app.button(key="discovery_discard_candidate").click().run(timeout=60)
-    assert not app.exception
-    assert any("Candidato descartado" in success.value for success in app.success)
-    assert discovery.candidates().iloc[0].state == "discarded"
+    app.radio(key="top_level_section").set_value("Administración").run(timeout=60)
+    app.selectbox(key="price_admin_section").set_value("Por revisar").run(timeout=60)
+    assert not any(widget.key == "pending_candidate" for widget in app.selectbox)
+    assert not any(button.key.startswith("discovery_") for button in app.button)
+    assert discovery.candidates().iloc[0].state == "pending_validation"
+    assert site.calls == calls_after_discovery
 
 
 def test_selection_rejects_products_and_competitors_outside_pilot(pilot):
@@ -531,10 +523,7 @@ def test_discovery_authorization_warning_formats_multiple_entries_and_unknown_na
         f" | other · EAN {SAMPLE_EANS[1]}: Búsqueda no autorizada")
 
 
-@pytest.mark.parametrize("key_prefix", ["dashboard", "products"])
-def test_product_discovery_unauthorized_warning_is_readable_and_offline(pilot, monkeypatch, key_prefix):
-    import app_pages.price_comparator as page
-
+def test_legacy_discovery_preview_reports_unauthorized_pair_without_side_effects(pilot):
     _, store, search, site, cid, _ = pilot
     configure(search, cid)
     search.update_config(cid, terms_reviewed=False, terms_note="", access_status="pending_authorization",
@@ -549,39 +538,11 @@ def test_product_discovery_unauthorized_warning_is_readable_and_offline(pilot, m
     assert preview["effective"] == []
     before = commerce(store)
     config_before = search.config(cid)
-    monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
-    monkeypatch.setattr(page, "WebPriceSearch", lambda _: search)
-    launched = []
-    monkeypatch.setattr(page, "_launch", lambda target, *args: launched.append((target, args)))
-
-    def reject_http(*args, **kwargs):
-        pytest.fail("La vista previa no debe realizar HTTP")
-
-    monkeypatch.setattr(requests.Session, "send", reject_http)
-    app = AppTest.from_string(
-        "from app_pages.price_comparator import render_price_comparator_page\n"
-        "render_price_comparator_page()").run(timeout=60)
-    if key_prefix == "products":
-        app.radio(key="top_level_section").set_value("Productos").run(timeout=60)
-        app.selectbox(key="products_selected_ean").set_value(EAN).run(timeout=60)
-    else:
-        app.selectbox(key="dashboard_product").set_value(EAN).run(timeout=60)
-    app.multiselect(key=f"{key_prefix}_locate_competitors_{EAN}").set_value([cid]).run(timeout=60)
-
-    assert not app.exception
-    expected = "No consultable: Visio Factory · EAN " + EAN + ": " + "; ".join(
-        preview["unauthorized"][0]["reasons"])
-    assert expected in [warning.value for warning in app.warning]
-    app.checkbox(key=f"{key_prefix}_locate_approved_{EAN}").set_value(True).run(timeout=60)
-    assert not app.exception
-    assert app.button(key=f"{key_prefix}_locate_product_{EAN}").disabled
-    assert launched == [] and site.calls == []
+    assert site.calls == []
     assert commerce(store) == before and search.config(cid) == config_before
 
 
-def test_product_discovery_mixed_selection_preserves_authorized_edel(pilot, monkeypatch):
-    import app_pages.price_comparator as page
-
+def test_legacy_discovery_requires_active_pilot(pilot):
     service, store, search, site, visio, _ = pilot
     search.update_config(visio, terms_reviewed=False, terms_note="")
     edel = next(row["id"] for row in service.competitors() if row["name"] == "Edel-Optics")
@@ -595,40 +556,11 @@ def test_product_discovery_mixed_selection_preserves_authorized_edel(pilot, monk
     preview = discovery.preview(pairs)
     assert preview["effective"] == [[edel, EAN]]
     assert [row["competitor_id"] for row in preview["unauthorized"]] == [visio]
-    monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
-    monkeypatch.setattr(page, "WebPriceSearch", lambda _: search)
-    launched = []
-    monkeypatch.setattr(page, "_launch", lambda target, *args: launched.append((target, args)))
 
-    def reject_http(*args, **kwargs):
-        pytest.fail("Las pruebas solo permiten transporte HTTP simulado")
-
-    monkeypatch.setattr(requests.Session, "send", reject_http)
-    app = AppTest.from_string(
-        "from app_pages.price_comparator import render_price_comparator_page\n"
-        "render_price_comparator_page()").run(timeout=60)
-    app.selectbox(key="dashboard_product").set_value(EAN).run(timeout=60)
-    app.multiselect(key=f"dashboard_locate_competitors_{EAN}").set_value([visio, edel]).run(timeout=60)
-    assert not app.exception
-    assert any("No consultable: Visio Factory" in warning.value for warning in app.warning)
-    assert app.button(key=f"dashboard_locate_product_{EAN}").disabled
-    app.checkbox(key=f"dashboard_locate_approved_{EAN}").set_value(True).run(timeout=60)
-    assert not app.button(key=f"dashboard_locate_product_{EAN}").disabled
-    app.button(key=f"dashboard_locate_product_{EAN}").click().run(timeout=60)
-    assert not app.exception and site.calls == []
-    assert len(launched) == 1 and launched[0][0] is page._run_discovery
-    assert launched[0][1][1:] == (False, pairs)
-
-    url = base + "/PR-27ZS-16K08Z-de-Prada.html"
-    site.add(base + "/robots.txt", "User-agent: *\nAllow: /\n")
-    site.add(base + "/search?q=" + EAN, f'<a href="{url}">Prada PR27ZS 16K08Z {EAN}</a>')
-    site.add(url, prada_page(EAN))
     before = commerce(store)
-    discovery.run(selection=pairs, search=search)
-    assert site.calls == [base + "/robots.txt", base + "/search?q=" + EAN, url]
-    candidate = discovery.candidates().iloc[0]
-    assert (candidate.competitor_id, candidate.ean, candidate.state) == (edel, EAN, "pending_validation")
-    assert search._indexed(edel, EAN) == []
+    with pytest.raises(PilotError, match="Piloto no preparado para ejecución manual"):
+        discovery.run(selection=pairs, search=search)
+    assert not site.calls
     assert commerce(store) == before
 
 
@@ -957,12 +889,10 @@ def test_ui_coverage_settings_and_approval_are_offline(pilot, monkeypatch):
     assert not app.exception
     from tests.admin_navigation import navigate
     navigate(app, "Piloto y consultas", timeout=60)
-    app.selectbox(key="price_pilot_section").set_value("Localización supervisada").run(timeout=60)
     assert not app.exception
-    assert any(item.value == "Localización de fichas del piloto" for item in app.subheader)
-    assert app.button(key="discovery_start").disabled
-    assert any(warning.value.startswith("No consultable: ") and " · EAN " in warning.value
-               for warning in app.warning)
+    assert any(item.value == "Buscar precios en la competencia" for item in app.subheader)
+    assert app.button(key="web_search_button").disabled
+    assert not any(button.key.startswith("discovery_") for button in app.button)
     navigate(app, "Competidores", timeout=60)
     app.selectbox(key="admin_competitor_id").set_value(cid).run(timeout=60)
     assert app.selectbox(key=f"web_{cid}_market").value == ""

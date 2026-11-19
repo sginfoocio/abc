@@ -258,7 +258,8 @@ def test_review_ui_separates_groups_and_reevaluates_with_preview(pilot, monkeypa
     app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
                               "render_price_comparator_page()").run(timeout=60)
     assert not app.exception
-    app.radio(key="top_level_section").set_value("Por revisar").run(timeout=60)
+    app.radio(key="top_level_section").set_value("Administración").run(timeout=60)
+    app.selectbox(key="price_admin_section").set_value("Por revisar").run(timeout=60)
 
     def metrics():
         return {metric.label: metric.value for metric in app.metric}

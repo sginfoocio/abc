@@ -627,16 +627,18 @@ def test_exhausted_budget_puts_jobs_on_hold(tmp_path):
     assert "Presupuesto diario" in report.stopped[cid]
 
 
-def test_supervised_pilot_pairs_are_skipped(tmp_path, monkeypatch):
+def test_legacy_pilot_scope_does_not_gate_current_locator_queue(tmp_path, monkeypatch):
     site = Site()
     store, _, locator, _, cid = _env(tmp_path, site)
     ean = _gtin("840000000001")
     site.product("Alpha", "AL1001", "10A")
     _watch(store, [(ean, "Alpha", "AL1001", "10A", "")])
-    monkeypatch.setattr("price_pilot.pilot_scope", lambda store: {"eans": [ean], "competitors": {cid: {}}})
+    monkeypatch.setattr("price_pilot.pilot_scope", lambda store: {"eans": [], "competitors": {}})
     locator.enqueue()
-    locator.run([cid])
-    assert _jobs(store, cid).iloc[0]["state"] == "pilot" and site.calls == []
+    report = locator.run([cid])
+    assert _jobs(store, cid).iloc[0]["state"] == "done"
+    assert report.states["done"] == 1
+    assert site.calls
 
 
 def test_dead_verified_page_is_relocated(tmp_path):

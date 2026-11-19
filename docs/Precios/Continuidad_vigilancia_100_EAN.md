@@ -1,5 +1,11 @@
 # Continuidad de vigilancia: mismos 100 EAN y seis tiendas
 
+La navegación actual es **Administración → Vigilancia y consumos → Continuidad
+vigente**. El piloto de 72 horas dejó de ser un requisito de ejecución: su estado
+histórico no autoriza ni bloquea una lectura actual. Los pares del manifiesto de
+continuidad siguen reservados según el estado de esa continuidad, y los controles
+de acceso/presupuesto no cambian.
+
 ## Estado y alcance
 
 La configuración versionada en [`price_watch_continuity.json`](../../price_watch_continuity.json)
@@ -19,8 +25,11 @@ El manifiesto es exactamente [`price_trial_manifest.json`](../../price_trial_man
 6. ConGafasDeSol
 
 Su SHA-256 es `be618e2e9a004cf0df7f9dba9163a1a53114b603012ee063c89ee11c50c31887`.
-No se incorporan otros productos, tiendas ni colas. Vytria/Odoo conserva el lector
-de solo lectura y solo puede recibir esa lista exacta de 100 EAN.
+Este archivo documenta la continuidad preparada de seis tiendas, no la selección
+comercial global de 14 competidores. La expansión a 14 sigue siendo una decisión
+de alcance independiente y explícita; no se incorporan otros productos, tiendas
+ni colas en esta configuración. Vytria/Odoo conserva el lector de solo lectura y
+solo puede recibir esa lista exacta de 100 EAN cuando se ejecuta en este contexto.
 
 ## Frecuencias, presupuesto y controles
 
@@ -45,10 +54,11 @@ de solo lectura y solo puede recibir esa lista exacta de 100 EAN.
   expone preparación, estado, latido, siguiente sincronización, fechas por par y
   controles explícitos de pausa, reanudación y parada. Cada control queda auditado.
 
-La preparación requiere el cierre del piloto, los mismos productos y tiendas
-activos y un latido reciente. La activación exige un responsable, un commit de
-Actions y confirmación explícita en la interfaz. Ninguna configuración, despliegue
-o prueba sintética constituye activación.
+La preparación valida los productos y tiendas activos del manifiesto, el latido
+reciente y los presupuestos. No depende del estado histórico del piloto de 72 horas.
+La activación exige un responsable, un commit de Actions y confirmación explícita
+en la interfaz. Ninguna configuración, despliegue o prueba sintética constituye
+activación.
 
 ## Métricas
 

@@ -413,7 +413,7 @@ def test_bottega_detail_uses_active_continuity_not_expired_pilot(pilot, monkeypa
     monkeypatch.setattr(page, "WebPriceSearch", lambda _: search)
     app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
                               "render_price_comparator_page()").run(timeout=60)
-    app.radio(key="top_level_section").set_value("Productos").run(timeout=60)
+    app.radio(key="top_level_section").set_value("Comparativa de precios").run(timeout=60)
     app.selectbox(key="products_selected_ean").set_value(ean).run(timeout=60)
 
     text = " ".join(markdown.value for markdown in app.markdown) + " " + " ".join(info.value for info in app.info)
@@ -422,31 +422,21 @@ def test_bottega_detail_uses_active_continuity_not_expired_pilot(pilot, monkeypa
     assert not app.exception
 
 
-def test_product_detail_starts_only_explicitly_selected_price_refresh(pilot, monkeypatch):
+def test_product_detail_does_not_expose_a_duplicate_price_refresh(pilot, monkeypatch):
     import app_pages.price_comparator as page
     from streamlit.testing.v1 import AppTest
 
-    _, store, search, site, cid, _ = pilot
-    url = known(pilot)
-    with store._connect() as connection, connection:
-        connection.execute("""UPDATE competitor_product_urls SET status='verified',source='user'
-            WHERE competitor_id=? AND ean=? AND url=?""", (cid, REQUIRED_EANS[0], url))
+    _, store, search, site, _, _ = pilot
     monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
     monkeypatch.setattr(page, "WebPriceSearch", lambda _: search)
-    launched = []
-    monkeypatch.setattr(page, "_launch", lambda target, *args: launched.append((target, args)))
 
     app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
                               "render_price_comparator_page()").run(timeout=60)
     assert not app.exception and site.calls == []
-    app.selectbox(key="dashboard_product").set_value(REQUIRED_EANS[0]).run(timeout=60)
-    app.checkbox(key=f"dashboard_refresh_approved_{REQUIRED_EANS[0]}").set_value(True).run(timeout=60)
-    app.button(key=f"dashboard_refresh_prices_{REQUIRED_EANS[0]}").click().run(timeout=60)
+    app.selectbox(key="products_selected_ean").set_value(REQUIRED_EANS[0]).run(timeout=60)
 
     assert not app.exception and site.calls == []
-    assert len(launched) == 1
-    assert launched[0][0] is page._run_price_refresh
-    assert launched[0][1][1] == [(cid, REQUIRED_EANS[0])]
+    assert not any(button.key.startswith("dashboard_refresh_") for button in app.button)
 
 
 @pytest.mark.parametrize("override,reason", [
@@ -558,22 +548,22 @@ def test_empty_invalid_scope_and_legacy_queue_quarantined(pilot):
 
 def test_ui_scope_plan_and_manual_confirmation(pilot, monkeypatch):
     from streamlit.testing.v1 import AppTest
-    service, store, search, site, cid, extras = pilot
+    _, store, _, site, _, _ = pilot
     monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
     app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
                               "render_price_comparator_page()").run(timeout=30)
     from tests.admin_navigation import navigate
     navigate(app, "Piloto y consultas", timeout=30)
     assert not app.exception
-    assert app.selectbox(key="price_pilot_section").value == "Configuración del piloto"
-    assert len(app.multiselect(key="pilot_eans").value) == 20
-    assert len(app.multiselect(key="pilot_competitors").value) == 6
-    assert app.button(key="pilot_save_limits") is not None
-    scope_before = pilot_scope(store)
-    app.button(key="pilot_save_limits").click().run(timeout=30)
+    assert app.button(key="web_search_button").disabled
+    assert not any(widget.key in {"pilot_eans", "pilot_competitors"} for widget in app.multiselect)
+    assert not any(button.key.startswith(("pilot_", "discovery_")) for button in app.button)
+    assert not site.calls
+
+    navigate(app, "Historial y diagnósticos", timeout=30)
     assert not app.exception
-    assert pilot_scope(store)["enabled"] == scope_before["enabled"]
-    assert site.calls == []
+    assert any("Histórico del piloto de 72 horas" in item.label for item in app.expander)
+    assert not any(button.key.startswith(("pilot_", "discovery_")) for button in app.button)
 
 
 @pytest.mark.parametrize("field,value", [("eans", '[[]]'), ("eans", '["invalid"]'),
@@ -686,66 +676,54 @@ def test_injected_old_pilot_jobs_cannot_escape_scope_on_resume(pilot):
 
 
 def test_pilot_worker_errors_are_visible_not_swallowed(pilot, monkeypatch):
-    from app_pages.price_comparator import _run_pilot
-    service, store, search, site, cid, extras = pilot
-    _run_pilot(service, False)
-    assert "preparado" in pilot_scope(store)["last_error"]
+    service, store, search, site, cid, _ = pilot
+    monkeypatch.setattr(service, "_execute", lambda *args, **kwargs: (_ for _ in ()).throw(
+        RuntimeError("synthetic worker failure")))
+    service.enable()
+    with pytest.raises(RuntimeError, match="synthetic worker failure"):
+        service.run(search=search)
+    with store._connect() as connection:
+        run = connection.execute("SELECT status,error FROM pilot_runs ORDER BY id DESC LIMIT 1").fetchone()
+    assert tuple(run) == ("interrupted", "synthetic worker failure")
     assert site.calls == []
 
 
-def test_ui_launches_only_approved_discovery_in_background(pilot, monkeypatch):
+def test_advanced_web_search_requires_an_explicit_bounded_submission(pilot, monkeypatch):
     import app_pages.price_comparator as page
     from streamlit.testing.v1 import AppTest
-    service, store, search, site, cid, extras = pilot
-    with store._connect() as connection, connection:
-        connection.execute("UPDATE competitor_web_config SET search_mode='site_search',search_verified=1 "
-                           "WHERE competitor_id=?", (cid,))
+    _, store, search, site, _, _ = pilot
     monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
-    calls = []
-    monkeypatch.setattr(page, "_launch", lambda target, *args: calls.append((target, args)))
+    monkeypatch.setattr(page, "WebPriceSearch", lambda _: search)
     app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
                               "render_price_comparator_page()").run(timeout=30)
     from tests.admin_navigation import navigate
     navigate(app, "Piloto y consultas", timeout=30)
-    app.selectbox(key="price_pilot_section").set_value("Localización supervisada").run(timeout=30)
-    app.selectbox(key="discovery_execution_competitor").set_value(cid).run(timeout=30)
-    selected_ean = app.selectbox(key="discovery_execution_ean").value
-    start = app.button(key="discovery_start")
-    assert start.disabled
-    approval = next(item for item in app.checkbox
-                    if item.label == "He revisado el alcance seleccionado, los métodos y las autorizaciones")
-    approval.check().run(timeout=30)
-    assert not app.button(key="discovery_start").disabled, (
-        f"warnings={[item.value for item in app.warning]}, "
-        f"info={[item.value for item in app.info]}, "
-        f"markdown={[item.value for item in app.markdown]}"
-    )
-    app.button(key="discovery_start").click().run(timeout=30)
+    app.text_input(key="web_text").set_value(REQUIRED_EANS[0]).run(timeout=30)
+    app.radio(key="web_mode").set_value("Consultar webs").run(timeout=30)
+    app.button(key="web_search_button").click().run(timeout=30)
     assert not app.exception
-    assert len(calls) == 1 and calls[0][0] == page._run_discovery
-    assert calls[0][1][0].store.database_path == store.database_path
-    assert calls[0][1][1:] == (False, [(cid, selected_ean)])
-    assert pilot_scope(store)["enabled"]
+    assert any("Elija entre 1 y 3 competidores" in error.value for error in app.error)
     assert site.calls == []
 
 
 def test_ui_shows_unauthorized_competitor_reasons_without_http(pilot, monkeypatch):
     from streamlit.testing.v1 import AppTest
-    service, store, search, site, cid, _ = pilot
+    _, store, search, site, cid, _ = pilot
     monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
     with store._connect() as connection, connection:
         connection.execute("UPDATE competitor_web_config SET access_status='pending_review',terms_reviewed=0 "
                            "WHERE competitor_id=?", (cid,))
-    name = next(row["name"] for row in service.competitors() if row["id"] == cid)
+    from price_access import AccessControl
+    AccessControl(store).set_method(cid, "ficha", "denied", actor="test", note="Revisión pendiente")
     app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
                               "render_price_comparator_page()").run(timeout=30)
     from tests.admin_navigation import navigate
-    navigate(app, "Piloto y consultas", timeout=30)
-    app.selectbox(key="price_pilot_section").set_value("Localización supervisada").run(timeout=30)
-    app.selectbox(key="discovery_execution_competitor").set_value(cid).run(timeout=30)
+    navigate(app, "Tiendas", timeout=30)
+    app.selectbox(key="admin_competitor_id").set_value(cid).run(timeout=30)
+    app.selectbox(key="competitor_card_section").set_value("Acceso y métodos").run(timeout=30)
     assert not app.exception
-    assert any(name in warning.value and "autoriz" in warning.value.lower() for warning in app.warning)
-    assert app.button(key="discovery_start").disabled
+    assert app.selectbox(key="access_method")
+    assert any("no son una autorización" in item.value for item in app.caption)
     assert site.calls == []
 
 
@@ -753,27 +731,16 @@ def test_ui_prepares_budget_recovery_with_audit_and_no_http(pilot, monkeypatch):
     from streamlit.testing.v1 import AppTest
     service, store, search, site, cid, _ = pilot
     service.enable()
-    job_id, _ = _insert_budget_error(service, store, cid, REQUIRED_EANS[0])
+    _insert_budget_error(service, store, cid, REQUIRED_EANS[0])
     monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
     app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
                               "render_price_comparator_page()").run(timeout=30)
     from tests.admin_navigation import navigate
     navigate(app, "Recuperación de búsquedas", timeout=30)
     assert not app.exception
-    assert any("no hace consultas HTTP" in item.value for item in app.caption)
-    app.multiselect(key="price_recovery_job_ids").set_value([job_id]).run(timeout=30)
-    app.text_input(key="price_recovery_operator").set_value("Revisión offline").run(timeout=30)
-    app.text_input(key="price_recovery_reason").set_value("Autorización confirmada y presupuesto revisado").run(
-        timeout=30)
-    app.checkbox(key="price_recovery_confirmation").check().run(timeout=30)
-    assert not app.button(key="price_recovery_prepare").disabled
-    app.button(key="price_recovery_prepare").click().run(timeout=30)
-    assert not app.exception
-    assert any("Se han preparado 1 referencias" in item.value for item in app.success)
-    with store._connect() as connection:
-        audit = connection.execute(
-            "SELECT operator,reason FROM pilot_recovery_audit WHERE source_job_id=?", (job_id,)).fetchone()
-    assert tuple(audit) == ("Revisión offline", "Autorización confirmada y presupuesto revisado")
+    assert any("Sin incidencias de bloqueo registradas" in item.value for item in app.success)
+    assert not any(widget.key.startswith("price_recovery_") for widget in app.multiselect)
+    assert not any(button.key.startswith("price_recovery_") for button in app.button)
     assert site.calls == []
 
 

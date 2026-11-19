@@ -2,10 +2,9 @@
 
 Cloud tiene su propio motor de localización y vigilancia de precios. Se ejecuta en nuestra infraestructura (`s2026`), lo mantenemos nosotros y **no depende de ninguna API externa de búsqueda**. Reutiliza `price_web.py`, `price_discovery.py`, `price_pilot.py`, `price_scheduler.py` y los extractores actuales.
 
-La fase 1 crea las bases para gestionar miles de EAN y muchos competidores sin registrar URLs a mano. El piloto de 20 EAN (`price_pilot.py`, tablas `pilot_*`) **no cambia**: sigue funcionando hasta que se valide el nuevo motor.
+Esta página reúne información histórica de varias fases. Las instrucciones de activación de pilotos y las ubicaciones de menús inferiores describen versiones anteriores; no son instrucciones para operar la compilación actual. El piloto de 72 horas se retiró del recorrido y del ciclo del trabajador. Su informe histórico es de solo lectura y los datos permanecen conservados. El piloto de búsqueda de 20 EAN (`price_pilot.py`, tablas `pilot_*`) sigue siendo una herramienta heredada, accesible solo en Diagnóstico técnico.
 
-Ubicación en Cloud: **Comparador de precios → Administración**. La administración se organiza en seis apartados;
-véase [navegación, auditoría y operación supervisada](ADMINISTRACION_COMPARADOR.md).
+La navegación actual es **Comparativa de precios**, **Administración** y **Diagnóstico técnico**. Productos y ofertas aparecen en la comparativa; tiendas, productos vigilados, revisiones y consumos están en Administración; colas, importaciones, historiales y herramientas técnicas están en Diagnóstico técnico. Véase [navegación, auditoría y operación supervisada](ADMINISTRACION_COMPARADOR.md).
 Al abrir las pantallas no se realiza ninguna petición HTTP ni se activa la planificación.
 
 ## Contenido de la fase 1
@@ -493,17 +492,17 @@ Las comprobaciones de precio sin cambios pueden reutilizar `stored_offer_id`:
 `last_offer_check_at` y `saved_receipt` acreditan la nueva lectura sin exigir cinco
 ofertas nuevas. No ejecutar el monitor para verificar estos datos.
 
-### Uso y prueba supervisada
+### Uso y prueba supervisada (referencia histórica)
 
-En **Comparador → Administración**:
+Las rutas siguientes documentan la interfaz anterior. En la interfaz actual:
 
-1. Añadir productos de Vytria (selección, importación de EAN o reglas), con marca/modelo/color completos.
-2. En «Competidores», revisar permisos por método y presupuestos. Las autorizaciones del piloto no se transfieren implícitamente al motor escalable.
-3. En «Actualizaciones → Lote supervisado», seleccionar EAN y competidores y revisar fichas, trabajos y consumo previsto.
-4. Preparar sin HTTP y confirmar expresamente la ejecución. Los controles independientes por motor siguen en «Colas y revisión (avanzado)».
-5. Consultar precio Vytria/competidor, mejor competidor, diferencias (Vytria menos competidor, porcentaje sobre Vytria), stock, moneda, IVA, fecha y estado. Hay filtros de marca/estado/búsqueda y evolución histórica reutilizada.
-6. «Alertas e incidencias» permite cambiar el umbral y descargar el resumen de correo, sin enviar nada.
-7. El dashboard general recibe las ofertas del mismo histórico; no hace falta volver a importarlas.
+1. Añadir productos y ajustar sus reglas en **Administración → Productos**.
+2. Revisar métodos, URLs, presupuestos y bloqueos en **Administración → Tiendas**.
+3. Confirmar o descartar fichas en **Administración → Por revisar**. La confirmación acreditada encola la lectura prioritaria en el trabajador existente.
+4. Consultar el estado de vigilancia y consumos en **Administración → Vigilancia y consumos**.
+5. Abrir **Diagnóstico técnico** para colas detalladas, recuperación, importaciones, auditoría e historial. Los controles gobernados y las restricciones por tienda permanecen vigentes.
+
+Los pasos y capturas de la antigua beta no acreditan consultas actuales, ofertas vigentes ni una activación de continuidad.
 
 CLI (desde el directorio de la aplicación; no ejecutar en producción sin aprobación):
 

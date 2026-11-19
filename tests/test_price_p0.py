@@ -167,7 +167,7 @@ def test_page_with_real_stored_offer_shows_gap_chart_and_competitor_requests(tmp
     app = AppTest.from_string(SCRIPT).run(timeout=60)
 
     assert not app.exception
-    app.radio(key="top_level_section").set_value("Inicio").run(timeout=60)
+    app.radio(key="top_level_section").set_value("Comparativa de precios").run(timeout=60)
     values = {metric.label: metric.value for metric in app.metric}
     assert values["Productos comparados"] == "1 / 1"
     assert values["Más caro"] == "100,0 %"
@@ -178,7 +178,7 @@ def test_page_with_real_stored_offer_shows_gap_chart_and_competitor_requests(tmp
     edel = states[states["Competidor"] == "Edel-Optics"].iloc[0]
     assert edel["Operatividad"] == "Pendiente de revisión de condiciones"
     assert any("Necesitamos:" in markdown.value for markdown in app.markdown)
-    app.radio(key="top_level_section").set_value("Productos").run(timeout=60)
+    app.radio(key="top_level_section").set_value("Comparativa de precios").run(timeout=60)
     assert EAN in app.selectbox(key="products_selected_ean").value
 
 

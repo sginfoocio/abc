@@ -32,8 +32,7 @@ class PilotDiscovery:
         self.store = store
 
     def coverage(self) -> pd.DataFrame:
-        from price_pilot import effective_scope
-        scope = effective_scope(self.store)
+        scope = pilot_scope(self.store)
         if scope is None:
             return pd.DataFrame()
         with self.store._connect() as connection:
@@ -79,8 +78,7 @@ class PilotDiscovery:
 
     def preview(self, requested: Iterable[tuple[str, str]]) -> dict:
         """Read-only execution preview; validates scope and never performs HTTP or writes."""
-        from price_pilot import effective_scope
-        scope = effective_scope(self.store)
+        scope = pilot_scope(self.store)
         if scope is None:
             raise PilotError("Piloto sin configurar")
         requested = list(requested)

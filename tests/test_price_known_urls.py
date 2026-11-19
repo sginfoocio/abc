@@ -257,7 +257,7 @@ def test_competitor_panels_have_separate_web_and_scheduler_sections_with_the_sch
     assert any("Estado del planificador" in item.value for item in app.caption)
     assert any("URLs conocidas:** 1" in item for item in markdown)
     assert not _rows(ui, "SELECT 1 FROM competitor_schedule WHERE enabled=1")
-    app.radio(key="top_level_section").set_value("Inicio").run(timeout=60)
+    app.radio(key="top_level_section").set_value("Comparativa de precios").run(timeout=60)
     assert {metric.label: metric.value for metric in app.metric
             }["Productos comparados"].startswith("0 / ")
     # Registered URLs remain configuration only; they do not create comparable price observations.

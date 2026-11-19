@@ -1,5 +1,10 @@
 # Administración del comparador: auditoría y simplificación
 
+La navegación actual tiene tres áreas principales: **Comparativa de precios**,
+**Administración** y **Diagnóstico técnico**. La selección protegida sigue siendo
+de 100 EAN y 14 competidores; no se modifica desde la interfaz sin previsualización
+explícita y auditoría.
+
 ## Auditoría funcional previa
 
 Se revisaron las pantallas `app_pages/price_comparator.py` y `app_pages/price_watch.py`,
@@ -9,59 +14,54 @@ sus pruebas de integración y Streamlit.
 
 | Situación anterior | Consecuencia | Tratamiento |
 | --- | --- | --- |
-| Ocho destinos de Administración y diez dentro de Vigilancia | Operaciones fragmentadas | Seis destinos principales, sin administración paralela |
+| Cinco destinos comerciales y seis subapartados administrativos | Comparación, administración y diagnósticos mezclados | Tres áreas, con productos/ofertas juntos y herramientas técnicas apartadas |
 | Panel general centrado exclusivamente en el piloto | No representaba la vigilancia actual | Resumen local de productos, fichas, Vytria, precios, colas, alertas e incidencias |
 | Configuración web, métodos, fuentes, presupuesto y planes separados | Difícil identificar la configuración efectiva de un competidor | Ficha única por competidor; el conector anterior queda como herramienta avanzada |
 | Preparación y ejecución separadas por cada motor | Exigía conocer dos colas | Lote supervisado con selección, vista previa, preparación local y confirmación |
 | Contadores de monitorización anteriores al filtro | Cifras ajenas a la selección | Recuentos posteriores a todos los filtros, con total global identificado |
 | Tablas/opciones calculadas antes de guardar | Necesidad de recarga manual | Rerender inmediato con mensaje persistido tras altas, grupos, reglas, fuentes y decisiones |
 | Comprobaciones por truthiness de fechas/textos SQL | Mensajes como «bloqueado el nan» | Comprobación explícita de nulos; no se inventan fechas |
-| Sin procedencia visible del piloto | Parecía necesario volver a localizar | Ficha y origen visibles; reutilización acreditada por candidato confirmado de la misma URL |
+| Piloto de 72 horas visible en administración | Podía confundirse con la vigilancia actual | Activación, reanudación, parada y tick retirados; histórico solo de lectura |
 | Exportaciones centradas en piloto/alertas | Faltaba trazabilidad detallada del motor | CSV de observaciones e histórico almacenados, sin actualizar por HTTP |
 
 No se han modificado la identidad comercial, comparabilidad, IVA, mercado, stock,
 autenticación ni el procedimiento de despliegue. No hay migraciones nuevas.
 
-## Seis apartados
+## Tres áreas
 
-1. **Panel general**: vigilancia actual, cobertura, última lectura por competidor,
-   vigencia/origen de Vytria, alertas y bloqueos.
-2. **Productos en vigilancia**: listado con retirada conservando histórico, alta individual,
-   importación CSV/Excel o EAN pegados, reglas, grupos/frecuencias y localización por producto.
-3. **Competidores**: una ficha con permisos por método, fuentes, presupuesto/pausas,
-   frecuencia, incidencias y controles avanzados del conector anterior. El estado
-   activo se edita aquí; importaciones técnicas ya no ofrece un segundo editor.
-4. **Actualizaciones**: lote supervisado, resultados/observaciones, sincronización Vytria
-   y ciclo diario existente, y revisión de colas como herramienta avanzada.
-5. **Alertas e incidencias**: alertas persistidas, resumen descargable sin envío y
-   resolución humana auditada de bloqueos.
-6. **Configuración y diagnóstico**: parámetros, importaciones técnicas, exportaciones,
-   auditoría/históricos, piloto anterior y recuperación de búsquedas.
+1. **Comparativa de precios**: cifras, posición y gráficas primero; después, tabla de
+   productos con precio propio, ofertas por tienda, diferencia, disponibilidad y
+   última actualización. Los filtros generales se comparten y los detalles no se
+   duplican en una pantalla separada.
+2. **Administración**:
+   - **Resumen**: productos vigilados, competidores activos, fichas, precios y cola.
+   - **Productos**: altas/importación, reglas, grupos/frecuencia y estado de localización.
+   - **Tiendas**: una ficha por competidor para métodos, URLs, fuentes, presupuesto,
+     frecuencia, incidencias y conectores avanzados.
+   - **Por revisar**: confirmar o descartar identidad; la confirmación acreditada
+     encola lectura prioritaria en el trabajador existente.
+   - **Vigilancia y consumos**: estado/consumos, lote supervisado o continuidad actual.
+3. **Diagnóstico técnico**: ajustes, importaciones, históricos/auditoría, colas y
+   búsqueda manual avanzada por EAN o modelo/color. Los controles del piloto de 72
+   horas ya no se muestran; sus registros permanecen consultables en históricos.
 
-## Operación habitual: 50 EAN y seis competidores
+## Flujo diario conservado: 100 EAN y 14 competidores
 
-1. Añadir los EAN en **Productos en vigilancia**. Se validan contra el catálogo y su
-   identidad marca + modelo + color. El alta ya prepara búsquedas, sin HTTP.
-2. Revisar la ficha de cada competidor: autorización de los métodos que se usarán,
-   fuentes disponibles, presupuesto y frecuencia. Ninguna autorización es implícita.
-3. En **Actualizaciones → Lote supervisado**, seleccionar EAN y competidores.
-4. Revisar fichas reutilizadas, trabajos necesarios, estado de acceso, frecuencia efectiva
-   y HTTP disponibles. El HTTP mínimo no es una reserva ni un máximo prometido: robots,
-   listados, paginación y reintentos hacen variable el consumo. Los límites reales se aplican
-   por los motores existentes antes de cada petición.
-5. **Preparar trabajos sin HTTP**. Las colas conservan sus identificadores, unicidad,
-   leases, reintentos e históricos.
-6. Confirmar expresamente y ejecutar. Si se marca sincronización Vytria, se leen primero
-   **todos los EAN vigilados** mediante la integración existente; después se localizan
-   y monitorizan únicamente los pares seleccionados. Cambiar la selección invalida la
-   preparación y la confirmación anteriores.
-7. Consultar resultados, errores y observaciones. Una segunda ejecución no repite
-   búsquedas para fichas verificadas ni actualiza precios todavía vigentes.
-
-Los pares pendientes incluidos en el piloto anterior se indican como tales y se
-gestionan en sus controles avanzados; no se eluden sus restricciones. Una ficha ya
-verificada puede monitorizarse sin volver a localizarla. Revisión de identidad y
-fallos terminales requieren los controles de revisión/reintento existentes.
+1. En **Administración → Productos**, gestionar vigilancia sin cambiar silenciosamente
+   la selección protegida; importar y retirar conserva el historial.
+2. En **Administración → Tiendas**, revisar autorización por método, fuente/URL,
+   mercado, moneda, IVA, presupuestos y bloqueos. Guardar una URL no autoriza la
+   consulta ni confirma la identidad.
+3. En **Administración → Por revisar**, confirmar o descartar cada candidata. Al
+   confirmar identidad con lectura, se solicita el precio mediante la cola prioritaria
+   existente; se respetan bloqueos, presupuestos, robots y fechas futuras.
+4. En **Administración → Vigilancia y consumos**, revisar estado y lote supervisado.
+   La preparación no consulta HTTP; ejecutar requiere confirmación explícita y revalida
+   su selección.
+5. Consultar la comparativa y el histórico. Repetir, refrescar o reiniciar no debe
+   duplicar solicitudes; los errores y ofertas no comparables conservan su motivo.
+6. La búsqueda manual avanzada conserva la consulta por EAN o modelo/color; no es
+   necesaria después de confirmar una ficha y no reemplaza la lectura prioritaria.
 
 Las frecuencias no se deducen de un texto: se muestra el intervalo utilizado por el
 motor (grupo, si tiene sobrescritura; después competidor; por defecto 24 horas).
@@ -82,7 +82,7 @@ y sin oferta comparable. Sus grupos son excluyentes y respetan los filtros gener
 distintos. Un precio observado no comparable puede mostrarse como evidencia, pero no
 se utiliza en diferencias ni KPIs.
 
-En **Actualizaciones → Precios y observaciones**, todos los contadores respetan
+En **Comparativa de precios**, todos los contadores respetan
 competidor, marca, estado y búsqueda; se identifica también el total global.
 El CSV detallado respeta los productos/competidor seleccionados e incluye sus
 observaciones históricas, no solo el último precio:
@@ -111,8 +111,7 @@ Una fecha futura de captura no entra en los KPIs, y una comprobación anterior,
 inválida o futura no sustituye la fecha de captura válida.
 
 Para verificar si Vytria guardó precios antes de una excepción de visualización,
-consultar **Actualizaciones → Precios y observaciones → Precio Vytria y ciclo diario**
-y **Configuración y diagnóstico → Auditoría, históricos y exportaciones** sin pulsar
+consultar el precio propio desde su resumen local y **Diagnóstico técnico → Históricos y auditoría** sin pulsar
 sincronización ni ejecución. Las lecturas
 existentes `VytriaPriceSync.last_run()`, `prices()` y `price_history(ean)` no consultan
 Odoo ni escriben datos. La escritura de precios/histórico se confirma en la
@@ -161,9 +160,9 @@ Reordenar una lista no prepara colas, autoriza accesos ni realiza consultas.
 
 ## Dependencia e integración
 
-Esta rama se apila sobre **PR #112**, con autorización del solicitante. No modifica
-su rama ni el worktree original. Orden: integrar #112 primero y después actualizar
-esta PR con `main`, revisar el diff y repetir CI. No fusionar ni desplegar sin aprobación.
+Este cambio continúa en **PR #144**, rama `fix/comparator-commercial-first`.
+No abre otra PR, no modifica la selección de 100 EAN/14 competidores y no fusiona ni
+despliega. La validación CI/Docker debe corresponder al HEAD final de esa PR.
 
 El Dockerfile incorpora `price_batch.py`. No cambian workflows, secretos, permisos,
 volúmenes ni servicios. Planificación y correo no se activan al actualizar la UI.
@@ -171,11 +170,19 @@ Las pruebas usan SQLite temporal y competidores simulados, nunca tiendas reales.
 
 ## Capturas
 
-Datos simulados de 50 EAN y seis competidores, modo claro. La validación en navegador
-comprueba anchos de 1440 y 390 píxeles, sin desbordamiento horizontal de la página
-ni excepciones. Las tablas conservan sus controles nativos de búsqueda y columnas.
+Capturas sintéticas sin consultas comerciales ni datos productivos. «Antes» muestra
+la navegación anterior; «Después» se genera desde las rutas reales del comparador
+con un catálogo/oferta sintéticos y solicitudes HTTP prohibidas por el harness.
+El harness verifica que no haya excepciones ni desbordamiento horizontal.
 
-| Vista | Escritorio | Móvil |
+| Vista | Antes | Después |
 | --- | --- | --- |
-| Panel general | [Captura](admin-panel-desktop.png) | [Captura](admin-panel-mobile.png) |
-| Lote supervisado | [Captura](admin-lote-desktop.png) | [Captura](admin-lote-mobile.png) |
+| Comparativa | [Captura anterior](../../PRICE_COMPARATOR_PREVIEW/resumen-desktop.png) | [Captura nueva](PR144_ADMIN_SIMPLIFICATION/after-light-comparator-desktop.png) |
+| Administración | [Captura anterior](../../PRICE_COMPARATOR_PREVIEW/administracion-desktop.png) | [Captura nueva](PR144_ADMIN_SIMPLIFICATION/after-light-comparator-admin-desktop.png) |
+| Diagnóstico técnico | [Controles anteriores](../../PRICE_COMPARATOR_PREVIEW/administracion-desktop.png) | [Captura nueva](PR144_ADMIN_SIMPLIFICATION/after-light-comparator-diagnostics-desktop.png) |
+
+Para repetir las capturas «Después»:
+
+```text
+python scripts/cloud_identity_visual_harness.py docs/Precios/PR144_ADMIN_SIMPLIFICATION --label after --comparator-only
+```

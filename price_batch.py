@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from contextlib import nullcontext
 from datetime import timedelta
 import json
 
@@ -11,7 +10,7 @@ import pandas as pd
 from price_comparator import PriceComparatorStore
 from price_locator import PriceLocator, catalog_plan_assessment, job_deferral, link_matches
 from price_monitor import PriceMonitor, _done_job_restriction, _inventory_datetime
-from price_pilot import PricePilot, pilot_scope, stamp
+from price_pilot import stamp
 from price_url_candidates import CandidatePlan, candidate_plan
 
 
@@ -50,7 +49,7 @@ class WatchBatch:
                 self.monitor.enqueue([cid], selected)
 
     def _unclaimed_reason(self, cid: str, ean: str, *, monitoring: bool,
-                          point_check: bool, pilot_authorized: bool) -> str:
+                          point_check: bool) -> str:
         with self.store._connect() as con:
             if not con.execute("SELECT 1 FROM watch_products WHERE ean=? AND active=1", (ean,)).fetchone():
                 return "Ningún trabajo reclamado: el producto ya no está en vigilancia"
@@ -63,16 +62,13 @@ class WatchBatch:
         if row is None:
             return "Ningún trabajo reclamado: no existe trabajo en la cola correspondiente"
         job = dict(row)
-        reason = job_deferral(job, self.monitor._now(), point_check=point_check, monitoring=monitoring,
-                              pilot_authorized=pilot_authorized)
+        reason = job_deferral(job, self.monitor._now(), point_check=point_check, monitoring=monitoring)
         if reason:
             return f"Ningún trabajo reclamado: {reason}"
         detail = f"; detalle: {job['detail']}" if job.get("detail") else ""
         return f"Ningún trabajo reclamado: estado actual {job['state']}{detail}"
 
     def preview(self, eans: list[str], competitors: list[str], *, point_check: bool = False) -> pd.DataFrame:
-        from price_trial import active_execution
-        supervised_trial = active_execution(self.store) is not None
         if not eans or not competitors:
             raise ValueError("Seleccione productos y competidores")
         eans, competitors = list(dict.fromkeys(eans)), list(dict.fromkeys(competitors))
@@ -92,7 +88,6 @@ class WatchBatch:
                 "SELECT competitor_id,access_status FROM competitor_web_config")}
             locate_jobs = {(r["ean"], r["competitor_id"]): dict(r) for r in con.execute("SELECT * FROM locate_jobs")}
             monitor_jobs = {(r["ean"], r["competitor_id"]): dict(r) for r in con.execute("SELECT * FROM monitor_jobs")}
-            pilot_active = con.execute("SELECT id FROM pilot_runs WHERE status IN ('running','interrupted')").fetchone()
         if not set(eans) <= watched or not set(competitors) <= active:
             raise ValueError("La selección contiene productos no vigilados o competidores inactivos")
         frame = self.monitor.inventory(competitor_ids=competitors, eans=eans)
@@ -101,7 +96,6 @@ class WatchBatch:
             raise ValueError("La vigilancia ha cambiado durante la lectura; vuelva a seleccionar el lote")
         methods = self.access.methods()
         sources = self.locator.sources()
-        scope = pilot_scope(self.store)
         now = self.monitor._now()
         rows = []
         policies = {}
@@ -142,8 +136,6 @@ class WatchBatch:
                 plan.discovery_plan, policy["catalog_sources"], policy["catalog_permission"],
                 policy["ficha_permission"], policy["access_status"], policy["catalog_gate"], gate,
             )
-            pilot_member = bool(scope and cid in scope["competitors"] and ean in scope["eans"])
-            pilot = pilot_member and not row["located"]
             job = monitor_jobs.get((ean, cid), {})
             locate_job = locate_jobs.get((ean, cid), {})
             sampled = job.get("sampled_at")
@@ -153,8 +145,6 @@ class WatchBatch:
             if (job.get("state") in {"review", "failed"} or row["locate_state"] in {"review", "failed"} or
                     (not row["located"] and (ean, cid) in pending)):
                 action = "Revisión / recuperación"
-            elif pilot and not point_check and not supervised_trial:
-                action = "Pendiente en piloto"
             elif row["located"]:
                 action = "Monitorizar" if due or point_check else "Reutilizar precio vigente"
             else:
@@ -178,14 +168,9 @@ class WatchBatch:
             if eligibility_job is not queue and not _done_job_restriction(job):
                 eligibility_job["not_before"] = None
             deferred = job_deferral(eligibility_job, now, point_check=point_check,
-                                    monitoring=bool(row["located"]),
-                                    pilot_authorized=pilot and (point_check or supervised_trial))
-            if pilot_member and (point_check or supervised_trial) and (not scope["enabled"] or pilot_active):
-                deferred = "Piloto desactivado o con ejecución pendiente: no se inicia otra"
+                                    monitoring=bool(row["located"]))
             if action == "Revisión / recuperación":
                 deferred = "Revisión pendiente: no se acepta ni se reintenta automáticamente"
-            elif action == "Pendiente en piloto":
-                deferred = "Requiere comprobación puntual explícita del piloto supervisado"
             if not allowed:
                 deferred = reason
             from price_trial import pair_reason
@@ -210,7 +195,6 @@ class WatchBatch:
                          "defer_reason": deferred, "queue_state": queue.get("state", "sin preparar"),
                          "not_before": queue_not_before, "next_check_at": next_check_at,
                          "access_retry_at": access_retry_at, "attempts": queue.get("attempts", 0),
-                         "pilot_route": bool(pilot_member and (point_check or supervised_trial)),
                          "candidate_count": len(plan.runnable), "candidate_reason": plan.reason,
                          "candidate_reason_code": plan.reason_code,
                          "local_candidates": [candidate.provenance() for candidate in plan.candidates],
@@ -245,59 +229,41 @@ class WatchBatch:
             selected = preview[(preview["competitor_id"] == cid) & preview["ready"]]["ean"].tolist()[:remaining]
             if not selected or remaining <= 0:
                 continue
-            legacy = [(cid, r["ean"]) for r in preview.to_dict("records")
-                      if r["competitor_id"] == cid and r["ean"] in selected and r["pilot_route"]]
-            context = PricePilot(self.store).watch_check(legacy, approved=approved) if legacy else nullcontext(None)
             started_at = stamp()
-            with context as pilot_run_id:
-                located = self.locator.run([cid], eans=selected, max_jobs=len(selected), deadline_seconds=300,
-                                           **({"point_check": point_check, "pilot_run_id": pilot_run_id}
-                                              if point_check or pilot_run_id is not None else {}))
-                # A store-level block must stop monitoring as well as discovery.
-                from price_monitor import MonitorReport
-                monitored = (MonitorReport() if located.stopped else self.monitor.run(
-                    [cid], eans=selected, max_jobs=len(selected), deadline_seconds=300,
-                    **({"point_check": point_check, "pilot_run_id": pilot_run_id}
-                       if point_check or pilot_run_id is not None else {})))
-                processed = {r["ean"] for r in located.outcomes + monitored.outcomes}
-                remaining -= len(processed)
-                result["deferred"] -= len(processed)
-                result["processed_pairs"] += len(processed)
-                run = {"competitor": cid, "location": located.summary, "monitor": monitored.summary,
-                       "location_processed": located.processed, "monitor_processed": monitored.processed,
-                       "requests": located.requests + monitored.requests,
-                       "processed_pairs": len(processed), "pilot_run_id": pilot_run_id,
-                       "location_deferred": located.deferred_reason,
-                       "monitor_deferred": monitored.deferred_reason,
-                       "started_at": started_at, "finished_at": stamp(),
-                       "errors": {**located.stopped, **monitored.stopped}}
-                result["runs"].append(run)
-                if pilot_run_id is not None:
-                    with self.store._connect() as con, con:
-                        con.execute("""UPDATE pilot_budgets SET requests=?,blocked=?
-                            WHERE run_id=? AND competitor_id=?""",
-                            (run["requests"], int(bool(run["errors"])), pilot_run_id, cid))
-                for ean in selected:
-                    outcomes = [r for r in located.outcomes + monitored.outcomes if r["ean"] == ean]
-                    requests = sum(r["requests"] for r in outcomes)
-                    preview_row = preview.loc[(preview["competitor_id"] == cid) &
-                                              (preview["ean"] == ean)].iloc[0]
-                    pair = {"ean": ean, "competitor_id": cid, "processed": ean in processed,
-                            "category": _outcome_category(outcomes),
-                            "requests": requests, "outcomes": outcomes,
-                            "reason": (outcomes[-1]["detail"] if outcomes else
-                                       run["errors"].get(cid) or located.deferred_reason or monitored.deferred_reason
-                                       or self._unclaimed_reason(
-                                           cid, ean, monitoring=bool(preview_row["located"]),
-                                           point_check=point_check,
-                                           pilot_authorized=bool(preview_row["pilot_route"])))}
-                    result["pairs"].append(pair)
-                    if pilot_run_id is not None:
-                        with self.store._connect() as con, con:
-                            con.execute("""UPDATE pilot_jobs SET status='done',outcome=?,detail=?,observation=?,
-                                checked_at=? WHERE run_id=? AND competitor_id=? AND ean=?""",
-                                (pair["category"], pair["reason"], json.dumps(pair, ensure_ascii=False), stamp(),
-                                 pilot_run_id, cid, ean))
+            located = self.locator.run([cid], eans=selected, max_jobs=len(selected), deadline_seconds=300,
+                                       point_check=point_check)
+            # A store-level block must stop monitoring as well as discovery.
+            from price_monitor import MonitorReport
+            monitored = (MonitorReport() if located.stopped else self.monitor.run(
+                [cid], eans=selected, max_jobs=len(selected), deadline_seconds=300,
+                point_check=point_check))
+            processed = {r["ean"] for r in located.outcomes + monitored.outcomes}
+            remaining -= len(processed)
+            result["deferred"] -= len(processed)
+            result["processed_pairs"] += len(processed)
+            run = {"competitor": cid, "location": located.summary, "monitor": monitored.summary,
+                   "location_processed": located.processed, "monitor_processed": monitored.processed,
+                   "requests": located.requests + monitored.requests,
+                   "processed_pairs": len(processed), "pilot_run_id": None,
+                   "location_deferred": located.deferred_reason,
+                   "monitor_deferred": monitored.deferred_reason,
+                   "started_at": started_at, "finished_at": stamp(),
+                   "errors": {**located.stopped, **monitored.stopped}}
+            result["runs"].append(run)
+            for ean in selected:
+                outcomes = [r for r in located.outcomes + monitored.outcomes if r["ean"] == ean]
+                requests = sum(r["requests"] for r in outcomes)
+                preview_row = preview.loc[(preview["competitor_id"] == cid) &
+                                          (preview["ean"] == ean)].iloc[0]
+                pair = {"ean": ean, "competitor_id": cid, "processed": ean in processed,
+                        "category": _outcome_category(outcomes),
+                        "requests": requests, "outcomes": outcomes,
+                        "reason": (outcomes[-1]["detail"] if outcomes else
+                                   run["errors"].get(cid) or located.deferred_reason or monitored.deferred_reason
+                                   or self._unclaimed_reason(
+                                       cid, ean, monitoring=bool(preview_row["located"]),
+                                       point_check=point_check))}
+                result["pairs"].append(pair)
                 with self.store._connect() as con, con:
                     con.execute("""INSERT INTO locate_runs(competitor_id,trigger,started_at,finished_at,status,
                         processed,requests,summary) VALUES(?,?,?,?,?,?,?,?)""",

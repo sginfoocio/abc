@@ -57,6 +57,8 @@ def render_fixture() -> None:
     import streamlit as st
     import cloud_design as design
 
+    import requests
+    requests.Session.send = forbidden
     st.session_state["auth_role"] = "admin"
     design.inject_styles()
     route = st.session_state.get("visual_route", "")
@@ -85,9 +87,14 @@ def render_fixture() -> None:
         from app_pages.image_library_page import render_images_page
 
         render_images_page(lambda *_: None, lambda: None, lambda: None)
-    elif screen == "comparator":
+    elif screen in {"comparator", "comparator-admin", "comparator-diagnostics"}:
         from app_pages.price_comparator import render_price_comparator_page
 
+        if screen == "comparator-admin":
+            st.session_state["top_level_section"] = "Administración"
+        elif screen == "comparator-diagnostics":
+            st.session_state["top_level_section"] = "Diagnóstico técnico"
+        st.caption("DATOS SINTÉTICOS · NO PRODUCCIÓN")
         render_price_comparator_page()
     elif screen in {"providers", "marcolin", "nuorder", "safilo"}:
         from provider_images_ui import render_provider_page
@@ -133,6 +140,21 @@ def prepare_fixture(base: Path):
     })
     os.environ.update(env)
     seed(ImageRepository())
+    from tests.test_price_monitor import _monitor_env
+    import pandas as pd
+    from datetime import datetime, timezone
+
+    price_root = base / "price-fixture"
+    price_root.mkdir()
+    store, _, _, monitor, _, cid, _ = _monitor_env(price_root, count=2)
+    monitor.run([cid])
+    eans = store.products()["ean"].tolist()
+    store.import_own_prices(pd.DataFrame([{
+        "EAN": ean, "Precio": "250", "Moneda": "EUR", "Mercado": "ES",
+        "Origen": "Vytria sintético", "Fecha consulta": datetime.now(timezone.utc).isoformat(),
+    } for ean in eans]))
+    env["PRICE_COMPARATOR_DB_PATH"] = str(store.database_path)
+    os.environ["PRICE_COMPARATOR_DB_PATH"] = str(store.database_path)
     if (ROOT / "static").is_dir():
         shutil.copytree(ROOT / "static", base / "static")
     entrypoint = base / "visual_app.py"
@@ -156,7 +178,7 @@ def preview(port: int) -> None:
         ], cwd=ROOT, env=env, check=True)
 
 
-def capture(output: Path, label: str, source: Path | None = None) -> None:
+def capture(output: Path, label: str, source: Path | None = None, *, comparator_only: bool = False) -> None:
     global ROOT
     if source:
         ROOT = source.resolve()
@@ -171,7 +193,7 @@ def capture(output: Path, label: str, source: Path | None = None) -> None:
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch()
             try:
-                for theme in ("light", "dark"):
+                for theme in (("light",) if comparator_only else ("light", "dark")):
                     with socket.socket() as sock:
                         sock.bind(("127.0.0.1", 0))
                         port = sock.getsockname()[1]
@@ -191,19 +213,27 @@ def capture(output: Path, label: str, source: Path | None = None) -> None:
                                     if process.poll() is not None or attempt == 59:
                                         raise RuntimeError(f"Preview failed; see {log.name}")
                                     time.sleep(.5)
-                            screens = ["home", "controls", "library", "comparator", "marcolin", "nuorder", "safilo"]
+                            screens = (["comparator", "comparator-admin", "comparator-diagnostics"]
+                                       if comparator_only else
+                                       ["home", "controls", "library", "comparator", "marcolin", "nuorder", "safilo"])
                             if label != "before":
                                 screens += ["a", "b"]
                             for screen in screens:
-                                for name, width in (("desktop", 1440), ("mobile", 375)):
+                                for name, width in ((("desktop", 1440),) if comparator_only else
+                                                    (("desktop", 1440), ("mobile", 375))):
                                     page = browser.new_page(viewport={"width": width, "height": 1000},
                                                             color_scheme=theme)
                                     route = {"library": "repositorio-imagenes", "comparator": "comparador-precios",
+                                             "comparator-admin": "comparador-precios",
+                                             "comparator-diagnostics": "comparador-precios",
                                              "marcolin": "proveedores-imagenes", "nuorder": "proveedores-imagenes",
                                              "safilo": "proveedores-imagenes"}.get(screen, "")
                                     page.goto(f"http://127.0.0.1:{port}/{route}?screen={screen}")
-                                    page.locator('[data-testid="stButton"], .cd-card, [data-testid="stTabs"], [data-testid="stException"]').first.wait_for(
-                                        timeout=60000)
+                                    if screen.startswith("comparator"):
+                                        page.get_by_text("Comparativa de precios", exact=True).wait_for(timeout=60000)
+                                    else:
+                                        page.locator('[data-testid="stButton"], .cd-card, [data-testid="stTabs"], '
+                                                     '[data-testid="stException"]').first.wait_for(timeout=60000)
                                     page.wait_for_timeout(800)
                                     page.evaluate("document.fonts.ready")
                                     errors = page.locator('[data-testid="stException"]').all_text_contents()
@@ -292,13 +322,15 @@ if __name__ == "__main__":
         parser.add_argument("output", type=Path, nargs="?")
         parser.add_argument("--label", choices=("before", "after"))
         parser.add_argument("--source", type=Path, help="Pristine baseline worktree, for reproducible before captures")
+        parser.add_argument("--comparator-only", action="store_true",
+                            help="Capture only the comparator's three current areas (synthetic data)")
         parser.add_argument("--preview", action="store_true", help="Serve an isolated interactive preview")
         parser.add_argument("--port", type=int, default=8601)
         args = parser.parse_args()
         if args.preview:
             preview(args.port)
         elif args.output and args.label:
-            capture(args.output, args.label, args.source)
+            capture(args.output, args.label, args.source, comparator_only=args.comparator_only)
         else:
             parser.error("Provide OUTPUT and --label, or --preview")
     else:

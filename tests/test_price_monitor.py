@@ -8,7 +8,7 @@ import pytest
 import sqlite3
 
 from price_comparator import PriceComparatorStore
-from price_locator import LEASE
+from price_locator import LEASE, PriceLocator
 from price_monitor import PriceMonitor, SCHEDULE_ENV, _inventory_datetime
 from price_watch import PriceWatch
 from price_web import WebPriceSearch
@@ -457,15 +457,16 @@ def test_monitoring_ui_shows_prices_and_alerts_without_network(tmp_path, monkeyp
         raise AssertionError("Opening the screen must not send requests")
 
     monkeypatch.setattr("requests.get", forbidden)
-    app = AppTest.from_string("from app_pages.price_watch import render_admin\n"
-                              "from price_comparator import PriceComparatorStore\n"
-                              "render_admin(PriceComparatorStore(), {})").run(timeout=30)
+    app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
+                              "render_price_comparator_page()").run(timeout=30)
     from tests.admin_navigation import watch_section
     for section in ("Precios y monitorización", "Alertas"):
         watch_section(app, section)
         assert not app.exception
-    assert any("envío automático desactivado" in str(item.value) for item in app.info)
+    assert not any("envío automático desactivado" in str(item.value).lower()
+                   for item in [*app.info, *app.warning])
     watch_section(app, "Precios y monitorización")
+    assert any("planificación periódica general" in str(item.value).lower() for item in app.caption)
     assert app.button(key="monitor_run").disabled
     app.button(key="monitor_enqueue").click().run(timeout=30)
     assert not app.exception
@@ -592,10 +593,10 @@ def test_monitoring_ui_mixed_dates_and_invalid_validity_without_writes(tmp_path,
     monkeypatch.setattr(PriceMonitor, "run", forbidden)
     monkeypatch.setattr(PriceMonitor, "enqueue", forbidden)
     site.calls.clear()
-    app = AppTest.from_string("from app_pages.price_watch import render_admin\n"
-                             "from price_comparator import PriceComparatorStore\n"
-                             "render_admin(PriceComparatorStore(), {})").run(timeout=30)
+    app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
+                              "render_price_comparator_page()").run(timeout=30)
     # The existing admin entry point seeds default configuration on its first opening.
+    PriceLocator(store).seed_sources()
     with store._connect() as con:
         before = "\n".join(con.iterdump())
     from tests.admin_navigation import watch_section

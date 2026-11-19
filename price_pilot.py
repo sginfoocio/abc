@@ -86,58 +86,89 @@ def pilot_scope(store: PriceComparatorStore) -> dict | None:
 
 
 def effective_scope(store: PriceComparatorStore) -> dict | None:
-    """Return the active continuity manifest when it owns the current watch, otherwise the legacy pilot."""
+    """Return the frozen continuity scope or the current active catalog selection."""
+    from price_access import AccessControl
     from price_trial import continuity_row
 
     continuity = continuity_row(store)
-    if continuity and continuity["status"] == "active":
+    if continuity:
         manifest = json.loads(continuity["manifest"])
         limits = json.loads(continuity["limits"])
         eans = manifest.get("eans")
         competitors = manifest.get("competitors")
         if not isinstance(eans, list) or not isinstance(competitors, dict):
-            raise PilotError("La continuidad activa tiene un manifiesto inválido")
+            raise PilotError("La continuidad tiene un manifiesto inválido")
         return {
-            "enabled": 1,
+            "enabled": int(continuity["status"] == "active"),
             "eans": eans,
             "competitors": limits,
             "source": "continuity",
+            "status": continuity["status"],
             "continuity_id": continuity["id"],
             "manifest": manifest,
         }
-    return pilot_scope(store)
+    with store._connect() as connection:
+        eans = [row[0] for row in connection.execute(
+            "SELECT ean FROM watch_products WHERE active=1 ORDER BY ean")]
+        competitors = [row[0] for row in connection.execute(
+            "SELECT id FROM competitors WHERE active=1 ORDER BY id")]
+    if not eans or not competitors:
+        return None
+    access = AccessControl(store)
+    limits = {}
+    for cid in competitors:
+        budget = access.budget("competitor", cid)
+        limits[cid] = {
+            "max_http_requests": budget["daily_limit"],
+            "pause_seconds": budget["effective_pause"],
+        }
+    return {
+        "enabled": 1,
+        "eans": eans,
+        "competitors": limits,
+        "source": "active_catalog",
+        "manifest": {
+            "eans": eans,
+            "competitors": {cid: cid for cid in competitors},
+            "pairs": [{"competitor_id": cid, "ean": ean}
+                      for cid in competitors for ean in eans],
+        },
+    }
 
 
 def require_pilot_access(store: PriceComparatorStore, ean: str | None, competitor_id: str) -> None:
-    from price_trial import TrialDenied, active_execution, require_pair
     from price_trial import continuity_row
 
     continuity = continuity_row(store)
-    if continuity and continuity["status"] == "active":
+    if continuity:
         manifest = json.loads(continuity["manifest"])
         if competitor_id not in manifest["competitors"] or (ean is not None and ean not in manifest["eans"]):
             raise PilotError("Producto o competidor fuera del manifiesto vigente")
+        if continuity["status"] != "active":
+            state = {"prepared": "preparada, todavía no activa", "paused": "pausada",
+                     "stopped": "detenida"}.get(continuity["status"], continuity["status"])
+            raise PilotError(f"La continuidad está {state}; no se inicia una consulta")
         if continuity["started_at"] is None:
             raise PilotError("La continuidad todavía no ha comenzado")
         return
-    try:
-        require_pair(store, competitor_id, ean, datetime.now(timezone.utc))
-    except TrialDenied as exc:
-        raise PilotError(str(exc)) from exc
-    scope = pilot_scope(store)
-    if scope is None:
-        return
-    trial = active_execution(store)
-    if trial and (competitor_id not in scope["competitors"] or trial.ean not in scope["eans"]):
-        return
-    if not scope["enabled"]:
-        raise PilotError("Piloto desactivado: consultas detenidas; el catálogo completo sigue excluido")
-    if competitor_id not in scope["competitors"] or (ean is not None and normalize_gtin(ean) not in scope["eans"]):
-        raise PilotError("Producto o competidor fuera del piloto")
     context = _execution.get()
-    if context is None or context[0] != str(store.database_path):
-        raise PilotError("Hay un piloto configurado. Las consultas de productos deben realizarse "
-                         "desde la prueba manual supervisada")
+    if context is not None and context[0] == str(store.database_path):
+        scope = pilot_scope(store)
+        if scope is None or not scope["enabled"]:
+            raise PilotError("La ejecución histórica no tiene un alcance activo")
+        if competitor_id not in scope["competitors"] or (ean is not None and
+                                                          normalize_gtin(ean) not in scope["eans"]):
+            raise PilotError("Producto o competidor fuera del alcance de la ejecución histórica")
+        return
+    with store._connect() as connection:
+        active_eans = {row[0] for row in connection.execute(
+            "SELECT ean FROM watch_products WHERE active=1")}
+        active_competitors = {row[0] for row in connection.execute(
+            "SELECT id FROM competitors WHERE active=1")}
+    if competitor_id not in active_competitors:
+        raise PilotError("Competidor fuera de la selección activa")
+    if ean is not None and normalize_gtin(ean) not in active_eans:
+        raise PilotError("Producto fuera de la selección activa")
 
 
 class PricePilot:
@@ -145,8 +176,8 @@ class PricePilot:
         self.store = store
 
     def effective_scope(self) -> dict | None:
-        """Use an active continuity manifest first; retain the legacy pilot as a fallback."""
-        return effective_scope(self.store)
+        """Return the frozen scope for legacy pilot services, not current watch operations."""
+        return pilot_scope(self.store)
 
     def lock(self):
         return FileLock(f"{self.store.database_path}.pilot.lock", timeout=0)
@@ -495,7 +526,7 @@ class PricePilot:
         from price_web import WebPriceSearch
         from price_trial import continuity_row
 
-        scope = self.effective_scope()
+        scope = effective_scope(self.store) or pilot_scope(self.store)
         if scope is None:
             raise PilotError("Piloto sin configurar")
         try:
