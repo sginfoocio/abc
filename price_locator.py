@@ -720,6 +720,13 @@ class PriceLocator:
                 WHERE competitor_id=? AND ean=? AND url=?""",
                                ("verified" if accept else "rejected", "user" if accept else "auto_watch",
                                 f"Revisión de {actor}: {note}", now, int(accept), competitor_id, ean, url))
+            connection.execute("""INSERT INTO access_audit(
+                scope,scope_id,action,previous,current,actor,note,at
+            ) VALUES('product_review',?,?,'candidate',?,? ,?,?)""",
+                               (f"{competitor_id}:{ean}:{url}",
+                                "candidate_confirmed" if accept else "candidate_rejected",
+                                "verified" if accept else "rejected",
+                                actor, note, now))
             job = connection.execute("SELECT id FROM locate_jobs WHERE competitor_id=? AND ean=?",
                                      (competitor_id, ean)).fetchone()
             refresh_id = None

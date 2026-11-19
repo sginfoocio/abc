@@ -469,7 +469,8 @@ def test_monitoring_ui_shows_prices_and_alerts_without_network(tmp_path, monkeyp
     assert app.button(key="monitor_run").disabled
     app.button(key="monitor_enqueue").click().run(timeout=30)
     assert not app.exception
-    assert any(SCHEDULE_ENV in str(item.value) for item in app.warning)
+    assert any("programación periódica general está desactivada" in str(item.value).lower()
+               for item in app.caption)
 
 
 def test_inventory_mixed_five_completed_and_unprocessed_jobs_is_read_only(tmp_path, monkeypatch):

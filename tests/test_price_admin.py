@@ -215,6 +215,19 @@ def test_observation_export_preserves_original_history_and_provenance(tmp_path):
     assert pd.isna(previous["valid_until"]) and previous["checked_at"] == previous["captured_at"]
 
 
+def test_inicio_shows_commercial_summary_before_compact_management(tmp_path, monkeypatch):
+    store, _, _, _, _, _, _ = _monitor_env(tmp_path, count=1)
+    monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
+    app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
+                              "render_price_comparator_page()").run(timeout=30)
+    app.radio(key="top_level_section").set_value("Inicio").run(timeout=30)
+    headers = [header.value for header in app.header]
+    assert "Cómo estamos" in headers
+    assert "Gestionar vigilancia" in [button.label for button in app.button]
+    assert not any(label in [button.label for button in app.button]
+                   for label in ("Actualizar mis precios", "Revisar pendientes"))
+
+
 def test_inicio_full_selection_and_partial_filter_use_matching_denominators(tmp_path, monkeypatch):
     store, _, _, _, _, _, _ = _monitor_env(tmp_path, count=2)
     monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
@@ -222,12 +235,11 @@ def test_inicio_full_selection_and_partial_filter_use_matching_denominators(tmp_
                               "render_price_comparator_page()").run(timeout=30)
     app.radio(key="top_level_section").set_value("Inicio").run(timeout=30)
     metrics = {m.label: m.value for m in app.metric}
-    assert metrics["Total de la vigilancia"] == "0/2"
+    assert metrics["Productos comparados"] == f"0 / {len(store.products())}"
 
     app.text_input(key="dashboard_search").set_value("does-not-exist").run(timeout=30)
-    metrics = {m.label: m.value for m in app.metric}
-    assert "Productos con comparación válida" in metrics
-    assert metrics["Productos con comparación válida"] == "0/0"
+    assert any("No hay productos para los filtros seleccionados" in item.value
+               for item in app.info)
 
 
 def test_inicio_partial_filter_keeps_filtered_numerator_and_denominator(tmp_path, monkeypatch):
@@ -238,8 +250,7 @@ def test_inicio_partial_filter_keeps_filtered_numerator_and_denominator(tmp_path
     app.radio(key="top_level_section").set_value("Inicio").run(timeout=30)
     app.text_input(key="dashboard_search").set_value(store.products().iloc[0]["ean"]).run(timeout=30)
     metrics = {m.label: m.value for m in app.metric}
-    assert "Productos con comparación válida" in metrics
-    assert metrics["Productos con comparación válida"] == "0/1"
+    assert metrics["Productos comparados"] == "0 / 1"
 
 
 def test_inicio_valid_comparison_requires_own_and_competitor_price(tmp_path, monkeypatch):
@@ -249,7 +260,7 @@ def test_inicio_valid_comparison_requires_own_and_competitor_price(tmp_path, mon
                               "render_price_comparator_page()").run(timeout=30)
     app.radio(key="top_level_section").set_value("Inicio").run(timeout=30)
     metrics = {m.label: m.value for m in app.metric}
-    assert metrics["Total de la vigilancia"] == "0/1"
+    assert metrics["Productos comparados"] == f"0 / {len(store.products())}"
 
 
 def test_por_revisar_shows_only_review_tray_not_locator_controls(tmp_path, monkeypatch):
@@ -278,14 +289,14 @@ def test_store_card_exposes_url_and_authorization_tasks(tmp_path, monkeypatch):
     assert not app.exception
 
 
-def test_inicio_review_button_opens_pending_tray(tmp_path, monkeypatch):
+def test_inicio_manage_vigilance_opens_advanced_settings(tmp_path, monkeypatch):
     store, _, _, _, _, _, _ = _monitor_env(tmp_path)
     monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
     app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
                               "render_price_comparator_page()").run(timeout=30)
     app.radio(key="top_level_section").set_value("Inicio").run(timeout=30)
-    app.button(key="inicio_review").click().run(timeout=30)
-    assert app.radio(key="top_level_section").value == "Por revisar"
+    app.button(key="inicio_manage_vigilance").click().run(timeout=30)
+    assert app.radio(key="top_level_section").value == "Ajustes avanzados"
     assert not app.exception
 
 

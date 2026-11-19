@@ -7,6 +7,7 @@ import pytest
 from price_comparator import PriceComparatorStore, normalize_gtin
 from price_pilot import (
     COMPETITOR_NAMES, HTTP_BUDGET_EXHAUSTED, REQUIRED_EANS, SAMPLE_EANS, PilotError, PricePilot, pilot_scope,
+    effective_scope,
 )
 from price_scheduler import CompetitorScheduler, SchedulerConfigError
 from price_web import WebPriceSearch, WebSearchError
@@ -283,6 +284,55 @@ def test_price_verification_dedup_and_history_survives_error(pilot):
         assert c.execute("SELECT COUNT(*) FROM offers").fetchone()[0] == 1
 
 
+def test_continuity_scope_allows_bottega_outside_expired_pilot(pilot):
+    service, store, search, site, cid, _ = pilot
+    ean = "0889652637075"
+    legacy = pilot_scope(store)
+    with store._connect() as connection, connection:
+        old_eans = [item for item in legacy["eans"] if item != ean]
+        connection.execute("UPDATE price_pilot SET eans=? WHERE id=1",
+                           (json.dumps(old_eans),))
+        manifest = {"eans": [ean], "competitors": {cid: "Synthetic"},
+                    "pairs": [{"competitor_id": cid, "ean": ean}]}
+        limits = {cid: {"daily_limit": 200, "per_minute_limit": 10, "effective_pause": 3}}
+        connection.execute("""INSERT INTO price_continuity(
+            id,status,prepared_at,started_at,actor,build_commit,manifest,limits,
+            interval_hours,heartbeat_at,next_sync_at,sync_receipt,error)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                           (1, "active", "2026-11-18T10:00:00+00:00",
+                            "2026-11-18T10:05:00+00:00", "operator", "d" * 40,
+                            json.dumps(manifest), json.dumps(limits), 24.0,
+                            NOW.isoformat(), NOW.isoformat(), "{}", ""))
+
+    plan = service.price_refresh_plan(ean)
+    scope = effective_scope(store)
+    assert scope["source"] == "continuity"
+    assert ean in scope["eans"]
+    assert set(plan["competitor_id"]) == {cid}
+    assert "No disponible" in set(plan["status"])
+
+
+def test_continuity_scope_rejects_pair_outside_manifest(pilot):
+    service, store, _, _, cid, _ = pilot
+    scope = pilot_scope(store)
+    with store._connect() as connection, connection:
+        manifest = {"eans": ["0889652637075"], "competitors": {cid: "Synthetic"},
+                    "pairs": [{"competitor_id": cid, "ean": "0889652637075"}]}
+        limits = {cid: {"daily_limit": 200, "per_minute_limit": 10, "effective_pause": 3}}
+        connection.execute("""INSERT INTO price_continuity(
+            id,status,prepared_at,started_at,actor,build_commit,manifest,limits,
+            interval_hours,heartbeat_at,next_sync_at,sync_receipt,error)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                           (1, "active", "2026-11-18T10:00:00+00:00",
+                            "2026-11-18T10:05:00+00:00", "operator", "d" * 40,
+                            json.dumps(manifest), json.dumps(limits), 24.0,
+                            NOW.isoformat(), NOW.isoformat(), "{}", ""))
+
+    outside = next(ean for ean in scope["eans"] if ean != "0889652637075")
+    with pytest.raises(PilotError, match="fuera del manifiesto|fuera del alcance"):
+        service.price_refresh_plan(outside)
+
+
 def test_selected_product_refresh_uses_only_confirmed_authorized_urls(pilot):
     service, store, search, site, cid, _ = pilot
     url = known(pilot)
@@ -335,6 +385,41 @@ def test_selected_product_refresh_never_uses_unconfirmed_urls(pilot):
     assert job["outcome"] == "not_found"
     assert "No hay ficha confirmada" in job["detail"]
     assert search._indexed(cid, REQUIRED_EANS[0])[0]["url"] == url
+
+
+def test_bottega_detail_uses_active_continuity_not_expired_pilot(pilot, monkeypatch):
+    import app_pages.price_comparator as page
+    from streamlit.testing.v1 import AppTest
+
+    service, store, search, site, cid, _ = pilot
+    ean = "0889652637075"
+    legacy = pilot_scope(store)
+    with store._connect() as connection, connection:
+        old_eans = [item for item in legacy["eans"] if item != ean]
+        connection.execute("UPDATE price_pilot SET eans=? WHERE id=1", (json.dumps(old_eans),))
+        manifest = {"eans": [ean], "competitors": {cid: "Synthetic"},
+                    "pairs": [{"competitor_id": cid, "ean": ean}]}
+        limits = {cid: {"daily_limit": 200, "per_minute_limit": 10, "effective_pause": 3}}
+        connection.execute("""INSERT INTO price_continuity(
+            id,status,prepared_at,started_at,actor,build_commit,manifest,limits,
+            interval_hours,heartbeat_at,next_sync_at,sync_receipt,error)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                           (1, "active", "2026-11-18T10:00:00+00:00",
+                            "2026-11-18T10:05:00+00:00", "operator", "d" * 40,
+                            json.dumps(manifest), json.dumps(limits), 24.0,
+                            NOW.isoformat(), NOW.isoformat(), "{}", ""))
+
+    monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
+    monkeypatch.setattr(page, "WebPriceSearch", lambda _: search)
+    app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
+                              "render_price_comparator_page()").run(timeout=60)
+    app.radio(key="top_level_section").set_value("Productos").run(timeout=60)
+    app.selectbox(key="products_selected_ean").set_value(ean).run(timeout=60)
+
+    text = " ".join(markdown.value for markdown in app.markdown) + " " + " ".join(info.value for info in app.info)
+    assert "Este producto no está dentro del alcance autorizado del piloto" not in text
+    assert "fuera del manifiesto" not in text
+    assert not app.exception
 
 
 def test_product_detail_starts_only_explicitly_selected_price_refresh(pilot, monkeypatch):

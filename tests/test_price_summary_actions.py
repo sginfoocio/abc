@@ -35,7 +35,7 @@ def test_action_cards_partition_catalogue_without_equating_missing_own_with_miss
     groups = {key: analytics.summary_segment(summary, key)["ean"].tolist()
               for key in analytics.SUMMARY_SEGMENTS}
     assert groups == {"cheaper": ["0"], "equal": ["1"], "higher": ["2"],
-                      "missing_own": ["3"], "missing_competitor": ["4"]}
+                      "none": ["3", "4"]}
     assert len({ean for group in groups.values() for ean in group}) == len(summary)
     filtered = summary[summary["brand"] == "Beta"]
     assert analytics.summary_segment(filtered, "cheaper").empty
@@ -109,12 +109,11 @@ def test_cards_show_matching_products_and_clear_without_touching_shared_filters(
         ("Productos · Más barato", "1"),
         ("Productos · Mismo precio", "1"),
         ("Productos · Más caro", "1"),
-        ("Productos · Sin precio Vytria", "1"),
-        ("Productos · Sin oferta comparable", "1"),
+        ("Productos · Sin comparación válida", "2"),
     ]
-    app.button(key="summary_view_missing_own").click().run(timeout=30)
+    app.button(key="summary_view_none").click().run(timeout=30)
     assert not app.exception
-    assert app.dataframe[0].value["EAN"].tolist() == ["3"]
+    assert app.dataframe[0].value["EAN"].tolist() == ["3", "4"]
     assert app.session_state["dashboard_brand"] == ["Alpha"]
     app.button(key="summary_view_higher").click().run(timeout=30)
     assert app.dataframe[0].value["EAN"].tolist() == ["2"]
@@ -123,10 +122,10 @@ def test_cards_show_matching_products_and_clear_without_touching_shared_filters(
 
 
 @pytest.mark.parametrize("rival_price, higher_pct, competitive_pct, counts", [
-    (None, "Sin datos", "Sin datos", (0, 0, 0, 0, 1)),
-    (90, "100,0 %", "0,0 %", (0, 0, 1, 0, 0)),
-    (100, "0,0 %", "100,0 %", (0, 1, 0, 0, 0)),
-    (110, "0,0 %", "100,0 %", (1, 0, 0, 0, 0)),
+    (None, "Sin datos", "Sin datos", (0, 0, 0, 1)),
+    (90, "100,0 %", "0,0 %", (0, 0, 1, 0)),
+    (100, "0,0 %", "100,0 %", (0, 1, 0, 0)),
+    (110, "0,0 %", "100,0 %", (1, 0, 0, 0)),
 ])
 def test_summary_percentages_and_product_counts_have_distinct_labels(
     tmp_path, monkeypatch, rival_price, higher_pct, competitive_pct, counts,
@@ -146,7 +145,7 @@ def test_summary_percentages_and_product_counts_have_distinct_labels(
     labels = [metric.label for metric in app.metric]
     card_labels = (
         "Productos · Más barato", "Productos · Mismo precio", "Productos · Más caro",
-        "Productos · Sin precio Vytria", "Productos · Sin oferta comparable",
+        "Productos · Sin comparación válida",
     )
     for label in (*card_labels, "Productos comparados", "Igual o más barato",
                   "Más caro", "Diferencia media vs. mejor"):

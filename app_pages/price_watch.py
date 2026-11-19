@@ -548,6 +548,8 @@ def _render_locator(store: PriceComparatorStore, names: dict[str, str], *, advan
         if preview:
             preview_rows = review[review["id"].astype(int).isin(preview["snapshots"])]
             st.markdown(f"**Vista previa: {len(preview_rows)} fichas seleccionadas**")
+            st.caption("La acción afecta únicamente a las filas marcadas en esta vista previa, "
+                       "no a otras fichas ocultas ni a todos los resultados del filtro.")
             st.dataframe(preview_rows[["ean", "brand", "model", "color", "competitor", "url"]].rename(
                 columns={"ean": "EAN", "brand": "Marca", "model": "Modelo", "color": "Color",
                          "competitor": "Competidor", "url": "URL"}), hide_index=True, width="stretch",
@@ -558,8 +560,9 @@ def _render_locator(store: PriceComparatorStore, names: dict[str, str], *, advan
                 confirmed = st.checkbox(
                     f"Confirmo expresamente este conjunto de {len(preview_rows)} fichas",
                     key="review_bulk_confirmed")
-                apply_bulk = st.form_submit_button("Confirmar seleccionadas y actualizar precios")
-            if apply_bulk:
+                apply_bulk = st.form_submit_button("Confirmar seleccionadas y solicitar lectura")
+                discard_bulk = st.form_submit_button("Descartar seleccionadas")
+            if apply_bulk or discard_bulk:
                 if not bulk_note.strip() or not confirmed or preview_rows.empty:
                     st.error("Indique el motivo y confirme expresamente el conjunto previsualizado.")
                 else:
@@ -568,12 +571,20 @@ def _render_locator(store: PriceComparatorStore, names: dict[str, str], *, advan
                     for job_id, expected in preview["snapshots"].items():
                         row = indexed.loc[job_id]
                         try:
-                            refresh_id = locator.review(
-                                row["ean"], row["competitor_id"], row["url"], accept=True,
-                                actor=_actor(), note=bulk_note, update_price=True,
-                                expected_candidate=expected)
-                            results.append({"ID": job_id, "EAN": row["ean"], "Competidor": row["competitor"],
-                                            "Resultado": f"Ficha aceptada; lectura {refresh_id} en cola"})
+                            if discard_bulk:
+                                locator.review(
+                                    row["ean"], row["competitor_id"], row["url"], accept=False,
+                                    actor=_actor(), note=bulk_note, update_price=False,
+                                    expected_candidate=expected)
+                                results.append({"ID": job_id, "EAN": row["ean"], "Competidor": row["competitor"],
+                                                "Resultado": "Ficha descartada; sin consulta HTTP ni lectura"})
+                            else:
+                                refresh_id = locator.review(
+                                    row["ean"], row["competitor_id"], row["url"], accept=True,
+                                    actor=_actor(), note=bulk_note, update_price=True,
+                                    expected_candidate=expected)
+                                results.append({"ID": job_id, "EAN": row["ean"], "Competidor": row["competitor"],
+                                                "Resultado": f"Ficha aceptada; lectura {refresh_id} en cola"})
                         except (ValueError, sqlite3.Error) as exc:
                             results.append({"ID": job_id, "EAN": row["ean"], "Competidor": row["competitor"],
                                             "Resultado": f"Excluida: {exc}"})
@@ -794,8 +805,16 @@ def _render_monitor(store: PriceComparatorStore, names: dict[str, str], *, advan
     st.caption("Solo fichas verificadas de productos vigilados. No repite búsquedas. Identidad: marca + modelo + "
                "color; calibre no vinculante. Solo se comparan ofertas disponibles con mercado ES, EUR e IVA "
                "incluido confirmados. Caducidad: un intervalo del grupo o competidor (24 h por defecto).")
-    if not monitor_enabled():
-        st.warning(f"Monitorización periódica desactivada ({MONITOR_ENV}). Los lotes supervisados son explícitos.")
+    from price_trial import continuity_row
+    continuity = continuity_row(store)
+    if continuity and continuity["status"] == "active":
+        st.caption("Vigilancia de continuidad activa. La programación periódica general no gobierna esta selección.")
+    elif continuity and continuity["status"] == "paused":
+        st.warning("Vigilancia de continuidad pausada. Las consultas periódicas están detenidas; las acciones manuales siguen sujetas a autorización.")
+    elif continuity and continuity["status"] == "stopped":
+        st.warning("Vigilancia de continuidad detenida. Las consultas manuales no pueden iniciarse hasta reanudarla.")
+    elif not monitor_enabled():
+        st.caption("La programación periódica general está desactivada. Puede usar una consulta manual autorizada.")
     cid = st.selectbox("Competidor", ordered(names, names.get), format_func=names.get,
                        key="monitor_competitor")
     if advanced:
