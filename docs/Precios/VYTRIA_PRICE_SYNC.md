@@ -64,7 +64,7 @@ territorial/compuesto, ecotasa y configuraciones o módulos no soportados.
    Solo tras confirmar su efecto, establecer `PRESTASHOP_PRICE_CODE_AUDITED=1`.
 2. Provisionar, sin tocar el usuario compartido, un usuario dedicado con
    `SELECT` sobre las tablas consultadas por el lector: `product[_shop]`,
-   `product_attribute[_shop]`, `shop`, `country`, `currency`, `group`,
+   `product_attribute[_shop]`, `shop`, `shop_group`, `stock_available`, `country`, `currency`, `group`,
    `configuration`, `hook`, `hook_module`, `module`, `group_reduction`,
    `tax_rule`, `tax`, `specific_price` y `specific_price_priority` (prefijo real).
    El lector rechaza privilegios adicionales o delegables; la auditoría vía SSH
@@ -79,16 +79,16 @@ territorial/compuesto, ecotasa y configuraciones o módulos no soportados.
    `_CURRENCY_ID` (prefijo `PRESTASHOP_PRICE`). Solo después de validar la
    instalación y obtener aprobación, `PRESTASHOP_PRICE_ENABLED=1`.
 
-**Resultado medido:** 11 consultas de lote, 1,86 s por SSH (incluye lecturas
-y cálculo; no es una medición del contenedor). De 100 EAN, se calcularon 43,
-52 tenían precio base registrado en tienda 1, pero estaban inactivos
-(`ps_product_shop.active=0`, 37 productos simples y 15 combinaciones).
-Ninguno de esos 52 estaba excluido por precio oculto ni por cantidad mínima.
+**Resultado medido (cálculo v2):** 12 consultas de lote, 1,89 s por SSH
+(incluye lecturas y cálculo; no es una medición del contenedor). De 100 EAN,
+se calcularon los 95 vinculados: 43 activos con stock y 52 inactivos sin
+stock (37 productos simples y 15 combinaciones). Se conservan los controles
+de visibilidad de precio y de cantidad mínima.
 Otros 5 no pudieron vincularse a una identidad en los campos auditados;
 esto no acredita que carezcan de precio. Se contrastaron 7 con el escaparate ES/EUR: Prada
 `8056597435581` 232,05 €, `0805289126584` 99 €, `0805289126591` 164 €,
 `0889214635310` 222 €, `0889214669742` 312 €, `0889652429717` 201,60 € y
-`0889652468983` 123 €. Los 36 importes calculados restantes no se contrastaron.
+`0889652468983` 123 €. Los otros 88 importes son cálculos, no contrastes públicos.
 Los resultados son evidencia de auditoría, no una sincronización de producción.
 
 La instantánea conserva base, impacto, tipo/importe de reducción, regla,
@@ -96,7 +96,11 @@ contexto, IVA, redondeo, versión del cálculo y vigencia. El resultado vence
 como máximo a las 24 horas o al siguiente cambio de oferta conocido. No se
 propaga el importe de un calibre a otro; las diferencias se señalan en
 administración. Una incidencia de otro calibre se muestra aparte, sin
-invalidar la combinación solicitada. El stock no interviene en ese cálculo.
+invalidar la combinación solicitada. Actividad y stock se muestran por
+separado y no condicionan el precio propio ni crean puntos en su histórico.
+«Con stock» significa cantidad positiva en la fila de la combinación exacta;
+ni eso ni el precio calculado acreditan que pueda comprarse. Si falta una fila
+de stock inequívoca en el ámbito de tienda o grupo, el stock queda sin verificar.
 
 ### Identidades sin resolver: consulta para el responsable
 
@@ -141,7 +145,9 @@ dos formas repetidas para cada campo. Una vez identificados `id_product` e
 `ps_specific_price_priority` para la regla elegida, y `ps_tax_rule`/`ps_tax`
 para el IVA. El importe específico, si sustituye la base, viene de
 `ps_specific_price.price`. Falta la tabla o clave de correspondencia para
-los cinco EAN anteriores; no se infiere del nombre ni de un ID Odoo.
+los cinco EAN anteriores; tampoco hubo coincidencias para sus variantes o
+plantillas Odoo en `ps_cc_co_equivalenciaproductos.id_odoo` ni en
+`ps_cc_co_equivalenciacombinaciones.id_odoo`. No se infiere del nombre ni de un ID Odoo.
 
 En SQLite, `prestashop_prices` guarda la última lectura, vencimiento, último
 intento e incidencia; `prestashop_price_history` guarda cambios de precio,

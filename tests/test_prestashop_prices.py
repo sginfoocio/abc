@@ -27,9 +27,14 @@ def rule(sid=5, aid=0, rule_id=0, shop=0, currency=0, country=0, group=0, quanti
             Decimal(fixed), Decimal(discount), kind, included, start, end)
 
 
-def calculate(rules, priority=PRIORITY, taxes=((0, "0", "0", Decimal(21), 1, 0),), *, combination=90):
-    return ps._calculate((Decimal("100"), 0, 63, 1, 1, 1), (Decimal("10"), 0, 1),
+def calculate(rules, priority=PRIORITY, taxes=((0, "0", "0", Decimal(21), 1, 0),), *, combination=90, active=1):
+    return ps._calculate((Decimal("100"), 0, 63, active, 1, 1), (Decimal("10"), 0, 1),
                          combination, taxes, rules, priority, CONTEXT, NOW, ZoneInfo("Europe/Madrid"))
+
+
+def test_inactive_product_keeps_the_same_offer_and_tax():
+    rules = [rule(aid=90, fixed="80")]
+    assert calculate(rules, active=0) == calculate(rules, active=1)
 
 
 @pytest.mark.parametrize(("rules", "final", "winner"), [
@@ -155,7 +160,8 @@ def test_watched_sync_is_scoped_deduplicates_and_does_not_fall_back(tmp_path, mo
         calls.append(set(eans))
         if fail[0]:
             raise OperationalError("private connection details")
-        payload = quote(price=price[0], observed_at=current_time[0].isoformat())
+        payload = quote(price=price[0], observed_at=current_time[0].isoformat(), active=False,
+                        in_stock=len(calls) == 1)
         return [(EAN, 498, 90, 0)], [(EAN, json.dumps(payload))]
 
     monkeypatch.setattr(ps, "_mysql_rows", mysql)
@@ -184,5 +190,8 @@ def test_watched_sync_is_scoped_deduplicates_and_does_not_fall_back(tmp_path, mo
         assert [json.loads(row[0])["price"] for row in history] == ["232.05", "230.00"]
         assert current["synced_at"] == (current_time[0] - timedelta(minutes=1)).isoformat()
         assert json.loads(current["payload"])["price"] == "230.00"
+        assert json.loads(current["payload"])["active"] is False
+        assert json.loads(current["payload"])["in_stock"] is False
+        assert all("in_stock" not in json.loads(row[0]) for row in history)
         assert "OperationalError" in current["issue"] and "private" not in current["issue"]
         assert con.execute("SELECT price FROM vytria_prices WHERE ean=?", (EAN,)).fetchone()[0] == 273

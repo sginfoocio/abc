@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS prestashop_price_history (
 CREATE INDEX IF NOT EXISTS prestashop_price_history_ean ON prestashop_price_history(ean,id);
 """
 SOURCE = "PrestaShop · MySQL"
-ENGINE = "PrestaShop 8.2.1 / ABC SQL v1"
+ENGINE = "PrestaShop 8.2.1 / ABC SQL v2"
 INCOMPLETE = "Lectura en curso o interrumpida"
 
 
@@ -148,7 +148,8 @@ def read_batch(cur, eans: list[str], context: dict, *, audit: bool = False) -> t
     marks = ",".join(["%s"] * len(products))
     settings = {}
     market = select("""SELECT s.id_shop_group,co.iso_code,cu.iso_code,cu.`precision`,g.price_display_method,
-        g.reduction FROM {shop} s JOIN {country} co ON co.id_country=%s AND co.active=1
+        g.reduction,sg.share_stock FROM {shop} s JOIN {shop_group} sg ON sg.id_shop_group=s.id_shop_group
+        JOIN {country} co ON co.id_country=%s AND co.active=1
         JOIN {currency} cu ON cu.id_currency=%s AND cu.active=1 AND cu.deleted=0
         JOIN {group} g ON g.id_group=%s WHERE s.id_shop=%s AND s.active=1""", (country, currency, group, shop))
     if len(market) != 1 or tuple(market[0][1:5]) != ("ES", "EUR", 2, 0) or Decimal(market[0][5]) != 0:
@@ -204,6 +205,12 @@ def read_batch(cur, eans: list[str], context: dict, *, audit: bool = False) -> t
             AND id_country IN (0,%s) AND id_group IN (0,%s) AND id_cart=0 AND id_customer=0 AND from_quantity<=1"""
                           .replace("MARKS", marks), (*products, shop, currency, country, group)):
             rules[row[0]].append(row[1:])
+    stock = defaultdict(list)
+    stock_scope = (0, shop_group) if market[0][6] else (shop, 0)
+    for pid, aid, quantity in select("""SELECT id_product,id_product_attribute,quantity
+        FROM {stock_available} WHERE id_shop=%s AND id_shop_group=%s AND id_product IN (MARKS)"""
+                                     .replace("MARKS", marks), (*stock_scope, *products)):
+        stock[pid, aid].append(quantity)
     try:
         tz = ZoneInfo(settings.get("PS_TIMEZONE") or "")
     except (ValueError, ZoneInfoNotFoundError):
@@ -223,7 +230,10 @@ def read_batch(cur, eans: list[str], context: dict, *, audit: bool = False) -> t
                                   context, now, tz)
 
             payload = _with_other_calibres(calculate, aid, variants[pid])
+            quantities = stock[pid, aid]
             payload.update(context, product_id=pid, combination_id=aid, engine=ENGINE,
+                           active=bool(bases[pid][3]),
+                           in_stock=quantities[0] > 0 if len(quantities) == 1 else None,
                            observed_at=now.isoformat())
             quotes.append((ean, json.dumps(payload)))
         except QuoteError as exc:
@@ -248,10 +258,8 @@ def _with_other_calibres(calculate: Callable[[int], dict], combination: int, sib
 
 
 def _calculate(base, variant, combination, taxes, rules, priority, context, now, tz):
-    base_price, ecotax, tax_group, active, show_price, minimum = base
+    base_price, ecotax, tax_group, _active, show_price, minimum = base
     impact, variant_eco, variant_minimum = variant or (0, 0, 1)
-    if not active:
-        raise QuoteError("Producto inactivo en la tienda de PrestaShop")
     if not show_price:
         raise QuoteError("PrestaShop no muestra el precio de este producto")
     if max(minimum, variant_minimum) > 1:
@@ -379,6 +387,9 @@ def _decode(raw: str, identity: tuple[int, int], context: dict, now: datetime) -
                 "engine": payload["engine"], "fiscal_context": payload["fiscal_context"], "source": SOURCE}
     if payload.get("other_calibre_issues"):
         snapshot["other_calibre_issues"] = payload["other_calibre_issues"]
+    for key in ("active", "in_stock"):
+        if type(payload.get(key)) is bool:
+            snapshot[key] = payload[key]
     for key in ("base_price_ex_tax", "combination_impact_ex_tax", "taxable_base", "vat_rate", "rounding"):
         if key in payload:
             snapshot[key] = payload[key]
@@ -450,7 +461,7 @@ def refresh(connect: Callable, selected: list[str], clock: Callable[[], datetime
             return {"monitored": 0, "issues": 0}
         con.executemany("""INSERT INTO prestashop_prices(ean,attempted_at,issue) VALUES(?,?,?)
             ON CONFLICT(ean) DO UPDATE SET attempted_at=excluded.attempted_at,issue=excluded.issue""",
-                        [(ean, started, INCOMPLETE)                         for ean in eans])
+                        [(ean, started, INCOMPLETE) for ean in eans])
     try:
         context = _context()
         identities, rows = _mysql_rows(eans, context)
@@ -468,7 +479,8 @@ def refresh(connect: Callable, selected: list[str], clock: Callable[[], datetime
                 continue
             payload, observed, until = result
             con.execute("""INSERT INTO prestashop_price_history(ean,synced_at,observed_at,payload)
-                SELECT ean,?,?,? FROM prestashop_prices WHERE ean=? AND payload IS NOT ?""",
+                SELECT ean,?,?,json_remove(?,'$.active','$.in_stock') FROM prestashop_prices WHERE ean=?
+                AND json_remove(payload,'$.active','$.in_stock') IS NOT json_remove(?,'$.active','$.in_stock')""",
                         (synced_at, observed, payload, ean, payload))
             con.execute("""UPDATE prestashop_prices SET payload=?,observed_at=?,valid_until=?,
                 synced_at=?,issue='' WHERE ean=?""", (payload, observed, until, synced_at, ean))

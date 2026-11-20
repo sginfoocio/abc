@@ -242,7 +242,8 @@ def _render_native_prices(store: PriceComparatorStore, prices: pd.DataFrame) -> 
     if not scope:
         return
     st.caption("La comparación usa el precio final de Vytria cuando la lectura está vigente. "
-               "Si falta o falla, se conserva la última lectura sin utilizarla como vigente.")
+               "Si falta o falla, se conserva la última lectura sin utilizarla como vigente. "
+               "El estado y el stock de la última lectura son informativos, no indican que se pueda comprar.")
     odoo = prices.set_index("ean")["price"].to_dict()
     now = datetime.now(timezone.utc)
     rows = []
@@ -265,6 +266,8 @@ def _render_native_prices(store: PriceComparatorStore, prices: pd.DataFrame) -> 
         rows.append({
             "EAN": ean, "Precio Odoo": odoo.get(ean), "Precio final en Vytria": float(price) if price else None,
             "Oferta aplicada": offer["reference"] if offer else "Sin oferta" if payload else "—",
+            "Estado en tienda": {True: "Activo", False: "Inactivo"}.get(payload.get("active"), "Sin verificar"),
+            "Stock": {True: "Con stock", False: "Sin stock"}.get(payload.get("in_stock"), "Sin verificar"),
             "Última actualización": quote["observed_at"] if quote else None,
             "Precio usado en comparación": used, "Incidencia": f"No actualizado: {issue}"
             if issue and used != "Precio final en Vytria" else issue,
