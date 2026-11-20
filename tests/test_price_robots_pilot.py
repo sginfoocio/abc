@@ -239,7 +239,7 @@ def test_same_api_still_refuses_products_after_successful_check(pilot):
         lambda: search.submit_url(pilot_scope(store)["eans"][0], cid, BASE + "/product.html"),
         lambda: search.run(pilot_scope(store)["eans"], [cid]),
     ]:
-        with pytest.raises(WebSearchError, match="Hay un piloto configurado"):
+        with pytest.raises(WebSearchError, match="Producto fuera de la selección activa"):
             action()
     assert site.calls == [BASE + "/robots.txt"]
 
