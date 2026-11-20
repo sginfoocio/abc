@@ -12,10 +12,63 @@ from zipfile import ZipFile
 import pandas as pd
 
 from price_comparator import PriceComparatorStore, normalize_gtin
+from price_access import AccessControl
 from price_diagnostic import EvidenceError, require_private_database, sanitise
-from price_trial import PriceTrial
+from price_locator import PriceLocator
+from price_recovery import apply_manual_reviews, preview_manual_reviews
+from price_trial import PriceTrial, manifest
 from price_references import EXACT, PROBABLE, REJECTED, classify
 from price_web_extract import extract_product, select_product_variant
+
+
+def smoke_approved_recovery(path, now):
+    store = PriceComparatorStore(path)
+    store.seed_defaults()
+    access = AccessControl(store, clock=lambda: now)
+    access.ensure_defaults()
+    cid = next(row["id"] for row in store.competitors().to_dict("records") if row["name"] == "Amevista")
+    access.set_method(cid, "ficha", "authorized", actor="smoke", note="Synthetic only")
+    frozen = manifest()
+    shops = {row["id"]: row["name"] for row in store.competitors().to_dict("records")}
+    frozen["competitors"] = shops
+    frozen["pairs"] = [{"competitor_id": shop, "ean": ean} for shop in shops for ean in frozen["eans"]]
+    limits = {shop: {"daily_limit": 200, "per_minute_limit": 10, "effective_pause": 3} for shop in shops}
+    ean = frozen["eans"][0]
+    url = "https://www.amevista.com/es/synthetic-fixture"
+    with store._connect() as con, con:
+        con.executemany("""INSERT INTO products(ean,original_ean,brand,model,color,updated_at)
+            VALUES(?,?,'Gucci','GG1660S','001',?)""",
+                        [(item, item, (now - timedelta(days=1)).isoformat()) for item in frozen["eans"]])
+        con.execute("INSERT INTO watch_groups(name,created_at) VALUES('smoke',?)", (now.isoformat(),))
+        con.execute("""INSERT INTO watch_products(ean,group_name,source,added_by,added_at)
+            VALUES(?,'smoke','synthetic','smoke',?)""", (ean, now.isoformat()))
+        con.execute("""INSERT INTO price_trial(id,status,started_at,expires_at,actor,build_commit,manifest,limits)
+            VALUES(1,'expired',?,?,'smoke',?,?,?)""",
+                    ((now - timedelta(days=2)).isoformat(), (now - timedelta(days=1)).isoformat(),
+                     "a" * 40, json.dumps(frozen), json.dumps(limits)))
+        con.execute("""INSERT INTO price_continuity(id,status,prepared_at,started_at,actor,build_commit,
+            manifest,limits,interval_hours) VALUES(1,'active',?,?,'smoke',?,?,?,24)""",
+                    (now.isoformat(), now.isoformat(), "a" * 40, json.dumps(frozen), json.dumps(limits)))
+        con.executemany("""INSERT INTO price_continuity_pairs(continuity_id,competitor_id,ean)
+            VALUES(1,?,?)""", [(pair["competitor_id"], pair["ean"]) for pair in frozen["pairs"]])
+        con.execute("""INSERT INTO competitor_product_urls(competitor_id,ean,url,model_code,color_code,
+            match_status,status,verified_at) VALUES(?,?,?,'GG1660S','001','probable_match','probable',?)""",
+                    (cid, ean, url, now.isoformat()))
+        con.execute("""INSERT INTO locate_jobs(ean,competitor_id,state,url,created_at,updated_at)
+            VALUES(?,?,'review',?,?,?)""", (ean, cid, url, now.isoformat(), now.isoformat()))
+    assert PriceLocator(store, clock=lambda: now).review(
+        ean, cid, url, accept=True, actor="smoke", note="Synthetic approval", update_price=False) is None
+    item = preview_manual_reviews(path, now=now)["approvals_without_request"][0]
+    assert item["action"] == "create", item
+    args = {"actor": "smoke", "note": "Synthetic recovery", "build_commit": "a" * 40,
+            "approved": True, "approval_ids": [item["approval_id"]], "now": now}
+    first = apply_manual_reviews(path, **args)["approval_results"][0]
+    second = apply_manual_reviews(path, **args)["approval_results"][0]
+    assert first["action"] == "created" and first["request_id"] == second["request_id"]
+    with store._connect() as con:
+        assert con.execute("SELECT COUNT(*) FROM manual_review_refreshes").fetchone()[0] == 1
+        assert con.execute("SELECT COUNT(*) FROM access_requests").fetchone()[0] == 0
+        assert con.execute("SELECT COUNT(*) FROM access_audit WHERE action='recover_approved_identity'").fetchone()[0] == 1
 
 
 def main():
@@ -142,6 +195,7 @@ def main():
             assert con.execute("SELECT COUNT(*) FROM manual_review_recorded_sample_events").fetchone()[0] == 2
             assert con.execute("SELECT COUNT(*) FROM offers").fetchone()[0] == 1
             assert con.execute("SELECT checks FROM offer_checks").fetchone()[0] == 1
+        smoke_approved_recovery(Path(directory) / "recovery.sqlite3", now)
     print("Private SQLite and archived partial JSON-LD evidence verified offline as UID 1037")
 
 

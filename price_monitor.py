@@ -111,7 +111,7 @@ def _review_saved_sample_reusable(con, task: dict, now: datetime) -> bool:
     try:
         sample = json.loads(task["monitor_sample"])
         sampled = _inventory_datetime(task["monitor_sampled_at"])
-        if (_inventory_datetime(sample["at"]) != sampled
+        if (sampled > now or _inventory_datetime(sample["at"]) != sampled
                 or _inventory_datetime(task["monitor_last_ok_at"]) != sampled
                 or _inventory_datetime(task["monitor_valid_until"]) <= now):
             return False
@@ -197,6 +197,8 @@ def _accepted_edel_resolution(page: ProductPage, accepted_url: str, product: dic
 
 
 def _review_sample_policy_reason(con, task: dict, now: datetime, interval: float | None) -> str:
+    if _inventory_datetime(task["monitor_sampled_at"]) > now:
+        return "La fecha de la muestra es futura"
     if interval is None or _inventory_datetime(task["monitor_sampled_at"]) + timedelta(hours=interval) <= now:
         return "La muestra posterior a la solicitud ha caducado"
     sample = json.loads(task["monitor_sample"])
@@ -558,6 +560,38 @@ class PriceMonitor:
                             if not valid:
                                 raise ConnectorError("La ficha aceptada o el alcance cambió; no se consulta")
 
+                    if review_id is not None:
+                        with self.store._connect() as con:
+                            try:
+                                validate_review(con)
+                            except ConnectorError as exc:
+                                raise ReviewRouteDenied(str(exc)) from exc
+                            latest = con.execute("""SELECT r.*,j.state AS monitor_state,j.url AS monitor_url,
+                                    j.sample AS monitor_sample,j.sampled_at AS monitor_sampled_at,
+                                    j.last_ok_at AS monitor_last_ok_at,j.valid_until AS monitor_valid_until,
+                                    j.eligible AS monitor_eligible
+                                FROM manual_review_refreshes r JOIN monitor_jobs j ON j.id=r.monitor_job_id
+                                WHERE r.id=?""", (review_id,)).fetchone()
+                            latest = dict(latest)
+                            try:
+                                ambiguous = _review_sample_ambiguous(latest)
+                                sample_ready = latest["monitor_state"] == "done" and _review_sample_matches(
+                                    latest, con=con, now=self._now())
+                                interval = self.watch.monitor_interval_hours(latest["ean"], cid)
+                                policy_reason = (_review_sample_policy_reason(con, latest, self._now(), interval)
+                                                 if sample_ready else "")
+                            except (KeyError, TypeError, ValueError) as exc:
+                                raise ReviewRouteDenied(f"Muestra comercial ilegible: {type(exc).__name__}") from exc
+                            if ambiguous:
+                                raise ReviewRouteDenied(
+                                    "No se puede acreditar el orden entre la muestra y la solicitud")
+                            if sample_ready:
+                                if not policy_reason:
+                                    report.stopped[cid] = "Lectura terminada durante la espera; reutilizada sin HTTP"
+                                    return report
+                                if policy_reason != "La muestra posterior a la solicitud ha caducado":
+                                    raise ReviewRouteDenied(policy_reason)
+
                     def url_guard(target: str) -> None:
                         if inherited_url_guard is not None:
                             inherited_url_guard(target)
@@ -658,6 +692,7 @@ class PriceMonitor:
                     con.execute("BEGIN IMMEDIATE")
                     row = con.execute("""SELECT r.*,j.state AS monitor_state,j.not_before AS monitor_not_before,
                             j.lease_until AS monitor_lease_until,j.attempts AS monitor_attempts,
+                            j.updated_at AS monitor_updated_at,
                             j.eligible AS monitor_eligible,j.detail AS monitor_detail,j.url AS monitor_url,
                     j.last_ok_at AS monitor_last_ok_at,j.sampled_at AS monitor_sampled_at,
                     j.valid_until AS monitor_valid_until,j.sample AS monitor_sample,
@@ -812,6 +847,22 @@ class PriceMonitor:
                             con.commit()
                             errors.append({"id": task["id"], "detail": detail})
                             continue
+                    if (task["monitor_state"] == "running" and not sample_matches
+                            and (not task["monitor_lease_until"]
+                                 or _inventory_datetime(task["monitor_lease_until"]) <= now)):
+                        since = _iso(_inventory_datetime(task["monitor_updated_at"]) - timedelta(seconds=1))
+                        uncertain = con.execute("""SELECT 1 FROM access_requests
+                            WHERE competitor_id=? AND (ean=? OR ean='' OR ean IS NULL)
+                              AND reserved_at>=? LIMIT 1""",
+                                                (task["competitor_id"], task["ean"], since)).fetchone()
+                        if uncertain:
+                            detail = "Monitor interrumpido con reserva o resultado incierto; reconciliación necesaria"
+                            con.execute("""UPDATE manual_review_refreshes SET status='blocked',detail=?,
+                                lease_until=NULL,retry_at=NULL,finished_at=?,updated_at=? WHERE id=?""",
+                                        (detail, now_text, now_text, task["id"]))
+                            con.commit()
+                            errors.append({"id": task["id"], "detail": detail})
+                            continue
                     if task["monitor_state"] in {"failed", "gone", "inactive"}:
                         detail = f"El trabajo monitor está en estado {task['monitor_state']}; requiere resolución manual"
                         con.execute("""UPDATE manual_review_refreshes SET status='blocked',detail=?,
@@ -904,8 +955,8 @@ class PriceMonitor:
                         errors.append({"id": task["id"], "detail": detail})
                     continue
                 with self.store._connect() as con:
-                    current = con.execute("""SELECT state,not_before,lease_until,attempts,eligible,detail,
-                            last_ok_at,sampled_at,sample FROM monitor_jobs WHERE id=?""",
+                    current = con.execute("""SELECT state,url,not_before,lease_until,attempts,eligible,detail,
+                            last_ok_at,sampled_at,valid_until,sample FROM monitor_jobs WHERE id=?""",
                                           (task["monitor_job_id"],)).fetchone()
                 finished_at = _iso(self._now())
                 retry_at = None
@@ -918,8 +969,12 @@ class PriceMonitor:
                 else:
                     current = dict(current)
                     if current["state"] == "done":
-                        done_after_request = _review_sample_matches({
-                            **task, "monitor_sample": current["sample"], "monitor_sampled_at": current["sampled_at"]})
+                        with self.store._connect() as con:
+                            done_after_request = _review_sample_matches({
+                                **task, "monitor_state": current["state"],
+                                "monitor_sample": current["sample"], "monitor_sampled_at": current["sampled_at"],
+                                "monitor_last_ok_at": current["last_ok_at"],
+                                "monitor_valid_until": current["valid_until"]}, con=con, now=self._now())
                         if report.processed or done_after_request:
                             status = "done"
                             sample = json.loads(current["sample"] or current.get("previous_sample") or "{}")
@@ -965,6 +1020,16 @@ class PriceMonitor:
                                 (status, detail[:1000], attempts, _iso(retry_at) if retry_at else None,
                                  finished_at if status in {"done", "blocked", "error"} else None,
                                  finished_at, task["id"]))
+                    if status == "done" and report.stopped.get(task["competitor_id"]) == (
+                            "Lectura terminada durante la espera; reutilizada sin HTTP"):
+                        sample = json.loads(current["sample"])
+                        digest = hashlib.sha256(json.dumps(
+                            sample, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+                        con.execute("""INSERT INTO access_audit(scope,scope_id,action,previous,current,actor,note,at)
+                            VALUES('manual_review',?,'reuse_saved_sample',?,?, 'worker','No se generó HTTP',?)""",
+                                    (str(task["id"]), json.dumps({"status": task["status"]}),
+                                     json.dumps({"status": "done", "sampled_at": sample["at"],
+                                                 "sample_sha256": digest}, ensure_ascii=False), finished_at))
                     _reconcile_review_requests(con, task["id"])
                 if status in {"done", "blocked", "error"}:
                     completed += 1

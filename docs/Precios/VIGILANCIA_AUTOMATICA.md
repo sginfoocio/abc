@@ -203,8 +203,8 @@ incluye el próximo intento. Su CSV exporta todas las filas.
 
 #### Recuperación supervisada después del despliegue
 
-No se aceptan de nuevo las fichas ni se crean solicitudes. Tras instalar la versión y sus migraciones,
-usar la base existente del comparador y generar una vista previa de **todas** las solicitudes:
+No se aceptan de nuevo las fichas. Tras instalar la versión y sus migraciones, usar la base existente
+del comparador y generar una vista previa de las solicitudes y las aprobaciones actuales sin solicitud:
 
 ```bash
 python price_recovery.py --database RUTA_BASE --manual-reviews
@@ -214,11 +214,10 @@ El JSON incluye cantidades y filas `recoverable`, `already_resolved` y `excluded
 fotografía local: permisos, presupuestos y estado pueden cambiar y se vuelven a comprobar al aplicar y
 al consultar. Se excluyen identidades históricas que no puedan acreditarse, restricciones vigentes y
 reservas inciertas. `approvals_without_request` añade las fichas actualmente marcadas como verificadas
-por usuario que no tienen solicitud para esa aprobación, con su URL, fecha, auditorías coincidentes y
-estado del monitor. Es un inventario de candidatos, no prueba por sí solo la identidad histórica ni
-crea solicitudes: la recuperación de estos casos todavía no está implementada. No incluye aprobaciones
-históricas sustituidas o fichas eliminadas. Si falta robots vigente, el trabajador lo comprobará antes de
-cualquier ficha.
+por usuario que no tienen solicitud para esa aprobación, con URL, fecha, ID de auditoría, lectura,
+estado del monitor, acción y motivo. Se excluyen identidades históricas que no puedan acreditarse,
+contradicciones, aprobaciones sustituidas, reservas inciertas y controles vigentes. No incluye fichas
+eliminadas. Si falta robots vigente, el trabajador lo comprobará antes de cualquier ficha.
 
 Guardar la vista previa y congelar los IDs elegibles con su evidencia. Primero, con aprobación expresa,
 seleccionar **una** solicitud elegible por mecanismo de la vista previa:
@@ -228,12 +227,28 @@ python price_recovery.py --database RUTA_BASE --manual-reviews --apply --approve
   --request-id ID --actor RESPONSABLE --note MOTIVO --commit COMMIT_COMPLETO
 ```
 
+Para una aprobación vigente sin solicitud, usar su `approval_id` de la vista previa en lugar del ID de
+solicitud:
+
+```bash
+python price_recovery.py --database RUTA_BASE --manual-reviews --apply --approved \
+  --approval-id ID_AUDITORIA --actor RESPONSABLE --note MOTIVO --commit COMMIT_COMPLETO
+```
+
+La aplicación revalida el manifiesto, aprobación, evento, producto y controles en una transacción;
+conserva el actor, motivo y fecha de la aprobación original y registra el responsable de recuperación
+por separado. Devuelve `approval_results` con el ID de solicitud creado o reutilizado y el motivo de
+cualquier exclusión. No confirma de nuevo la ficha ni hace HTTP. Una muestra vigente se conserva con
+su fecha original; si ya hay una lectura en curso, la solicitud espera su resultado. Las solicitudes
+de una aprobación distinta se excluyen si están activas, sin duplicarlas. Una interrupción con reserva
+incierta queda bloqueada para reconciliación, no se reenvía automáticamente.
+
 Comprobar el par, la URL, los recibos `access_requests` con propósito `manual_review:ID`, el resultado y
 su fecha, precio, mercado, IVA y disponibilidad; verificar si realmente aparece en la comparativa. Una
 reevaluación local debe conservar su fecha y consumir cero HTTP. Repetir la acción y comprobar que no haya
 solicitudes, importaciones ni recibos duplicados. Solo después, repetir la vista previa y, si procede,
-aplicar al resto congelado en lotes acotados, pasando cada ID mediante `--request-id` repetido; nunca
-omitirlo para incorporar automáticamente solicitudes nuevas. La aplicación bloquea cola, continuidad y
+aplicar al resto congelado en lotes acotados, pasando cada ID mediante `--request-id` o `--approval-id`
+repetido; nunca omitir los selectores para incorporar automáticamente solicitudes nuevas. La aplicación bloquea cola, continuidad y
 competidores, vuelve a evaluar el inventario,
 audita responsable, motivo, commit y estado anterior, y no hace HTTP. Repetirla no vuelve a encolar ni
 crea autorizaciones adicionales. Si alguna prueba falla, detener ese mecanismo. Pausa, parada, condiciones

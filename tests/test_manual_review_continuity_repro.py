@@ -1,15 +1,17 @@
 """Offline regressions for accepted review reads and queue fairness."""
 from dataclasses import asdict, replace
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from io import BytesIO
 import json
+from threading import Event
 
 from filelock import FileLock, Timeout
 import pandas as pd
 import pytest
 import requests
 
-from price_monitor import MonitorReport
+from price_monitor import MonitorReport, PriceMonitor
 from price_comparator import PriceComparatorStore
 from price_recovery import apply_manual_reviews, preview_manual_reviews
 from price_web import WebPriceSearch
@@ -673,7 +675,8 @@ def test_inventory_and_export_include_more_than_100_requests(expanded_review):
     assert preview["counts"] == {"recoverable": 105, "already_resolved": 0, "excluded": 0}
 
 
-def test_preview_inventories_current_approval_without_matching_request(trial):
+@pytest.fixture
+def approval_without_request(trial):
     service, store, clock, cid, ean, url, site = _diagnostic_review(trial)
     access = trial[2]
     for shop in store.competitors().to_dict("records"):
@@ -685,9 +688,17 @@ def test_preview_inventories_current_approval_without_matching_request(trial):
     locator = trial[3]
     assert preview_manual_reviews(store.database_path, now=clock())["approvals_without_request"] == []
 
+    with store._connect() as con, con:
+        con.execute("UPDATE products SET updated_at=? WHERE ean=?",
+                    ((clock() - timedelta(days=1)).isoformat(), ean))
     row = _candidate(locator, ean)
     assert locator.review(ean, cid, url, accept=True, actor="operator", note="Synthetic review",
                           update_price=False, expected_candidate=_expected(row)) is None
+    return service, store, clock, cid, ean, url, site, trial[4]
+
+
+def test_preview_inventories_current_approval_without_matching_request(approval_without_request):
+    _, store, clock, cid, ean, url, site, _ = approval_without_request
     preview = preview_manual_reviews(store.database_path, now=clock())
     assert preview["requests"] == []
     assert len(preview["approvals_without_request"]) == 1
@@ -695,5 +706,248 @@ def test_preview_inventories_current_approval_without_matching_request(trial):
     assert (approval["competitor_id"], approval["ean"], approval["url"]) == (cid, ean, url)
     assert approval["approval_audits"] == 1
     assert approval["active_requests"] == 0
-    assert "aún no está implementada" in approval["reason"]
+    assert approval["action"] == "create", approval["reason"]
     assert site.calls == []
+
+
+def test_recover_approval_without_request_to_comparator(approval_without_request):
+    _, store, clock, cid, ean, url, site, monitor = approval_without_request
+    approval = preview_manual_reviews(store.database_path, now=clock())["approvals_without_request"][0]
+    args = {"actor": "operator", "note": "Synthetic recovery", "build_commit": "e" * 40,
+            "approved": True, "now": clock(), "approval_ids": [approval["approval_id"]], "request_ids": []}
+    result = apply_manual_reviews(store.database_path, **args)
+    task = result["approval_results"][0]["request_id"]
+    assert result["approval_results"][0]["action"] == "created"
+    assert apply_manual_reviews(store.database_path, **args)["approval_results"][0]["request_id"] == task
+    assert site.calls == []
+    own = pd.DataFrame([{"EAN": ean, "Precio": 150, "Moneda": "EUR", "Mercado": "ES",
+                         "Fecha consulta": clock().isoformat(), "Origen": "Synthetic"}])
+    assert store.import_own_prices(own).imported == 1
+    assert monitor.review_refresh_tick()["processed"] == 1
+    with store._connect() as con:
+        refresh = con.execute("SELECT * FROM manual_review_refreshes WHERE id=?", (task,)).fetchone()
+        assert refresh["status"] == "done" and refresh["attempts"] == 1
+        assert con.execute("SELECT COUNT(*) FROM manual_review_refreshes WHERE ean=? AND competitor_id=?",
+                           (ean, cid)).fetchone()[0] == 1
+        assert con.execute("SELECT COUNT(*) FROM access_audit WHERE action='recover_approved_identity'").fetchone()[0] == 1
+    assert site.calls.count(url) == 1
+    assert not store.current_offers(now=clock()).query("ean == @ean and competitor_id == @cid").empty
+
+
+def _recover_approval(store, clock, approval_id):
+    return apply_manual_reviews(store.database_path, actor="operator", note="Synthetic recovery",
+                                build_commit="e" * 40, approved=True, now=clock(),
+                                approval_ids=[approval_id], request_ids=[])
+
+
+def test_recover_approval_reuses_existing_sample_without_http(approval_without_request):
+    service, store, clock, cid, ean, url, site, monitor = approval_without_request
+    clock.advance(seconds=1)
+    with service.execution(0, cid, ean, program="continuity", program_id=1):
+        assert monitor.run([cid], eans=[ean], max_jobs=1).processed == 1
+    calls = list(site.calls)
+    with store._connect() as con, con:
+        sampled = con.execute("SELECT sampled_at FROM monitor_jobs WHERE competitor_id=? AND ean=?",
+                              (cid, ean)).fetchone()[0]
+        con.execute("UPDATE monitor_jobs SET attempts=999 WHERE competitor_id=? AND ean=?", (cid, ean))
+    item = preview_manual_reviews(store.database_path, now=clock())["approvals_without_request"][0]
+    assert item["action"] == "reuse_saved_sample", item["reason"]
+    task = _recover_approval(store, clock, item["approval_id"])["approval_results"][0]["request_id"]
+    assert monitor.review_refresh_tick()["processed"] == 1
+    with store._connect() as con:
+        result = con.execute("SELECT status,attempts,http_requests,detail FROM manual_review_refreshes WHERE id=?",
+                             (task,)).fetchone()
+        assert result["status"] == "done" and result["attempts"] == result["http_requests"] == 0
+        assert sampled in result["detail"]
+    assert site.calls == calls and url in calls
+
+
+def test_recover_approval_reuses_compatible_sample_from_before_approval(approval_without_request, trial):
+    service, store, clock, cid, ean, url, site, monitor = approval_without_request
+    clock.advance(seconds=1)
+    with service.execution(0, cid, ean, program="continuity", program_id=1):
+        assert monitor.run([cid], eans=[ean], max_jobs=1).processed == 1
+    calls = list(site.calls)
+    with store._connect() as con, con:
+        sampled = con.execute("SELECT sampled_at FROM monitor_jobs WHERE competitor_id=? AND ean=?",
+                              (cid, ean)).fetchone()[0]
+        con.execute("""UPDATE competitor_product_urls SET status='probable',source='auto_watch'
+            WHERE competitor_id=? AND ean=? AND url=?""", (cid, ean, url))
+        con.execute("UPDATE locate_jobs SET state='review' WHERE competitor_id=? AND ean=?", (cid, ean))
+    clock.advance(seconds=1)
+    locator = trial[3]
+    locator.review(ean, cid, url, accept=True, actor="operator", note="New synthetic approval",
+                   update_price=False, expected_candidate=_expected(_candidate(locator, ean)))
+    item = preview_manual_reviews(store.database_path, now=clock())["approvals_without_request"][0]
+    assert item["action"] == "reuse_saved_sample", item["reason"]
+    task = _recover_approval(store, clock, item["approval_id"])["approval_results"][0]["request_id"]
+    assert monitor.review_refresh_tick()["processed"] == 1
+    with store._connect() as con:
+        result = con.execute("SELECT status,attempts,http_requests,detail FROM manual_review_refreshes WHERE id=?",
+                             (task,)).fetchone()
+    assert result["status"] == "done" and result["attempts"] == result["http_requests"] == 0
+    assert sampled in result["detail"] and site.calls == calls
+
+
+def test_concurrent_recovery_creates_one_request(approval_without_request):
+    _, store, clock, cid, ean, _, site, _ = approval_without_request
+    approval_id = preview_manual_reviews(store.database_path, now=clock())["approvals_without_request"][0]["approval_id"]
+
+    def recover():
+        try:
+            return _recover_approval(store, clock, approval_id)
+        except Timeout:
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: recover(), range(2)))
+    assert any(result is not None for result in results)
+    final = _recover_approval(store, clock, approval_id)
+    with store._connect() as con:
+        rows = con.execute("SELECT id FROM manual_review_refreshes WHERE competitor_id=? AND ean=?",
+                           (cid, ean)).fetchall()
+    assert len(rows) == 1 and final["approval_results"][0]["request_id"] == rows[0]["id"]
+    assert site.calls == []
+
+
+@pytest.mark.parametrize("change", ["superseded", "contradiction"])
+def test_recovery_excludes_changed_approval(approval_without_request, change):
+    _, store, clock, cid, ean, url, site, _ = approval_without_request
+    approval_id = preview_manual_reviews(store.database_path, now=clock())["approvals_without_request"][0]["approval_id"]
+    with store._connect() as con, con:
+        if change == "superseded":
+            con.execute("UPDATE competitor_product_urls SET status='rejected' WHERE competitor_id=? AND ean=? AND url=?",
+                        (cid, ean, url))
+        else:
+            con.execute("UPDATE competitor_product_urls SET color_code='other' WHERE competitor_id=? AND ean=? AND url=?",
+                        (cid, ean, url))
+    result = _recover_approval(store, clock, approval_id)["approval_results"][0]
+    assert result["action"] == "excluded"
+    assert ("sustituida" if change == "superseded" else "Contradicción") in result["reason"]
+    with store._connect() as con:
+        assert con.execute("SELECT COUNT(*) FROM manual_review_refreshes").fetchone()[0] == 0
+    assert site.calls == []
+
+
+def test_recovery_excludes_future_sample_and_unverifiable_product(approval_without_request):
+    _, store, clock, cid, ean, url, site, _ = approval_without_request
+    with store._connect() as con, con:
+        con.execute("""INSERT INTO monitor_jobs(ean,competitor_id,url,state,sampled_at,updated_at)
+            VALUES(?,?,?,'done',?,?)""",
+                    (ean, cid, url, (clock() + timedelta(days=1)).isoformat(), clock().isoformat()))
+    item = preview_manual_reviews(store.database_path, now=clock())["approvals_without_request"][0]
+    assert item["action"] == "excluded" and "futura" in item["reason"]
+    with store._connect() as con, con:
+        con.execute("UPDATE monitor_jobs SET sampled_at=NULL WHERE competitor_id=? AND ean=?", (cid, ean))
+        con.execute("UPDATE products SET updated_at=? WHERE ean=?",
+                    ((clock() + timedelta(seconds=1)).isoformat(), ean))
+    result = _recover_approval(store, clock, item["approval_id"])["approval_results"][0]
+    assert result["action"] == "excluded" and "histórica" in result["reason"]
+    assert site.calls == []
+
+
+def test_interrupted_existing_monitor_reservation_is_not_repeated(approval_without_request):
+    _, store, clock, cid, ean, url, site, monitor = approval_without_request
+    approval_id = preview_manual_reviews(store.database_path, now=clock())["approvals_without_request"][0]["approval_id"]
+    task = _recover_approval(store, clock, approval_id)["approval_results"][0]["request_id"]
+    with store._connect() as con, con:
+        con.execute("""UPDATE monitor_jobs SET state='running',lease_until=?,updated_at=?
+            WHERE competitor_id=? AND ean=?""",
+                    ((clock() - timedelta(seconds=1)).isoformat(), clock().isoformat(), cid, ean))
+        con.execute("""INSERT INTO access_requests(scope,scope_id,competitor_id,method,purpose,ean,url,reserved_at)
+            VALUES('competitor',?,?,'ficha','monitor',?,?,?)""", (cid, cid, ean, url, clock().isoformat()))
+    result = monitor.review_refresh_tick()
+    with store._connect() as con:
+        row = con.execute("SELECT status,detail,attempts FROM manual_review_refreshes WHERE id=?", (task,)).fetchone()
+    assert row["status"] == "blocked" and "incierto" in row["detail"] and row["attempts"] == 0
+    assert result["errors"] and site.calls == []
+
+
+def test_recovered_approval_defers_busy_lock_then_retries(approval_without_request):
+    service, store, clock, _, _, url, site, monitor = approval_without_request
+    approval_id = preview_manual_reviews(store.database_path, now=clock())["approvals_without_request"][0]["approval_id"]
+    task = _recover_approval(store, clock, approval_id)["approval_results"][0]["request_id"]
+    with service.continuity_lock():
+        assert monitor.review_refresh_tick()["deferred"] == 1
+    with store._connect() as con:
+        row = con.execute("SELECT status,retry_at,attempts,http_requests FROM manual_review_refreshes WHERE id=?",
+                          (task,)).fetchone()
+    assert row["status"] == "deferred" and row["retry_at"]
+    assert row["attempts"] == row["http_requests"] == 0 and site.calls == []
+    assert _recover_approval(store, clock, approval_id)["approval_results"][0]["request_id"] == task
+    clock.advance(seconds=30)
+    assert monitor.review_refresh_tick()["processed"] == 1
+    assert site.calls.count(url) == 1
+
+
+def test_recovered_approval_waits_for_existing_monitor(approval_without_request):
+    service, store, clock, cid, ean, url, site, monitor = approval_without_request
+    with store._connect() as con, con:
+        con.execute("""INSERT INTO monitor_jobs(ean,competitor_id,url,state,lease_until,updated_at)
+            VALUES(?,?,?,'running',?,?)""",
+                    (ean, cid, url, (clock() + timedelta(minutes=2)).isoformat(), clock().isoformat()))
+    item = preview_manual_reviews(store.database_path, now=clock())["approvals_without_request"][0]
+    task = _recover_approval(store, clock, item["approval_id"])["approval_results"][0]["request_id"]
+    assert monitor.review_refresh_tick()["deferred"] == 1 and site.calls == []
+    with store._connect() as con, con:
+        con.execute("UPDATE monitor_jobs SET state='pending',lease_until=NULL WHERE competitor_id=? AND ean=?",
+                    (cid, ean))
+    clock.advance(seconds=1)
+    with service.execution(0, cid, ean, program="continuity", program_id=1):
+        assert monitor.run([cid], eans=[ean], max_jobs=1).processed == 1
+    calls = list(site.calls)
+    clock.advance(minutes=2)
+    assert monitor.review_refresh_tick()["processed"] == 1 and site.calls == calls
+    with store._connect() as con:
+        result = con.execute("SELECT status,attempts,http_requests FROM manual_review_refreshes WHERE id=?",
+                             (task,)).fetchone()
+    assert result["status"] == "done" and result["attempts"] == result["http_requests"] == 0
+
+
+def test_result_finished_after_claim_is_reused_before_http(approval_without_request, monkeypatch):
+    _, store, clock, cid, ean, url, site, monitor = approval_without_request
+    approval_id = preview_manual_reviews(store.database_path, now=clock())["approvals_without_request"][0]["approval_id"]
+    task = _recover_approval(store, clock, approval_id)["approval_results"][0]["request_id"]
+    run = monitor.run
+
+    def finish_during_wait(*args, **kwargs):
+        if kwargs.get("review_id") == task:
+            clock.advance(seconds=1)
+            assert run([cid], eans=[ean], max_jobs=1).processed == 1
+        return run(*args, **kwargs)
+
+    monkeypatch.setattr(monitor, "run", finish_during_wait)
+    assert monitor.review_refresh_tick()["processed"] == 1
+    with store._connect() as con:
+        result = con.execute("SELECT status,attempts,http_requests FROM manual_review_refreshes WHERE id=?",
+                             (task,)).fetchone()
+    assert result["status"] == "done" and result["attempts"] == result["http_requests"] == 0
+    assert site.calls.count(url) == 1
+
+
+def test_two_workers_process_recovered_approval_once(approval_without_request):
+    _, store, clock, cid, _, url, site, monitor = approval_without_request
+    approval_id = preview_manual_reviews(store.database_path, now=clock())["approvals_without_request"][0]["approval_id"]
+    task = _recover_approval(store, clock, approval_id)["approval_results"][0]["request_id"]
+    entered, release = Event(), Event()
+
+    def transport(target, headers, timeout):
+        if target == url:
+            entered.set()
+            assert release.wait(10)
+        return site(target, headers, timeout)
+
+    worker = PriceMonitor(store, clock=clock, transport=transport, sleep=lambda seconds: clock.advance(seconds=seconds))
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(worker.review_refresh_tick)
+        try:
+            assert entered.wait(10)
+            assert monitor.review_refresh_tick()["skipped"]
+        finally:
+            release.set()
+        assert future.result(timeout=30)["processed"] == 1
+    with store._connect() as con:
+        assert con.execute("SELECT status FROM manual_review_refreshes WHERE id=?", (task,)).fetchone()[0] == "done"
+        assert con.execute("SELECT COUNT(*) FROM access_requests WHERE purpose=? AND url=?",
+                           (f"manual_review:{task}", url)).fetchone()[0] == 1
+    assert site.calls.count(url) == 1
