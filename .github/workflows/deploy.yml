@@ -116,6 +116,7 @@ jobs:
           import provider_images, provider_images_ui, provider_odoo_orders, repository_catalog_readonly, marcolin_images, safilo_images, nuorder_images
           import cloud_dashboard, kering_images_ui, kering_portal, kering_jobs, graph_mail_downloader, abcd_snapshots, image_exports, luxoptica_auto_upload, repository_storage, market_publication
           import price_pilot, price_scheduler, price_web, price_monitor, price_url_candidates, app_pages.price_comparator
+          import prestashop_prices, pymysql
           from urllib.parse import urlparse
           from competitor_requirements import COMPETITORS, business_tax_policy_for
           policies = [business_tax_policy_for(url) for _, url in COMPETITORS]

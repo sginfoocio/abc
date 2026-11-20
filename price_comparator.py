@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 import pandas as pd
 from filelock import FileLock, Timeout
 
+import prestashop_prices
 
 GTIN_ERROR = "EAN/UPC debe ser GTIN-12 o GTIN-13 válido"
 MATCH_STATES = {"exact_match", "probable_match", "manual_review", "not_found", "error", "rejected"}
@@ -351,6 +352,7 @@ class PriceComparatorStore:
                         changed_at TEXT NOT NULL,
                         synced_at TEXT NOT NULL
                     );
+                    """ + prestashop_prices.SCHEMA + """
                     CREATE TABLE IF NOT EXISTS vytria_price_history (
                         id INTEGER PRIMARY KEY,
                         ean TEXT NOT NULL REFERENCES products(ean),
@@ -1661,6 +1663,10 @@ class PriceComparatorStore:
             competitor_count = connection.execute("SELECT COUNT(*) FROM competitors WHERE active=1").fetchone()[0]
             synced = pd.read_sql_query("SELECT * FROM vytria_prices", connection)
             watched = {r[0] for r in connection.execute("SELECT ean FROM watch_products WHERE active=1")}
+            native = {r["ean"]: dict(r) for r in connection.execute("SELECT * FROM prestashop_prices")
+                      if r["ean"] in watched}
+            native_scope = (watched & prestashop_prices.manifest_eans()
+                            if prestashop_prices.enabled() else set(native))
 
         offers = _fresh_offers(offers, now, max_age_days)
         search_results = _chronological(search_results, "captured_at", since=cutoff, until=now)
@@ -1682,6 +1688,24 @@ class PriceComparatorStore:
                 "captured_at": confirmed["synced_at"], "source": confirmed["source"],
             })], ignore_index=True)
         synced_by_ean = {row["ean"]: row for row in synced.to_dict("records")}
+        if native_scope:
+            own = own[~own["ean"].isin(native_scope)]
+            current_native = []
+            for ean in native_scope:
+                cached = native.get(ean)
+                usable = cached is not None and prestashop_prices.usable(cached, now)
+                status = ("validated" if usable else "stale" if cached and cached["issue"]
+                          else "expired" if cached and cached["payload"] else "not_synced")
+                synced_by_ean[ean] = {"current_status": status, "source": prestashop_prices.SOURCE,
+                                      "synced_at": cached["observed_at"] if cached else None}
+                if usable and cached is not None:
+                    current_native.append({
+                        "ean": ean, "market": "ES", "price": float(json.loads(cached["payload"])["price"]),
+                        "promotional_price": None, "currency": "EUR", "fx_to_eur": 1.0,
+                        "captured_at": cached["observed_at"], "source": prestashop_prices.SOURCE,
+                    })
+            if current_native:
+                own = pd.concat([own, pd.DataFrame(current_native)], ignore_index=True)
 
         rows: list[dict[str, Any]] = []
         for product in products.to_dict("records"):

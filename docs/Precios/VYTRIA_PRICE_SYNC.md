@@ -1,6 +1,99 @@
 # Sincronización del PVP Vytria desde Odoo
 
-Sustituye la importación manual de precios propios del comparador. Integración **solo de lectura**:
+## Precio final público de PrestaShop (preparación, deshabilitada por defecto)
+
+La tarifa 59 sigue siendo la referencia efectiva de Odoo. PrestaShop puede aplicar
+ofertas posteriores a esa tarifa: son diferencias comerciales, no errores de Odoo.
+Cuando se habilita el lector, solo para la intersección del manifiesto existente de
+100 EAN con los vigilados activos y autorizados por la ejecución, se compara el
+resultado vigente del motor nativo. Una lectura fallida o caducada conserva el
+último resultado y su fecha real, pero no se compara ni se sustituye por Odoo.
+Sin habilitación y sin lectura anterior, la operativa existente no cambia.
+
+**Contraste público (2026-11-20):** un GET sin sesión autenticada a la
+[ficha Prada PR 17WS 2AU8C1](https://www.vytria.com/es/pr-17ws-2au8c1.html)
+mostró EAN `8056597435581`, calibre 49, país `ES` (6), moneda `EUR` (1),
+tienda `Vytria` (1) y `is_logged=false`. La ficha publicó **232,05 €**,
+también en `product:price:amount`, y mostró **273,00 €** como precio anterior.
+El producto público indicado es `498`; el `68` del selector es un valor de
+atributo, no el ID de la combinación. La página no identifica `427094`, ni
+confirma el grupo fiscal, cómo se aplicó el IVA o qué representan los 225,62 €.
+El importe público no se usa como semilla, ni esta URL se usa como lector automático.
+
+**Antes de habilitar:** no se facilitó la conexión MySQL ni se confirmó una
+salida existente del motor para esta instalación. El lector está preparado para
+una relación MySQL de solo lectura (vista o instantánea existente, que deberá
+conectar el responsable de PrestaShop con el cálculo nativo). No hay cálculo
+SQL aproximado, nuevo endpoint ni cambios en PrestaShop en este trabajo.
+
+1. Con el usuario existente, revisar `SELECT VERSION()` (servidor MySQL),
+   `INFORMATION_SCHEMA.COLUMNS` (prefijo/esquema) y la versión de la aplicación
+   (administración o configuración de PrestaShop). Verificar `product[_shop]`,
+   `product_attribute[_shop]`, `shop`, `country`, `currency`, `configuration`,
+   `specific_price`, `specific_price_priority`, `specific_price_rule`,
+   `tax_rules_group`/`tax_rule`/`tax` y módulos/hook/overrides de precios. Estas
+   son tablas candidatas, no un inventario confirmado. Comprobar `427094` por
+   separado en `id_product`, `id_product_attribute` e `id_specific_price`, y
+   cruzar con EAN, tienda y calibre; el mismo número puede existir en varias tablas.
+2. Confirmar con el administrador el grupo anónimo, el contexto fiscal ES
+   (incluidos criterio y ámbito geográfico de dirección, regla y tratamiento de
+   IVA), la tienda y moneda, y contrastar el resultado del motor con la ficha
+   anónima para el ejemplo antes de extenderlo a los restantes EAN. Verificar base
+   e impacto de combinación, precio específico y regla de catálogo seleccionados,
+   prioridades, fechas, cantidad y personalizaciones activas. No usar datos de
+   cupones, transporte o descuentos condicionados al carrito.
+3. Inyectar por el gestor de secretos aprobado en el entorno del proceso
+   `PRESTASHOP_MYSQL_HOST`, `_PORT` (3306 si se omite), `_DATABASE`, `_USER`,
+   `_PASSWORD`, `_SSL_CA` (ruta al certificado CA), `_PREFIX` y
+   `_NATIVE_QUOTES` (nombre de la relación existente; sin esquema ni credenciales).
+   Aquí los nombres abreviados comparten el prefijo `PRESTASHOP_MYSQL`.
+   Usar TLS con verificación de identidad, permisos exclusivamente `SELECT` sobre
+   los objetos necesarios y transacciones `READ ONLY`. Configurar los IDs
+   confirmados `PRESTASHOP_PRICE_SHOP_ID`, `_GROUP_ID`, `_COUNTRY_ID`,
+   `_CURRENCY_ID` (prefijo `PRESTASHOP_PRICE`). Solo después de validar la
+   instalación y obtener aprobación, `PRESTASHOP_PRICE_ENABLED=1`.
+
+**Contrato de la relación nativa:** columnas `ean` (GTIN-13 de texto, incluye
+ceros), `shop_id`, `country_id`, `currency_id`, `group_id` y `payload` (JSON).
+Una sola fila por EAN y contexto. La salida representa el precio unitario final
+que realmente publica el motor activo (incluidos módulos y reglas de catálogo)
+y contiene:
+
+- `product_id`, `combination_id` (0 solo si no hay combinación), IDs del
+  contexto como en las columnas, `market: "ES"`, `currency: "EUR"`,
+  `customer_id: 0`, `quantity: 1`, `tax_included: true`, `shipping_included: false`
+  y `cart_discount: false`.
+- `price`: importe final decimal en texto (p. ej. `"232.05"`); `engine`:
+  identificación/versionado del productor nativo; `fiscal_context`: descripción
+  del grupo de reglas/ámbito fiscal y tratamiento aplicado, sin datos personales.
+- `observed_at` y `valid_until` con zona horaria. El productor debe acotar
+  `valid_until` al siguiente momento de cambio conocido (incluido el inicio de
+  una promoción aún inactiva). ABC nunca usa una lectura más de 24 horas.
+- `offer`: `null` si no aplica; en otro caso `reference` (regla/oferta inequívoca),
+  `starts_at`/`ends_at` (ISO con zona, o `null` si abierto) y `conditions`
+  (`min_quantity` entero; además tienda, grupo, país, moneda, combinación,
+  prioridad, tipo de reducción y tratamiento fiscal según corresponda).
+- `other_calibres`: mapa de IDs de otras combinaciones del mismo modelo/color
+  a importes finales del mismo contexto, o `{}` si no hay otros. Las diferencias
+  se señalan, sin elegir otra combinación ni intercambiar sus precios. Enumerar
+  solo los calibres del producto; no incorporar EAN adicionales al manifiesto.
+
+La relación es un contrato de integración **aún no validado**. Una vista que
+solo reste un porcentaje o elija una fila de `specific_price` no cumple el
+contrato. Las pruebas offline verifican la aceptación/rechazo de resultados
+nativos simulados y la conservación del precio; no certifican la precedencia,
+el IVA ni los módulos de la tienda real.
+
+En SQLite, `prestashop_prices` guarda la última lectura, vencimiento, último
+intento e incidencia; `prestashop_price_history` guarda cambios de precio,
+oferta o contexto. Las reconfirmaciones solo actualizan las fechas del estado
+vigente. Ambas tablas se vinculan por EAN a `vytria_prices` y al histórico
+existente de Odoo; no alteran dicha tarifa ni la identidad/disponibilidad del
+comparador. La sección de administración distingue las dos fuentes.
+
+## Referencia Odoo y operativa anterior
+
+La integración Odoo sustituye la importación manual de precios propios. Es **solo de lectura**:
 no se modifica nada en Odoo ni en PrestaShop.
 
 ## Fuente del precio

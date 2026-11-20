@@ -779,8 +779,9 @@ def _render_monitor(store: PriceComparatorStore, names: dict[str, str], *, advan
     monitor = PriceMonitor(store)
     sync = VytriaPriceSync(store)
     with st.expander("Precio Vytria y ciclo diario"):
-        st.caption("Fuente operativa: Odoo tarifa 59, ES/EUR con IVA. Contraste con el precio publicado en "
-                   "PrestaShop pendiente. Vigencia máxima de los precios Vytria vigilados: 24 h.")
+        st.caption("Referencia: Odoo tarifa 59. Cuando el lector de PrestaShop está habilitado, "
+                   "la comparación usa su precio final vigente (ES/EUR con IVA), sin sustituirlo por Odoo "
+                   "ante una incidencia. Vigencia máxima: 24 h.")
         daily = st.toggle("Sincronizar Vytria antes de la vigilancia diaria", value=sync.auto_enabled,
                           key="watch_vytria_daily")
         if daily != sync.auto_enabled:
@@ -793,7 +794,7 @@ def _render_monitor(store: PriceComparatorStore, names: dict[str, str], *, advan
                 f"{'activa' if schedule_enabled() else 'desactivada'} "
                 "(PRICE_MONITOR_SCHEDULE_ENABLED); la localización usa su propia planificación."
             )
-        approved_sync = st.checkbox("Autorizo la lectura supervisada de Odoo para los EAN vigilados",
+        approved_sync = st.checkbox("Autorizo la lectura supervisada de precios Vytria para los EAN vigilados",
                                     key="watch_vytria_approved")
         if st.button("Sincronizar solo Vytria vigilados", disabled=not approved_sync or sync.is_running(),
                      key="watch_vytria_sync"):

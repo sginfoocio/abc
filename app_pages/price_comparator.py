@@ -17,6 +17,7 @@ from app_pages.price_options import ordered, product_eans
 from cloud_design import page_title
 from competitor_requirements import requirement_for
 import price_analytics as analytics
+import prestashop_prices
 from price_comparator import (
     RETENTION_MONTHS_OPTIONS, PriceComparatorStorageError, PriceComparatorStore, exclusion_reason,
 )
@@ -166,9 +167,9 @@ def _watch_running_competitors(scheduler: CompetitorScheduler) -> None:
 def _render_vytria_prices(store: PriceComparatorStore) -> None:
     sync = _make_sync(store)
     st.subheader("Precio de venta Vytria")
-    st.caption("Fuente: Odoo, tarifa 59 (Vytria España, EUR). El precio ya incluye IVA y descuentos de la tarifa; "
-               "no se recalcula ni se le suma IVA. Integración de solo lectura. "
-               "Contraste directo con PrestaShop: pendiente (no validado).")
+    st.caption("Odoo, tarifa 59 (España, EUR), es la referencia con IVA y descuentos de tarifa. "
+               "Una oferta adicional de PrestaShop no es un error de Odoo.")
+    _render_native_prices(store, prices)
     last = sync.last_run()
     prices = sync.prices()
     confirmed = int(prices["usable"].sum()) if not prices.empty else 0
@@ -200,12 +201,11 @@ def _render_vytria_prices(store: PriceComparatorStore) -> None:
     )
     st.dataframe(table[["brand", "commercial_name", "ean", "price", "currency", "iva", "vat_rate", "source",
                         "synced_at", "validation", "validation_detail", "stale_reason"]].rename(columns={
-        "brand": "Marca", "commercial_name": "Producto", "ean": "EAN", "price": "Precio actual",
+        "brand": "Marca", "commercial_name": "Producto", "ean": "EAN", "price": "Precio Odoo",
         "currency": "Moneda", "iva": "IVA", "vat_rate": "IVA %", "source": "Origen",
         "synced_at": "Última sincronización", "validation": "Validación", "validation_detail": "Detalle", "stale_reason": "Incidencia",
     }), width="stretch", hide_index=True)
-    st.caption("Precio promocional: no aplica; la tarifa 59 ya incorpora los descuentos. "
-               "Disponibilidad: no proviene de esta fuente.")
+    st.caption("Disponibilidad: no proviene de estas fuentes de precio.")
     issues = sync.last_issues()
     if issues:
         with st.expander(f"Productos sin precio confirmado en la última sincronización ({len(issues)})"):
@@ -230,6 +230,47 @@ def _render_vytria_prices(store: PriceComparatorStore) -> None:
                            "plantilla_precios_vytria.xlsx", XLSX_MIME)
 
 
+def _render_native_prices(store: PriceComparatorStore, prices: pd.DataFrame) -> None:
+    with store._connect() as con:
+        scope = prestashop_prices.watched_scope(con)
+        quotes = {r["ean"]: dict(r) for r in con.execute("SELECT * FROM prestashop_prices")}
+    active = prestashop_prices.enabled()
+    if not active:
+        st.info("Lectura de PrestaShop desactivada. Sin lectura previa se mantiene la referencia habitual; "
+                "si ya existe una lectura, no se sustituye por Odoo.")
+    if not scope:
+        return
+    st.caption("La comparación usa el precio final de Vytria cuando la lectura está vigente. "
+               "Si falta o falla, se conserva la última lectura sin utilizarla como vigente.")
+    odoo = prices.set_index("ean")["price"].to_dict()
+    now = datetime.now(timezone.utc)
+    rows = []
+    for ean in sorted(scope):
+        quote = quotes.get(ean)
+        payload = json.loads(quote["payload"]) if quote and quote["payload"] else {}
+        offer = payload.get("offer")
+        price = payload.get("price")
+        alternative = payload.get("other_calibres", {})
+        issue = quote["issue"] if quote else "Sin lectura de PrestaShop"
+        if quote and payload and not issue and not prestashop_prices.usable(quote, now):
+            issue = "Lectura caducada o con fecha inválida"
+        used = ("Precio final en Vytria" if payload and not issue else
+                "Sin precio comparable" if quote or active else "Operativa anterior")
+        if any(other != price for other in alternative.values()):
+            difference = ", ".join(f"combinación {key}: {value} €" for key, value in alternative.items())
+            issue = " · ".join(filter(None, (issue, f"Diferencia entre calibres: {difference}")))
+        rows.append({
+            "EAN": ean, "Precio Odoo": odoo.get(ean), "Precio final en Vytria": float(price) if price else None,
+            "Oferta aplicada": offer["reference"] if offer else "Sin oferta" if payload else "—",
+            "Última actualización": quote["observed_at"] if quote else None,
+            "Precio usado en comparación": used, "Incidencia": issue,
+        })
+    st.dataframe(pd.DataFrame(rows), column_config={
+        column: st.column_config.NumberColumn(format="%.2f €")
+        for column in ("Precio Odoo", "Precio final en Vytria")
+    }, width="stretch", hide_index=True)
+
+
 def _render_actions(store: PriceComparatorStore) -> None:
     """The two data refreshes are independent from the comparison, which only reads stored data."""
     sync, scheduler = _make_sync(store), _make_scheduler(store)
@@ -238,8 +279,8 @@ def _render_actions(store: PriceComparatorStore) -> None:
     left, right = st.columns(2)
     with left:
         running = sync.is_running()
-        if st.button("Sincronizar precios Vytria desde Odoo", key="sync_vytria_prices", disabled=running,
-                     help="Lee la tarifa 59 de Odoo (solo lectura)."):
+        if st.button("Sincronizar precios Vytria", key="sync_vytria_prices", disabled=running,
+                     help="Lee Odoo y, si está habilitado, PrestaShop para los EAN vigilados (solo lectura)."):
             _launch(_run_sync, sync)
             st.rerun()
     with right:
