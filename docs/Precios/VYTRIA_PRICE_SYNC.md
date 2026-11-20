@@ -16,28 +16,52 @@ mostró EAN `8056597435581`, calibre 49, país `ES` (6), moneda `EUR` (1),
 tienda `Vytria` (1) y `is_logged=false`. La ficha publicó **232,05 €**,
 también en `product:price:amount`, y mostró **273,00 €** como precio anterior.
 El producto público indicado es `498`; el `68` del selector es un valor de
-atributo, no el ID de la combinación. La página no identifica `427094`, ni
-confirma el grupo fiscal, cómo se aplicó el IVA o qué representan los 225,62 €.
+atributo, no el ID de la combinación.
 El importe público no se usa como semilla, ni esta URL se usa como lector automático.
 
-**Antes de habilitar:** no se facilitó la conexión MySQL ni se confirmó una
-salida existente del motor para esta instalación. El lector está preparado para
+**Contraste MySQL (2026-11-20):** MariaDB 11.8.10, esquema de PrestaShop
+8.2.1 (`PS_VERSION_DB`), prefijo `ps_`, una tienda activa (Vytria, ID 1).
+El grupo anónimo es **Visitante (1)**, no Invitado (2); muestra IVA y no tiene
+reducción de grupo. País 6, moneda 1, cliente y carrito 0, una unidad,
+geografía fiscal española por dirección de entrega. Para este artículo el
+grupo fiscal 63 aplica el 21 % a España, sin restricciones de estado o código
+postal. La combinación `9367` (calibre 49) repite el EAN del producto `498`,
+con impacto de precio cero. Las 8 unidades observadas en stock se comprueban
+por separado; la oferta no impone un límite de unidades.
+
+`427094` es `id_specific_price`, no ID de producto, combinación ni regla de
+catálogo. Se aplica a la combinación `9367`, España/EUR, cualquier tienda,
+grupo o cliente, sin carrito, mínimo 1, vigencia abierta. Su precio fijo
+`225.619800` es **sin IVA y antes** de la reducción porcentual de `0.15`.
+También era elegible la regla de catálogo global 35 (fila `8593775`), con
+15 % pero sin precio fijo. Según [PrestaShop 8.2.1](https://github.com/PrestaShop/PrestaShop/blob/8.2.1/classes/SpecificPrice.php),
+la combinación exacta se ordena antes que la genérica; no se acumulan.
+No hay prioridad particular para 498; la configuración general ordena
+grupo, moneda, país y tienda después del cliente. El recálculo de contraste
+da `225.619800 × 1.21 = 273.00` y `225.619800 × 1.21 × 0.85 = 232.05`,
+redondeados a céntimos; coincide con la ficha. Esto no sustituye al motor nativo.
+
+Auditoría de los mismos 100 GTIN en tienda 1: 56 aparecen en la combinación y
+en su propio producto, 2 solo en combinación, 37 solo en un producto sin
+combinaciones y 5 no tienen coincidencia en las columnas auditadas. La
+repetición bajo el mismo producto no es ambigua cuando hay una sola
+combinación exacta; nunca se elige entre varios productos o varios calibres
+con el mismo GTIN.
+
+**Antes de habilitar:** el login MySQL de la auditoría cifra la conexión
+pero tiene permisos de escritura y no se debe reutilizar en el contenedor.
+La auditoría se ejecutó vía SSH exclusivamente en transacciones `READ ONLY`.
+No se encontró una vista ni rutina de precios disponible en el esquema;
+`actionPresentProduct` tiene al menos un módulo activo, y MySQL por sí solo
+no acredita el código activo, los overrides ni su efecto sobre precios.
+El lector está preparado para
 una relación MySQL de solo lectura (vista o instantánea existente, que deberá
 conectar el responsable de PrestaShop con el cálculo nativo). No hay cálculo
 SQL aproximado, nuevo endpoint ni cambios en PrestaShop en este trabajo.
 
-1. Con el usuario existente, revisar `SELECT VERSION()` (servidor MySQL),
-   `INFORMATION_SCHEMA.COLUMNS` (prefijo/esquema) y la versión de la aplicación
-   (administración o configuración de PrestaShop). Verificar `product[_shop]`,
-   `product_attribute[_shop]`, `shop`, `country`, `currency`, `configuration`,
-   `specific_price`, `specific_price_priority`, `specific_price_rule`,
-   `tax_rules_group`/`tax_rule`/`tax` y módulos/hook/overrides de precios. Estas
-   son tablas candidatas, no un inventario confirmado. Comprobar `427094` por
-   separado en `id_product`, `id_product_attribute` e `id_specific_price`, y
-   cruzar con EAN, tienda y calibre; el mismo número puede existir en varias tablas.
-2. Confirmar con el administrador el grupo anónimo, el contexto fiscal ES
-   (incluidos criterio y ámbito geográfico de dirección, regla y tratamiento de
-   IVA), la tienda y moneda, y contrastar el resultado del motor con la ficha
+1. Identificar con el responsable una salida de solo lectura del motor de
+   producción y auditar los módulos, hooks y overrides activos.
+2. Con el contexto auditado arriba, contrastar el resultado del motor con la ficha
    anónima para el ejemplo antes de extenderlo a los restantes EAN. Verificar base
    e impacto de combinación, precio específico y regla de catálogo seleccionados,
    prioridades, fechas, cantidad y personalizaciones activas. No usar datos de

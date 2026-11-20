@@ -62,8 +62,10 @@ def test_reject_inapplicable_native_quotes(changes, reason):
 
 def test_ambiguous_ean_and_duplicate_source_rows_are_not_guessed():
     row = (EAN, json.dumps(quote()))
-    native = [(EAN, 498, 90, 0)]
-    for identities in (native + [(EAN[1:], 498, 91, 0)], [(EAN, 498, 0, 1)]):
+    native = [(EAN, 498, 90, 0), (EAN, 498, 0, 1)]
+    assert not isinstance(ps.resolve([EAN], native, [row], CONTEXT, NOW)[EAN], str)
+    for identities in (native + [(EAN[1:], 498, 91, 0)], native + [(EAN, 499, 0, 0)],
+                       [(EAN, 498, 0, 1)]):
         assert "ambiguo" in ps.resolve([EAN], identities, [row], CONTEXT, NOW)[EAN]
     assert "Varios" in ps.resolve([EAN], native, [row, row], CONTEXT, NOW)[EAN]
 

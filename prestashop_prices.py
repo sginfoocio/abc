@@ -194,6 +194,12 @@ def resolve(eans: list[str], identities: Iterable[tuple], rows: Iterable[tuple],
     results: dict[str, tuple[str, str, str] | str] = {}
     for ean in eans:
         matches = candidates[ean]
+        # This installation also stores the same barcode on many parent rows.
+        # An exact, unique combination under that same product is more specific.
+        if len({match[0] for match in matches}) == 1:
+            combinations = {match for match in matches if match[1]}
+            if combinations:
+                matches = combinations
         if not matches:
             results[ean] = "EAN no localizado en la tienda de PrestaShop"
         elif len(matches) != 1 or next(iter(matches))[2]:
