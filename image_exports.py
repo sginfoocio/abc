@@ -1,6 +1,6 @@
 """Bounded, on-demand exports of current repository images (not historical copies)."""
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 from io import BytesIO
 import json
@@ -134,6 +134,7 @@ class _RepositoryExportReader:
     repository: ImageRepository
     selected: list[ImageRecord]
     deadline: float
+    verified_pixels: dict[int, str] = field(default_factory=dict, init=False)
 
     @property
     def root(self) -> Path:
@@ -159,6 +160,7 @@ class _RepositoryExportReader:
         pixels = image_fingerprint(content)
         if record.pixels and pixels != record.pixels:
             raise ValueError(f"{record.ean}/{record.name}: huella visual incorrecta.")
+        self.verified_pixels[record.id] = pixels
         _before_deadline(self.deadline)
         return content
 
@@ -232,12 +234,19 @@ def _commercial_export_entries(reader, products, export_format, engine_factory, 
     )
     entries = []
     included = set()
+    views_by_photo = {}
     requested = {ean_key(ean): ean for ean in eans}
     for entry in plan.entries:
         key = (ean_key(entry.ean), entry.source_checksum)
-        if entry.market != export_format or key in included:
+        if entry.market != export_format:
             continue
         code = requested[ean_key(entry.ean)]
+        if expected_variants is not None:
+            photo = (key[0], reader.verified_pixels[entry.source_id])
+            if views_by_photo.setdefault(photo, entry.view) != entry.view:
+                raise ValueError(f"{code}: la misma fotografía acredita vistas incompatibles; requiere revisión.")
+        if key in included:
+            continue
         name = f"{export_format}/{code}/{Path(entry.relative_path).name}"
         if any(previous.casefold() == name.casefold() for previous, _, _ in entries):
             raise ValueError(f"{code}: colision de nombres comerciales; requiere revision.")

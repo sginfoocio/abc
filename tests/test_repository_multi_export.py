@@ -141,6 +141,28 @@ def test_contextual_commercial_preview_blocks_incomplete_or_wrong_variant(reposi
             pytest.fail("No debe admitir otra variante")
 
 
+@pytest.mark.parametrize("with_catalog_fingerprint", [True, False])
+def test_contextual_commercial_rejects_conflicting_views_across_equivalent_codes(
+    repository, engine, monkeypatch, with_catalog_fingerprint,
+):
+    monkeypatch.setenv("IMAGE_REPOSITORY_STATE_ROOT", str(repository.state_root))
+    front = save(repository, view="frontal")
+    alternate_encoding = BytesIO()
+    with Image.open(front.path) as image:
+        image.save(alternate_encoding, format="PNG", compress_level=0)
+    perspective = save(repository, ean=EAN, view="perspectiva", content=alternate_encoding.getvalue())
+    save(repository, view="lateral", seed=3)
+    assert front.checksum != perspective.checksum and front.pixels == perspective.pixels
+    if not with_catalog_fingerprint:
+        with repository.connect() as connection:
+            connection.execute("UPDATE assets SET pixels=NULL WHERE checksum=?", (perspective.checksum,))
+    with pytest.raises(ValueError, match="misma fotografía"):
+        with exports.prepare_repository_zip(ReadOnlyImageRepository(repository.root), [EAN], role="admin",
+                                            export_format="Farfetch", engine_factory=lambda: engine,
+                                            expected_variants={EAN: 0}, preview_only=True):
+            pytest.fail("V1 y V2 no se pueden acreditar con la misma fotografía")
+
+
 def test_scoped_preview_checks_other_eans_without_scanning_files(repository, monkeypatch):
     monkeypatch.setenv("IMAGE_REPOSITORY_STATE_ROOT", str(repository.state_root))
     record = save(repository)
