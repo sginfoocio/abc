@@ -49,7 +49,8 @@ combinación exacta; nunca se elige entre varios productos o varios calibres
 con el mismo GTIN.
 
 **Antes de habilitar:** el login MySQL de la auditoría cifra la conexión
-pero tiene permisos de escritura y no se debe reutilizar en el contenedor.
+pero todavía tiene permisos de escritura; no se debe usar en el contenedor
+hasta retirarlos y verificar los permisos efectivos del mismo login.
 La auditoría se ejecutó vía SSH exclusivamente en transacciones `READ ONLY`.
 El lector por lotes no necesita vista, rutina ni API. Abre una conexión,
 verifica los permisos, y lee en una instantánea `REPEATABLE READ`, `READ ONLY`.
@@ -62,19 +63,29 @@ territorial/compuesto, ecotasa y configuraciones o módulos no soportados.
    (`actionPresentProduct`) y `revolutpayment` (`displayProductPriceBlock`).
    Los contrastes de ficha no prueban su comportamiento para todo el catálogo.
    Solo tras confirmar su efecto, establecer `PRESTASHOP_PRICE_CODE_AUDITED=1`.
-2. Provisionar, sin tocar el usuario compartido, un usuario dedicado con
-   `SELECT` sobre las tablas consultadas por el lector: `product[_shop]`,
+2. Confirmar con el administrador si `ps_user_vytria_lect` se comparte con
+   otros procesos antes de cambiar sus permisos. Si no depende de la escritura,
+   retirar los privilegios sobrantes en la entrada exacta `usuario@host`
+   devuelta por `CURRENT_USER()`, dejando `SELECT` solo sobre las tablas
+   que consulta el lector: `product[_shop]`,
    `product_attribute[_shop]`, `manufacturer`, `shop`, `shop_group`, `stock_available`, `country`, `currency`, `group`,
    `configuration`, `hook`, `hook_module`, `module`, `group_reduction`,
    `tax_rule`, `tax`, `specific_price` y `specific_price_priority` (prefijo real).
-   El lector rechaza privilegios adicionales o delegables; la auditoría vía SSH
-   no acredita la conectividad del contenedor.
+   Comprobar `SHOW GRANTS`, `APPLICABLE_ROLES` y `ENABLED_ROLES`; no validar
+   los permisos intentando escribir. El lector rechaza concesiones de roles,
+   permisos adicionales y permisos delegables.
 3. Inyectar por el gestor de secretos aprobado en el entorno del proceso
    `PRESTASHOP_MYSQL_HOST`, `_PORT` (3306 si se omite), `_DATABASE`, `_USER`,
-   `_PASSWORD`, `_SSL_CA` (ruta al certificado CA) y `_PREFIX`.
+   `_PASSWORD` y `_PREFIX`. No montar ni copiar el perfil MySQL del usuario SSH.
    Aquí los nombres abreviados comparten el prefijo `PRESTASHOP_MYSQL`.
-   Usar TLS con verificación de identidad, permisos exclusivamente `SELECT` sobre
-   los objetos necesarios y transacciones `READ ONLY`. Configurar los IDs
+   El modo predeterminado `PRESTASHOP_MYSQL_SSL_MODE=VERIFY_IDENTITY` exige
+   `PRESTASHOP_MYSQL_SSL_CA` (ruta a la CA) y un nombre de servidor verificable.
+   Sin CA y nombre verificables, configurar explícitamente `REQUIRED` (TLS
+   obligatorio, **sin validar la identidad del servidor**). No hay degradación
+   a texto claro. El lector comprueba `Ssl_cipher` antes de consultar precios.
+   Desde el entorno del lector, comprobar `SELECT CURRENT_USER(), DATABASE()`
+   y `SHOW SESSION STATUS LIKE 'Ssl_cipher'` por separado del smoke sin red.
+   Configurar los IDs
    confirmados `PRESTASHOP_PRICE_SHOP_ID`, `_GROUP_ID`, `_COUNTRY_ID`,
    `_CURRENCY_ID` (prefijo `PRESTASHOP_PRICE`). Solo después de validar la
    instalación y obtener aprobación, `PRESTASHOP_PRICE_ENABLED=1`.

@@ -1,10 +1,12 @@
 import json
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from unittest.mock import MagicMock
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pytest
+import pymysql
 from pymysql import OperationalError
 
 import prestashop_prices as ps
@@ -19,6 +21,62 @@ CONTEXT = {"shop_id": 1, "group_id": 2, "country_id": 6, "currency_id": 1,
            "tax_included": True, "shipping_included": False, "cart_discount": False}
 OPEN = "0000-00-00 00:00:00"
 PRIORITY = "id_group;id_currency;id_country;id_shop"
+
+
+@pytest.mark.parametrize(("mode", "ca"), [
+    (None, None), ("PREFERRED", None), ("DISABLED", None), ("REQUIRED", "ca.pem"),
+])
+def test_mysql_rejects_missing_or_unsafe_tls_settings(monkeypatch, mode, ca):
+    for key, value in [("PRESTASHOP_MYSQL_SSL_MODE", mode), ("PRESTASHOP_MYSQL_SSL_CA", ca)]:
+        if value is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, value)
+    with pytest.raises(ps.QuoteError, match="Configurar TLS"):
+        ps._mysql_tls_options()
+
+
+@pytest.mark.parametrize("mode", ["REQUIRED", "VERIFY_IDENTITY"])
+def test_mysql_configures_driver_for_mandatory_tls(monkeypatch, mode):
+    monkeypatch.setenv("PRESTASHOP_MYSQL_SSL_MODE", mode)
+    monkeypatch.delenv("PRESTASHOP_MYSQL_SSL_CA", raising=False)
+    if mode == "VERIFY_IDENTITY":
+        monkeypatch.setenv("PRESTASHOP_MYSQL_SSL_CA", "test-ca.pem")
+        assert ps._mysql_tls_options() == {
+            "ssl_ca": "test-ca.pem", "ssl_verify_cert": True, "ssl_verify_identity": True}
+    else:
+        con = pymysql.connect(defer_connect=True, **ps._mysql_tls_options())
+        assert con._ssl_required and not con.ctx.check_hostname
+
+
+@pytest.mark.parametrize(("cipher", "grant", "error"), [
+    ("", "GRANT SELECT ON db.* TO reader", "no tiene TLS activo"),
+    ("AES", "GRANT SELECT, INSERT ON db.* TO reader", "exclusivamente de lectura"),
+    ("AES", "GRANT SELECT ON db.* TO reader WITH GRANT OPTION", "exclusivamente de lectura"),
+    ("AES", "GRANT price_role TO reader", "exclusivamente de lectura"),
+    ("AES", "GRANT SELECT ON db.* TO reader", None),
+])
+def test_mysql_validates_session_before_reading_prices(monkeypatch, cipher, grant, error):
+    for key in ("HOST", "USER", "PASSWORD", "DATABASE"):
+        monkeypatch.setenv(f"PRESTASHOP_MYSQL_{key}", "test")
+    monkeypatch.setenv("PRESTASHOP_MYSQL_SSL_MODE", "REQUIRED")
+    monkeypatch.delenv("PRESTASHOP_MYSQL_SSL_CA", raising=False)
+    con = MagicMock()
+    cur = con.cursor.return_value.__enter__.return_value
+    cur.fetchone.return_value = ("Ssl_cipher", cipher)
+    cur.fetchall.return_value = [("GRANT USAGE ON *.* TO reader",), (grant,)]
+    monkeypatch.setattr(pymysql, "connect", lambda **kwargs: con)
+    read_batch = MagicMock(return_value=([], []))
+    monkeypatch.setattr(ps, "read_batch", read_batch)
+    if error:
+        with pytest.raises(ps.QuoteError, match=error):
+            ps._mysql_rows([EAN], CONTEXT)
+        read_batch.assert_not_called()
+    else:
+        assert ps._mysql_rows([EAN], CONTEXT) == ([], [])
+        cur.execute.assert_called_with("START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY")
+        read_batch.assert_called_once_with(cur, [EAN], CONTEXT)
+    con.close.assert_called_once()
 
 
 def rule(sid=5, aid=0, rule_id=0, shop=0, currency=0, country=0, group=0, quantity=1,

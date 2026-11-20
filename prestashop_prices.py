@@ -102,19 +102,34 @@ def _identifier(variable: str, suffix: str) -> str:
     return f"`{value}{suffix}`"
 
 
+def _mysql_tls_options() -> dict:
+    mode = os.getenv("PRESTASHOP_MYSQL_SSL_MODE", "VERIFY_IDENTITY")
+    ca = os.getenv("PRESTASHOP_MYSQL_SSL_CA")
+    if mode == "VERIFY_IDENTITY" and ca:
+        return {"ssl_ca": ca, "ssl_verify_cert": True, "ssl_verify_identity": True}
+    if mode == "REQUIRED" and not ca:
+        # A nonempty SSL options dict makes PyMySQL require TLS before authentication.
+        return {"ssl": {"check_hostname": False, "verify_mode": False}}
+    raise QuoteError("Configurar TLS de MySQL: VERIFY_IDENTITY con CA o REQUIRED explícito sin CA")
+
+
 def _mysql_rows(eans: list[str], context: dict) -> tuple[list[tuple], list[tuple]]:
     import pymysql
 
     try:
         config = {name: os.environ[f"PRESTASHOP_MYSQL_{key}"] for name, key in (
             ("host", "HOST"), ("user", "USER"), ("password", "PASSWORD"),
-            ("database", "DATABASE"), ("ssl_ca", "SSL_CA"))}
+            ("database", "DATABASE"))}
         port = int(os.getenv("PRESTASHOP_MYSQL_PORT", "3306"))
     except (KeyError, ValueError):
-        raise QuoteError("Falta configurar la conexión MySQL de solo lectura y su CA") from None
-    with closing(pymysql.connect(**config, port=port, ssl_verify_cert=True, ssl_verify_identity=True,
+        raise QuoteError("Falta configurar la conexión MySQL de solo lectura") from None
+    with closing(pymysql.connect(**config, port=port, **_mysql_tls_options(),
                                  connect_timeout=5, read_timeout=15, write_timeout=15,
                                  charset="utf8mb4")) as con, con.cursor() as cur:
+        cur.execute("SHOW SESSION STATUS LIKE 'Ssl_cipher'")
+        cipher = cur.fetchone()
+        if not cipher or not cipher[1]:
+            raise QuoteError("La sesión MySQL de PrestaShop no tiene TLS activo")
         cur.execute("SHOW GRANTS")
         for (grant,) in cur.fetchall():
             if not re.match(r"^GRANT (USAGE|SELECT) ON ", grant) or "WITH GRANT OPTION" in grant:
