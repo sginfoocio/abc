@@ -121,3 +121,27 @@ Rollback de código: revertir la corrección mediante PR; no hay migración de b
 `ImageRepository.save` escribe de forma atómica con verificación SHA-256 y sin sobrescribir; el núcleo solo escribe en
 el NAS por ahí. Las miniaturas las genera la biblioteca existente (test: original byte a byte intacto).
 
+## Panel de pedidos de solo lectura (P0.1)
+
+En Cloud, un administrador puede abrir `/proveedores-imagenes`, elegir proveedor y fechas y pulsar
+**Consultar pedidos de Odoo**. La apertura de la pantalla no consulta Odoo ni portales. La última página y sus
+verificaciones quedan en la sesión administrativa; filtrar, paginar la tabla y desplegar el detalle no vuelve a
+consultar Odoo. **Consultar siguiente página de Odoo** es una consulta explícita; el resumen y los filtros se
+aplican a la página adquirida, no a todos los pedidos del intervalo.
+
+- La consulta acepta un intervalo máximo de 366 días (Madrid), hasta 50 pedidos o 2.000 líneas por página.
+  Los pedidos que superan el presupuesto de líneas se pueden continuar en la página siguiente. Su cobertura
+  global no se declara completa utilizando solo una parte de sus referencias.
+- Se incluyen todos los estados de compra. Solo se buscan proveedores con asociación comercial confirmada.
+  Kering también puede usar la asociación de su configuración actual. No se asignan proveedores por marca.
+- Las vistas técnicas son frontal, lateral y perspectiva. Se verifica el archivo original mediante checksum y
+  huella, y se cuenta una sola vez por foto. Detalle, `lifestyle` y otras fotos no completan vistas técnicas.
+  Se distingue un catálogo no disponible de un catálogo sin registros. La verificación de archivos tiene un
+  presupuesto por página; los resultados no comprobados se identifican como tales.
+- El historial se vincula mediante identidad del pedido en Kering y evidencia de pedido/proveedor/fecha/SKU/EAN
+  en solicitudes asistidas. No se vinculan entregas Luxottica por coincidencia de EAN o por recibos globales.
+  Cuando no se puede acreditar un vínculo, se muestra **Sin historial disponible**.
+- **Abrir imágenes del producto** lleva a la biblioteca en contexto de solo lectura, sin inicializar el almacén
+  normal ni escribir miniaturas. Los accesos anteriores permanecen; las herramientas por proveedor se abren
+  deliberadamente desde **Herramientas existentes de los proveedores** y no forman parte del recorrido P0.1.
+
