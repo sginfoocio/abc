@@ -174,9 +174,9 @@ En el grid de revisión manual se puede combinar filtros de competidor, marca, m
 
 La confirmación individual («Confirmar ficha y actualizar precio») o múltiple requiere motivo explícito y revalida el snapshot de cada candidata. Responsable, decisión, fecha, URL y solicitud durable de lectura se registran atómicamente. La acción múltiple se limita a las filas seleccionadas; las candidatas cambiadas o ya resueltas se excluyen y se explican sin perder el resultado de las demás.
 
-El trabajador persistente existente recoge las solicitudes manuales, también entre ciclos diarios, y las procesa con `PriceMonitor.run` y los mismos bloqueos, permisos, robots, pausas, reservas y presupuestos compartidos. Una interrupción deja la solicitud recuperable; la reserva evita ejecuciones concurrentes o duplicadas. Las restricciones vigentes (`not_before`, bloqueos y límites) pueden aplazar la lectura y se muestran como estado y motivo.
+El trabajador persistente existente recoge primero las solicitudes manuales en cada ciclo, también entre ciclos diarios, y las procesa con `PriceMonitor.run` y los mismos bloqueos, permisos, robots, pausas, reservas y presupuestos compartidos. El bloqueo global de continuidad solo protege la comprobación y reserva; cada par conserva su exclusión mutua durante la lectura, incluso mientras se libera el bloqueo global para HTTP. Si otro trabajador tiene reservado el mismo par, la solicitud queda aplazada 30 segundos, sin consumir intentos comerciales y con la hora del siguiente intento visible. La repetición usa el mismo ID; no crea otra solicitud.
 
-Aceptar confirma únicamente la identidad revisada; no acredita oferta, precio, stock ni comparabilidad. La lectura posterior conserva el comportamiento comercial normal: identidad sin contradicciones, precio válido, moneda/mercado e IVA configurados, disponibilidad y vigencia. Si la lectura falla, la aceptación permanece con su motivo pendiente; si descubre una contradicción de identidad, no registra esa oferta comparable y la ficha vuelve a revisión. No se modifican frecuencias generales ni se reprograman otros pares.
+Aceptar confirma únicamente la identidad revisada; no acredita oferta, precio, stock ni comparabilidad. La lectura conserva el comportamiento comercial normal: identidad sin contradicciones, precio válido, moneda/mercado e IVA configurados, disponibilidad y vigencia. Antes de HTTP se reutiliza una lectura guardada solo si la URL y la identidad son compatibles, su fecha y vigencia están acreditadas y la política comercial vigente sigue coincidiendo. La reevaluación local conserva la fecha original. Si falta una lectura utilizable, el mismo trabajo prioritario la obtiene por el monitor gobernado. Si la lectura falla, la aceptación permanece con su motivo pendiente; si descubre una contradicción de identidad, no registra esa oferta comparable y la ficha vuelve a revisión. No se modifican frecuencias generales ni se reprograman otros pares.
 
 En continuidad, cada lectura manual usa el contexto del único par autorizado y comprueba el manifiesto de
 100 EAN y 14 competidores, el estado activo, la decisión y la URL exacta. No sigue redirecciones a otra URL
@@ -184,18 +184,27 @@ ni admite una variante extraída con URL distinta. La reserva histórica del pil
 prolonga. El calibre, incluido el ausente, no cambia el precio del mismo modelo y color.
 
 Las confirmaciones nuevas conservan una instantánea de identidad, sin vincular el calibre. Las solicitudes
-anteriores de pares de continuidad no se ejecutan hasta su autorización auditada. Una muestra ya guardada
-solo se reutiliza si se acredita la misma ficha, su fecha posterior a la solicitud y su vigencia; se conserva
-su fecha original. Cuando una interrupción deja una reserva o petición sin muestra, o el orden temporal no
-puede acreditarse, se bloquea para revisión en lugar de repetir HTTP. Los recibos nuevos se atribuyen al ID
-de solicitud. La importación de la muestra y su marca de idempotencia se guardan en la misma transacción,
-para que una interrupción posterior no cuente dos veces la observación. La tabla de la interfaz muestra las
-últimas 100 filas; su CSV exporta todas.
+anteriores de pares de continuidad no se ejecutan hasta su autorización auditada. Una muestra guardada puede
+ser anterior a la aprobación: se reutiliza localmente solo si acredita la misma identidad y URL, conserva una
+vigencia actual y sus datos comerciales siguen siendo compatibles; la reevaluación no renueva su fecha. Una
+lectura compartida por URL puede reutilizar el precio para el mismo modelo y color cuando la identidad es
+exacta, pero nunca transfiere EAN, variante, talla ni disponibilidad de stock entre productos; esos datos
+requieren evidencia específica del par. Cuando una interrupción deja una reserva o petición sin muestra, o el
+orden temporal no puede acreditarse, se bloquea para revisión en lugar de repetir HTTP. Los recibos nuevos se
+atribuyen al ID de solicitud. La importación de la muestra y su marca de idempotencia se guardan en la misma
+transacción. Las peticiones de robots se conservan en los recibos y presupuestos, pero no incrementan los
+intentos comerciales de la ficha. Cada muestra nueva tiene un identificador persistido y conserva su contenido y fecha reales;
+reprocesar ese identificador no cuenta otra observación, mientras que una renovación distinta sí queda
+registrada aunque el precio no cambie. Las marcas anteriores se conservan y migran con su fecha y huella;
+no se inventa el contenido que no estaba guardado. Si el proceso cae tras reservar o recibir HTTP pero antes
+de guardar una muestra, no es posible demostrar el resultado: se bloquea para reconciliación, no se afirma
+«exactamente una vez» ni se reenvía automáticamente. La tabla muestra ID, resultado y detalle; un aplazamiento
+incluye el próximo intento. Su CSV exporta todas las filas.
 
 #### Recuperación supervisada después del despliegue
 
-No se aceptan de nuevo las fichas ni se crean solicitudes. Tras instalar la versión y sus migraciones,
-usar la base existente del comparador y generar una vista previa de **todas** las solicitudes:
+No se aceptan de nuevo las fichas. Tras instalar la versión y sus migraciones, usar la base existente
+del comparador y generar una vista previa de las solicitudes y las aprobaciones actuales sin solicitud:
 
 ```bash
 python price_recovery.py --database RUTA_BASE --manual-reviews
@@ -204,20 +213,46 @@ python price_recovery.py --database RUTA_BASE --manual-reviews
 El JSON incluye cantidades y filas `recoverable`, `already_resolved` y `excluded`, con motivo. Es una
 fotografía local: permisos, presupuestos y estado pueden cambiar y se vuelven a comprobar al aplicar y
 al consultar. Se excluyen identidades históricas que no puedan acreditarse, restricciones vigentes y
-reservas inciertas. Si falta robots vigente, el trabajador lo comprobará antes de cualquier ficha.
+reservas inciertas. `approvals_without_request` añade las fichas actualmente marcadas como verificadas
+por usuario que no tienen solicitud para esa aprobación, con URL, fecha, ID de auditoría, lectura,
+estado del monitor, acción y motivo. Se excluyen identidades históricas que no puedan acreditarse,
+contradicciones, aprobaciones sustituidas, reservas inciertas y controles vigentes. No incluye fichas
+eliminadas. Si falta robots vigente, el trabajador lo comprobará antes de cualquier ficha.
 
-Primero, con aprobación expresa, seleccionar **una** solicitud elegible de la vista previa:
+Guardar la vista previa y congelar los IDs elegibles con su evidencia. Primero, con aprobación expresa,
+seleccionar **una** solicitud elegible por mecanismo de la vista previa:
 
 ```bash
 python price_recovery.py --database RUTA_BASE --manual-reviews --apply --approved \
   --request-id ID --actor RESPONSABLE --note MOTIVO --commit COMMIT_COMPLETO
 ```
 
+Para una aprobación vigente sin solicitud, usar su `approval_id` de la vista previa en lugar del ID de
+solicitud:
+
+```bash
+python price_recovery.py --database RUTA_BASE --manual-reviews --apply --approved \
+  --approval-id ID_AUDITORIA --actor RESPONSABLE --note MOTIVO --commit COMMIT_COMPLETO
+```
+
+La aplicación revalida el manifiesto, aprobación, evento, producto y controles en una transacción;
+conserva el actor, motivo y fecha de la aprobación original y registra el responsable de recuperación
+por separado. Devuelve `approval_results` con el ID de solicitud creado o reutilizado y el motivo de
+cualquier exclusión. No confirma de nuevo la ficha ni hace HTTP. Una muestra vigente se conserva con
+su fecha original; si ya hay una lectura en curso, la solicitud espera su resultado. Las solicitudes
+de una aprobación distinta se excluyen si están activas, sin duplicarlas. Una interrupción con reserva
+incierta queda bloqueada para reconciliación, no se reenvía automáticamente.
+
 Comprobar el par, la URL, los recibos `access_requests` con propósito `manual_review:ID`, el resultado y
-su fecha. Solo después, repetir la vista previa y, si procede, aplicar al resto elegible omitiendo
-`--request-id`. La aplicación bloquea cola, continuidad y competidores, vuelve a evaluar el inventario,
+su fecha, precio, mercado, IVA y disponibilidad; verificar si realmente aparece en la comparativa. Una
+reevaluación local debe conservar su fecha y consumir cero HTTP. Repetir la acción y comprobar que no haya
+solicitudes, importaciones ni recibos duplicados. Solo después, repetir la vista previa y, si procede,
+aplicar al resto congelado en lotes acotados, pasando cada ID mediante `--request-id` o `--approval-id`
+repetido; nunca omitir los selectores para incorporar automáticamente solicitudes nuevas. La aplicación bloquea cola, continuidad y
+competidores, vuelve a evaluar el inventario,
 audita responsable, motivo, commit y estado anterior, y no hace HTTP. Repetirla no vuelve a encolar ni
-crea autorizaciones adicionales. Pausa, parada, condiciones comerciales y presupuestos siguen vigentes;
+crea autorizaciones adicionales. Si alguna prueba falla, detener ese mecanismo. Pausa, parada, condiciones
+comerciales y presupuestos siguen vigentes;
 no se reinician intentos, fechas de solicitud ni restricciones.
 
 ### Prueba funcional (`tests/test_price_locator.py`)

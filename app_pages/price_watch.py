@@ -611,13 +611,14 @@ def _render_locator(store: PriceComparatorStore, names: dict[str, str], *, advan
             if decision:
                 row = indexed.loc[job_id]
                 try:
-                    locator.review(row["ean"], row["competitor_id"], row["url"], accept=decision == "accept",
-                                   actor=_actor(), note=note, update_price=decision == "accept",
-                                   expected_candidate=_review_expected_candidate(row, job_id=job_id))
+                    refresh_id = locator.review(
+                        row["ean"], row["competitor_id"], row["url"], accept=decision == "accept",
+                        actor=_actor(), note=note, update_price=decision == "accept",
+                        expected_candidate=_review_expected_candidate(row, job_id=job_id))
                     st.session_state["manual_review_action_results"] = [{
                         "ID": int(job_id), "EAN": row["ean"], "Competidor": row["competitor"],
-                        "Resultado": ("Ficha aceptada; lectura inmediata en cola" if decision == "accept"
-                                      else "Ficha descartada"),
+                        "Resultado": (f"Ficha aprobada · lectura {refresh_id} en cola"
+                                      if decision == "accept" else "Ficha descartada"),
                     }]
                 except (ValueError, sqlite3.Error) as exc:
                     st.session_state["manual_review_action_results"] = [{
@@ -644,16 +645,21 @@ def _render_locator(store: PriceComparatorStore, names: dict[str, str], *, advan
                            monitor.review_refreshes(limit=None).to_csv(index=False).encode("utf-8-sig"),
                            "solicitudes-lectura-manual.csv", "text/csv", key="review_refresh_export")
         progress = progress.copy()
-        progress["Resultado"] = progress.apply(
-            lambda row: ("Oferta comparable" if pd.notna(row["eligible"]) and bool(row["eligible"])
-                         else "No comparable")
-            if row["status"] == "done" else {
-                "pending": "Ficha aceptada · lectura pendiente",
-                "running": "Ficha aceptada · leyendo",
-                "deferred": "Aplazada por control",
-                "blocked": "Aceptada · bloqueada",
-                "error": "Error / revisión de identidad",
-            }.get(row["status"], row["status"]), axis=1)
+        def _refresh_status(row):
+            if row["status"] == "done":
+                return ("Lectura terminada · consultar vigencia y comparador"
+                        if pd.notna(row["eligible"]) and bool(row["eligible"])
+                        else "Lectura terminada · no comparable")
+            if row["status"] == "deferred":
+                return f"Aplazado · próximo intento {row['retry_at'] or 'pendiente'}"
+            return {
+                "pending": "Ficha aprobada · esperando lectura",
+                "running": "Lectura en curso",
+                "blocked": "Aprobada · bloqueada",
+                "error": "Error técnico / identidad: revisar el detalle",
+            }.get(row["status"], row["status"])
+
+        progress["Resultado"] = progress.apply(_refresh_status, axis=1)
         st.dataframe(progress[["id", "ean", "brand", "model", "color", "competitor", "url", "actor",
                               "reason", "Resultado", "detail", "http_requests", "requested_at", "retry_at"]]
                      .rename(columns={"id": "Lectura", "ean": "EAN", "brand": "Marca", "model": "Modelo",

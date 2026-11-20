@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -20,6 +20,7 @@ import os
 import time
 from typing import AbstractSet, Callable
 from urllib.parse import parse_qsl, urlparse
+from uuid import uuid4
 
 from filelock import FileLock, Timeout
 import pandas as pd
@@ -40,6 +41,7 @@ STATES = {"pending": "Pendiente", "running": "En ejecución", "done": "Terminada
           "waiting": "En espera de presupuesto / pausa", "blocked": "Bloqueada",
           "unavailable": "Sin autorización", "review": "Revisión manual",
           "gone": "Ficha retirada", "inactive": "Fuera de vigilancia", "failed": "Error: revisar"}
+REVIEW_LOCK_RETRY = timedelta(seconds=30)
 ALERTS = {"price_down": "Bajada de precio", "price_up": "Subida de precio",
           "undercut": "Más barato que Vytria", "availability": "Cambio de disponibilidad",
           "gone": "Ficha desaparecida", "stale": "Precio caducado"}
@@ -101,18 +103,64 @@ def _done_job_restriction(job):
     return deadline
 
 
-def _review_sample_matches(task: dict) -> bool:
+def _review_saved_sample_reusable(con, task: dict, now: datetime) -> bool:
+    if (task.get("monitor_state") != "done" or not task.get("monitor_sample")
+            or not task.get("monitor_sampled_at") or not task.get("monitor_last_ok_at")
+            or not task.get("monitor_valid_until")):
+        return False
+    try:
+        sample = json.loads(task["monitor_sample"])
+        sampled = _inventory_datetime(task["monitor_sampled_at"])
+        if (sampled > now or _inventory_datetime(sample["at"]) != sampled
+                or _inventory_datetime(task["monitor_last_ok_at"]) != sampled
+                or _inventory_datetime(task["monitor_valid_until"]) <= now):
+            return False
+        page = ProductPage(**sample["page"])
+        if (page.url != task["url"]
+                or (page.url_trace or {}).get("candidate_url") != task["url"]
+                or not page.has_price or page.ambiguous):
+            return False
+        product = con.execute("SELECT * FROM products WHERE ean=?", (task["ean"],)).fetchone()
+        if not product or classify(dict(product), page.candidate()).status != EXACT:
+            return False
+        shared = sample.get("shared_source")
+        if shared is None:
+            return True
+        if (shared.get("competitor_id") != task["competitor_id"]
+                or shared.get("ean") == task["ean"] or shared.get("url") != task["url"]
+                or shared.get("sampled_at") != sample["at"]):
+            return False
+        source = con.execute("""SELECT ean,competitor_id,url,state,sample,sampled_at,last_ok_at,valid_until
+            FROM monitor_jobs WHERE id=?""", (shared.get("monitor_job_id"),)).fetchone()
+        if (not source or source["state"] != "done" or source["ean"] != shared["ean"]
+                or source["competitor_id"] != shared["competitor_id"] or source["url"] != shared["url"]
+                or source["sampled_at"] != shared["sampled_at"]
+                or source["last_ok_at"] != shared["sampled_at"]
+                or not source["valid_until"] or _inventory_datetime(source["valid_until"]) <= now):
+            return False
+        source_sample = json.loads(source["sample"])
+        digest = hashlib.sha256(json.dumps(
+            source_sample, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+        return digest == shared.get("sample_sha256") and source_sample.get("at") == sample["at"]
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+
+
+def _review_sample_matches(task: dict, *, con=None, now: datetime | None = None) -> bool:
     if not task.get("monitor_sample") or not task.get("monitor_sampled_at"):
         return False
     sampled = _inventory_datetime(task["monitor_sampled_at"])
     requested = _inventory_datetime(task["requested_at"])
     precise_request = "." in task["requested_at"].split("T", 1)[-1]
-    if sampled <= requested or (not precise_request and sampled < requested + timedelta(seconds=1)):
-        return False
     sample = json.loads(task["monitor_sample"])
     page = sample.get("page") or {}
-    return (_inventory_datetime(sample["at"]) == sampled and page.get("url") == task["url"]
-            and (page.get("url_trace") or {}).get("candidate_url") == task["url"])
+    matches = (_inventory_datetime(sample["at"]) == sampled and page.get("url") == task["url"]
+               and (page.get("url_trace") or {}).get("candidate_url") == task["url"])
+    if not matches:
+        return False
+    if sampled > requested and (precise_request or sampled >= requested + timedelta(seconds=1)):
+        return True
+    return bool(con is not None and now is not None and _review_saved_sample_reusable(con, task, now))
 
 
 def _review_sample_ambiguous(task: dict) -> bool:
@@ -149,6 +197,8 @@ def _accepted_edel_resolution(page: ProductPage, accepted_url: str, product: dic
 
 
 def _review_sample_policy_reason(con, task: dict, now: datetime, interval: float | None) -> str:
+    if _inventory_datetime(task["monitor_sampled_at"]) > now:
+        return "La fecha de la muestra es futura"
     if interval is None or _inventory_datetime(task["monitor_sampled_at"]) + timedelta(hours=interval) <= now:
         return "La muestra posterior a la solicitud ha caducado"
     sample = json.loads(task["monitor_sample"])
@@ -182,6 +232,17 @@ def _reconcile_review_requests(con, task_id: int) -> None:
         COALESCE((SELECT base_requests FROM manual_review_http_attribution WHERE refresh_id=?)
         + (SELECT COUNT(*) FROM access_requests WHERE purpose=?),http_requests)) WHERE id=?""",
                 (task_id, f"manual_review:{task_id}", task_id))
+
+
+def _review_has_new_http_receipt(con, task: dict) -> bool:
+    attribution = con.execute(
+        "SELECT base_requests FROM manual_review_http_attribution WHERE refresh_id=?",
+        (task["id"],)).fetchone()
+    prior = (max(0, int(task["http_requests"]) - int(attribution["base_requests"]))
+             if attribution else 0)
+    receipts = con.execute("""SELECT url,result FROM access_requests WHERE purpose=?
+        ORDER BY id LIMIT -1 OFFSET ?""", (f"manual_review:{task['id']}", prior)).fetchall()
+    return any(row["url"] == task["url"][:500] and row["result"] not in {"", "reserved"} for row in receipts)
 
 
 def _review_identity(con, task: dict) -> dict | None:
@@ -301,11 +362,14 @@ class PriceMonitor:
             yield
             return
         service = PriceTrial(self.store, clock=self._now)
-        with service.continuity_lock():
-            row = continuity_row(self.store)
-            if not row:
-                raise ReviewRouteDenied("Par reservado al piloto; no existe continuidad activa")
-            self._validate_review_continuity(task, row["id"])
+        with ExitStack() as locks:
+            with service.continuity_lock():
+                row = continuity_row(self.store)
+                if not row:
+                    raise ReviewRouteDenied("Par reservado al piloto; no existe continuidad activa")
+                self._validate_review_continuity(task, row["id"])
+                locks.enter_context(service.continuity_pair_lock(
+                    task["competitor_id"], task["ean"]))
             with service.execution(0, task["competitor_id"], task["ean"],
                                    program="continuity", program_id=row["id"]):
                 yield
@@ -496,6 +560,38 @@ class PriceMonitor:
                             if not valid:
                                 raise ConnectorError("La ficha aceptada o el alcance cambió; no se consulta")
 
+                    if review_id is not None:
+                        with self.store._connect() as con:
+                            try:
+                                validate_review(con)
+                            except ConnectorError as exc:
+                                raise ReviewRouteDenied(str(exc)) from exc
+                            latest = con.execute("""SELECT r.*,j.state AS monitor_state,j.url AS monitor_url,
+                                    j.sample AS monitor_sample,j.sampled_at AS monitor_sampled_at,
+                                    j.last_ok_at AS monitor_last_ok_at,j.valid_until AS monitor_valid_until,
+                                    j.eligible AS monitor_eligible
+                                FROM manual_review_refreshes r JOIN monitor_jobs j ON j.id=r.monitor_job_id
+                                WHERE r.id=?""", (review_id,)).fetchone()
+                            latest = dict(latest)
+                            try:
+                                ambiguous = _review_sample_ambiguous(latest)
+                                sample_ready = latest["monitor_state"] == "done" and _review_sample_matches(
+                                    latest, con=con, now=self._now())
+                                interval = self.watch.monitor_interval_hours(latest["ean"], cid)
+                                policy_reason = (_review_sample_policy_reason(con, latest, self._now(), interval)
+                                                 if sample_ready else "")
+                            except (KeyError, TypeError, ValueError) as exc:
+                                raise ReviewRouteDenied(f"Muestra comercial ilegible: {type(exc).__name__}") from exc
+                            if ambiguous:
+                                raise ReviewRouteDenied(
+                                    "No se puede acreditar el orden entre la muestra y la solicitud")
+                            if sample_ready:
+                                if not policy_reason:
+                                    report.stopped[cid] = "Lectura terminada durante la espera; reutilizada sin HTTP"
+                                    return report
+                                if policy_reason != "La muestra posterior a la solicitud ha caducado":
+                                    raise ReviewRouteDenied(policy_reason)
+
                     def url_guard(target: str) -> None:
                         if inherited_url_guard is not None:
                             inherited_url_guard(target)
@@ -596,6 +692,7 @@ class PriceMonitor:
                     con.execute("BEGIN IMMEDIATE")
                     row = con.execute("""SELECT r.*,j.state AS monitor_state,j.not_before AS monitor_not_before,
                             j.lease_until AS monitor_lease_until,j.attempts AS monitor_attempts,
+                            j.updated_at AS monitor_updated_at,
                             j.eligible AS monitor_eligible,j.detail AS monitor_detail,j.url AS monitor_url,
                     j.last_ok_at AS monitor_last_ok_at,j.sampled_at AS monitor_sampled_at,
                     j.valid_until AS monitor_valid_until,j.sample AS monitor_sample,
@@ -611,15 +708,25 @@ class PriceMonitor:
                         LEFT JOIN monitor_jobs j ON j.id=r.monitor_job_id
                         WHERE ((r.status IN ('pending','deferred') AND
                                 (r.retry_at IS NULL OR r.retry_at<=?))
-                               OR (r.status='running' AND r.lease_until<=?))
+                               OR (r.status='running' AND r.lease_until<=?)
+                               OR (r.status='done' AND j.state='done' AND j.sampled_at IS NOT NULL
+                                   AND julianday(j.sampled_at) + (
+                                       COALESCE(
+                                           (SELECT g.interval_hours FROM watch_products w
+                                            JOIN watch_groups g ON g.name=w.group_name
+                                            WHERE w.ean=r.ean AND w.active=1),
+                                           (SELECT s.interval_hours FROM competitor_schedule s
+                                            WHERE s.competitor_id=r.competitor_id),24
+                                       ) / 24.0) <= julianday(?)))
                           AND (EXISTS(SELECT 1 FROM manual_review_identity i WHERE i.refresh_id=r.id)
                                OR EXISTS(SELECT 1 FROM manual_review_recovery_grants g WHERE g.refresh_id=r.id
                                    AND g.continuity_id=(SELECT id FROM price_continuity ORDER BY id DESC LIMIT 1))
                                OR NOT EXISTS(SELECT 1 FROM price_continuity_pairs p
                                    WHERE p.continuity_id=(SELECT id FROM price_continuity ORDER BY id DESC LIMIT 1)
                                      AND p.competitor_id=r.competitor_id AND p.ean=r.ean))
-                        ORDER BY r.updated_at,CASE WHEN r.status='pending' THEN 0 ELSE 1 END,r.id
-                        LIMIT 1""", (now_text, now_text)).fetchone()
+                        ORDER BY CASE r.status WHEN 'pending' THEN 0 WHEN 'deferred' THEN 1
+                            WHEN 'running' THEN 2 ELSE 3 END,r.updated_at,r.id
+                        LIMIT 1""", (now_text, now_text, now_text)).fetchone()
                     if row is None:
                         con.commit()
                         break
@@ -639,7 +746,7 @@ class PriceMonitor:
                         errors.append({"id": task["id"], "detail": invalid_reason})
                         continue
                     try:
-                        sample_matches = _review_sample_matches(task)
+                        sample_matches = _review_sample_matches(task, con=con, now=now)
                         sample_ambiguous = _review_sample_ambiguous(task)
                     except (KeyError, TypeError, ValueError) as exc:
                         detail = f"Muestra de monitorización ilegible: {type(exc).__name__}"
@@ -663,7 +770,9 @@ class PriceMonitor:
                             policy_reason = _review_sample_policy_reason(con, task, now, interval)
                         except (KeyError, TypeError, ValueError) as exc:
                             policy_reason = f"Muestra comercial ilegible: {type(exc).__name__}"
-                        if policy_reason:
+                        if policy_reason == "La muestra posterior a la solicitud ha caducado":
+                            sample_matches = False
+                        elif policy_reason:
                             detail = f"{policy_reason}; requiere revisión"
                             con.execute("""UPDATE manual_review_refreshes SET status='blocked',detail=?,
                                 lease_until=NULL,retry_at=NULL,finished_at=?,updated_at=? WHERE id=?""",
@@ -682,7 +791,7 @@ class PriceMonitor:
                             con.execute("""UPDATE manual_review_refreshes SET status=?,detail=?,retry_at=?,
                                 lease_until=NULL,finished_at=?,updated_at=? WHERE id=?""",
                                         ("deferred" if retryable else "blocked", detail,
-                                         _iso(now + timedelta(minutes=5)) if retryable else None,
+                                         _iso(now + REVIEW_LOCK_RETRY) if retryable else None,
                                          None if retryable else now_text, now_text, task["id"]))
                             con.commit()
                             if retryable:
@@ -701,9 +810,23 @@ class PriceMonitor:
                                 "availability") or "faltan datos comerciales"
                             detail = f"Lectura terminada; no comparable: {reason}"
                             detail += f" · lectura original {sample['at']}"
-                        con.execute("""UPDATE manual_review_refreshes SET status='done',detail=?,
+                        attempts = int(task["attempts"]) + int(_review_has_new_http_receipt(con, task))
+                        con.execute("""UPDATE manual_review_refreshes SET status='done',detail=?,attempts=?,
                             lease_until=NULL,retry_at=NULL,finished_at=?,updated_at=? WHERE id=?""",
-                                    (detail[:1000], now_text, now_text, task["id"]))
+                                    (detail[:1000], attempts, now_text, now_text, task["id"]))
+                        digest = hashlib.sha256(json.dumps(
+                            sample, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+                        con.execute("""INSERT INTO access_audit(
+                            scope,scope_id,action,previous,current,actor,note,at
+                        ) VALUES('manual_review',?,'reuse_saved_sample',?,?, 'worker','No se generó HTTP',?)""",
+                                    (str(task["id"]),
+                                     json.dumps({"status": task["status"], "detail": task["detail"]},
+                                                ensure_ascii=False),
+                                     json.dumps({"status": "done", "sampled_at": sample["at"],
+                                                 "sample_sha256": digest,
+                                                 "shared_source": sample.get("shared_source"),
+                                                 "http_requests": task["http_requests"]},
+                                                ensure_ascii=False), now_text))
                         _reconcile_review_requests(con, task["id"])
                         con.commit()
                         completed += 1
@@ -716,10 +839,27 @@ class PriceMonitor:
                                                 (task["competitor_id"], task["ean"], since)).fetchone()
                         if uncertain:
                             detail = "Interrupción con petición o reserva sin muestra recuperable; revisión necesaria"
+                            attempts = int(task["attempts"]) + int(_review_has_new_http_receipt(con, task))
+                            con.execute("""UPDATE manual_review_refreshes SET status='blocked',detail=?,attempts=?,
+                                lease_until=NULL,retry_at=NULL,finished_at=?,updated_at=? WHERE id=?""",
+                                        (detail, attempts, now_text, now_text, task["id"]))
+                            _reconcile_review_requests(con, task["id"])
+                            con.commit()
+                            errors.append({"id": task["id"], "detail": detail})
+                            continue
+                    if (task["monitor_state"] == "running" and not sample_matches
+                            and (not task["monitor_lease_until"]
+                                 or _inventory_datetime(task["monitor_lease_until"]) <= now)):
+                        since = _iso(_inventory_datetime(task["monitor_updated_at"]) - timedelta(seconds=1))
+                        uncertain = con.execute("""SELECT 1 FROM access_requests
+                            WHERE competitor_id=? AND (ean=? OR ean='' OR ean IS NULL)
+                              AND reserved_at>=? LIMIT 1""",
+                                                (task["competitor_id"], task["ean"], since)).fetchone()
+                        if uncertain:
+                            detail = "Monitor interrumpido con reserva o resultado incierto; reconciliación necesaria"
                             con.execute("""UPDATE manual_review_refreshes SET status='blocked',detail=?,
                                 lease_until=NULL,retry_at=NULL,finished_at=?,updated_at=? WHERE id=?""",
                                         (detail, now_text, now_text, task["id"]))
-                            _reconcile_review_requests(con, task["id"])
                             con.commit()
                             errors.append({"id": task["id"], "detail": detail})
                             continue
@@ -785,7 +925,7 @@ class PriceMonitor:
                     lease_until = _iso(now + LEASE)
                     con.execute("""INSERT OR IGNORE INTO manual_review_http_attribution(refresh_id,base_requests)
                         VALUES(?,?)""", (task["id"], task["http_requests"]))
-                    con.execute("""UPDATE manual_review_refreshes SET status='running',attempts=attempts+1,
+                    con.execute("""UPDATE manual_review_refreshes SET status='running',
                         started_at=COALESCE(started_at,?),lease_until=?,retry_at=NULL,updated_at=? WHERE id=?""",
                                 (now_text, lease_until, now_text, task["id"]))
                     con.commit()
@@ -801,7 +941,7 @@ class PriceMonitor:
                     detail = "Bloqueo de continuidad ocupado" if isinstance(exc, Timeout) else str(exc)
                     status = "deferred" if retryable else "blocked"
                     finished = _iso(self._now())
-                    retry = _iso(self._now() + timedelta(minutes=5)) if retryable else None
+                    retry = _iso(self._now() + REVIEW_LOCK_RETRY) if retryable else None
                     with self.store._connect() as con, con:
                         con.execute("""UPDATE manual_review_refreshes SET status=?,detail=?,retry_at=?,
                             attempts=?,started_at=?,lease_until=NULL,finished_at=?,updated_at=? WHERE id=?""",
@@ -815,19 +955,26 @@ class PriceMonitor:
                         errors.append({"id": task["id"], "detail": detail})
                     continue
                 with self.store._connect() as con:
-                    current = con.execute("""SELECT state,not_before,lease_until,attempts,eligible,detail,
-                            last_ok_at,sampled_at,sample FROM monitor_jobs WHERE id=?""",
+                    current = con.execute("""SELECT state,url,not_before,lease_until,attempts,eligible,detail,
+                            last_ok_at,sampled_at,valid_until,sample FROM monitor_jobs WHERE id=?""",
                                           (task["monitor_job_id"],)).fetchone()
                 finished_at = _iso(self._now())
                 retry_at = None
                 status, detail = "pending", ""
+                with self.store._connect() as con:
+                    attempted = _review_has_new_http_receipt(con, task)
+                attempts = int(task["attempts"]) + int(attempted)
                 if current is None:
                     status, detail = "error", "Desapareció el trabajo de monitorización"
                 else:
                     current = dict(current)
                     if current["state"] == "done":
-                        done_after_request = _review_sample_matches({
-                            **task, "monitor_sample": current["sample"], "monitor_sampled_at": current["sampled_at"]})
+                        with self.store._connect() as con:
+                            done_after_request = _review_sample_matches({
+                                **task, "monitor_state": current["state"],
+                                "monitor_sample": current["sample"], "monitor_sampled_at": current["sampled_at"],
+                                "monitor_last_ok_at": current["last_ok_at"],
+                                "monitor_valid_until": current["valid_until"]}, con=con, now=self._now())
                         if report.processed or done_after_request:
                             status = "done"
                             sample = json.loads(current["sample"] or current.get("previous_sample") or "{}")
@@ -868,11 +1015,21 @@ class PriceMonitor:
                     else:
                         status, detail = "error", current["detail"] or f"Estado inesperado: {current['state']}"
                 with self.store._connect() as con, con:
-                    con.execute("""UPDATE manual_review_refreshes SET status=?,detail=?,
+                    con.execute("""UPDATE manual_review_refreshes SET status=?,detail=?,attempts=?,
                         retry_at=?,lease_until=NULL,finished_at=?,updated_at=? WHERE id=?""",
-                                (status, detail[:1000], _iso(retry_at) if retry_at else None,
+                                (status, detail[:1000], attempts, _iso(retry_at) if retry_at else None,
                                  finished_at if status in {"done", "blocked", "error"} else None,
                                  finished_at, task["id"]))
+                    if status == "done" and report.stopped.get(task["competitor_id"]) == (
+                            "Lectura terminada durante la espera; reutilizada sin HTTP"):
+                        sample = json.loads(current["sample"])
+                        digest = hashlib.sha256(json.dumps(
+                            sample, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+                        con.execute("""INSERT INTO access_audit(scope,scope_id,action,previous,current,actor,note,at)
+                            VALUES('manual_review',?,'reuse_saved_sample',?,?, 'worker','No se generó HTTP',?)""",
+                                    (str(task["id"]), json.dumps({"status": task["status"]}),
+                                     json.dumps({"status": "done", "sampled_at": sample["at"],
+                                                 "sample_sha256": digest}, ensure_ascii=False), finished_at))
                     _reconcile_review_requests(con, task["id"])
                 if status in {"done", "blocked", "error"}:
                     completed += 1
@@ -903,17 +1060,59 @@ class PriceMonitor:
                 validate_competitor_url(url, config["domain"])
                 fetcher.ean = ean
                 with self.store._connect() as con:
-                    shared = con.execute("""SELECT ean,sample FROM monitor_jobs
+                    shared = con.execute("""SELECT id,ean,competitor_id,url,sample,sampled_at,last_ok_at,valid_until
+                        FROM monitor_jobs
                         WHERE competitor_id=? AND url=? AND state='done'
-                        AND sample<>'' AND last_ok_at IS NOT NULL AND not_before>?
+                          AND sample<>'' AND sampled_at=last_ok_at AND valid_until>?
                         ORDER BY last_ok_at DESC LIMIT 1""", (cid, url, _iso(self._now()))).fetchone()
-                shared_sample = json.loads(shared["sample"]) if shared and not fresh else None
+                shared_sample = json.loads(shared["sample"]) if shared and (not fresh or review_id is not None) else None
                 shared_page = ProductPage(**shared_sample["page"]) if shared_sample else None
                 product = self.search._product(ean)
                 shared_candidate = select_product_variant(shared_page, product) if shared_page else None
+                shared_source = None
+                if shared_candidate and shared and shared["ean"] != ean:
+                    source_product = self.search._product(shared["ean"])
+                    source_candidate = (select_product_variant(shared_page, source_product)
+                                        if source_product else None)
+                    source_match = classify(source_product, source_candidate.candidate()) if source_candidate else None
+                    source_valid = bool(
+                        source_match and source_match.status == EXACT and not source_candidate.ambiguous
+                        and source_candidate.has_price
+                        and shared_sample.get("at") == shared["sampled_at"])
+                    if not source_valid:
+                        shared_candidate = None
+                    else:
+                        from price_comparator import normalize_gtin
+
+                        try:
+                            target_specific = (bool(shared_candidate.ean_published)
+                                               and normalize_gtin(shared_candidate.ean_published)
+                                               == normalize_gtin(ean))
+                            source_ean = normalize_gtin(shared["ean"])
+                            published_ean = (normalize_gtin(shared_candidate.ean_published)
+                                             if shared_candidate.ean_published else "")
+                        except ValueError:
+                            target_specific, source_ean, published_ean = False, "", ""
+                        if published_ean and published_ean not in {source_ean, normalize_gtin(ean)}:
+                            shared_candidate = None
+                        elif not target_specific:
+                            shared_candidate = replace(
+                                shared_candidate, ean_published="", caliber="", variant_id="",
+                                variant_scoped=False, availability="unknown",
+                                stock_evidence=[], delivery_evidence=[], stock_conflict=False)
+                        if shared_candidate is not None:
+                            digest = hashlib.sha256(json.dumps(
+                                shared_sample, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+                            shared_source = {
+                                "monitor_job_id": shared["id"], "competitor_id": cid, "ean": shared["ean"],
+                                "url": url, "sampled_at": shared["sampled_at"], "sample_sha256": digest,
+                            }
                 shared_match = classify(product, shared_candidate.candidate()) if shared_candidate else None
                 reuse_shared = bool(shared_candidate and shared_match and shared_match.status == EXACT
-                                    and not shared_candidate.ambiguous)
+                                    and not shared_candidate.ambiguous
+                                    and shared_candidate.has_price
+                                    and (not shared or shared["ean"] == ean or shared_source)
+                                    and (not fresh or review_id is not None))
                 if reuse_shared:
                     page = shared_candidate
                     sampled_at = shared_sample["at"]
@@ -996,11 +1195,25 @@ class PriceMonitor:
                     self._finish(job, "review", detail or "Variantes ambiguas: revisar identidad")
                     return ""
                 sample = {"page": asdict(page), "at": sampled_at,
+                          "observation_id": uuid4().hex,
                           "own_price": own_price if own_price is not None and pd.notna(own_price) else None,
                           "gap": comparability_gap(page, config)}
+                if reuse_shared and shared_source:
+                    sample["shared_source"] = shared_source
                 with self.store._connect() as con, con:
                     con.execute("UPDATE monitor_jobs SET sample=?,sampled_at=? WHERE id=?",
                                 (json.dumps(sample, ensure_ascii=False), sample["at"], job["id"]))
+                    if review_id is not None and shared_source:
+                        con.execute("""INSERT INTO access_audit(
+                            scope,scope_id,action,previous,current,actor,note,at
+                        ) VALUES('manual_review',?,'reuse_shared_sample','',?,'worker',
+                            'Precio reutilizado; stock de variante no transferido',?)""",
+                                    (str(review_id), json.dumps({
+                                        "target_ean": ean, "source_monitor_job_id": shared_source["monitor_job_id"],
+                                        "source_ean": shared_source["ean"], "sampled_at": sampled_at,
+                                        "sample_sha256": shared_source["sample_sha256"],
+                                        "http_requests": 0, "stock_transferred": False,
+                                    }, ensure_ascii=False), _iso(self._now())))
             if validate is not None:
                 with self.store._connect() as con:
                     validate(con)
@@ -1039,8 +1252,11 @@ class PriceMonitor:
                           detail="Identidad revalidada: marca + modelo + color; calibre no vinculante")
         search = WebPriceSearch(self.store, clock=lambda: at)
         if review_id is not None:
-            digest = hashlib.sha256(json.dumps(sample, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
-            problem = search.record(outcome, validate=validate, review_sample=(review_id, sample["at"], digest))
+            sample_json = json.dumps(sample, ensure_ascii=False, sort_keys=True)
+            digest = hashlib.sha256(sample_json.encode("utf-8")).hexdigest()
+            observation_id = sample.get("observation_id") or f"legacy:{sample['at']}"
+            problem = search.record(outcome, validate=validate,
+                                    review_sample=(review_id, observation_id, sample["at"], digest, sample_json))
         else:
             problem = search.record(outcome, validate=validate) if validate is not None else search.record(outcome)
         if problem:

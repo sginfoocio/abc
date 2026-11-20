@@ -238,6 +238,13 @@ class PriceTrial:
     def continuity_lock(self):
         return FileLock(f"{self.store.database_path}.continuity.lock", timeout=0)
 
+    def continuity_tick_lock(self):
+        return FileLock(f"{self.store.database_path}.continuity-tick.lock", timeout=0)
+
+    def continuity_pair_lock(self, competitor_id: str, ean: str):
+        pair_key = hashlib.sha256(f"{competitor_id}\0{ean}".encode("utf-8")).hexdigest()
+        return FileLock(f"{self.store.database_path}.continuity-pair-{pair_key}.lock", timeout=0)
+
     def heartbeat(self):
         now = self.clock().isoformat()
         with self.store._connect() as con, con:
@@ -872,8 +879,8 @@ class PriceTrial:
                     ) VALUES('price_continuity',?,'manual_sync_requested',?,?,?,'Actualización solicitada desde Inicio',?)""",
                                 (str(row["id"]), row["sync_receipt"], json.dumps({"status": "running"}),
                                  actor, self.clock().isoformat()))
-                self._run_continuity_sync(row)
-                return self.continuity_report()
+            self._run_continuity_sync(row)
+            return self.continuity_report()
         except SyncInProgress as exc:
             raise ValueError("Ya hay una actualización de precios en ejecución; no se inició otra") from exc
         except Timeout as exc:
@@ -882,7 +889,20 @@ class PriceTrial:
     def continuity_tick(self, *, max_pairs: int = 20, deadline_seconds: int = 240,
                         exact_pair: tuple[str, str] | None = None) -> int | None:
         try:
-            with self.continuity_lock():
+            with self.continuity_tick_lock():
+                return self._continuity_tick(max_pairs=max_pairs, deadline_seconds=deadline_seconds,
+                                             exact_pair=exact_pair)
+        except Timeout:
+            if exact_pair is not None:
+                raise
+            return
+
+    def _continuity_tick(self, *, max_pairs: int, deadline_seconds: int,
+                         exact_pair: tuple[str, str] | None) -> int | None:
+        control_lock = self.continuity_lock()
+        held_pair_locks = []
+        try:
+            with control_lock:
                 if exact_pair is None:
                     self.heartbeat()
                 row = continuity_row(self.store)
@@ -896,7 +916,11 @@ class PriceTrial:
                 if now < datetime.fromisoformat(row["started_at"]):
                     return
                 if exact_pair is None and row["next_sync_at"] and datetime.fromisoformat(row["next_sync_at"]) <= now:
-                    self._run_continuity_sync(row)
+                    control_lock.release()
+                    try:
+                        self._run_continuity_sync(row)
+                    finally:
+                        control_lock.acquire(timeout=30)
                 from price_batch import WatchBatch
                 batch = self._batch or WatchBatch(self.store)
                 now_text = self.clock().isoformat()
@@ -938,14 +962,27 @@ class PriceTrial:
                         break
                     cid, ean = pair["competitor_id"], pair["ean"]
                     started_at = self.clock().isoformat()
+                    pair_lock = self.continuity_pair_lock(cid, ean)
+                    try:
+                        pair_lock.acquire()
+                    except Timeout:
+                        if exact_pair is not None:
+                            raise
+                        continue
+                    held_pair_locks.append(pair_lock)
                     with self.store._connect() as con, con:
                         claimed = con.execute("""UPDATE price_continuity_pairs SET state='running',started_at=?
-                            WHERE id=? AND state='pending'""", (started_at, pair["id"])).rowcount
+                            WHERE id=? AND state='pending'""",
+                                              (started_at, pair["id"])).rowcount
                     if not claimed:
+                        pair_lock.release()
+                        held_pair_locks.remove(pair_lock)
                         continue
                     current = continuity_row(self.store, row["id"])
                     if not current or current["status"] != "active":
                         self._close_continuity_failure(row["id"], pair, started_at, phase="paused_before_execution")
+                        pair_lock.release()
+                        held_pair_locks.remove(pair_lock)
                         break
                     phase = "preview_before_execution"
                     try:
@@ -954,7 +991,11 @@ class PriceTrial:
                             with self.store._connect() as con:
                                 first_request = con.execute("SELECT COALESCE(MAX(id),0) FROM access_requests").fetchone()[0]
                             phase = "execution_started"
-                            result = batch.execute([ean], [cid], approved=True, sync_vytria=False, max_jobs=1)
+                            control_lock.release()
+                            try:
+                                result = batch.execute([ean], [cid], approved=True, sync_vytria=False, max_jobs=1)
+                            finally:
+                                control_lock.acquire(timeout=30)
                             after = json.loads(batch.preview([ean], [cid]).to_json(orient="records"))[0]
                             with self.store._connect() as con:
                                 receipts = [dict(r) for r in con.execute("""SELECT * FROM access_requests
@@ -965,6 +1006,8 @@ class PriceTrial:
                                   cid, ean, phase, type(exc).__name__)
                         self._close_continuity_failure(row["id"], pair, started_at, phase=phase,
                                                        error_type=type(exc).__name__)
+                        pair_lock.release()
+                        held_pair_locks.remove(pair_lock)
                         continue
                     result["inventory_before"] = before
                     result["inventory_after"] = after
@@ -1031,12 +1074,17 @@ class PriceTrial:
                             checked_at=? WHERE id=?""",
                                     (state, next_check.isoformat() if next_check else None, reason,
                                      finished_at, pair["id"]))
+                    pair_lock.release()
+                    held_pair_locks.remove(pair_lock)
                     if exact_pair is not None:
                         return check_id
         except Timeout:
             if exact_pair is not None:
                 raise
             return
+        finally:
+            for pair_lock in reversed(held_pair_locks):
+                pair_lock.release()
 
     def capture_continuity(self, competitor_id: str, ean: str, *, actor: str, note: str,
                            build_commit: str, approved: bool) -> dict:
@@ -1860,11 +1908,11 @@ def serve(command):
 def _watch_worker_cycle(store):
     """Run current governed workers without advancing the retired 72-hour pilot."""
     service = PriceTrial(store)
-    service.continuity_tick()
-    service.diagnostic_tick()
     from price_monitor import PriceMonitor
 
     PriceMonitor(store).review_refresh_tick()
+    service.continuity_tick()
+    service.diagnostic_tick()
 
 
 def main(argv=None):
