@@ -179,3 +179,39 @@ Anotar fecha, SHA, alcance, conteos y discrepancias anonimizadas; no adjuntar or
 No abrir acciones de proveedor, importar, revisar ni crear solicitudes. No se ha ejecutado este piloto:
 queda por verificar el esquema y los campos reales, asociaciones, lectura del NAS e historial disponible.
 
+## Biblioteca y ZIP por pedido (P0.3)
+
+**Imágenes del pedido** muestra el catálogo de la referencia seleccionada. La actualización explícita
+vuelve a leer esa referencia del repositorio, no Odoo. La miniatura se prepara en memoria a demanda;
+el visor contextual no crea cachés ni inicializa el almacén. Al regresar se recuperan los filtros,
+la página consultada, el pedido y la referencia mientras siga activa la misma sesión.
+
+**Preparar exportación de imágenes** verifica las referencias y muestra inclusiones, exclusiones y
+vistas no incluidas, sin crear el ZIP. **Generar ZIP verificado** comprueba de nuevo los archivos y
+la vigencia del plan. Original no consulta Odoo; Farfetch y Miinto consultan los identificadores
+comerciales y verifican la variante en esas dos acciones explícitas, no al navegar. Este recorrido
+bloquea ZIP comerciales con alguna vista técnica no acreditada; no cambia los formatos, los nombres
+ni las reglas de exportación de la biblioteca anterior. `lifestyle`, `detalle` y `unknown` se pueden
+conservar en Original con su procedencia y checksum; no acreditan vistas comerciales.
+
+Se conservan los límites del exportador (64 MiB, 2.000 fotos y 60 s), con un máximo adicional de
+200 referencias por lote contextual. Los pedidos fraccionados en la consulta no se ofrecen como
+exportación global. Los códigos equivalentes se deduplican sin sustituir el código mostrado en el pedido.
+
+| Funcionalidad anterior | Ubicación unificada | Paridad |
+|---|---|---|
+| Consulta de pedidos | Panel | Cubierta offline |
+| Procesamiento Kering | Acciones del pedido | Piloto y paridad real pendientes |
+| Solicitudes Marcolin, Sáfilo y NuORDER | Acciones del pedido | Casos vinculados cubiertos offline; conservar herramientas anteriores |
+| Revisión y clasificación | Acciones del pedido y biblioteca | Vista contextual de solo lectura; edición y casos no vinculados conservan su herramienta |
+| ZIP Original | Exportación del pedido y biblioteca | Cubierto offline |
+| ZIP Farfetch | Exportación del pedido y biblioteca | Cubierto offline; validar identificadores reales |
+| ZIP Miinto | Exportación del pedido y biblioteca | Cubierto offline; validar identificadores reales |
+| Historial | Detalle del pedido | Evidencia vinculada; recibos Luxottica globales |
+| Búsqueda masiva sin pedido | Biblioteca / búsqueda masiva | Se conserva |
+
+#149 propone una segunda consulta en la misma ruta. Sus controles de consulta explícita, límites,
+atribución confirmada y claridad sobre la evidencia se conservan en la pila #150–#151; no se
+incorpora su segunda pantalla ni se cierra esa PR. No se retira ningún acceso anterior hasta
+validar la paridad de extremo a extremo con datos autorizados.
+

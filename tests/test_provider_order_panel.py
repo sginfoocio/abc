@@ -231,10 +231,55 @@ render_images_page(lambda _: None, lambda: None, lambda: None, return_to_orders=
     app.session_state[page.CONTEXT] = ((None, None), "PO25", UPC, photos, root)
     app.run()
     assert not app.exception and "solo lectura" in app.title[0].value
-    app.selectbox[0].select(0).run()
+    app.selectbox[0].select(photos[0]["record"]["record_id"]).run()
     assert not app.exception and show.call_count == 1
     assert show.call_args.args[0] == _image("blue")
     assert not store.called
+
+
+def test_contextual_return_restores_filters_and_reference_without_query(tmp_path):
+    from app_pages import provider_orders_page as page
+
+    app = AppTest.from_string(APP)
+    app.session_state["auth_role"] = "admin"
+    app.session_state[page.RETURN_FILTERS] = ((None, None), {
+        "sup_provider": "kering", "sup_start": START, "sup_end": END,
+        "sup_number": "PO25", "sup_order": 25, "sup_product_25": 101,
+    })
+    app.run()
+    assert not app.exception
+    assert app.selectbox[0].value == "kering"
+    assert app.date_input[0].value == START
+    assert app.session_state["sup_order"] == 25
+    assert app.session_state["sup_product_25"] == 101
+
+
+def test_export_panel_opens_catalog_only_on_explicit_action(engine, monkeypatch):
+    from app_pages import provider_order_media as media
+
+    orders, _ = read_purchase_page(engine, LINKS, ("kering",), START, END)
+    reader = Mock(side_effect=ValueError("Catálogo sintético no disponible"))
+    monkeypatch.setattr(media, "ReadOnlyImageRepository", reader)
+    app = AppTest.from_string("""
+import streamlit as st
+from app_pages.provider_order_media import render_order_export
+def no_odoo():
+    raise AssertionError('No consultar Odoo')
+render_order_export(st.session_state.order, None, no_odoo, (None, None))
+""")
+    app.session_state["order"] = orders[0]
+    app.session_state["auth_role"] = "admin"
+    app.run()
+    assert not app.exception and not reader.called
+    app.radio[0].set_value("Selección de referencias").run()
+    assert app.multiselect[0].options == [EAN, OTHER]
+    app.multiselect[0].select(OTHER).run()
+    assert not reader.called
+    _button(app, "Preparar exportación de imágenes").click().run()
+    assert reader.call_count == 1 and "bloqueada" in app.error[0].value
+    app.session_state["auth_role"] = "masterdata"
+    app.run()
+    assert not app.button and reader.call_count == 1
 
 
 APP = """
@@ -248,6 +293,24 @@ render_order_panel(unexpected, unexpected)
 
 def _button(app, label):
     return next(b for b in app.button if b.label == label)
+
+
+def test_initial_render_displays_persisted_kering_cutoff_without_query(monkeypatch, tmp_path):
+    from cryptography.fernet import Fernet
+    from app_pages import provider_orders_page as page
+    from kering_images import ConfigStore, PORTAL_URL
+
+    monkeypatch.setenv("KERING_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    monkeypatch.setattr(page, "data_root", lambda: tmp_path)
+    monkeypatch.setattr(page, "kering_root", lambda: tmp_path)
+    ConfigStore(tmp_path).save(dict(url=PORTAL_URL, supplier_id=7, cutoff_date="2026-10-05"))
+    app = AppTest.from_string(APP)
+    app.session_state["auth_role"] = "admin"
+    app.session_state["supplier_order_home_provider"] = "kering"
+    app.run()
+    assert not app.exception
+    assert any("corte de procesamiento 05/10/2026" in caption.value for caption in app.caption)
+    assert app.selectbox(key="sup_provider").value == "kering"
 
 
 def test_streamlit_explicit_query_and_retained_results(monkeypatch, tmp_path, engine):

@@ -1,24 +1,28 @@
 """Administrative purchase-order panel. Network acquisition only on explicit submit."""
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from math import ceil
 
 import streamlit as st
+from cryptography.fernet import InvalidToken
 from sqlalchemy.exc import SQLAlchemyError
 
 from app_pages.provider_order_snapshot import (
-    COMPLETE, MADRID, NONE, PARTIAL, PROVIDERS, UNKNOWN, VIEWS, acquire, associations,
+    COMPLETE, MADRID, NONE, PARTIAL, PROVIDERS, UNKNOWN, VIEWS, acquire, associations, image_evidence,
 )
-from kering_images import data_root as kering_root
+from app_pages.provider_order_media import render_order_export, render_photos
+from kering_images import ConfigStore, data_root as kering_root
 from provider_images import ean_key, ean_valid
 from provider_images_ui import data_root
 from provider_odoo_orders import MAX_ORDER_DAYS, OdooUnavailable
-from repository_catalog_readonly import verified_original
-from repository_storage import check_image_root
+from repository_storage import state_root
 
 SNAPSHOT = "supplier_order_snapshot"
 CONTEXT = "supplier_order_photos"
 LEGACY = "supplier_order_legacy"
 PAGE_SIZE = 15
+RETURN_FILTERS = "supplier_order_return_filters"
+FILTER_KEYS = ("sup_provider", "sup_start", "sup_end", "sup_number", "sup_ean", "sup_state",
+               "sup_coverage", "sup_errors", "sup_table_provider", "sup_page", "sup_order", "sup_lines")
 LABELS = dict(zip(VIEWS, ("Frontal", "Lateral", "Perspectiva", "Detalle", "Lifestyle", "Otras imágenes")))
 
 
@@ -128,14 +132,43 @@ def _detail(order, root, library_page, engine_factory):
             "Vistas no verificadas": ", ".join(LABELS[v] for v in line["image"]["missing"]) if line["image"] else "—",
             "Incidencias": ", ".join(issue for issue in line["issues"] if issue),
         } for line in visible], hide_index=True)
-    variants = {line["id"]: line for line in order["lines"] if line["image"] and line["image"]["photos"]}
-    if variants and library_page is not None:
-        line_id = st.selectbox("Producto para abrir en el repositorio", list(variants), format_func=lambda i: (
-            f"{variants[i]['ean']} · {variants[i]['sku']} · línea {i}"), key=f"sup_product_{order['id']}")
-        if st.button("Abrir imágenes del producto"):
+    variants = {line["id"]: line for line in order["lines"]}
+    if variants:
+        st.markdown("#### Imágenes del pedido")
+        product_key = f"sup_product_{order['id']}"
+        line_id = st.selectbox("Referencia del pedido", list(variants), index=None, format_func=lambda i: (
+            f"{variants[i]['ean']} · {variants[i]['sku']} · línea {i}"), key=product_key)
+        if line_id is not None:
             line = variants[line_id]
-            st.session_state[CONTEXT] = (owner(), order["name"], line["ean"], line["image"]["photos"], root)
-            st.switch_page(library_page)
+            st.text(" · ".join(str(value) for value in (line["product"], line["model"], line["color"], line["caliber"])
+                               if value))
+            report = line["image"]
+            fresh_key = (owner(), order["id"], line_id, root)
+            if ean_valid(line["ean"]) and not line["barcode_conflict"] and st.button("Actualizar imágenes locales"):
+                try:
+                    evidence, notice = image_evidence([{"lines": [line]}], state_root(root) / ".catalog.sqlite3", root)
+                    if notice:
+                        st.warning(notice)
+                    st.session_state["order_media_refresh"] = (fresh_key, evidence.get(ean_key(line["ean"])))
+                except (OSError, ValueError):
+                    st.warning("No se pudo localizar el catálogo de imágenes.")
+            refreshed = st.session_state.get("order_media_refresh")
+            if refreshed and refreshed[0] == fresh_key:
+                report = refreshed[1]
+            if report:
+                st.caption("Vistas no verificadas: " + (", ".join(LABELS[v] for v in report["missing"]) or "ninguna"))
+                for issue in dict.fromkeys([*line["issues"], *report["issues"]]):
+                    if issue:
+                        st.warning(issue)
+            photos = report["photos"] if report else []
+            render_photos(photos, root, LABELS, owner(), f"order_{order['id']}_{line_id}")
+            if photos and library_page is not None and st.button("Abrir imágenes del producto"):
+                keys = [*FILTER_KEYS, product_key, *(k for k in st.session_state if k.startswith("sup_dates_"))]
+                filters = {k: st.session_state[k] for k in keys if k in st.session_state}
+                st.session_state[RETURN_FILTERS] = (owner(), filters)
+                st.session_state[CONTEXT] = (owner(), order["name"], line["ean"], photos, root)
+                st.switch_page(library_page)
+        render_order_export(order, root, engine_factory, owner())
     from app_pages.provider_order_actions import render_order_actions
 
     render_order_actions(order, root, engine_factory)
@@ -152,6 +185,14 @@ def _detail(order, root, library_page, engine_factory):
 
 def render_order_panel(engine_factory, legacy_renderer, library_page=None):
     _guard()
+    returning = st.session_state.pop(RETURN_FILTERS, None)
+    if returning and returning[0] == owner():
+        for key, value in returning[1].items():
+            st.session_state[key] = value
+    requested_provider = st.session_state.pop("supplier_order_home_provider", None)
+    if requested_provider in PROVIDERS:
+        st.session_state.pop(LEGACY, None)
+        st.session_state["sup_provider"] = requested_provider
     if st.session_state.get(LEGACY) == owner():
         if st.button("Volver a pedidos de solo lectura"):
             st.session_state.pop(LEGACY)
@@ -170,13 +211,24 @@ def render_order_panel(engine_factory, legacy_renderer, library_page=None):
                           for key, label in PROVIDERS.items()))
     for notice in association_notices:
         st.warning(notice)
+    if (kering_root() / "config.enc").is_file():
+        try:
+            cutoff = date.fromisoformat(ConfigStore(kering_root()).load()["cutoff_date"])
+        except (OSError, InvalidToken, TypeError, ValueError):
+            st.warning("No se pudo leer el corte de procesamiento Kering.")
+        else:
+            st.caption(f"Kering: corte de procesamiento {cutoff:%d/%m/%Y}. "
+                       "No limita la consulta histórica de pedidos.")
+    else:
+        st.caption("Kering: corte de procesamiento no configurado.")
     today = datetime.now(MADRID).date()
     with st.form("supplier_orders_odoo"):
         provider_col, start_col, end_col = st.columns(3)
         provider = provider_col.selectbox("Proveedor", ["", *PROVIDERS],
-                                          format_func=lambda key: PROVIDERS.get(key, "Todos configurados"))
-        start = start_col.date_input("Desde", today - timedelta(days=30))
-        end = end_col.date_input("Hasta", today)
+                                          format_func=lambda key: PROVIDERS.get(key, "Todos configurados"),
+                                          key="sup_provider")
+        start = start_col.date_input("Desde", today - timedelta(days=30), key="sup_start")
+        end = end_col.date_input("Hasta", today, key="sup_end")
         submitted = st.form_submit_button("Consultar pedidos de Odoo")
     if submitted:
         _request(engine_factory, links, (provider,) if provider else tuple(PROVIDERS), start, end)
@@ -204,15 +256,16 @@ def render_order_panel(engine_factory, legacy_renderer, library_page=None):
         st.info("No hay pedidos para el alcance consultado.")
         return
     a, b, c = st.columns(3)
-    number = a.text_input("Número de pedido")
-    barcode = b.text_input("EAN/UPC")
-    state = c.selectbox("Estado Odoo", ["", *sorted({o["state"] for o in snapshot["orders"] if o["state"]})])
+    number = a.text_input("Número de pedido", key="sup_number")
+    barcode = b.text_input("EAN/UPC", key="sup_ean")
+    state = c.selectbox("Estado Odoo", ["", *sorted({o["state"] for o in snapshot["orders"] if o["state"]})],
+                        key="sup_state")
     d, e, f = st.columns(3)
-    coverage = d.selectbox("Estado de cobertura", ["", COMPLETE, PARTIAL, NONE, UNKNOWN])
-    errors = e.selectbox("Errores en el historial", ["", "Registrados", "Sin errores registrados"])
+    coverage = d.selectbox("Estado de cobertura", ["", COMPLETE, PARTIAL, NONE, UNKNOWN], key="sup_coverage")
+    errors = e.selectbox("Errores en el historial", ["", "Registrados", "Sin errores registrados"], key="sup_errors")
     provider_filter = f.selectbox("Proveedor en tabla", [None, *sorted({o["provider"] for o in snapshot["orders"]})],
                                   format_func=lambda key: "Todos" if key is None else
-                                  PROVIDERS.get(key, "Asociación ambigua"))
+                                  PROVIDERS.get(key, "Asociación ambigua"), key="sup_table_provider")
     interval = st.date_input("Fechas en tabla", (snapshot["start"], snapshot["end"]),
                              min_value=snapshot["start"], max_value=snapshot["end"], key=f"sup_dates_{acquired_page}")
     filtered = filter_orders(snapshot["orders"], number=number, barcode=barcode, state=state,
@@ -251,19 +304,5 @@ def render_contextual_photos(return_to_orders):
         return_to_orders()
         return True
     visible = _paginate(photos, "sup_photo_page", "Página de fotografías")
-    if not visible:
-        return True
-    photo = st.selectbox("Fotografía", range(len(visible)), index=None, format_func=lambda i: (
-        f"{LABELS[visible[i]['view']]} · {visible[i]['record']['name']}"))
-    if photo is not None:
-        record = visible[photo]["record"]
-        try:
-            check_image_root(root)
-            content, _, issue = verified_original(record, root)
-        except (OSError, ValueError, RuntimeError):
-            content, issue = None, "archivo_no_accesible"
-        if issue or content is None:
-            st.warning("No se pudo verificar el archivo. Actualice la consulta de pedidos.")
-        else:
-            st.image(content, width=450)
+    render_photos(visible, root, LABELS, owner(), f"library_{ean}", thumbnail=False)
     return True
