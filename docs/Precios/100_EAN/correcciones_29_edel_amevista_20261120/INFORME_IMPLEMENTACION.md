@@ -6,7 +6,9 @@ El trabajo parte del commit desplegado `939dfc6f9a81f1575a040f93d0b5b848dbb5452a
 
 La continuidad persistida seguía activa: **100 EAN × 14 competidores = 1.400 pares únicos**. El heartbeat observado fue `2026-11-20T17:50:18+01:00` y el siguiente ciclo estaba previsto para `2026-11-20T23:27:06+01:00`. La consulta de comparación encontró **71/100 EAN comparados**, 29 sin comparación, y **124 ofertas guardadas vigentes**. Las 124 ofertas que el comparador consideró vigentes eran ES, EUR y disponibles. Es una lectura de estado almacenado, no una nueva validación directa con los comercios.
 
-Los dos CSV de este directorio son matrices estáticas de esa instantánea. La matriz 100 × 14 registra URL aprobada auditada, URLs exactas verificadas, rutas documentales, lectura guardada, vigencia, solicitud actual, impedimento y próxima acción. La matriz de rutas conserva las 102 candidatas históricas y sus niveles/notas, pero advierte por fila que el estado de una oferta del par no demuestra que esa URL concreta sea la fuente de la oferta.
+Los dos CSV de este directorio son matrices estáticas. El estado de ofertas, solicitudes y continuidad es de las **16:50:32 UTC**; la identidad de catálogo (`marca`, `modelo`, `color`) se leyó separadamente a las **17:05:29 UTC** para los 100 EAN. La matriz 100 × 14 registra URL aprobada auditada, URLs exactas verificadas, rutas documentales, lectura guardada, vigencia, solicitud actual, impedimento y próxima acción. La matriz de rutas conserva las 102 candidatas históricas y sus niveles/notas, pero advierte por fila que el estado de una oferta del par no demuestra que esa URL concreta sea la fuente de la oferta.
+
+El catálogo almacenado no tiene calibre para ninguno de los 100 EAN. La columna se conserva vacía en la matriz; no se infirió calibre, precio ni stock a partir de otra talla.
 
 ## Estado actual de solicitudes y aprobaciones
 
@@ -46,8 +48,8 @@ Validación local de la rama:
 - `tests/test_price_monitor.py` sin su prueba independiente de estrés de 1.000 trabajos: **77 passed, 1 deselected**.
 - `py_compile` de los módulos, pruebas y smoke modificados: correcto.
 - `git diff --check`: correcto.
-- Ambas matrices se volvieron a leer como CSV y se verificaron sus claves únicas y cardinalidades: **1.400/1.400** pares y **102/102** URLs; 29 EAN, 72 pares y 12 tiendas en las rutas.
+- Ambas matrices se volvieron a leer como CSV y se verificaron sus claves únicas y cardinalidades: **1.400/1.400** pares con 100 identidades completas de marca/modelo/color y **102/102** URLs; 29 EAN, 72 pares y 12 tiendas en las rutas.
 
-El smoke offline del contenedor ahora comprueba además 124 ofertas almacenadas ES/EUR/disponibles en 71 EAN y las cardinalidades de las dos matrices. Conserva su recuperación sintética auditada e idempotente. La imagen y el smoke Docker aún deben ejecutarse en CI sobre el commit publicado de la PR.
+El smoke offline del contenedor ahora comprueba además 124 ofertas almacenadas ES/EUR/disponibles en 71 EAN, las identidades de catálogo y las cardinalidades de las dos matrices. Conserva su recuperación sintética auditada e idempotente. La imagen y el smoke Docker aún deben ejecutarse en CI sobre el commit publicado de la PR.
 
 No se ha hecho merge ni despliegue. La promoción y nuevas consultas comerciales quedan fuera del alcance de esta entrega.

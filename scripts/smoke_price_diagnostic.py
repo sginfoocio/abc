@@ -127,6 +127,11 @@ def main():
     assert len(matrix) == 1_400
     assert len({(row["ean"], row["competitor_id"]) for row in matrix}) == 1_400
     assert len({row["snapshot_at"] for row in matrix}) == 1
+    assert len({row["product_metadata_at"] for row in matrix}) == 1
+    assert len({row["ean"] for row in matrix}) == 100
+    assert len({row["competitor_id"] for row in matrix}) == 14
+    assert all(row["marca"] and row["modelo"] and row["color"] for row in matrix)
+    assert all("caliber" in row for row in matrix)
     current_offers = [row for row in matrix if row["current_comparable_offer"] == "True"]
     assert len(current_offers) == 124
     assert len({row["ean"] for row in current_offers}) == 71
@@ -140,6 +145,8 @@ def main():
     assert len({row["ean"] for row in routes}) == 29
     assert len({(row["ean"], row["competitor_id"]) for row in routes}) == 72
     assert len({row["competidor"] for row in routes}) == 12
+    assert len({row["product_metadata_at"] for row in routes}) == 1
+    assert all(row["catalog_brand"] and row["catalog_model"] and row["catalog_color"] for row in routes)
     assert all("Ruta documental solamente" in row["result_and_limitation"] for row in routes)
 
     with tempfile.TemporaryDirectory(dir=os.environ["CLOUD_SMOKE_DIRECTORY"]) as directory:
