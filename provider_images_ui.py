@@ -11,6 +11,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 import streamlit as st
+from filelock import Timeout
 
 import marcolin_images
 import nuorder_images
@@ -217,6 +218,8 @@ def _request_actions(connector, rows, engine_factory) -> None:
         try:
             result = connector.import_zip(selected, upload.getvalue())
             st.success(f"Importadas {result['imported']}, reutilizadas {result['reused']}, a revisión {result['review']}.")
+        except Timeout:
+            st.warning("La solicitud ya se está importando. Consulte su estado antes de reintentar.")
         except (ValueError, KeyError) as error:
             st.error(f"ZIP rechazado: {error}")
     if request["state"] in {FAILED, PARTIAL} and st.button("Reintentar", key=f"prov_retry_{selected}"):

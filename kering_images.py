@@ -472,7 +472,8 @@ class ImageStore:
                 VALUES(?,?,?,?,?,?,?,?,?)""", (run_id, order["id"], order["name"], supplier,
                 order["date_order"], previous + 1, "Pendiente", json.dumps(order), json.dumps({
                     line["ean"]: {"views": dict.fromkeys(VIEWS, "Pendiente"), "reason": "", "tries": 0}
-                    for line in order["lines"] if line["ean"]
+                    for line in order["lines"] if line["ean"] and (
+                        "selected_line_ids" not in order or line["id"] in order["selected_line_ids"])
                 })))
 
     def add_orders(self, run_id, orders):
@@ -838,7 +839,10 @@ def execute_order(store, attempt, loader, portal, cache):
         connection.execute("UPDATE attempts SET snapshot=?, order_date=? WHERE run_id=? AND order_id=?",
                            (json.dumps(order), order["date_order"], run_id, order["id"]))
     results = {}
-    for line in order["lines"]:
+    selected_ids = set(order.get("selected_line_ids", ()))
+    scoped_lines = ([line for line in order["lines"] if line["id"] in selected_ids]
+                    if "selected_line_ids" in order else order["lines"])
+    for line in scoped_lines:
         ean = line["ean"]
         if not ean or ean in results:
             continue
@@ -861,8 +865,10 @@ def execute_order(store, attempt, loader, portal, cache):
                                (json.dumps(results), run_id, order["id"]))
         if results[ean].get("access_failure"):
             raise AccessNotConfirmed(results[ean]["reason"])
-    status = order_status(order, results)
-    error = "lineas_sin_ean" if any(not line["ean"] for line in order["lines"]) else ""
+    status = order_status({**order, "lines": scoped_lines}, results)
+    if status == "Completo" and len(scoped_lines) != len(order["lines"]):
+        status = "Parcial"
+    error = "lineas_sin_ean" if any(not line["ean"] for line in scoped_lines) else ""
     with store.connect() as connection:
         connection.execute("""UPDATE attempts SET status=?, snapshot=?, results=?, error=?, order_date=?
             WHERE run_id=? AND order_id=?""", (status, json.dumps(order), json.dumps(results), error,

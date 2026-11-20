@@ -402,8 +402,8 @@ def test_kering_uses_existing_batch_with_selected_lines_and_rejects_stale_previe
     config_store = Mock()
     config_store.load.return_value = config
     monkeypatch.setattr(actions, "ConfigStore", lambda _: config_store)
-    selected, *rest = order["lines"]
-    revalidate = Mock(return_value={**order, "lines": [selected]})
+    selected = order["lines"][0]
+    revalidate = Mock(return_value={**order, "selected_line_ids": [selected["id"]]})
     monkeypatch.setattr(actions, "revalidate", revalidate)
     portal, batch = object(), Mock()
     monkeypatch.setattr(actions, "create_portal", lambda _: portal)
@@ -413,7 +413,8 @@ def test_kering_uses_existing_batch_with_selected_lines_and_rejects_stale_previe
     keys = {actions.line_identity(selected)}
     actions.kering_submission(None, order, keys, None, "Prueba", None)
     args, kwargs = batch.submit_for_user.call_args
-    assert args[0][0]["lines"] == args[6](25)["lines"] == [selected]
+    assert args[0][0]["lines"] == args[6](25)["lines"] == order["lines"]
+    assert args[0][0]["selected_line_ids"] == args[6](25)["selected_line_ids"] == [selected["id"]]
     assert kwargs["portal"] is portal
     kwargs["preflight"](None)
     latest.return_value = {"run_id": "already_started"}
@@ -422,6 +423,28 @@ def test_kering_uses_existing_batch_with_selected_lines_and_rejects_stale_previe
     config_store.load.return_value = {**config, "test_order_ids": []}
     with pytest.raises(ValueError, match="no autorizado"):
         actions.kering_submission(None, order, keys, None, "Prueba", None)
+
+
+def test_kering_partial_selection_preserves_order_for_follow_up(engine, tmp_path, monkeypatch):
+    import json
+    import kering_images as kering
+
+    order = read_purchase_page(engine, LINKS, ("kering",), START, END)[0][0]
+    order.update(selected_line_ids=[101], cursor=None)
+    store = ImageStore(tmp_path)
+    process = Mock(return_value={"views": dict.fromkeys(kering.VIEWS, "Descargada"), "reason": ""})
+    monkeypatch.setattr(kering, "process_ean", process)
+    run = store.create_run([order], "Prueba", 1, START, END)
+    row, = store.run_history(run)
+    assert set(json.loads(row["results"])) == {EAN}
+    kering.execute_order(store, row, lambda _: order, None, {})
+    row, = store.run_history(run)
+    process.assert_called_once_with(store, None, EAN)
+    assert row["status"] == "Parcial"
+    assert len(json.loads(row["snapshot"])["lines"]) == 3
+    baseline = {**row, "ended": 1}
+    assert actions.kering_action(baseline, {(103,)}) == "Procesar otras referencias Kering"
+    assert actions.kering_action(baseline, {(101,)}) is None
 
 
 def test_luxottica_only_reads_local_receipts(monkeypatch):

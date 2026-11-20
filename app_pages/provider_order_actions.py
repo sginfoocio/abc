@@ -77,18 +77,18 @@ def reload_order(engine_factory, order):
     return current
 
 
-def revalidate(engine_factory, order, selected, root):
+def revalidate(engine_factory, order, selected, root, *, keep_order=False):
     current = reload_order(engine_factory, order)
     if not selected or not set(selected) <= {line_identity(line) for line in current["lines"]
                                              if not line["barcode_conflict"]}:
         raise ValueError("Las referencias han cambiado; vuelva a consultar el pedido.")
     chosen = [line for line in current["lines"] if line_identity(line) in selected]
-    current["lines"] = chosen
-    evidence, notice = image_evidence([current], state_root(root) / ".catalog.sqlite3", root)
+    scoped = {**current, "lines": chosen}
+    evidence, notice = image_evidence([scoped], state_root(root) / ".catalog.sqlite3", root)
     if notice or any((report := evidence.get(ean_key(line["ean"]))) is None or report["incomplete"]
                      or report["status"] == COMPLETE for line in chosen):
         raise ValueError("La cobertura ha cambiado o no se pudo comprobar; actualice la consulta.")
-    return current
+    return {**current, "selected_line_ids": [line["id"] for line in chosen]} if keep_order else scoped
 
 
 def prepare_assisted(order, reviewer):
@@ -141,11 +141,25 @@ def latest_kering(order):
         return None
     with closing(open_existing(path)) as db:
         row = db.execute("""
-            SELECT a.run_id, a.status, a.error, a.results, r.started, r.ended
+            SELECT a.run_id, a.status, a.error, a.results, a.snapshot, r.started, r.ended
             FROM attempts a JOIN runs r ON r.id=a.run_id
             WHERE a.order_id=? AND a.number=? ORDER BY a.attempt DESC LIMIT 1
         """, (order["id"], order["name"])).fetchone()
         return dict(row) if row else None
+
+
+def kering_action(baseline, selected):
+    if baseline is None:
+        return "Procesar Kering"
+    if baseline["ended"] is None:
+        return None
+    if baseline["status"] in {"Error", "Interrumpido"}:
+        return "Reintentar Kering"
+    previous = json.loads(baseline["snapshot"] or "{}")
+    previous_ids = previous.get("selected_line_ids")
+    if previous_ids is not None and not {line[0] for line in selected} & set(previous_ids):
+        return "Procesar otras referencias Kering"
+    return None
 
 
 def kering_submission(engine_factory, order, selected, root, reviewer, baseline):
@@ -154,8 +168,8 @@ def kering_submission(engine_factory, order, selected, root, reviewer, baseline)
     day = date.fromisoformat(order["date"])
     if config.get("auto_enabled") or not config.get("test_mode") or order["id"] not in config.get("test_order_ids", []):
         raise ValueError("Pedido no autorizado en el piloto de Kering.")
-    if baseline and (baseline["ended"] is None or baseline["status"] not in {"Error", "Interrumpido"}):
-        raise ValueError("El último intento no admite reintento técnico desde el panel.")
+    if not kering_action(baseline, selected):
+        raise ValueError("El último intento no permite esta selección.")
     supplier = int(config["supplier_id"])
     batch = kering_service()
 
@@ -163,7 +177,7 @@ def kering_submission(engine_factory, order, selected, root, reviewer, baseline)
         current_config = config_store.load()
         if current_config != config:
             raise ValueError("Ha cambiado la configuración del piloto.")
-        current = revalidate(engine_factory, order, selected, root)
+        current = revalidate(engine_factory, order, selected, root, keep_order=True)
         if current["partner_id"] != supplier:
             # The panel may have a broader association than the Kering worker.
             from kering_images import configured_orders
@@ -359,7 +373,7 @@ def _render_actions(order, root, engine_factory, key):
             baseline = latest_kering(order)
             if baseline and baseline["ended"] is None:
                 st.info("Hay un lote activo. Consulte el resultado antes de iniciar otro.")
-            elif not baseline or baseline["status"] in {"Error", "Interrumpido"}:
+            elif action := kering_action(baseline, selected):
                 st.caption("Ejecuta solo las referencias seleccionadas, respetando los límites del piloto de Kering.")
 
                 def submit(reviewer, _):
@@ -367,8 +381,7 @@ def _render_actions(order, root, engine_factory, key):
                     st.success(f"Lote Kering iniciado: {run_id}")
 
                 previous = baseline["run_id"] if baseline else "first"
-                _confirm(f"kering_{order['id']}_{selection}_{previous}",
-                         "Reintentar Kering" if baseline else "Procesar Kering", submit)
+                _confirm(f"kering_{order['id']}_{selection}_{previous}", action, submit)
     if provider == "kering":
         latest = latest_kering(order)
         if latest:

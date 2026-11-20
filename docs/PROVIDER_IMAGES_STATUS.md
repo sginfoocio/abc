@@ -152,8 +152,9 @@ lista los EAN pendientes, vistas sin acreditar y referencias omitidas. Las accio
 requieren confirmación y un administrador identificado; se vuelve a leer Odoo por ID y se verifica
 la cobertura antes de preparar o reintentar referencias. No se crea otro almacén.
 
-- **Kering:** usa el lote manual, el bloqueo y las validaciones del piloto existentes. Solo entrega al
-  ejecutor las líneas confirmadas. El panel exige modo de prueba y automatización desactivada; no cambia
+- **Kering:** usa el lote manual, el bloqueo y las validaciones del piloto existentes. Conserva el
+  pedido completo en el historial pero solo procesa las líneas confirmadas. Un lote acotado no valida
+  el pedido completo; las otras referencias pueden prepararse después. Exige modo de prueba y automatización desactivada; no cambia
   configuración, corte ni lista de pedidos autorizados. Muestra progreso persistido y ofrece reintento
   de lotes terminados en error o interrumpidos. No acredita vistas a partir de fotos `lifestyle`,
   de detalle o desconocidas. `35600f2` pertenece a precios (#142); las correcciones de autenticación
