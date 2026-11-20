@@ -519,14 +519,47 @@ def _classification_summary(rows):
     return result
 
 
+def _approvals_without_request(con, continuity_id):
+    rows = con.execute("""SELECT u.ean,u.competitor_id,u.url,u.verified_at,u.note,
+            j.state AS monitor_state,j.url AS monitor_url,j.sampled_at,j.valid_until,
+            j.detail AS monitor_detail,
+            (SELECT COUNT(*) FROM access_audit a WHERE a.scope='product_review'
+               AND a.action='candidate_confirmed' AND a.at=u.verified_at
+               AND a.scope_id=u.competitor_id || ':' || u.ean || ':' || u.url) AS approval_audits,
+            (SELECT COUNT(*) FROM manual_review_refreshes r
+             WHERE r.competitor_id=u.competitor_id AND r.ean=u.ean
+               AND r.status IN ('pending','deferred','running')) AS active_requests
+        FROM competitor_product_urls u
+        JOIN price_continuity_pairs p ON p.continuity_id=? AND p.competitor_id=u.competitor_id
+            AND p.ean=u.ean
+        LEFT JOIN monitor_jobs j ON j.competitor_id=u.competitor_id AND j.ean=u.ean
+        WHERE u.status='verified' AND u.source='user'
+          AND NOT EXISTS (SELECT 1 FROM manual_review_refreshes r
+              WHERE r.competitor_id=u.competitor_id AND r.ean=u.ean AND r.url=u.url
+                AND r.requested_at=u.verified_at)
+        ORDER BY u.competitor_id,u.ean,u.url""", (continuity_id,)).fetchall()
+    return [{
+        "ean": row["ean"], "competitor_id": row["competitor_id"], "url": row["url"],
+        "verified_at": row["verified_at"], "approval_note": row["note"],
+        "monitor_url": row["monitor_url"], "monitor_state": row["monitor_state"],
+        "sampled_at": row["sampled_at"], "valid_until": row["valid_until"],
+        "monitor_detail": row["monitor_detail"], "active_requests": row["active_requests"],
+        "approval_audits": row["approval_audits"],
+        "reason": ("Ficha marcada como aprobada sin solicitud asociada: requiere acreditar y reconciliar la identidad; "
+                   "la recuperación automática para este caso aún no está implementada"),
+    } for row in rows]
+
+
 def preview_manual_reviews(database, *, now=None):
     path = Path(database).resolve()
     now = _time(now or datetime.now(timezone.utc))
     with closing(_connect(path, readonly=True)) as con:
         con.execute("BEGIN")
-        _, rows = _manual_review_rows(con, path, now)
+        continuity_id, rows = _manual_review_rows(con, path, now)
+        approvals = _approvals_without_request(con, continuity_id)
         con.rollback()
-    return {"counts": _manual_summary(rows), "classifications": _classification_summary(rows), "requests": rows}
+    return {"counts": _manual_summary(rows), "classifications": _classification_summary(rows), "requests": rows,
+            "approvals_without_request": approvals}
 
 
 def apply_manual_reviews(database, *, actor, note, build_commit, approved=False, request_ids=None, now=None):

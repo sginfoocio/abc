@@ -671,3 +671,29 @@ def test_inventory_and_export_include_more_than_100_requests(expanded_review):
     preview = preview_manual_reviews(store.database_path, now=clock())
     assert len(preview["requests"]) == 105
     assert preview["counts"] == {"recoverable": 105, "already_resolved": 0, "excluded": 0}
+
+
+def test_preview_inventories_current_approval_without_matching_request(trial):
+    service, store, clock, cid, ean, url, site = _diagnostic_review(trial)
+    access = trial[2]
+    for shop in store.competitors().to_dict("records"):
+        for method in ("ficha", "sitemap"):
+            access.set_method(shop["id"], method, "authorized", actor="operator", note="Synthetic authorization")
+    service.heartbeat()
+    service.expand_continuity(actor="operator", approved=True, build_commit="d" * 40,
+                              note="Synthetic scope expansion")
+    locator = trial[3]
+    assert preview_manual_reviews(store.database_path, now=clock())["approvals_without_request"] == []
+
+    row = _candidate(locator, ean)
+    assert locator.review(ean, cid, url, accept=True, actor="operator", note="Synthetic review",
+                          update_price=False, expected_candidate=_expected(row)) is None
+    preview = preview_manual_reviews(store.database_path, now=clock())
+    assert preview["requests"] == []
+    assert len(preview["approvals_without_request"]) == 1
+    approval = preview["approvals_without_request"][0]
+    assert (approval["competitor_id"], approval["ean"], approval["url"]) == (cid, ean, url)
+    assert approval["approval_audits"] == 1
+    assert approval["active_requests"] == 0
+    assert "aún no está implementada" in approval["reason"]
+    assert site.calls == []

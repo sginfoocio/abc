@@ -213,9 +213,12 @@ python price_recovery.py --database RUTA_BASE --manual-reviews
 El JSON incluye cantidades y filas `recoverable`, `already_resolved` y `excluded`, con motivo. Es una
 fotografía local: permisos, presupuestos y estado pueden cambiar y se vuelven a comprobar al aplicar y
 al consultar. Se excluyen identidades históricas que no puedan acreditarse, restricciones vigentes y
-reservas inciertas. El inventario enumera solicitudes existentes, no todas las fichas aprobadas que nunca
-tuvieron solicitud; estas requieren un inventario adicional. Si falta robots vigente, el trabajador lo
-comprobará antes de cualquier ficha.
+reservas inciertas. `approvals_without_request` añade las fichas actualmente marcadas como verificadas
+por usuario que no tienen solicitud para esa aprobación, con su URL, fecha, auditorías coincidentes y
+estado del monitor. Es un inventario de candidatos, no prueba por sí solo la identidad histórica ni
+crea solicitudes: la recuperación de estos casos todavía no está implementada. No incluye aprobaciones
+históricas sustituidas o fichas eliminadas. Si falta robots vigente, el trabajador lo comprobará antes de
+cualquier ficha.
 
 Guardar la vista previa y congelar los IDs elegibles con su evidencia. Primero, con aprobación expresa,
 seleccionar **una** solicitud elegible por mecanismo de la vista previa:
