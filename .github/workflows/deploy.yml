@@ -10,9 +10,12 @@ on:
     # `push` stays limited to main/master and image publication/deploy only happen on push to main.
     branches:
       - '**'
+  workflow_dispatch:
+  schedule:
+    - cron: '37 3 * * 1'
 
 concurrency:
-  group: abcd-control-deploy-${{ github.ref }}
+  group: abcd-control-deploy-${{ github.ref }}-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'full-offline' || 'change' }}
   cancel-in-progress: false
 
 env:
@@ -22,6 +25,7 @@ env:
 jobs:
   build-and-push:
     needs: tests
+    if: github.event_name == 'push' || (github.event_name == 'pull_request' && needs.tests.outputs.documentation_only != 'true')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -254,7 +258,10 @@ jobs:
 
   tests:
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    permissions:
+      contents: read
+    outputs:
+      documentation_only: ${{ steps.selection.outputs.documentation_only }}
     services:
       postgres:
         image: postgres:16
@@ -275,6 +282,9 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -290,16 +300,19 @@ jobs:
       - name: Verify dependency locks
         run: python scripts/dependency_locks.py
 
-      - name: Run offline tests
-        run: python -m pytest -q tests test_transform_luxottica_masterdata.py test_validate_masterdata_odoo_dryrun.py
+      - name: Select and run offline tests
+        id: selection
+        run: python -m scripts.ci_test_selection
 
       - name: Benchmark synthetic thumbnail cold and hot reads
+        if: steps.selection.outputs.benchmark == 'true'
         run: |
           python -m scripts.benchmark_image_thumbnails \
             --directory "$GITHUB_WORKSPACE/.thumbnail-benchmark" \
             --output "$RUNNER_TEMP/thumbnail-benchmark.json"
 
       - name: Retain synthetic benchmark evidence
+        if: steps.selection.outputs.benchmark == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: thumbnail-benchmark-synthetic
@@ -307,6 +320,7 @@ jobs:
 
       - name: Lint with flake8
         run: |
+          flake8 scripts/ci_test_selection.py tests/test_ci_stacked_prs.py --select=E9,F63,F7,F82
           flake8 deployment/cloud/cloud_production_deploy.py deployment/cloud/validate_luxottica.py deployment/cloud/runner_job_gate.py deployment/cloud/verify_compose_transition.py tests/test_cloud_production_deploy.py tests/test_validate_luxottica.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 app_enhanced.py app_exports.py app_navigation.py app_pages db_loader.py engine.py abcd_snapshots.py save_abcd_weekly_snapshot.py auth_session.py order_alerts.py graph_mail_downloader.py tests/test_app_exports.py tests/test_app_navigation.py tests/test_abcd_snapshots.py tests/test_auth_session.py tests/test_order_alerts.py tests/test_graph_mail_downloader.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 app_enhanced.py app_exports.py app_navigation.py app_pages db_loader.py engine.py abcd_snapshots.py save_abcd_weekly_snapshot.py auth_session.py order_alerts.py graph_mail_downloader.py tests/test_app_exports.py tests/test_app_navigation.py tests/test_abcd_snapshots.py tests/test_auth_session.py tests/test_order_alerts.py tests/test_graph_mail_downloader.py --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
@@ -332,6 +346,7 @@ jobs:
 
       - name: Check syntax
         run: |
+          python -m py_compile scripts/ci_test_selection.py tests/test_ci_stacked_prs.py
           python -m py_compile deployment/cloud/cloud_production_deploy.py deployment/cloud/validate_luxottica.py deployment/cloud/runner_job_gate.py deployment/cloud/verify_compose_transition.py tests/test_cloud_production_deploy.py tests/test_validate_luxottica.py
           sh -n deployment/cloud/runner_job_gate.sh
           python -m py_compile app_enhanced.py app_exports.py app_navigation.py app_pages/alerts.py app_pages/luxoptica.py tests/test_app_exports.py tests/test_app_navigation.py
