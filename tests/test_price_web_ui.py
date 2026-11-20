@@ -27,11 +27,7 @@ def ui(tmp_path, monkeypatch):
 
 def _run(admin_section="Competidores"):
     app = AppTest.from_string(SCRIPT).run(timeout=90)
-    if admin_section == "Búsqueda manual":
-        navigate(app, "Piloto y consultas")
-        app.selectbox(key="price_pilot_section").set_value(admin_section).run(timeout=90)
-    else:
-        navigate(app, admin_section)
+    navigate(app, admin_section)
     assert not app.exception
     return app
 

@@ -888,7 +888,7 @@ def test_ui_coverage_settings_and_approval_are_offline(pilot, monkeypatch):
                              "render_price_comparator_page()").run(timeout=60)
     assert not app.exception
     from tests.admin_navigation import navigate
-    navigate(app, "Piloto y consultas", timeout=60)
+    navigate(app, "Búsqueda manual", timeout=60)
     assert not app.exception
     assert any(item.value == "Buscar precios en la competencia" for item in app.subheader)
     assert app.button(key="web_search_button").disabled

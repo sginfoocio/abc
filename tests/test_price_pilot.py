@@ -7,10 +7,11 @@ import pytest
 from price_comparator import PriceComparatorStore, normalize_gtin
 from price_pilot import (
     COMPETITOR_NAMES, HTTP_BUDGET_EXHAUSTED, REQUIRED_EANS, SAMPLE_EANS, PilotError, PricePilot, pilot_scope,
-    effective_scope,
+    effective_scope, require_pilot_access,
 )
 from price_scheduler import CompetitorScheduler, SchedulerConfigError
 from price_web import WebPriceSearch, WebSearchError
+from price_watch import PriceWatch
 from tests.test_price_review_fixes import _freeze, _vytria
 from tests.web_fixtures import BASE, NOW, PRADA, FakeSite, competitor_id, index_url, prada_page, url_of
 
@@ -223,14 +224,17 @@ def test_budget_recovery_requires_operator_reason_and_pilot_lock(pilot):
 def test_direct_manual_forced_and_scheduler_boundaries(pilot):
     service, store, search, site, cid, extras = pilot
     service.enable()
+    PriceWatch(store).add([SAMPLE_EANS[0]], actor="fixture", source="manual")
     other = next(r["id"] for r in store.competitors().to_dict("records") if r["name"] not in COMPETITOR_NAMES)
-    for ean, competitor in [(extras[0], cid), (SAMPLE_EANS[0], other), (SAMPLE_EANS[0], cid)]:
+    for ean, competitor in [(extras[0], cid)]:
         with pytest.raises(WebSearchError):
             search.locate(ean, competitor)
         with pytest.raises(WebSearchError):
             search.run([ean], [competitor])
         with pytest.raises(WebSearchError):
             search.submit_url(ean, competitor, BASE + "/product")
+    require_pilot_access(store, SAMPLE_EANS[0], cid)
+    require_pilot_access(store, SAMPLE_EANS[0], other)
     assert search.check_access(cid)["access_status"] == "robots_allowed"
     assert site.calls == [BASE + "/robots.txt"]
     site.calls.clear()
@@ -331,6 +335,30 @@ def test_continuity_scope_rejects_pair_outside_manifest(pilot):
     outside = next(ean for ean in scope["eans"] if ean != "0889652637075")
     with pytest.raises(PilotError, match="fuera del manifiesto|fuera del alcance"):
         service.price_refresh_plan(outside)
+
+
+def test_manual_web_access_requires_an_exact_pair_in_active_continuity(pilot):
+    _, store, search, site, cid, _ = pilot
+    selected, unpaired = SAMPLE_EANS[:2]
+    limits = {cid: {"daily_limit": 200, "per_minute_limit": 10, "effective_pause": 3}}
+    manifest = {
+        "eans": [selected, unpaired],
+        "competitors": {cid: "Synthetic"},
+        "pairs": [{"competitor_id": cid, "ean": selected}],
+    }
+    with store._connect() as connection, connection:
+        connection.execute("""INSERT INTO price_continuity(
+            id,status,prepared_at,started_at,actor,build_commit,manifest,limits,
+            interval_hours,heartbeat_at,next_sync_at,sync_receipt,error)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                           (1, "active", NOW.isoformat(), NOW.isoformat(), "operator", "d" * 40,
+                            json.dumps(manifest), json.dumps(limits), 24.0,
+                            NOW.isoformat(), NOW.isoformat(), "{}", ""))
+
+    require_pilot_access(store, selected, cid)
+    with pytest.raises(WebSearchError, match="Par fuera del manifiesto vigente"):
+        search.run([unpaired], [cid])
+    assert site.calls == []
 
 
 def test_selected_product_refresh_uses_only_confirmed_authorized_urls(pilot):
@@ -553,7 +581,7 @@ def test_ui_scope_plan_and_manual_confirmation(pilot, monkeypatch):
     app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
                               "render_price_comparator_page()").run(timeout=30)
     from tests.admin_navigation import navigate
-    navigate(app, "Piloto y consultas", timeout=30)
+    navigate(app, "Búsqueda manual", timeout=30)
     assert not app.exception
     assert app.button(key="web_search_button").disabled
     assert not any(widget.key in {"pilot_eans", "pilot_competitors"} for widget in app.multiselect)
@@ -697,7 +725,7 @@ def test_advanced_web_search_requires_an_explicit_bounded_submission(pilot, monk
     app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
                               "render_price_comparator_page()").run(timeout=30)
     from tests.admin_navigation import navigate
-    navigate(app, "Piloto y consultas", timeout=30)
+    navigate(app, "Búsqueda manual", timeout=30)
     app.text_input(key="web_text").set_value(REQUIRED_EANS[0]).run(timeout=30)
     app.radio(key="web_mode").set_value("Consultar webs").run(timeout=30)
     app.button(key="web_search_button").click().run(timeout=30)

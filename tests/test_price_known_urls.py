@@ -221,8 +221,7 @@ def _run():
 
 def _search(app, text):
     from tests.admin_navigation import navigate
-    navigate(app, "Piloto y consultas")
-    app.selectbox(key="price_pilot_section").set_value("Búsqueda manual").run(timeout=90)
+    navigate(app, "Búsqueda manual")
     app.text_input(key="web_text").set_value(text).run(timeout=90)
     app.radio(key="web_mode").set_value("Almacenados")
     app.button(key="web_search_button").click()
@@ -230,6 +229,10 @@ def _search(app, text):
 
 
 def test_stored_search_shows_candidate_pages_not_a_bare_no_results(ui):
+    from price_watch import PriceWatch
+    PriceWatch(ui).add([PRADA_27], actor="test", source="manual")
+    from price_watch import PriceWatch
+    PriceWatch(ui).add([PRADA_27], actor="test", source="manual")
     app = _search(_run(), PRADA_27)
     assert not app.exception and not app.error
     assert any("Producto encontrado" in s.value and PRADA_27 in s.value for s in app.success)

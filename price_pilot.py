@@ -144,6 +144,11 @@ def require_pilot_access(store: PriceComparatorStore, ean: str | None, competito
         manifest = json.loads(continuity["manifest"])
         if competitor_id not in manifest["competitors"] or (ean is not None and ean not in manifest["eans"]):
             raise PilotError("Producto o competidor fuera del manifiesto vigente")
+        pairs = manifest.get("pairs")
+        if ean is not None and (not isinstance(pairs, list) or not any(
+                isinstance(pair, dict) and pair.get("competitor_id") == competitor_id
+                and pair.get("ean") == ean for pair in pairs)):
+            raise PilotError("Par fuera del manifiesto vigente")
         if continuity["status"] != "active":
             state = {"prepared": "preparada, todavía no activa", "paused": "pausada",
                      "stopped": "detenida"}.get(continuity["status"], continuity["status"])

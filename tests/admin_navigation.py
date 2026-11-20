@@ -13,15 +13,13 @@ def navigate(app, section, *, timeout=90):
         "Configuración general": ("Ajustes técnicos", None),
         "Datos e importaciones": ("Importaciones", None),
         "Historial y diagnósticos": ("Históricos y auditoría", None),
-        "Piloto y consultas": ("Búsqueda manual (avanzada)", None),
+        "Búsqueda manual": ("Búsqueda manual (avanzada)", None),
         "Recuperación de búsquedas": ("Colas y recuperaciones", "Incidencias y recuperación"),
     }
     if section in diagnostics:
         page, task = diagnostics[section]
         _diagnostics(app, page, timeout=timeout)
-        if task and task != "Incidencias y recuperación":
-            app.selectbox(key="price_pilot_section").set_value(task).run(timeout=timeout)
-        elif task:
+        if task:
             app.selectbox(key="diagnostic_queue_task").set_value(task).run(timeout=timeout)
         return app
     if section == "Competidores":

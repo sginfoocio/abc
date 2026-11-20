@@ -269,8 +269,7 @@ def ui(tmp_path, monkeypatch):
 
 def _find(app):
     from tests.admin_navigation import navigate
-    navigate(app, "Piloto y consultas")
-    app.selectbox(key="price_pilot_section").set_value("Búsqueda manual").run(timeout=90)
+    navigate(app, "Búsqueda manual")
     app.text_input(key="web_text").set_value(EAN).run(timeout=90)
     app.multiselect(key="web_competitors").set_value(["Visio Factory"])
     app.button(key="web_search_button").click()
