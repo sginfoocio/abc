@@ -82,7 +82,17 @@ La ruta existente en [la aplicación](../app_enhanced.py) selecciona un proveedo
 | **P0.2 — Operación por proveedor** | Reutilizar acciones de Kering/Luxottica primero y después integrar las asistidas de Marcolin, Sáfilo y NuORDER. Probar permisos en UI y servidor, confirmación, concurrencia, idempotencia, historial intacto y que el fallo de un proveedor no oculta ni bloquea a los demás. Las capacidades sin autorización o evidencia se muestran como no disponibles, con motivo. |
 | **P0.3 — Navegación y aceptación** | Integrar biblioteca y exportación contextual; no retirar accesos anteriores hasta probar paridad y conservar enlaces existentes. Verificar interfaz en escritorio y móvil con datos sintéticos y ejecutar regresiones por proveedor. Para declarar cerrado el P0, un administrador debe poder localizar un pedido pendiente, inspeccionar cobertura, ejecutar el procedimiento autorizado, revisar resultados y abrir/exportar las imágenes desde el panel para cada proveedor incluido. Los pilotos reales requieren autorización separada y se registran aparte de las pruebas offline. |
 
-**Coordinación:** [#147](https://github.com/sginfoocio/abc/pull/147) contiene esta auditoría y el plan; no implementa la pantalla. [#146](https://github.com/sginfoocio/abc/pull/146) se limita a clasificación y revisión de `lifestyle`: reutilizarla tras su integración, sin repetirla ni bloquear por ella la consulta de solo lectura. Las futuras PR de P0 se separan por entrega. Mantener [#38](https://github.com/sginfoocio/abc/issues/38) para la validación específica de Kering y [#59](https://github.com/sginfoocio/abc/issues/59) para la identidad, reconciliación y pilotos de los otros conectores, sin cerrarlas por el mero cambio de navegación.
+**Coordinación:** [#147](https://github.com/sginfoocio/abc/pull/147) contiene esta auditoría y el plan; no implementa la pantalla. Las entregas están en [#150](https://github.com/sginfoocio/abc/pull/150) (consulta), [#151](https://github.com/sginfoocio/abc/pull/151) (acciones) y [#152](https://github.com/sginfoocio/abc/pull/152) (biblioteca y ZIP), apiladas en ese orden. Su implementación offline no acredita integración en `main`, despliegue ni paridad productiva. [#146](https://github.com/sginfoocio/abc/pull/146) sigue separada: amplía `lifestyle` sin acreditar vistas técnicas. Mantener [#38](https://github.com/sginfoocio/abc/issues/38) y [#59](https://github.com/sginfoocio/abc/issues/59) abiertas para validaciones reales.
+
+El borrador [#149](https://github.com/sginfoocio/abc/pull/149) añade otra tabla en la misma ruta y
+entra en conflicto con la integración de la pila. Ambos enfoques exigen consulta explícita y
+asociación confirmada, conservan líneas repetidas y distinguen cobertura desconocida. #149 excluye
+pedidos no confirmados, permite fijar manualmente el tope de líneas y usa solo metadatos de catálogo;
+la pila ofrece filtro de estado, paginación con presupuesto fijo y contraste de archivos, además de
+historial, acciones y biblioteca. Sus cuatro pruebas cubren agregación, asociación, ausencia de I/O
+implícita y catálogo desconocido; la pila prueba esos contratos y el recorrido ampliado.
+Recomendar sustituir el borrador solo cuando se acepte que el tope editable y la vista de metadatos
+sin verificar no son requisitos de operación. No cerrar ni fusionar el borrador automáticamente.
 
 ## Issues y referencias vigentes consultadas
 
@@ -115,7 +125,10 @@ La ruta existente en [la aplicación](../app_enhanced.py) selecciona un proveedo
 
 ## Próximos pasos seguros
 
-1. Empezar por P0.1 (lectura común) en una PR de implementación separada; no tocar aún los procesos de proveedor.
+1. Revisar la pila en orden `main → #150 → #151 → #152`. Tras cada fusión autorizada, comprobar
+   el SHA y CI de `main`, reorientar únicamente la siguiente PR y revisar su diff antes de continuar.
+   Si se fusiona por squash, comprobar que el rango de commits de la fase anterior no vuelve a entrar
+   (preparar un `rebase --onto` con base antigua explícita, sin publicarlo sin autorización).
 2. Revisar #146 como cambio independiente de `lifestyle` y corregir la referencia PR/SHA de autenticación Kering antes de cerrar esa validación.
 3. Mantener #38 y #59 como seguimiento de los pilotos/accesos externos; no reenviar la solicitud Marcolin nº 1.
 4. Solicitar a un administrador la evidencia de solo lectura de workers/NAS y autorizaciones de portal; sin ella, producción permanece «No verificada».
