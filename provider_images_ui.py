@@ -112,12 +112,6 @@ def render_provider_page(
     _guard()
     if show_title:
         st.title(TITLE)
-    if selected_provider is None:
-        from provider_orders_dashboard import render as render_order_dashboard
-        with st.expander("Pedidos y cobertura — panel único (solo lectura)", expanded=True):
-            render_order_dashboard(engine_factory, data_root())
-        st.divider()
-        st.subheader("Gestión específica por proveedor")
     provider = selected_provider or st.segmented_control(
         "Proveedor",
         PROVIDERS,
