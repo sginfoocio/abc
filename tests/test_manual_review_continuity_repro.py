@@ -183,6 +183,186 @@ def test_extracted_other_variant_is_not_recorded(expanded_review, monkeypatch):
     assert trace["receipt_ids"] and trace["url_sha256"]["candidate_url"]
 
 
+def _accepted_ft1044_review(trial):
+    service, store, access, locator, monitor, clock, cid, site, _ = trial
+    _, _, _, _, ean, old_url, _ = trial_helpers._diagnostic_review(trial)
+    url = site.product("Tom Ford", "FT1044", "001", gtin=ean)
+    with store._connect() as con, con:
+        con.execute("UPDATE products SET brand='Tom Ford',model='FT1044',color='001' WHERE ean=?", (ean,))
+        con.execute("""UPDATE competitor_product_urls SET url=?,model_code='FT1044',color_code='001',
+            match_status='probable_match',status='probable'
+            WHERE competitor_id=? AND ean=? AND url=?""", (url, cid, ean, old_url))
+        con.execute("UPDATE locate_jobs SET url=?,state='review' WHERE competitor_id=? AND ean=?",
+                    (url, cid, ean))
+    for shop in store.competitors().to_dict("records"):
+        for method in ("ficha", "sitemap"):
+            access.set_method(shop["id"], method, "authorized", actor="operator", note="Synthetic authorization")
+    service.heartbeat()
+    service.expand_continuity(actor="operator", approved=True, build_commit="d" * 40,
+                              note="Synthetic 14-competitor scope")
+    task = locator.review(ean, cid, url, accept=True, actor="operator", note="Aprobación vigente",
+                          update_price=True)
+    return service, store, clock, cid, ean, url, site, monitor, task
+
+
+def _record_corrected_amevista_error(review, html):
+    import base64
+    import hashlib
+
+    _, store, clock, cid, ean, url, site, _, task = review
+    detail = "Distinto modelo: catálogo FT1044, ficha BRONSON, FT1044"
+    captured_at = (clock() + timedelta(seconds=1)).isoformat()
+    payload = html.encode("utf-8")
+    current = {
+        "competitor_id": cid,
+        "ean": ean,
+        "requested_url": url,
+        "final_url": url,
+        "captured_at": captured_at,
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "html_base64": base64.b64encode(payload).decode("ascii"),
+    }
+    with store._connect() as con, con:
+        refresh = con.execute("SELECT monitor_job_id FROM manual_review_refreshes WHERE id=?",
+                              (task,)).fetchone()
+        con.execute("""UPDATE manual_review_refreshes SET status='error',detail=?,finished_at=?,updated_at=?
+            WHERE id=?""", (detail, clock().isoformat(), clock().isoformat(), task))
+        con.execute("UPDATE monitor_jobs SET state='review',detail=? WHERE id=?",
+                    (detail, refresh["monitor_job_id"]))
+        con.execute("""INSERT INTO access_audit(scope,scope_id,action,previous,current,actor,note,at)
+            VALUES('competitor',?,'capture_continuity_html','',?,'operator','synthetic retained HTML',?)""",
+                    (cid, json.dumps(current), captured_at))
+    return store, clock, cid, ean, url, site, task
+
+
+def test_corrected_error_replays_exact_saved_html_and_is_idempotent(trial):
+    review = _accepted_ft1044_review(trial)
+    alias_url = review[6].product("Tom Ford", "Bronson", "001", gtin=review[4])
+    html = review[6].pages[alias_url]
+    store, clock, cid, ean, _, site, task = _record_corrected_amevista_error(review, html)
+    now = clock() + timedelta(seconds=2)
+
+    preview = preview_manual_reviews(store.database_path, request_ids=[task], now=now)
+    item = preview["requests"][0]
+    assert item["action"] == "recover_corrected_error", item
+    assert item["evidence"]["approval_audits"] == 1
+    assert item["evidence"]["artifact_evaluations"][0]["result"] == "exact_identity"
+    assert item["http_requests"] == 0
+    assert site.calls == []
+
+    applied = apply_manual_reviews(
+        store.database_path, request_ids=[task], actor="operator", note="Revisión local",
+        build_commit="f" * 40, approved=True, now=now,
+    )
+    assert applied["changed"] == [task]
+    with store._connect() as con:
+        refresh_status = con.execute(
+            "SELECT status FROM manual_review_refreshes WHERE id=?", (task,)
+        ).fetchone()[0]
+        monitor_state = con.execute(
+            "SELECT state FROM monitor_jobs WHERE competitor_id=? AND ean=?", (cid, ean)
+        ).fetchone()[0]
+        request_count = con.execute(
+            "SELECT COUNT(*) FROM manual_review_refreshes WHERE competitor_id=? AND ean=?",
+            (cid, ean),
+        ).fetchone()[0]
+    assert refresh_status == "pending"
+    assert monitor_state == "pending"
+    assert request_count == 1
+    repeat = preview_manual_reviews(store.database_path, request_ids=[task], now=now)
+    assert repeat["requests"][0]["action"] == "already_queued"
+    assert apply_manual_reviews(
+        store.database_path, request_ids=[task], actor="operator", note="Repetición idempotente",
+        build_commit="f" * 40, approved=True, now=now,
+    )["changed"] == []
+    assert site.calls == []
+
+
+def test_corrected_error_with_contradictory_saved_html_stays_excluded(trial):
+    review = _accepted_ft1044_review(trial)
+    _, _, _, _, ean, url, site, _, _ = review
+    conflicting_url = site.product("RayBan", "RB123", "001", gtin=ean)
+    store, clock, _, _, _, _, task = _record_corrected_amevista_error(review, site.pages[conflicting_url])
+    preview = preview_manual_reviews(
+        store.database_path, request_ids=[task], now=clock() + timedelta(seconds=2))
+    item = preview["requests"][0]
+    assert item["category"] == "excluded", (
+        item["reason"], item["evidence"].get("artifact_evaluations"))
+    assert "contradice" in item["reason"].lower() or "distinto" in item["reason"].lower()
+    assert item["action"] == ""
+    assert site.calls == []
+
+
+def test_corrected_error_without_retained_artifact_does_not_claim_offline_replay(trial):
+    review = _accepted_ft1044_review(trial)
+    html = review[6].pages[review[5]]
+    store, clock, cid, _, url, site, task = _record_corrected_amevista_error(review, html)
+    with store._connect() as con, con:
+        con.execute("""DELETE FROM access_audit WHERE scope='competitor' AND scope_id=?
+            AND action='capture_continuity_html' AND json_extract(current,'$.requested_url')=?""",
+                    (cid, url))
+    preview = preview_manual_reviews(
+        store.database_path, request_ids=[task], now=clock() + timedelta(seconds=2))
+    item = preview["requests"][0]
+    assert item["action"] == "recover_corrected_error"
+    assert item["evidence"]["artifact_evaluations"] == []
+    assert "Sin artefacto reevaluable suficiente" in item["reason"]
+    assert site.calls == []
+
+
+def test_sanitized_diagnostic_artifact_is_replayed_without_becoming_an_observation(trial):
+    from price_diagnostic import sanitise
+    from price_web_fetch import Fetched
+
+    review = _accepted_ft1044_review(trial)
+    alias_url = review[6].product("Tom Ford", "Bronson", "001", gtin=review[4])
+    html = review[6].pages[alias_url]
+    store, clock, cid, ean, url, site, task = _record_corrected_amevista_error(review, html)
+    with store._connect() as con, con:
+        con.execute("""DELETE FROM access_audit WHERE scope='competitor' AND scope_id=?
+            AND action='capture_continuity_html' AND json_extract(current,'$.requested_url')=?""",
+                    (cid, url))
+    metadata, artifact = sanitise(Fetched(url, 200, html.encode(), url, []), 1024 * 1024)
+    metadata["captured_at"] = (clock() + timedelta(seconds=1)).isoformat()
+    metadata["status"] = "captured"
+    with store._connect() as con, con:
+        continuity_id = con.execute(
+            "SELECT id FROM price_continuity ORDER BY id DESC LIMIT 1").fetchone()["id"]
+        con.execute("""INSERT INTO price_diagnostic_requests(
+            continuity_id,competitor_id,ean,url,actor,note,build_commit,status,created_at,
+            finished_at,result,artifact,expires_at
+        ) VALUES(?,?,?,?,?,'synthetic diagnostic','a','captured',?,?,?,?,?)""",
+                    (continuity_id, cid, ean, url, "operator", clock().isoformat(),
+                     metadata["captured_at"], json.dumps(metadata), artifact,
+                     (clock() + timedelta(days=1)).isoformat()))
+    preview = preview_manual_reviews(
+        store.database_path, request_ids=[task], now=clock() + timedelta(seconds=2))
+    item = preview["requests"][0]
+    assert item["action"] == "recover_corrected_error"
+    assert item["evidence"]["artifact_evaluations"][0]["source"] == "sanitized_jsonld"
+    assert item["evidence"]["artifact_evaluations"][0]["result"] == "exact_identity"
+    assert item["status"] == "error"
+    assert site.calls == []
+
+
+def test_approved_read_recovery_ui_previews_without_http(expanded_review):
+    from streamlit.testing.v1 import AppTest
+
+    _, store, _, _, _, _, site, _, _ = expanded_review
+    names = dict(zip(store.competitors()["id"], store.competitors()["name"]))
+    app = AppTest.from_string(
+        "from app_pages.price_watch import _render_approved_read_recovery\n"
+        "from price_comparator import PriceComparatorStore\n"
+        f"store = PriceComparatorStore({str(store.database_path)!r})\n"
+        f"names = {names!r}\n"
+        "_render_approved_read_recovery(store, names)\n"
+    ).run()
+    app.button(key="approved_read_preview_button").click().run()
+    assert not app.exception
+    assert any(metric.label == "Reprogramaciones" for metric in app.metric)
+    assert site.calls == []
+
+
 def test_accepted_edel_base_url_records_checked_variant_without_new_http(tmp_path):
     from price_monitor import PriceMonitor
     from tests.test_price_locator import Site, _env

@@ -1478,6 +1478,187 @@ def _render_selected_recovery(store: PriceComparatorStore, continuity_id: int) -
                 st.error(f"No se pudo aplicar la recuperación: {exc}")
 
 
+def _render_approved_read_recovery(store: PriceComparatorStore, names: dict[str, str]) -> None:
+    import sqlite3
+    from filelock import Timeout
+    from build_info import load_build_info
+    from price_recovery import apply_manual_reviews, preview_manual_reviews
+
+    st.caption(
+        "La vista previa es local y de solo lectura: reevalúa muestras y artefactos conservados, "
+        "sin HTTP. La aplicación revalida aprobaciones, identidad, vigencia, permisos, robots, "
+        "presupuesto y bloqueos; las lecturas nuevas las ejecuta únicamente el monitor existente."
+    )
+    columns = st.columns(3)
+    competitor_ids = columns[0].multiselect(
+        "Competidores", options=sorted(names), format_func=lambda value: names[value],
+        key="approved_read_competitors",
+    )
+    ean_query = columns[1].text_input("EAN", key="approved_read_ean")
+    reason_query = columns[2].text_input("Motivo o evidencia", key="approved_read_reason")
+    filters = (tuple(competitor_ids), ean_query.strip(), reason_query.strip())
+    if st.session_state.get("approved_read_filters") != filters:
+        st.session_state.pop("approved_read_preview", None)
+        st.session_state.pop("approved_read_selection", None)
+        st.session_state.pop("approved_read_approval_selection", None)
+        st.session_state["approved_read_filters"] = filters
+
+    if st.button("Previsualizar lecturas aprobadas", key="approved_read_preview_button"):
+        try:
+            st.session_state["approved_read_preview_revision"] = (
+                int(st.session_state.get("approved_read_preview_revision", 0)) + 1)
+            st.session_state["approved_read_preview"] = preview_manual_reviews(
+                store.database_path,
+                competitor_ids=competitor_ids or None,
+                ean_query=ean_query,
+                reason_query=reason_query,
+            )
+            st.session_state["approved_read_selection"] = []
+            st.session_state["approved_read_approval_selection"] = []
+        except (ValueError, KeyError, TypeError, OSError, sqlite3.Error) as exc:
+            st.session_state.pop("approved_read_preview", None)
+            st.error(f"No se pudo preparar la vista previa: {exc}")
+
+    preview = st.session_state.get("approved_read_preview")
+    if preview is None:
+        return
+    counts = preview["action_counts"]
+    metrics = st.columns(5)
+    metrics[0].metric("Reutilizaciones locales", counts["reuse"])
+    metrics[1].metric("Reprogramaciones", counts["requeue"])
+    metrics[2].metric("Ya en cola", counts["already_queued"])
+    metrics[3].metric("Exclusiones", counts["excluded"])
+    metrics[4].metric("HTTP nuevos en esta acción", 0)
+
+    actionable = [row for row in preview["requests"]
+                  if row["action"] in {"local_reevaluation", "requeue", "recover_corrected_error"}]
+    if actionable:
+        selected = set(st.session_state.get("approved_read_selection", []))
+        grid_key = (f"approved_read_grid_{st.session_state.get('approved_read_preview_revision', 0)}_"
+                    f"{hashlib.sha256(repr(filters).encode()).hexdigest()[:10]}")
+        grid = pd.DataFrame([{
+            "Seleccionar": row["id"] in selected,
+            "ID": row["id"],
+            "EAN": row["ean"],
+            "Competidor": names.get(row["competitor_id"], row["competitor_id"]),
+            "URL aprobada": row["url"],
+            "Aprobación": row["approval_id"],
+            "Error histórico": row["detail"],
+            "Resultado local": (
+                ", ".join(item["result"] for item in
+                          row["evidence"].get("artifact_evaluations", []))
+                or row["evidence"]["sample_kind"]
+            ),
+            "Acción / motivo": f"{row['action']}: {row['reason']}",
+            "HTTP previos": row["http_requests"],
+            "Recibos": ", ".join(
+                f"{receipt['id']}:{receipt['result'] or 'reserved'}"
+                for receipt in row["evidence"]["receipt_summaries"]),
+        } for row in actionable])
+        edited = st.data_editor(
+            grid, key=grid_key, hide_index=True, width="stretch", num_rows="fixed",
+            disabled=[column for column in grid.columns if column != "Seleccionar"],
+            column_config={"URL aprobada": st.column_config.LinkColumn("URL aprobada")},
+        )
+        st.session_state["approved_read_selection"] = edited.loc[
+            edited["Seleccionar"], "ID"].astype(int).tolist()
+    else:
+        st.info("No hay solicitudes de lecturas recuperables en estos filtros.")
+
+    excluded = [row for row in preview["requests"] if row["category"] == "excluded"]
+    if excluded:
+        with st.expander(f"Exclusiones actuales ({len(excluded)})"):
+            st.dataframe(pd.DataFrame([{
+                "ID": row["id"],
+                "EAN": row["ean"],
+                "Competidor": names.get(row["competitor_id"], row["competitor_id"]),
+                "URL aprobada": row["url"],
+                "Aprobación": row["approval_id"],
+                "Error histórico": row["detail"],
+                "Motivo de exclusión": row["reason"],
+                "Artefactos": ", ".join(
+                    item["result"] for item in row["evidence"].get("artifact_evaluations", [])),
+                "HTTP previos": row["http_requests"],
+                "Recibos": ", ".join(
+                    f"{receipt['id']}:{receipt['result'] or 'reserved'}"
+                    for receipt in row["evidence"]["receipt_summaries"]),
+            } for row in excluded]), hide_index=True, width="stretch")
+
+    approvals = preview["approvals_without_request"]
+    if approvals:
+        st.dataframe(pd.DataFrame([{
+            "Aprobación": row["approval_id"],
+            "EAN": row["ean"],
+            "Competidor": names.get(row["competitor_id"], row["competitor_id"]),
+            "URL aprobada": row["url"],
+            "Acción": row["action"],
+            "Motivo": row["reason"],
+        } for row in approvals]), hide_index=True, width="stretch")
+        approval_labels = {
+            row["approval_id"]: f"{row['approval_id']} · {row['ean']} · "
+                                f"{names.get(row['competitor_id'], row['competitor_id'])}"
+            for row in approvals if row["action"] in {"create", "reuse_saved_sample"}
+        }
+        selected_approvals = st.multiselect(
+            "Aprobaciones auditadas elegibles sin solicitud",
+            options=list(approval_labels),
+            format_func=approval_labels.get,
+            key="approved_read_approval_selection",
+        )
+    else:
+        selected_approvals = []
+        st.caption("No hay aprobaciones auditadas sin solicitud en estos filtros.")
+
+    request_ids = st.session_state.get("approved_read_selection", [])
+    info = load_build_info()
+    with st.form("approved_read_apply_form"):
+        actor = st.text_input("Responsable", value=_actor(), key="approved_read_actor")
+        note = st.text_input("Motivo de aplicación", key="approved_read_note")
+        approved = st.checkbox("Autorizo aplicar solo las filas elegibles seleccionadas",
+                               key="approved_read_confirm")
+        submitted = st.form_submit_button(
+            "Aplicar reevaluación auditada",
+            disabled=not (request_ids or selected_approvals) or not info["build"].startswith("actions-"),
+        )
+    if submitted:
+        try:
+            result = apply_manual_reviews(
+                store.database_path, actor=actor, note=note, build_commit=info["commit"], approved=approved,
+                request_ids=request_ids or None, approval_ids=selected_approvals or None,
+            )
+            st.session_state.pop("approved_read_preview", None)
+            st.session_state.pop("approved_read_selection", None)
+            st.session_state.pop("approved_read_approval_selection", None)
+            changed = set(result["changed"])
+            linked = {item["request_id"] for item in result["linked"]}
+            selected_requests = set(request_ids)
+            request_rows = [{
+                "ID": row["id"],
+                "EAN": row["ean"],
+                "Competidor": names.get(row["competitor_id"], row["competitor_id"]),
+                "Estado final": ("done" if row["action"] == "local_reevaluation" else "pending")
+                if row["id"] in changed else "ya en cola" if row["id"] in linked else "sin cambios",
+                "Acción": row["action"],
+                "Motivo": row["reason"],
+            } for row in result["requests"] if row["id"] in selected_requests]
+            approval_rows = [{
+                "Aprobación": row.get("approval_id"),
+                "Solicitud": row.get("request_id"),
+                "Acción": row["action"],
+                "Motivo": row["reason"],
+            } for row in result["approval_results"]]
+            outcomes = [*request_rows, *approval_rows]
+            if changed or linked or any(row["action"] == "created" for row in approval_rows):
+                st.success("Aplicación auditada completada; no se hizo HTTP. "
+                           "Las nuevas lecturas quedan a cargo del monitor.")
+            else:
+                st.info("No hubo cambios: las filas ya estaban resueltas/en cola o dejaron de ser elegibles.")
+            if outcomes:
+                st.dataframe(pd.DataFrame(outcomes), hide_index=True, width="stretch")
+        except (ValueError, KeyError, TypeError, OSError, sqlite3.Error, Timeout) as exc:
+            st.error(f"No se pudo aplicar la reevaluación: {exc}")
+
+
 def _render_continuity_capture(service, frozen: dict, *, active: bool = True) -> None:
     import sqlite3
 
@@ -1837,7 +2018,8 @@ def render_diagnostics(store: PriceComparatorStore, data: dict) -> None:
     elif section == "Colas y recuperaciones":
         task = st.selectbox(
             "Herramienta de diagnóstico",
-            ["Localización automática", "Monitorización", "Incidencias y recuperación"],
+            ["Localización automática", "Monitorización", "Incidencias y recuperación",
+             "Reevaluar lecturas aprobadas"],
             key="diagnostic_queue_task",
         )
         if task == "Localización automática":
@@ -1846,6 +2028,8 @@ def render_diagnostics(store: PriceComparatorStore, data: dict) -> None:
             _render_monitor(store, names)
         elif task == "Incidencias y recuperación":
             _render_incidents(access, names)
+        elif task == "Reevaluar lecturas aprobadas":
+            _render_approved_read_recovery(store, names)
     else:
         st.caption("Búsqueda manual acotada; se mantienen permisos, presupuesto, pausas, robots y bloqueos.")
         page._render_web_finder(store)
