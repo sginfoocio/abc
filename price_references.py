@@ -25,8 +25,11 @@ _LENS_TOKEN = re.compile(r"(?<![\dA-Za-z])C(\d{2})(?![\dA-Za-z])|\s(\d{2})\s*$")
 _CODE_CALIBER = re.compile(r"^0?[A-Z]{1,4}_[A-Z0-9]+?(\d{2})(\d{2})$")
 _COMMERCIAL_NAMES = {
     ("RAYBAN", "RB2140"): {"WAYFARER"},
+    ("TOMFORD", "FT1044"): {"BRONSON"},
+    ("TOMFORD", "FT1301"): {"JOEY02"},
     ("TOMFORD", "FT0711"): {"FAUSTO"},
 }
+_BRAND_ALIASES = {"TIFFANY": "TIFFANYCO", "TIFFANYCO": "TIFFANYCO"}
 
 
 def _ascii(value: Any) -> str:
@@ -39,6 +42,11 @@ def _ascii(value: Any) -> str:
 def key(value: Any) -> str:
     """Case, accent, space, hyphen, slash and punctuation-insensitive identity key. Zeros are preserved."""
     return re.sub(r"[^A-Z0-9]", "", _ascii(value).upper())
+
+
+def _brand_key(value: Any) -> str:
+    normalized = key(value)
+    return _BRAND_ALIASES.get(normalized, normalized)
 
 
 def model_key(value: Any) -> str:
@@ -130,17 +138,20 @@ class Reference:
 
 def strip_brand(text: str, brands: Iterable[str]) -> tuple[str, str]:
     """Remove a leading known brand ('BOTTEGA VENETA BV1274S 005' -> 'Bottega Veneta', 'BV1274S 005')."""
-    cleaned = " ".join(tokens(text))
-    best = ""
+    parts = tokens(text)
+    best: tuple[int, str] | None = None
     for brand in brands:
-        brand_tokens = " ".join(tokens(brand))
-        if brand_tokens and (cleaned == brand_tokens or cleaned.startswith(brand_tokens + " ")) \
-                and len(brand_tokens) > len(best):
-            best = brand_tokens
+        brand_parts = tokens(brand)
+        if not brand_parts:
+            continue
+        for width in range(1, min(len(parts), len(brand_parts) + 1) + 1):
+            if _brand_key(" ".join(parts[:width])) == _brand_key(brand):
+                if best is None or width > best[0]:
+                    best = (width, str(brand))
     if not best:
-        return "", cleaned
-    original = next(b for b in brands if " ".join(tokens(b)) == best)
-    return original, cleaned[len(best):].strip()
+        return "", " ".join(parts)
+    width, original = best
+    return original, " ".join(parts[width:])
 
 
 def parse_reference(text: str, *, brands: Iterable[str] = (), models: Iterable[str] = ()) -> Reference:
@@ -166,9 +177,19 @@ def parse_reference(text: str, *, brands: Iterable[str] = (), models: Iterable[s
     if parts and parts[0] in {"COLECCION", "COLLECTION"}:
         parts = parts[1:]
     for model in model_list:
-        aliases = _COMMERCIAL_NAMES.get((key(brand), model_key(model)), set())
+        aliases = _COMMERCIAL_NAMES.get((_brand_key(brand), model_key(model)), set())
         if aliases and model_key(model) in key(" ".join(parts)):
-            parts = [part for part in parts if part not in aliases]
+            remaining = []
+            index = 0
+            while index < len(parts):
+                match_end = next((end for end in range(len(parts), index, -1)
+                                  if key("".join(parts[index:end])) in aliases), None)
+                if match_end is None:
+                    remaining.append(parts[index])
+                    index += 1
+                else:
+                    index = match_end
+            parts = remaining
     matches: list[Reference] = []
     for model in sorted(set(model_list), key=lambda m: -len(key(m))):
         expected_model = model_key(model)
@@ -295,7 +316,8 @@ def classify(product: Mapping[str, Any], candidate: Mapping[str, Any]) -> MatchR
 
     candidate keys (all optional): ean_published, brand, model, color, caliber, title.
     """
-    own_model, own_color, own_brand = model_key(product.get("model")), key(product.get("color")), key(product.get("brand"))
+    own_model, own_color, own_brand = (
+        model_key(product.get("model")), key(product.get("color")), _brand_key(product.get("brand")))
     title = str(candidate.get("title") or "")
     published = str(candidate.get("ean_published") or "").strip()
     ean = _valid_gtin(published) if published else ""
@@ -328,8 +350,9 @@ def classify(product: Mapping[str, Any], candidate: Mapping[str, Any]) -> MatchR
         commercial_names = _COMMERCIAL_NAMES.get((own_brand, own_model), set())
         group = parse_reference(str(candidate.get("group_reference") or ""),
                                 models=[str(product.get("model") or "")])
-        group_descriptor = (verified_ean and own_brand == "GUCCI" and own_model == "GG1660S"
-                            and key(candidate.get("brand")) == own_brand and declared_model == "LOGOTIPOGG"
+        group_descriptor = (verified_ean and own_brand == "GUCCI"
+                            and _brand_key(candidate.get("brand")) == own_brand
+                            and declared_model == "LOGOTIPOGG"
                             and own_model in models
                             and group.model_key == own_model and group.color_key == own_color
                             and title_ref.model_key == own_model and title_ref.color_key == own_color)
@@ -337,9 +360,9 @@ def classify(product: Mapping[str, Any], candidate: Mapping[str, Any]) -> MatchR
             models.add(declared_model)
     if any(char.isdigit() for char in str(candidate.get("color") or "")):
         colors.add(key(candidate["color"]))
-    brands = {key(ref.brand) for ref in references if ref.brand}
+    brands = {_brand_key(ref.brand) for ref in references if ref.brand}
     if candidate.get("brand"):
-        brands.add(key(candidate["brand"]))
+        brands.add(_brand_key(candidate["brand"]))
     brand_tokens = " ".join(tokens(product.get("brand")))
     if brand_tokens and f" {brand_tokens} " in f" {' '.join(tokens(title))} ":
         brands.add(own_brand)

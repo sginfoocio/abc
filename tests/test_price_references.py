@@ -79,6 +79,75 @@ def test_exact_by_reference_without_ean():
     assert (result.status, result.basis) == (refs.EXACT, "reference")
 
 
+def test_tiffany_brand_aliases_are_equivalent_but_explicit():
+    product = {"ean": "8056262010730", "brand": "Tiffany & Co.", "model": "TF3104D", "color": "6216S4"}
+    for brand, title in (
+        ("Tiffany", "Tiffany TF3104D 6216S4"),
+        ("Tiffany & Co.", "Tiffany & Co. TF3104D 6216S4"),
+        ("TIFFANYCO", "TIFFANYCO TF3104D 6216S4"),
+    ):
+        result = refs.classify(product, {"brand": brand, "model": "TF3104D", "color": "6216S4",
+                                         "title": title})
+        assert result.status == refs.EXACT, (brand, result.reasons)
+
+
+def test_tom_ford_commercial_names_are_scoped_to_their_complete_model():
+    cases = (
+        ({"ean": "0889214519788", "brand": "Tom Ford", "model": "FT1044", "color": "01V"},
+         {"brand": "Tom Ford", "model": "Bronson", "title": "Tom Ford FT1044 01V Bronson"}),
+        ({"ean": "0889214625625", "brand": "Tom Ford", "model": "FT1301", "color": "52A"},
+         {"brand": "Tom Ford", "model": "Joey-02", "title": "Tom Ford Joey-02 FT1301 52A"}),
+    )
+    for product, candidate in cases:
+        result = refs.classify(product, candidate)
+        assert result.status == refs.EXACT, result.reasons
+
+    unrelated = refs.classify(
+        {"ean": "0889214625991", "brand": "Tom Ford", "model": "FT1310", "color": "52E"},
+        {"brand": "Tom Ford", "model": "Joey-02", "title": "Tom Ford Joey-02 FT1310 52E"},
+    )
+    assert unrelated.status != refs.EXACT
+
+
+def test_gucci_logotipo_descriptor_requires_exact_ean_group_title_and_color():
+    product = {"ean": "0889652498768", "brand": "Gucci", "model": "GG1680S", "color": "002"}
+    candidate = {
+        "ean_published": "889652498768",
+        "brand": "Gucci",
+        "model": "Logotipo Gg",
+        "title": "Gucci GG1680S 002 Logotipo Gg",
+        "group_reference": "GG1680S-002",
+    }
+    assert refs.classify(product, candidate).status == refs.EXACT
+    for change in (
+        {"group_reference": "GG1680S-001"},
+        {"title": "Gucci GG1680S 001 Logotipo Gg"},
+        {"ean_published": "889652498760"},
+        {"brand": "Other"},
+    ):
+        assert refs.classify(product, {**candidate, **change}).status != refs.EXACT, change
+
+
+def test_hyphenated_tom_ford_codes_remain_complete_model_aliases():
+    for model in ("FT5737-B", "FT6058-B", "FT6082-B"):
+        assert refs.model_key(model) == refs.model_key(model.replace("-", ""))
+    assert refs.model_key("FT6082-B") != refs.model_key("FT6082")
+
+
+def test_ray_ban_901_58_color_remains_distinct_from_901_and_901_32():
+    product = {"ean": "0805289126591", "brand": "Ray Ban", "model": "RB2140", "color": "90158"}
+    assert refs.classify(product, {"title": "Ray Ban RB2140 901/58 54-18"}).status == refs.EXACT
+    for title in ("Ray Ban RB2140 901 54-18", "Ray Ban RB2140 901/32 50-22"):
+        assert refs.classify(product, {"title": title}).status == refs.REJECTED
+
+
+def test_parse_reference_recognizes_tiffany_brand_alias_prefix():
+    parsed = refs.parse_reference("Tiffany TF3104D 6216S4", brands=["Tiffany & Co."],
+                                  models=["TF3104D"])
+    assert parsed.brand == "Tiffany & Co."
+    assert (parsed.model_key, parsed.color_key) == ("TF3104D", "6216S4")
+
+
 def test_model_and_color_are_exact_without_ean_or_caliber():
     result = refs.classify(PR27, {"brand": "Prada", "model": "PR 27ZS", "color": "16K08Z"})
     assert result.status == refs.EXACT and result.comparable

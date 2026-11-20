@@ -1,4 +1,5 @@
 """Offline container smoke for private diagnostic storage."""
+import csv
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -117,6 +118,29 @@ def main():
         assert page and classify(product, page.candidate()).status == EXACT and page.price == price
         if number == 8:
             assert not page.ean_published and page.availability == "unknown"
+
+    matrix_dir = (Path(__file__).resolve().parents[1] / "docs" / "Precios" / "100_EAN"
+                  / "correcciones_29_edel_amevista_20261120")
+    with (matrix_dir / "MATRIZ_100x14_ESTADO_CLOUD_20261120.csv").open(
+            encoding="utf-8-sig", newline="") as matrix_file:
+        matrix = list(csv.DictReader(matrix_file, delimiter=";"))
+    assert len(matrix) == 1_400
+    assert len({(row["ean"], row["competitor_id"]) for row in matrix}) == 1_400
+    assert len({row["snapshot_at"] for row in matrix}) == 1
+    current_offers = [row for row in matrix if row["current_comparable_offer"] == "True"]
+    assert len(current_offers) == 124
+    assert len({row["ean"] for row in current_offers}) == 71
+    assert all((row["offer_market"], row["offer_currency"], row["offer_availability"]) ==
+               ("ES", "EUR", "available") for row in current_offers)
+
+    with (matrix_dir / "MATRIZ_RUTAS_29_EDEL_AMEVISTA_20261120.csv").open(
+            encoding="utf-8-sig", newline="") as matrix_file:
+        routes = list(csv.DictReader(matrix_file, delimiter=";"))
+    assert len(routes) == 102
+    assert len({row["ean"] for row in routes}) == 29
+    assert len({(row["ean"], row["competitor_id"]) for row in routes}) == 72
+    assert len({row["competidor"] for row in routes}) == 12
+    assert all("Ruta documental solamente" in row["result_and_limitation"] for row in routes)
 
     with tempfile.TemporaryDirectory(dir=os.environ["CLOUD_SMOKE_DIRECTORY"]) as directory:
         os.umask(0o077)
