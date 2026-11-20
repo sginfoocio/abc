@@ -295,6 +295,24 @@ def _button(app, label):
     return next(b for b in app.button if b.label == label)
 
 
+def test_initial_render_displays_persisted_kering_cutoff_without_query(monkeypatch, tmp_path):
+    from cryptography.fernet import Fernet
+    from app_pages import provider_orders_page as page
+    from kering_images import ConfigStore, PORTAL_URL
+
+    monkeypatch.setenv("KERING_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    monkeypatch.setattr(page, "data_root", lambda: tmp_path)
+    monkeypatch.setattr(page, "kering_root", lambda: tmp_path)
+    ConfigStore(tmp_path).save(dict(url=PORTAL_URL, supplier_id=7, cutoff_date="2026-10-05"))
+    app = AppTest.from_string(APP)
+    app.session_state["auth_role"] = "admin"
+    app.session_state["supplier_order_home_provider"] = "kering"
+    app.run()
+    assert not app.exception
+    assert any("corte de procesamiento 05/10/2026" in caption.value for caption in app.caption)
+    assert app.selectbox(key="sup_provider").value == "kering"
+
+
 def test_streamlit_explicit_query_and_retained_results(monkeypatch, tmp_path, engine):
     root = tmp_path / "images"
     ImageRepository(root)

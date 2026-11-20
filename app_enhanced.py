@@ -826,7 +826,7 @@ def render_home_page() -> None:
     elif st.session_state.get("auth_role") == "admin":
         pages.update(images=LUXOPTICA_IMAGES_PAGE, luxpending=LUXOPTICA_PENDING_PAGE,
                      kering=KERING_IMAGES_PAGE, alerts=ALERTA_PEDIDOS_PAGE,
-                     abchistory=ABC_HISTORY_PAGE, config=SETTINGS_PAGE)
+                     abchistory=ABC_HISTORY_PAGE, config=SETTINGS_PAGE, provider_orders=PROVIDER_IMAGES_PAGE)
     render_dashboard(pages)
 
 
@@ -846,15 +846,15 @@ def render_settings_page() -> None:
     st.divider()
     render_kering_settings(get_db_engine)
     st.divider()
-    st.caption("Guarda credenciales de integración en el archivo .env local del proyecto.")
+    st.caption("Los secretos se gestionan mediante la configuración segura del servicio, no desde este formulario.")
 
     current_url = _read_env_setting_any([LUXOPTICA_URL_ENV, LEGACY_ESSILOR_URL_ENV])
     current_user = _read_env_setting_any([LUXOPTICA_USER_ENV, LEGACY_ESSILOR_USER_ENV])
-    current_password = _read_env_setting_any([LUXOPTICA_PASSWORD_ENV, LEGACY_ESSILOR_PASSWORD_ENV])
+    password_configured = bool(_read_env_setting_any([LUXOPTICA_PASSWORD_ENV, LEGACY_ESSILOR_PASSWORD_ENV]))
     current_request_email = _read_env_setting(LUXOPTICA_REQUEST_EMAIL_ENV, "images@diagonaleyewear.com")
     current_tenant_id = _read_env_setting(M365_TENANT_ID_ENV)
     current_client_id = _read_env_setting(M365_CLIENT_ID_ENV)
-    current_client_secret = _read_env_setting(M365_CLIENT_SECRET_ENV)
+    graph_secret_configured = bool(_read_env_setting(M365_CLIENT_SECRET_ENV))
     current_mailbox = _read_env_setting(M365_MAILBOX_ENV, "ruben.cebreiros@diagonaleyewear.com")
     current_download_root = str(repository_root())
 
@@ -862,22 +862,13 @@ def render_settings_page() -> None:
         st.subheader("Essilor Luxottica")
         url_value = st.text_input("URL", value=current_url, placeholder="https://...")
         user_value = st.text_input("Usuario", value=current_user)
-        password_value = st.text_input(
-            "Contraseña",
-            type="password",
-            value=current_password,
-            placeholder="Deja vacío para conservar la actual",
-        )
+        st.caption("Contraseña del portal: " + ("configurada" if password_configured else "no configurada"))
         request_email_value = st.text_input("Email solicitud imágenes", value=current_request_email)
 
         st.subheader("Microsoft 365 (Graph)")
         tenant_id_value = st.text_input("Tenant ID", value=current_tenant_id)
         client_id_value = st.text_input("Client ID", value=current_client_id)
-        client_secret_value = st.text_input(
-            "Client Secret",
-            type="password",
-            placeholder="Deja vacío para conservar el actual",
-        )
+        st.caption("Secreto OAuth: " + ("configurado" if graph_secret_configured else "no configurado"))
         mailbox_value = st.text_input("Mailbox objetivo", value=current_mailbox)
         st.text_input("Repositorio comun (IMAGE_REPOSITORY_ROOT)", value=current_download_root, disabled=True)
         st.caption("Cambiar en el entorno de todos los servicios tras verificar la migración y reiniciarlos.")
@@ -893,22 +884,11 @@ def render_settings_page() -> None:
             M365_CLIENT_ID_ENV: client_id_value.strip(),
             M365_MAILBOX_ENV: mailbox_value.strip(),
         }
-        keep_existing_password = not password_value.strip() and bool(current_password)
-        keep_existing_client_secret = not client_secret_value.strip() and bool(current_client_secret)
-        if password_value.strip():
-            updates[LUXOPTICA_PASSWORD_ENV] = password_value.strip()
-        if client_secret_value.strip():
-            updates[M365_CLIENT_SECRET_ENV] = client_secret_value.strip()
-
         _upsert_env_settings(updates)
         for key, value in updates.items():
             os.environ[key] = value
 
-        st.success("Configuración guardada en .env")
-        if keep_existing_password:
-            st.info("Se conservó la contraseña existente.")
-        if keep_existing_client_secret:
-            st.info("Se conservó el client secret existente.")
+        st.success("Configuración no secreta guardada en .env")
 
     st.markdown("### Variables gestionadas")
     st.write(f"- {LUXOPTICA_URL_ENV}")

@@ -117,12 +117,20 @@ def render_job_settings(config_store):
                                       min_value=0.01, value=float(config["auto_retry_interval_hours"]), step=1.0)
         st.caption("Las vistas no disponibles requieren revisión o procesamiento manual; no se reintentan automáticamente.")
         test_mode = st.toggle("Modo de prueba", value=config["test_mode"] if validated else True, disabled=not validated)
+        confirmed = st.checkbox("Confirmo el cambio de la fecha de corte o del modo de procesamiento")
         saved = st.form_submit_button("Guardar procesamiento", icon=SAVE_ICON)
     if saved:
-        save_settings(config_store, {**config_store.load(), "cutoff_date": cutoff.isoformat(),
-                                   "auto_enabled": automatic, "auto_interval_hours": hours,
-                                   "auto_max_technical_attempts": max_attempts, "auto_retry_interval_hours": retry_hours,
-                                   "test_mode": test_mode, "full_lot_validated": validated and not test_mode})
+        current = config_store.load()
+        scope_changed = (cutoff.isoformat() != current["cutoff_date"] or automatic != current["auto_enabled"]
+                         or test_mode != current["test_mode"])
+        if scope_changed and not confirmed:
+            st.error("Confirma el cambio de alcance antes de guardar.")
+        else:
+            save_settings(config_store, {**current, "cutoff_date": cutoff.isoformat(),
+                                         "auto_enabled": automatic, "auto_interval_hours": hours,
+                                         "auto_max_technical_attempts": max_attempts,
+                                         "auto_retry_interval_hours": retry_hours,
+                                         "test_mode": test_mode, "full_lot_validated": validated and not test_mode})
     if not validated:
         st.info("Validaci\u00f3n inicial de pedidos pendiente")
     render_scheduler_status()

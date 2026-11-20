@@ -1,15 +1,16 @@
 """Administrative purchase-order panel. Network acquisition only on explicit submit."""
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from math import ceil
 
 import streamlit as st
+from cryptography.fernet import InvalidToken
 from sqlalchemy.exc import SQLAlchemyError
 
 from app_pages.provider_order_snapshot import (
     COMPLETE, MADRID, NONE, PARTIAL, PROVIDERS, UNKNOWN, VIEWS, acquire, associations, image_evidence,
 )
 from app_pages.provider_order_media import render_order_export, render_photos
-from kering_images import data_root as kering_root
+from kering_images import ConfigStore, data_root as kering_root
 from provider_images import ean_key, ean_valid
 from provider_images_ui import data_root
 from provider_odoo_orders import MAX_ORDER_DAYS, OdooUnavailable
@@ -188,6 +189,10 @@ def render_order_panel(engine_factory, legacy_renderer, library_page=None):
     if returning and returning[0] == owner():
         for key, value in returning[1].items():
             st.session_state[key] = value
+    requested_provider = st.session_state.pop("supplier_order_home_provider", None)
+    if requested_provider in PROVIDERS:
+        st.session_state.pop(LEGACY, None)
+        st.session_state["sup_provider"] = requested_provider
     if st.session_state.get(LEGACY) == owner():
         if st.button("Volver a pedidos de solo lectura"):
             st.session_state.pop(LEGACY)
@@ -206,6 +211,16 @@ def render_order_panel(engine_factory, legacy_renderer, library_page=None):
                           for key, label in PROVIDERS.items()))
     for notice in association_notices:
         st.warning(notice)
+    if (kering_root() / "config.enc").is_file():
+        try:
+            cutoff = date.fromisoformat(ConfigStore(kering_root()).load()["cutoff_date"])
+        except (OSError, InvalidToken, TypeError, ValueError):
+            st.warning("No se pudo leer el corte de procesamiento Kering.")
+        else:
+            st.caption(f"Kering: corte de procesamiento {cutoff:%d/%m/%Y}. "
+                       "No limita la consulta histórica de pedidos.")
+    else:
+        st.caption("Kering: corte de procesamiento no configurado.")
     today = datetime.now(MADRID).date()
     with st.form("supplier_orders_odoo"):
         provider_col, start_col, end_col = st.columns(3)
