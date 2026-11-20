@@ -1,5 +1,40 @@
 # 📊 GitHub Actions - Visual Workflow
 
+## CI actual: pruebas por impacto
+
+El check estable `tests` de **Deploy to Production** mantiene la verificación de
+locks, lint y compilación. El resumen de Actions lista los archivos que
+determinaron la selección y los destinos de pytest. La compilación de imagen y
+la publicación siguen sujetas al check; este workflow no sustituye al
+[workflow protegido de producción](deployment/cloud/README.md).
+
+| Cambio | Pruebas |
+|---|---|
+| Panel, catálogo o biblioteca | Panel, proveedores, repositorio, exportación y regresiones compartidas. |
+| Kering o Luxottica | Circuito modificado y regresiones del catálogo, el panel o el monitor que correspondan. |
+| Precios | Comparador, adaptadores, seguimiento y sincronización relacionados. |
+| Odoo/masterdata | Consultas y regresiones relacionadas. Las dos pruebas de raíz se añaden solo si cambian sus dependencias declaradas. |
+| Documentación Markdown | Comprobación de formato del diff y controles estáticos; sin pytest ni *smoke* de imagen en PR. |
+| Workflow de publicación o selector | Contrato de CI, controlador de despliegue, versionado y empaquetado. El *smoke* de imagen se conserva. |
+| Dependencias comunes o configuración de pytest | Suite completa, incluidos los dos módulos de raíz. |
+| Código o infraestructura no clasificados | Regresión conservadora de `tests/`; añade pruebas de raíz si otro archivo del cambio afecta a sus dependencias. |
+
+En PR, el selector compara el padre de base con el merge sintético que se
+prueba, incluso para PR apiladas. En `push`, compara el `before` del evento con
+el commit publicado, abarcando todos los commits del push. Si falta la base o
+no coincide el checkout, se ejecuta la suite completa con el motivo en el resumen.
+
+Para actualizar la cobertura, edita el [selector](scripts/ci_test_selection.py)
+y añade una regresión en las [pruebas del workflow](tests/test_ci_stacked_prs.py).
+La suite completa también se ejecuta los lunes a las 03:37 UTC o bajo demanda
+desde **Actions → Deploy to Production → Run workflow** (una vez en la rama
+predeterminada). Esas ejecuciones no publican ni despliegan imágenes.
+
+## Diagrama histórico
+
+El diagrama siguiente describe el mecanismo anterior por SSH; no es la
+referencia del despliegue actual.
+
 ## Diagrama del Flujo
 
 ```
