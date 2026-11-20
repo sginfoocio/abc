@@ -279,7 +279,9 @@ def _render_actions(store: PriceComparatorStore) -> None:
     left, right = st.columns(2)
     with left:
         running = sync.is_running()
-        if st.button("Sincronizar precios Vytria", key="sync_vytria_prices", disabled=running,
+        label = ("Sincronizar precios Vytria" if prestashop_prices.enabled()
+                 else "Sincronizar precios Vytria desde Odoo")
+        if st.button(label, key="sync_vytria_prices", disabled=running,
                      help="Lee Odoo y, si está habilitado, PrestaShop para los EAN vigilados (solo lectura)."):
             _launch(_run_sync, sync)
             st.rerun()
