@@ -210,6 +210,12 @@ Se aplica en `kering_media.classify_viewer` sobre el orden del visor (DOM de
 | 3 | detalle | nombre original saneado; nunca acredita V2 |
 | 4+ | unknown salvo senal explicita | se conservan, se muestran y se exportan |
 
+La posicion 4 o posterior no basta para decidir que una imagen es lifestyle:
+esa etiqueta requiere una señal explicita o revision visual por una persona.
+La revision conserva nombre y bytes originales y registra revisor, motivo y
+clasificacion previa; lifestyle es una categoria opcional, no cubre V1/V2/V3
+ni convierte detalle en perspectiva.
+
 - Duplicados (misma URL, o misma ruta con distinta query/fragmento) se eliminan
   antes de asignar posiciones.
 - Las imagenes posicionales guardan en `view_detection` la regla, `explicit_view`,

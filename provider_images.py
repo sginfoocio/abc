@@ -24,7 +24,9 @@ from typing import Callable, Protocol
 from zipfile import BadZipFile, ZipFile
 
 from image_naming import classified_view, sanitize_filename
-from image_repository import IMAGE_VIEWS, VIEW_ALIASES, ImageRepository
+from image_repository import (
+    IMAGE_CLASSIFICATIONS, IMAGE_VIEWS, VIEW_ALIASES, ImageRepository,
+)
 from kering_images import (
     AccessNotConfirmed, InterventionRequired, LoginFailed, PortalUnavailable, read_orders,
 )
@@ -44,7 +46,7 @@ TRANSITIONS = {
     IMPORTED: set(), PARTIAL: set(), FAILED: set(), CANCELLED: set(),
 }
 PROVIDERS = ("marcolin", "nuorder", "safilo")
-VALID_VIEWS = {*IMAGE_VIEWS, "unknown"}
+VALID_VIEWS = {*IMAGE_CLASSIFICATIONS, "unknown"}
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 MANIFEST_NAMES = {"manifest.csv", "manifest.json", "metadata.csv", "metadata.json"}
 EAN_LENGTHS = {8, 12, 13, 14}
@@ -663,7 +665,7 @@ class ProviderService:
         if reject:
             resolution = "rechazada"
         elif item["record_id"] is not None:
-            if view not in IMAGE_VIEWS:
+            if view not in IMAGE_CLASSIFICATIONS:
                 raise ValueError("vista_invalida")
             self.repository.review_view(item["record_id"], view, reviewer=reviewer, reason=reason,
                                         evidence={"review_item": item_id, "request": item["request_id"]})
