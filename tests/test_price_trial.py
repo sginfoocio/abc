@@ -67,6 +67,30 @@ def only_pair(store, cid, ean, cycle=0):
                     (cycle, cid, ean))
 
 
+def test_current_worker_cycle_does_not_advance_the_retired_72h_pilot(trial, monkeypatch):
+    service, store, _, _, _, _, _, _, _ = trial
+    calls = []
+    monkeypatch.setattr(PriceTrial, "tick", lambda *_args, **_kwargs: pytest.fail("Legacy pilot tick executed"))
+    monkeypatch.setattr(PriceTrial, "continuity_tick", lambda _self: calls.append("continuity"))
+    monkeypatch.setattr(PriceTrial, "diagnostic_tick", lambda _self: calls.append("diagnostic"))
+    monkeypatch.setattr(PriceMonitor, "review_refresh_tick", lambda _self: calls.append("reviews"))
+
+    price_trial._watch_worker_cycle(store)
+
+    assert calls == ["continuity", "diagnostic", "reviews"]
+
+
+def test_retired_pilot_reservation_does_not_block_current_query_or_odoo_read(trial):
+    _, store, _, _, _, clock, cid, _, _ = trial
+    ean = manifest()["eans"][0]
+    with store._connect() as con, con:
+        con.execute("UPDATE price_trial SET status='active',expires_at=? WHERE id=1",
+                    ((clock() - timedelta(hours=1)).isoformat(),))
+
+    assert price_trial.select_eans(store, cid, [ean], clock()) == [ean]
+    price_trial.require_sync(store, [ean], clock())
+
+
 def test_real_script_entrypoint_uses_canonical_sync_context(trial, monkeypatch):
     service, _, _, _, _, _, _, _, reader = trial
     called = []
@@ -145,25 +169,22 @@ def test_recovery_never_replays_uncertain_work_or_restarts_window(trial, unsafe)
         assert "\n".join(con.iterdump()) == before
 
 
-def test_recovery_ui_requires_explicit_approval_and_does_not_run_queries(trial, monkeypatch):
-    import build_info
+def test_historical_pilot_recovery_controls_are_not_in_current_ui(trial, monkeypatch):
     from streamlit.testing.v1 import AppTest
 
     service, store, _, _, _, _, _, site, reader = trial
     initial_failure(service, store)
     monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
     monkeypatch.setattr(price_trial, "PriceTrial", lambda store: service)
-    monkeypatch.setattr(build_info, "load_build_info", lambda: {"commit": "b" * 40, "build": "actions-test"})
     app = AppTest.from_string(
-        "from price_comparator import PriceComparatorStore\n"
-        "from app_pages.price_watch import _render_trial\n"
-        "_render_trial(PriceComparatorStore())").run(timeout=30)
-    assert not app.exception and app.button(key="trial_resume").disabled
-    app.checkbox(key="trial_resume_approval").set_value(True).run(timeout=30)
-    assert not app.button(key="trial_resume").disabled
-    app.button(key="trial_resume").click().run(timeout=30)
+        "from app_pages.price_comparator import render_price_comparator_page\n"
+        "render_price_comparator_page()").run(timeout=30)
+    app.radio(key="top_level_section").set_value("Diagnóstico técnico").run(timeout=30)
+    app.selectbox(key="price_diagnostic_section").set_value("Históricos y auditoría").run(timeout=30)
+
     assert not app.exception
-    assert service.report()["status"] == "active"
+    assert any("Histórico del piloto de 72 horas" in item.label for item in app.expander)
+    assert not any(button.key.startswith("trial_") for button in app.button)
     assert not reader.calls and not site.calls
 
 
@@ -270,7 +291,9 @@ def test_controls_and_queue_eligibility_still_apply(trial, restriction):
 
 def test_other_triggers_cannot_consume_owned_pairs_but_unrelated_pairs_remain_free(trial):
     service, store, access, locator, monitor, clock, cid, _, reader = trial
-    ean = "0889652494821"
+    active = _activate_continuity(service, clock)
+    ean = manifest()["eans"][0]
+    other_ean = manifest()["eans"][1]
     locator.enqueue([cid], [ean])
     assert locator.run([cid], eans=[ean]).processed == 0
     assert monitor.run([cid], eans=[ean]).processed == 0
@@ -281,14 +304,15 @@ def test_other_triggers_cannot_consume_owned_pairs_but_unrelated_pairs_remain_fr
         access.reserve(cid, "ficha", purpose="manual", ean=ean)
     with pytest.raises(TrialDenied):
         service._sync.run(eans=[ean])
-    with service.execution(0, cid, ean):
+    with service.execution(0, cid, ean, program="continuity", program_id=active["id"]):
         with pytest.raises(TrialDenied):
             require_pair(store, "domanci-com", ean, clock())
         with pytest.raises(TrialDenied):
-            require_pair(store, cid, manifest()["eans"][0], clock())
+            require_pair(store, cid, other_ean, clock())
         limits = access.budget("competitor", cid)
         assert limits["daily_limit"] == 200 and limits["per_minute_limit"] == 10
         assert limits["effective_pause"] >= 3
+        require_pair(store, cid, ean, clock())
     require_pair(store, cid, "8410000000013", clock())
     assert not reader.calls
 
@@ -480,7 +504,7 @@ def test_stop_prevents_new_http_without_changing_saved_controls(trial):
 
 
 @pytest.mark.parametrize("legacy_pair", [True, False])
-def test_existing_legacy_scope_does_not_exclude_additional_trial_pairs_and_keeps_legacy_route(trial, monkeypatch, legacy_pair):
+def test_legacy_pilot_scope_does_not_gate_current_trial_pairs(trial, monkeypatch, legacy_pair):
     from price_pilot import PricePilot, SAMPLE_EANS, pilot_scope
     from tests.test_price_review_fixes import _vytria
     service, store, _, _, _, clock, cid, site, _ = trial
@@ -508,7 +532,7 @@ def test_existing_legacy_scope_does_not_exclude_additional_trial_pairs_and_keeps
     assert service.report()["summary"][f"0:{cid}"]["processed_pairs"] == 1
     assert pilot_scope(store) == scope_before
     with store._connect() as con:
-        assert con.execute("SELECT COUNT(*) FROM pilot_runs WHERE operation='watch_check'").fetchone()[0] == int(legacy_pair)
+        assert con.execute("SELECT COUNT(*) FROM pilot_runs WHERE operation='watch_check'").fetchone()[0] == 0
 
 
 def _activate_continuity(service, clock):
@@ -1481,6 +1505,17 @@ def test_continuity_ui_keeps_prepared_plan_inactive_until_explicit_approval(tria
     app.checkbox(key="continuity_activation_approval").set_value(True).run(timeout=30)
     assert not app.button(key="continuity_activate").disabled
     assert service.continuity_report()["status"] == "prepared"
+
+
+def test_stale_72h_active_status_does_not_block_current_continuity_pair(trial):
+    service, store, _, _, _, clock, cid, _, _ = trial
+    active = _activate_continuity(service, clock)
+    ean = manifest()["eans"][0]
+    with store._connect() as con, con:
+        con.execute("UPDATE price_trial SET status='active' WHERE id=1")
+
+    with service.execution(0, cid, ean, program="continuity", program_id=active["id"]):
+        assert price_trial.pair_reason(store, cid, ean, clock()) == ""
 
 
 def test_restricted_pair_reevaluation_is_audited_and_never_queries_or_rewrites_history(trial):

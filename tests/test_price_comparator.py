@@ -220,7 +220,7 @@ def test_comparator_page_renders_without_external_services(tmp_path, monkeypatch
 
     assert not app.exception
     assert app.radio(key="top_level_section").options == [
-        "Inicio", "Productos", "Tiendas", "Por revisar", "Ajustes avanzados",
+        "Comparativa de precios", "Administración", "Diagnóstico técnico",
     ]
 
 

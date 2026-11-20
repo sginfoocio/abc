@@ -336,6 +336,51 @@ def test_access_budget_and_identity_contradiction_never_create_comparable_offers
         assert con.execute("SELECT COUNT(*) FROM offers WHERE ean=?", (rows2[0][0],)).fetchone()[0] == 0
 
 
+def test_review_tray_excludes_advanced_locator_controls(tmp_path, monkeypatch):
+    store, _, _, _, cid, _, _, _ = _review_env(tmp_path, count=2)
+    monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
+    names = {row["id"]: row["name"] for row in store.competitors().to_dict("records")}
+    app = AppTest.from_string(
+        "from app_pages.price_watch import _render_locator\n"
+        "from price_comparator import PriceComparatorStore\n"
+        f"_render_locator(PriceComparatorStore(), {names!r}, advanced=False)\n"
+    ).run(timeout=60)
+    assert not app.exception
+    assert not any(button.key == "locate_enqueue" for button in app.button)
+    assert not any(button.key == "locate_run" for button in app.button)
+    assert not any("Preparar cola" in button.label for button in app.button)
+
+
+def test_bulk_discard_revalidates_candidate_and_never_requests_http(tmp_path):
+    store, locator, monitor, clock, cid, site, rows, urls = _review_env(tmp_path, count=2)
+    first, second = rows
+    first_row = _candidate(locator, first[0])
+    second_row = _candidate(locator, second[0])
+    before_offers = 0
+    with store._connect() as con:
+        before_offers = con.execute("SELECT COUNT(*) FROM offers").fetchone()[0]
+
+    locator.review(first[0], cid, urls[0], accept=False, actor="ana",
+                   note="Descartar conjunto sintético", update_price=False,
+                   expected_candidate=_expected(first_row))
+    clock.advance(microseconds=1)
+    locator.review(second[0], cid, urls[1], accept=False, actor="ana",
+                   note="Descartar conjunto sintético", update_price=False,
+                   expected_candidate=_expected(second_row))
+
+    assert site.calls == []
+    assert monitor.review_refreshes().empty
+    with store._connect() as con:
+        statuses = con.execute("""SELECT status FROM competitor_product_urls
+            WHERE competitor_id=? AND ean IN (?,?)""",
+                               (cid, first[0], second[0])).fetchall()
+        assert {row["status"] for row in statuses} == {"rejected"}
+        assert con.execute("SELECT COUNT(*) FROM offers").fetchone()[0] == before_offers
+        audit_count = con.execute("""SELECT COUNT(*) FROM access_audit
+            WHERE action='candidate_rejected'""").fetchone()
+    assert audit_count is not None and audit_count[0] == 2
+
+
 def test_existing_monitor_deferral_keeps_its_specific_reason(tmp_path):
     store, locator, monitor, clock, cid, site, rows, urls = _review_env(tmp_path)
     ean = rows[0][0]

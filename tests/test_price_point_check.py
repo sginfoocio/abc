@@ -1,6 +1,5 @@
 """Supervised one-pass regressions, using synthetic shops only."""
 from datetime import timedelta
-import json
 
 import pytest
 
@@ -12,7 +11,8 @@ from price_watch import PriceWatch
 from tests.test_price_admin import _dump
 from tests.test_price_locator import Site, _env, _gtin, _watch
 from tests.test_price_monitor import _monitor_env
-from tests.test_price_pilot import pilot
+
+pytest_plugins = ["tests.test_price_pilot"]
 
 
 def test_reused_negative_and_shared_source_are_not_counted_as_new_or_reused_offers():
@@ -123,7 +123,7 @@ def test_point_check_never_overrides_controls(tmp_path, kind):
     assert result["pairs"][0]["category"] == "not_executed"
 
 
-def test_legacy_pilot_handoff_is_explicit_locked_audited_and_uses_authorized_catalog(pilot):
+def test_current_watch_batch_uses_authorized_catalog_without_legacy_pilot_handoff(pilot):
     service, store, _, _, cid, _ = pilot
     service.enable()
     site = Site(base="https://www.visiofactory.es")
@@ -143,25 +143,15 @@ def test_legacy_pilot_handoff_is_explicit_locked_audited_and_uses_authorized_cat
     monitor = PriceMonitor(store, clock=clock, transport=site, sleep=lambda s: clock.advance(seconds=s))
     PriceWatch(store).add([ean], actor="test", source="manual")
     batch = WatchBatch(store, locator=locator, monitor=monitor)
-    assert not batch.preview([ean], [cid])["ready"].any()
-    assert batch.preview([ean], [cid], point_check=True)["pilot_route"].all()
-    scope_before = service.store.database_path
-    with service.lock(), pytest.raises(PilotError, match="reserva"):
-        with service.watch_check([(cid, ean)], approved=True):
-            pass
+    preview = batch.preview([ean], [cid], point_check=True)
+    assert preview["ready"].all() and "pilot_route" not in preview.columns
     result = batch.execute([ean], [cid], approved=True, sync_vytria=False, point_check=True)
     assert result["processed_pairs"] == 1 and result["pairs"][0]["category"] == "checked_now"
-    assert result["runs"][0]["pilot_run_id"]
     assert site.count("/marca/prada") == 1
     assert not any("busqueda" in u or "search_query" in u for u in site.calls)
     with store._connect() as con:
-        run = con.execute("SELECT * FROM pilot_runs ORDER BY id DESC LIMIT 1").fetchone()
-        assert run["operation"] == "watch_check" and run["status"] == "done"
-        assert json.loads(run["selection"]) == [[cid, ean]]
-        assert con.execute("SELECT outcome FROM pilot_jobs WHERE run_id=?", (run["id"],)).fetchone()[0] == "checked_now"
-        assert con.execute("SELECT requests FROM pilot_budgets WHERE run_id=?", (run["id"],)).fetchone()[0] == len(site.calls)
+        assert con.execute("SELECT COUNT(*) FROM pilot_runs").fetchone()[0] == 0
         assert con.execute("SELECT enabled FROM price_pilot").fetchone()[0] == 1
-    assert store.database_path == scope_before
 
 
 def test_active_legacy_pilot_is_reported_without_starting_another(pilot):
@@ -203,36 +193,34 @@ def test_point_check_does_not_clear_pending_review_during_prepare(tmp_path):
     assert _dump(store) == before and not site.calls
 
 
-def test_verified_legacy_pair_still_requires_enabled_pilot_and_supervised_route(pilot):
+def test_current_watch_pair_does_not_require_the_retired_pilot(pilot):
     from price_access import AccessControl
     from tests.test_price_pilot import known
 
-    service, store, _, _, cid, _ = pilot
+    _, store, _, _, cid, extras = pilot
     ean = SAMPLE_EANS[0]
     known(pilot, ean)
     access = AccessControl(store)
     access.ensure_defaults()
     access.set_method(cid, "ficha", "authorized", actor="test", note="Synthetic agreement")
     PriceWatch(store).add([ean], actor="test", source="manual")
-    row = WatchBatch(store).preview([ean], [cid], point_check=True).iloc[0]
-    assert row["pilot_route"] and not row["ready"]
-    assert "Piloto desactivado" in row["defer_reason"]
+    batch = WatchBatch(store)
+    row = batch.preview([ean], [cid], point_check=True).iloc[0]
+    assert row["ready"] and "pilot_route" not in row.index
+    with pytest.raises(ValueError, match="productos no vigilados"):
+        batch.preview([extras[0]], [cid], point_check=True)
     with store._connect() as con:
         assert con.execute("SELECT COUNT(*) FROM pilot_runs").fetchone()[0] == 0
 
 
-def test_pilot_pause_and_budget_are_shared_across_methods_and_phases(pilot):
+def test_shared_access_pause_and_budget_apply_across_methods_and_phases(pilot):
     from price_access import AccessControl
     from price_locator import PriceLocator
     from tests.test_price_locator import Clock
 
-    service, store, _, _, cid, _ = pilot
+    _, store, _, _, cid, _ = pilot
     with store._connect() as con, con:
-        settings = json.loads(con.execute("SELECT competitors FROM price_pilot").fetchone()[0])
-        settings[cid]["pause_seconds"] = 60
-        con.execute("UPDATE price_pilot SET competitors=?", (json.dumps(settings),))
         product = dict(con.execute("SELECT * FROM products WHERE ean=?", (SAMPLE_EANS[0],)).fetchone())
-    service.enable()
     site = Site(base="https://www.visiofactory.es")
     site.product(product["brand"], product["model"], product["color"], gtin=product["ean"])
     clock = Clock()
@@ -246,7 +234,7 @@ def test_pilot_pause_and_budget_are_shared_across_methods_and_phases(pilot):
     access.ensure_defaults()
     for method in ("catalog", "ficha"):
         access.set_method(cid, method, "authorized", actor="test", note="Synthetic agreement")
-    access.set_budget("competitor", cid, daily_limit=200, per_minute_limit=600, pause_seconds=0, actor="test")
+    access.set_budget("competitor", cid, daily_limit=200, per_minute_limit=600, pause_seconds=60, actor="test")
     locator = PriceLocator(store, clock=clock, transport=transport, sleep=lambda s: clock.advance(seconds=s))
     locator.save_source(cid, "catalog", site.base + "/marca/{brand}", actor="test", note="Synthetic")
     monitor = PriceMonitor(store, clock=clock, transport=transport, sleep=lambda s: clock.advance(seconds=s))
@@ -255,9 +243,10 @@ def test_pilot_pause_and_budget_are_shared_across_methods_and_phases(pilot):
         [product["ean"]], [cid], approved=True, sync_vytria=False, point_check=True)
     assert result["runs"][0]["location_processed"] == result["runs"][0]["monitor_processed"] == 1
     assert len(times) >= 4 and all(b - a >= 60 for a, b in zip(times, times[1:]))
+    assert access.usage("competitor", cid) == len(times)
     with store._connect() as con:
-        assert con.execute("SELECT requests FROM pilot_budgets").fetchone()[0] == len(times)
-        assert 0 < con.execute("SELECT COUNT(*) FROM pilot_http_log").fetchone()[0] <= len(times)
+        assert con.execute("SELECT COUNT(*) FROM pilot_budgets").fetchone()[0] == 0
+        assert con.execute("SELECT COUNT(*) FROM pilot_http_log").fetchone()[0] == 0
 
 
 def test_failed_fresh_check_cannot_replay_previous_success_sample(tmp_path):

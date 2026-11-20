@@ -463,7 +463,7 @@ class PriceMonitor:
             from price_trial import select_eans
             selected_eans = select_eans(self.store, cid, eans, self._now())
             if selected_eans == []:
-                report.stopped[cid] = "Par reservado al piloto de 72 h o ventana finalizada"
+                report.stopped[cid] = "Par reservado a la continuidad vigente"
                 continue
             try:
                 with self.search._lock(cid):

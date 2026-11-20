@@ -548,6 +548,8 @@ def _render_locator(store: PriceComparatorStore, names: dict[str, str], *, advan
         if preview:
             preview_rows = review[review["id"].astype(int).isin(preview["snapshots"])]
             st.markdown(f"**Vista previa: {len(preview_rows)} fichas seleccionadas**")
+            st.caption("La acción afecta únicamente a las filas marcadas en esta vista previa, "
+                       "no a otras fichas ocultas ni a todos los resultados del filtro.")
             st.dataframe(preview_rows[["ean", "brand", "model", "color", "competitor", "url"]].rename(
                 columns={"ean": "EAN", "brand": "Marca", "model": "Modelo", "color": "Color",
                          "competitor": "Competidor", "url": "URL"}), hide_index=True, width="stretch",
@@ -558,8 +560,9 @@ def _render_locator(store: PriceComparatorStore, names: dict[str, str], *, advan
                 confirmed = st.checkbox(
                     f"Confirmo expresamente este conjunto de {len(preview_rows)} fichas",
                     key="review_bulk_confirmed")
-                apply_bulk = st.form_submit_button("Confirmar seleccionadas y actualizar precios")
-            if apply_bulk:
+                apply_bulk = st.form_submit_button("Confirmar seleccionadas y solicitar lectura")
+                discard_bulk = st.form_submit_button("Descartar seleccionadas")
+            if apply_bulk or discard_bulk:
                 if not bulk_note.strip() or not confirmed or preview_rows.empty:
                     st.error("Indique el motivo y confirme expresamente el conjunto previsualizado.")
                 else:
@@ -568,12 +571,20 @@ def _render_locator(store: PriceComparatorStore, names: dict[str, str], *, advan
                     for job_id, expected in preview["snapshots"].items():
                         row = indexed.loc[job_id]
                         try:
-                            refresh_id = locator.review(
-                                row["ean"], row["competitor_id"], row["url"], accept=True,
-                                actor=_actor(), note=bulk_note, update_price=True,
-                                expected_candidate=expected)
-                            results.append({"ID": job_id, "EAN": row["ean"], "Competidor": row["competitor"],
-                                            "Resultado": f"Ficha aceptada; lectura {refresh_id} en cola"})
+                            if discard_bulk:
+                                locator.review(
+                                    row["ean"], row["competitor_id"], row["url"], accept=False,
+                                    actor=_actor(), note=bulk_note, update_price=False,
+                                    expected_candidate=expected)
+                                results.append({"ID": job_id, "EAN": row["ean"], "Competidor": row["competitor"],
+                                                "Resultado": "Ficha descartada; sin consulta HTTP ni lectura"})
+                            else:
+                                refresh_id = locator.review(
+                                    row["ean"], row["competitor_id"], row["url"], accept=True,
+                                    actor=_actor(), note=bulk_note, update_price=True,
+                                    expected_candidate=expected)
+                                results.append({"ID": job_id, "EAN": row["ean"], "Competidor": row["competitor"],
+                                                "Resultado": f"Ficha aceptada; lectura {refresh_id} en cola"})
                         except (ValueError, sqlite3.Error) as exc:
                             results.append({"ID": job_id, "EAN": row["ean"], "Competidor": row["competitor"],
                                             "Resultado": f"Excluida: {exc}"})
@@ -763,6 +774,7 @@ def _render_locate_schedule(locator: PriceLocator, names: dict[str, str]) -> Non
 
 def _render_monitor(store: PriceComparatorStore, names: dict[str, str], *, advanced: bool = True) -> None:
     import price_analytics as analytics
+    from price_monitor import schedule_enabled
 
     monitor = PriceMonitor(store)
     sync = VytriaPriceSync(store)
@@ -773,8 +785,14 @@ def _render_monitor(store: PriceComparatorStore, names: dict[str, str], *, advan
                           key="watch_vytria_daily")
         if daily != sync.auto_enabled:
             sync.set_auto_enabled(daily)
-        st.caption("El ciclo requiere también PRICE_MONITOR_SCHEDULE_ENABLED y cada competidor habilitado. "
-                   "La localización conserva su planificación independiente. No se activa ningún servicio aquí.")
+        st.caption("Esta planificación periódica y la continuidad vigente son mecanismos separados. "
+                   "Su estado no impide solicitar aquí una lectura manual autorizada.")
+        if advanced:
+            st.caption(
+                f"Diagnóstico: planificación periódica general "
+                f"{'activa' if schedule_enabled() else 'desactivada'} "
+                "(PRICE_MONITOR_SCHEDULE_ENABLED); la localización usa su propia planificación."
+            )
         approved_sync = st.checkbox("Autorizo la lectura supervisada de Odoo para los EAN vigilados",
                                     key="watch_vytria_approved")
         if st.button("Sincronizar solo Vytria vigilados", disabled=not approved_sync or sync.is_running(),
@@ -794,8 +812,16 @@ def _render_monitor(store: PriceComparatorStore, names: dict[str, str], *, advan
     st.caption("Solo fichas verificadas de productos vigilados. No repite búsquedas. Identidad: marca + modelo + "
                "color; calibre no vinculante. Solo se comparan ofertas disponibles con mercado ES, EUR e IVA "
                "incluido confirmados. Caducidad: un intervalo del grupo o competidor (24 h por defecto).")
-    if not monitor_enabled():
-        st.warning(f"Monitorización periódica desactivada ({MONITOR_ENV}). Los lotes supervisados son explícitos.")
+    from price_trial import continuity_row
+    continuity = continuity_row(store)
+    if continuity and continuity["status"] == "active":
+        st.caption("Vigilancia de continuidad activa. La programación periódica general no gobierna esta selección.")
+    elif continuity and continuity["status"] == "paused":
+        st.warning("Vigilancia de continuidad pausada. Las consultas periódicas están detenidas; las acciones manuales siguen sujetas a autorización.")
+    elif continuity and continuity["status"] == "stopped":
+        st.warning("Vigilancia de continuidad detenida. Las consultas manuales no pueden iniciarse hasta reanudarla.")
+    elif not monitor_enabled():
+        st.caption("La programación periódica general está desactivada. Puede usar una consulta manual autorizada.")
     cid = st.selectbox("Competidor", ordered(names, names.get), format_func=names.get,
                        key="monitor_competitor")
     if advanced:
@@ -934,9 +960,10 @@ def _render_alerts(store: PriceComparatorStore) -> None:
                        mime="text/plain", key="monitor_email")
 
 
-ADMIN_SECTIONS = (
-    "Panel general", "Productos en vigilancia", "Competidores", "Actualizaciones",
-    "Alertas e incidencias", "Configuración y diagnóstico",
+ADMIN_SECTIONS = ("Resumen", "Productos", "Tiendas", "Por revisar", "Vigilancia y consumos")
+DIAGNOSTIC_SECTIONS = (
+    "Ajustes técnicos", "Importaciones", "Históricos y auditoría", "Colas y recuperaciones",
+    "Búsqueda manual (avanzada)",
 )
 
 
@@ -1027,10 +1054,11 @@ def _render_store_urls(store: PriceComparatorStore, cid: str) -> None:
             with store._connect() as connection, connection:
                 connection.execute("""INSERT INTO competitor_product_urls(
                     competitor_id,ean,url,match_status,status,verified_at,source,note,submitted_at
-                ) VALUES(?,?,'manual_review','pending_verification',?,'user','Aportada manualmente; pendiente de verificar',?)
+                ) VALUES(?,?,?,'manual_review','pending_verification','','user',
+                    'Aportada manualmente; pendiente de verificar',?)
                 ON CONFLICT(competitor_id,ean,url) DO UPDATE SET status='pending_verification',
                     note=excluded.note,submitted_at=excluded.submitted_at""",
-                                   (cid, normalized, validated, stamp, stamp))
+                                   (cid, normalized, validated, stamp))
                 if replace:
                     connection.execute("""UPDATE competitor_product_urls SET status='replaced'
                         WHERE competitor_id=? AND ean=? AND url<>? AND status IN
@@ -1045,11 +1073,21 @@ def _render_store_urls(store: PriceComparatorStore, cid: str) -> None:
         except (ValueError, sqlite3.Error) as exc:
             st.error(str(exc))
 
-    if st.button("Solicitar lectura actual", key=f"store_url_request_{cid}",
-                 disabled=not url.strip()):
+    verified = urls[(urls["ean"] == normalize_gtin(ean)) & urls["status"].eq("verified")]
+    verified_urls = verified["url"].drop_duplicates().tolist()
+    if len(verified_urls) > 1:
+        selected_url = st.selectbox("Ficha confirmada para leer", verified_urls,
+                                    key=f"store_url_verified_{cid}")
+    else:
+        selected_url = verified_urls[0] if verified_urls else None
+    if not verified_urls:
+        st.info("Esta URL aún no está confirmada. Al confirmar la identidad en «Por revisar», "
+                "el trabajador solicitará la lectura prioritaria automáticamente.")
+    if st.button("Solicitar lectura de ficha confirmada", key=f"store_url_request_{cid}",
+                 disabled=not selected_url):
         try:
             normalized = normalize_gtin(ean)
-            refresh = PriceMonitor(store).enqueue([cid], [normalized])
+            refresh = PriceMonitor(store).enqueue([cid], [normalized], exact_url=selected_url)
             st.info(f"Solicitud registrada: {refresh}. El trabajador decidirá reutilización, espera o bloqueo.")
         except (ValueError, sqlite3.Error) as exc:
             st.error(str(exc))
@@ -1117,81 +1155,38 @@ def render_competitor_card(store: PriceComparatorStore, cid: str, search: WebPri
         _render_locate_schedule(PriceLocator(store), names)
 
 
-def _render_trial(store: PriceComparatorStore) -> None:
-    from filelock import Timeout
-    from build_info import load_build_info
-    from price_trial import PriceTrial, manifest
+def _render_trial_history(store: PriceComparatorStore) -> None:
+    from price_trial import trial_row
 
-    service = PriceTrial(store)
-    with st.expander("Piloto automático de 72 horas · 100 EAN × seis tiendas"):
-        report = service.report()
-        if report is None:
-            frozen = manifest()
-            st.caption("Tres ciclos diarios, Odoo tarifa 59 de solo lectura y los 600 pares explícitos del manifiesto. "
-                       "No se cambian permisos ni presupuestos; Otticait queda excluida. El cierre es absoluto.")
-            st.download_button("Descargar manifiesto de 600 pares (JSON)",
-                               json.dumps(frozen, ensure_ascii=False, indent=2).encode("utf-8"),
-                               "piloto-72h-manifiesto.json", "application/json", key="trial_manifest")
-            try:
-                prepared = service.preflight()
-            except ValueError as exc:
-                st.warning(str(exc))
-                return
-            st.dataframe(pd.DataFrame(prepared["limits"].values()), hide_index=True)
-            info = load_build_info()
-            approved = st.checkbox("Autorizo activar los 600 pares durante 72 horas y sincronizar solo esos 100 EAN",
-                                   key="trial_approval")
-            if st.button("Activar piloto de 72 horas", key="trial_activate",
-                         disabled=not approved or not info["build"].startswith("actions-")):
-                try:
-                    service.activate(actor=_actor(), build_commit=info["commit"])
-                    _refresh("Ventana persistida. El trabajador del servidor ejecutará el primer ciclo.")
-                except (ValueError, RuntimeError, Timeout) as exc:
-                    st.error(str(exc))
-            _render_continuity(store, service)
-            return
-        st.write({name: report[name] for name in ("status", "build_commit", "started_at", "expires_at",
-                                                "started_at_madrid", "expires_at_madrid", "heartbeat_at", "error")})
-        if report["recoveries"]:
-            recovery = report["recoveries"][-1]
-            st.caption(f"Compilación de recuperación: {recovery['note']['recovery_build_commit']} · "
-                       "El commit de activación y la ventana original se conservan.")
-        st.caption("La configuración no demuestra ejecución: compruebe el heartbeat y los recibos de cada ciclo. "
-                   "Los demás disparadores no pueden consultar estos pares, tampoco después de caducar.")
-        st.dataframe(pd.DataFrame.from_dict(report["summary"], orient="index"), width="stretch")
-        deferred = [{
-            "ciclo": pair["cycle"], "competidor": pair["competitor_id"], "EAN": pair["ean"],
-            "estado": pair["state"], "próxima comprobación": pair.get("next_check_at"),
-            "motivo": pair.get("defer_reason") or pair.get("pending_reason", ""),
-        } for pair in report["pairs"] if pair["state"] == "pending"]
-        if deferred:
-            st.caption("Las fechas y motivos de cada par pendiente se conservan; `done` no equivale a consultado.")
-            st.dataframe(pd.DataFrame(deferred), width="stretch", hide_index=True)
-        st.download_button("Descargar historial e informe del piloto (JSON)",
-                           json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8"),
-                           "piloto-72h-historial.json", "application/json", key="trial_report")
-        if report["status"] == "failed":
-            try:
-                service.recovery_preflight()
-            except ValueError as exc:
-                st.warning(f"Recuperación sin reintentos: {exc}")
-            else:
-                st.info("El fallo inicial no dejó sincronizaciones ni peticiones. Puede reanudar la misma "
-                        "ventana; se conservará en auditoría el estado anterior completo.")
-                info = load_build_info()
-                approved = st.checkbox("Autorizo reanudar el piloto fallido sin ampliar su fecha de cierre",
-                                       key="trial_resume_approval")
-                if st.button("Reanudar tras corregir el arranque", key="trial_resume",
-                             disabled=not approved or not info["build"].startswith("actions-")):
-                    try:
-                        service.resume_initial_sync_failure(actor=_actor(), build_commit=info["commit"])
-                        _refresh("Piloto recuperado con su ventana original. El trabajador continuará sin duplicar consultas.")
-                    except (ValueError, RuntimeError, Timeout) as exc:
-                        st.error(str(exc))
-        if report["status"] == "active" and st.button("Detener piloto ahora", key="trial_stop"):
-            service.stop(actor=_actor())
-            _refresh("Piloto detenido: no se iniciarán consultas nuevas. Los recibos se conservan.")
-    _render_continuity(store, service)
+    row = trial_row(store)
+    if row is None:
+        st.info("No hay una ejecución histórica del piloto de 72 horas.")
+        return
+    with store._connect() as con:
+        cycles = [dict(item) for item in con.execute(
+            "SELECT * FROM price_trial_cycles ORDER BY cycle").fetchall()]
+        pairs = [dict(item) for item in con.execute(
+            "SELECT cycle,competitor_id,ean,state,started_at,finished_at,next_check_at,receipt "
+            "FROM price_trial_pairs ORDER BY cycle,competitor_id,ean").fetchall()]
+        audits = [dict(item) for item in con.execute(
+            "SELECT id,actor,action,at,note FROM access_audit WHERE scope='price_trial' AND scope_id='1' "
+            "ORDER BY id").fetchall()]
+    for pair in pairs:
+        pair["receipt"] = json.loads(pair["receipt"] or "{}")
+    history = {
+        "status": row["status"], "started_at": row["started_at"], "expires_at": row["expires_at"],
+        "stopped_at": row["stopped_at"], "manifest": json.loads(row["manifest"]),
+        "cycles": cycles, "pairs": pairs, "audit": audits,
+    }
+    st.caption("Solo consulta histórica. No activa, reanuda ni detiene trabajos, y no realiza consultas.")
+    st.write({key: history[key] for key in ("status", "started_at", "expires_at", "stopped_at")})
+    if pairs:
+        pair_frame = pd.DataFrame(pairs)
+        st.dataframe(pair_frame.groupby(["state"], as_index=False).size().rename(
+            columns={"state": "Estado", "size": "Pares"}), hide_index=True)
+    st.download_button("Descargar histórico del piloto (JSON)",
+                       json.dumps(history, ensure_ascii=False, indent=2).encode("utf-8"),
+                       "piloto-72h-historial.json", "application/json", key="trial_history_export")
 
 
 def _render_continuity(store: PriceComparatorStore, service=None) -> None:
@@ -1208,8 +1203,8 @@ def _render_continuity(store: PriceComparatorStore, service=None) -> None:
         st.caption(
             ("Configuración preparada y desactivada. " if report is None else "Selección persistida de continuidad. ")
             + f"100 EAN × {len(frozen['competitors'])} tiendas. "
-            "No modifica ni prolonga el piloto expirado. La sincronización Vytria/Odoo es solo de lectura y "
-            "queda limitada a esos 100 EAN. El SHA mostrado corresponde al manifiesto original de origen."
+            "La sincronización Vytria/Odoo es solo de lectura y queda limitada a esos 100 EAN. "
+            "El SHA mostrado corresponde al manifiesto original de origen."
         )
         st.write({
             "manifest_sha256": config["manifest_sha256"],
@@ -1592,7 +1587,6 @@ def _render_continuity_capture(service, frozen: dict, *, active: bool = True) ->
 def _render_batch(store: PriceComparatorStore, names: dict[str, str]) -> None:
     from price_batch import WatchBatch, batch_pairs_export
 
-    _render_trial(store)
     with st.expander("Historial persistente de lotes"):
         with store._connect() as con:
             history = con.execute("""SELECT id,started_at,summary FROM locate_runs
@@ -1613,8 +1607,8 @@ def _render_batch(store: PriceComparatorStore, names: dict[str, str]) -> None:
     point_check = st.checkbox("Comprobación puntual: nuevo intento de negativos y lectura actual de fichas",
                               key="batch_point_check")
     st.caption("Una sola pasada por par seleccionado. No modifica frecuencias, no acepta revisiones ni anula "
-               "permisos, robots, bloqueos, pausas, presupuestos o reservas. Los pares del piloto antiguo "
-               "se registran en una nueva ejecución supervisada del piloto, con las fuentes autorizadas actuales.")
+               "permisos, robots, bloqueos, pausas, presupuestos o reservas. Las decisiones del piloto histórico "
+               "no amplían ni bloquean la selección vigente.")
     scope = (tuple(sorted(eans)), tuple(sorted(cids)), point_check)
     if scope != st.session_state.get("batch_selection") or st.session_state.pop("batch_reset", False):
         st.session_state["batch_approved"] = False
@@ -1641,9 +1635,9 @@ def _render_batch(store: PriceComparatorStore, names: dict[str, str]) -> None:
         "provenance": "Procedencia", "status": "Precio", "interval_hours": "Frecuencia efectiva (h)", "access": "Acceso",
         "minimum_http": "HTTP base", "remaining_http": "HTTP restantes hoy", "estimate": "Previsión"})
     display = display.rename(columns={"defer_reason": "Motivo de aplazamiento", "queue_state": "Estado de cola",
-                                      "not_before": "No antes de", "attempts": "Intentos", "pilot_route": "Flujo piloto"})
+                                      "not_before": "No antes de", "attempts": "Intentos"})
     st.dataframe(display[["EAN", "Competidor", "Trabajo necesario", "Precio", "Procedencia", "Ficha reutilizada",
-                          "Motivo de aplazamiento", "Estado de cola", "No antes de", "Intentos", "Flujo piloto"]],
+                          "Motivo de aplazamiento", "Estado de cola", "No antes de", "Intentos"]],
                  hide_index=True, width="stretch", column_config={
                      "Ficha reutilizada": st.column_config.LinkColumn("Ficha reutilizada", display_text="Ver ficha")})
     with st.expander("Detalle de permisos, consumo y frecuencias"):
@@ -1703,7 +1697,7 @@ def _render_batch(store: PriceComparatorStore, names: dict[str, str]) -> None:
                          hide_index=True, width="stretch")
     st.warning("El consumo de localización es variable. El mínimo no es una cuota reservada. "
                "Robots, paginación, pausas, límites compartidos y bloqueos se comprueban de nuevo al ejecutar. "
-               "Las fichas verificadas se reutilizan; los pares pendientes del piloto se gestionan en el piloto.")
+               "Las fichas verificadas se reutilizan; las reservas heredadas no detienen la cola actual.")
     if st.button("Preparar trabajos sin HTTP", key="batch_prepare"):
         try:
             batch.prepare(eans, cids, point_check=point_check)
@@ -1749,7 +1743,7 @@ def _render_batch(store: PriceComparatorStore, names: dict[str, str]) -> None:
                            json.dumps(result, ensure_ascii=False, indent=2).encode("utf-8"),
                            "resultado-lote.json", "application/json", key="batch_result_export")
         if result["skipped"]:
-            st.info("Pares sin ejecución: precio todavía vigente, gestión en piloto, revisión o restricciones de acceso.")
+            st.info("Pares sin ejecución: precio vigente, revisión pendiente o restricciones de acceso.")
             st.dataframe(pd.DataFrame(result["skipped"]), hide_index=True, width="stretch")
         if result["deferred"]:
             st.warning(f"{result['deferred']} pares aptos no procesados: límite, reserva, bloqueo o cambio "
@@ -1765,10 +1759,12 @@ def render_admin(store: PriceComparatorStore, data: dict) -> None:
     access.ensure_defaults()
     PriceLocator(store).seed_sources()
     names = {r["id"]: r["name"] for r in store.competitors().to_dict("records")}
+    if st.session_state.get("price_admin_section") not in ADMIN_SECTIONS:
+        st.session_state.pop("price_admin_section", None)
     section = st.selectbox("Administración", ADMIN_SECTIONS, key="price_admin_section")
-    if section == "Panel general":
+    if section == "Resumen":
         _render_overview(store)
-    elif section == "Productos en vigilancia":
+    elif section == "Productos":
         _render_watchlist(watch)
         task = st.selectbox("Gestionar productos", ["Añadir / importar", "Reglas", "Grupos y frecuencia",
                                                   "Estado de localización"], key="watch_product_task")
@@ -1789,54 +1785,61 @@ def render_admin(store: PriceComparatorStore, data: dict) -> None:
                          "locate_detail": "Detalle", "url": "Ficha", "provenance": "Procedencia",
                          "interval_hours": "Frecuencia efectiva (h)"}),
                     hide_index=True, width="stretch")
-    elif section == "Competidores":
+    elif section == "Tiendas":
+        st.caption("Ficha de cada tienda: estado, mercado, URLs, métodos, frecuencia, consumos y bloqueos.")
         page._render_competitors(store, data)
-    elif section == "Actualizaciones":
-        task = st.selectbox("Actualización", ["Lote supervisado", "Precios y observaciones",
-                                             "Colas y revisión (avanzado)"], key="watch_update_task")
+    elif section == "Por revisar":
+        st.caption("Candidatas y problemas en una sola bandeja. Confirmar una ficha solicita la lectura prioritaria "
+                   "al trabajador existente; descartar no consulta la tienda.")
+        _render_locator(store, names, advanced=False)
+    else:
+        task = st.selectbox(
+            "Vigilancia y consumo",
+            ["Estado y consumos", "Lote supervisado", "Continuidad vigente"],
+            key="watch_vigilance_task",
+        )
         if task == "Lote supervisado":
             active = store.competitors()
             active_names = {r["id"]: r["name"] for r in active[active["active"].eq(1)].to_dict("records")}
             _render_batch(store, active_names)
-        elif task == "Precios y observaciones":
+        elif task == "Estado y consumos":
             _render_monitor(store, names, advanced=False)
         else:
-            advanced = st.selectbox("Herramienta avanzada", ["Localización", "Monitorización"],
-                                    key="watch_advanced_task")
-            if advanced == "Localización":
-                _render_locator(store, names)
-            else:
-                _render_monitor(store, names)
-    elif section == "Alertas e incidencias":
-        task = st.selectbox("Consultar", ["Alertas comerciales", "Incidencias y recuperación"], key="watch_alert_task")
-        if task == "Alertas comerciales":
-            _render_alerts(store)
-        else:
+            _render_continuity(store)
+
+
+def render_diagnostics(store: PriceComparatorStore, data: dict) -> None:
+    from app_pages import price_comparator as page
+
+    _notices()
+    access = AccessControl(store)
+    access.ensure_defaults()
+    PriceWatch(store).ensure_defaults()
+    PriceLocator(store).seed_sources()
+    names = {r["id"]: r["name"] for r in store.competitors().to_dict("records")}
+    if st.session_state.get("price_diagnostic_section") not in DIAGNOSTIC_SECTIONS:
+        st.session_state.pop("price_diagnostic_section", None)
+    section = st.selectbox("Diagnóstico técnico", DIAGNOSTIC_SECTIONS, key="price_diagnostic_section")
+    if section == "Ajustes técnicos":
+        page._render_settings(store)
+    elif section == "Importaciones":
+        page._render_data_sources(store)
+    elif section == "Históricos y auditoría":
+        page._render_admin_history(store)
+        with st.expander("Histórico del piloto de 72 horas"):
+            _render_trial_history(store)
+    elif section == "Colas y recuperaciones":
+        task = st.selectbox(
+            "Herramienta de diagnóstico",
+            ["Localización automática", "Monitorización", "Incidencias y recuperación"],
+            key="diagnostic_queue_task",
+        )
+        if task == "Localización automática":
+            _render_locator(store, names)
+        elif task == "Monitorización":
+            _render_monitor(store, names)
+        elif task == "Incidencias y recuperación":
             _render_incidents(access, names)
     else:
-        task = st.selectbox("Diagnóstico", ["Parámetros generales", "Importaciones técnicas",
-                                           "Auditoría, históricos y exportaciones", "Piloto anterior",
-                                           "Recuperación de búsquedas"], key="watch_diagnostic_task")
-        if task == "Parámetros generales":
-            page._render_settings(store)
-        elif task == "Importaciones técnicas":
-            page._render_data_sources(store)
-        elif task == "Auditoría, históricos y exportaciones":
-            page._render_admin_history(store)
-        elif task == "Recuperación de búsquedas":
-            page._render_budget_recovery(store)
-        else:
-            from price_pilot import PricePilot
-
-            sub = st.selectbox("Tarea del piloto", ["Configuración del piloto", "Localización supervisada",
-                                                    "Actualización de precios", "Búsqueda manual"],
-                               key="price_pilot_section")
-            pilot = PricePilot(store)
-            if sub == "Configuración del piloto":
-                page._render_pilot(store)
-            elif sub == "Localización supervisada":
-                page._render_discovery(pilot, pilot.is_running())
-            elif sub == "Actualización de precios":
-                page._render_pilot_price_refresh(store)
-            else:
-                page._render_web_finder(store)
+        st.caption("Búsqueda manual acotada; se mantienen permisos, presupuesto, pausas, robots y bloqueos.")
+        page._render_web_finder(store)

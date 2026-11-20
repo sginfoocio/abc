@@ -118,17 +118,10 @@ def active_execution(store) -> Execution | None:
 
 
 def pair_reason(store, cid: str, ean: str | None, now: datetime) -> str:
-    """Ownership survives expiry: jobs created by the trial cannot leak into other schedulers."""
-    row = trial_row(store)
-    if row is None:
-        return ""
-    frozen = json.loads(row["manifest"])
-    owned = cid in frozen["competitors"] and (not ean or ean in frozen["eans"])
+    """Keep current continuity isolated; the retired trial no longer owns live queries."""
     execution = active_execution(store)
     if execution and execution.program == "continuity":
         continuity = continuity_row(store, execution.program_id)
-        if row["status"] == "active":
-            return "La vigilancia de continuidad no puede solaparse con el piloto original"
         if not continuity or continuity["status"] != "active":
             return "La vigilancia de continuidad no está activa"
         selected = json.loads(continuity["manifest"])
@@ -139,14 +132,17 @@ def pair_reason(store, cid: str, ean: str | None, now: datetime) -> str:
             return "La vigilancia de continuidad todavía no ha comenzado"
         return ""
     if execution is None:
-        if owned:
-            return "Par reservado al piloto de 72 h; no se ejecuta desde otro disparador"
         continuity = continuity_row(store)
         if continuity:
             selected = json.loads(continuity["manifest"])
             if cid in selected["competitors"] and (not ean or ean in selected["eans"]):
                 return "Par reservado a la vigilancia de continuidad; no se ejecuta desde otro disparador"
         return ""
+    row = trial_row(store)
+    if row is None:
+        return ""
+    frozen = json.loads(row["manifest"])
+    owned = cid in frozen["competitors"] and (not ean or ean in frozen["eans"])
     if (row["status"] != "active" or now < datetime.fromisoformat(row["started_at"])
             or now >= datetime.fromisoformat(row["expires_at"])):
         return "Piloto finalizado o caducado: no se inician nuevas consultas"
@@ -162,8 +158,6 @@ def require_pair(store, cid: str, ean: str | None, now: datetime) -> None:
 
 
 def select_eans(store, cid: str, eans: list[str] | None, now: datetime) -> list[str] | None:
-    if trial_row(store) is None:
-        return eans
     if eans is None:
         with store._connect() as con:
             eans = [r[0] for r in con.execute("SELECT ean FROM watch_products WHERE active=1")]
@@ -171,10 +165,6 @@ def select_eans(store, cid: str, eans: list[str] | None, now: datetime) -> list[
 
 
 def require_sync(store, eans: list[str], now: datetime) -> None:
-    row = trial_row(store)
-    if row is None:
-        return
-    frozen = set(json.loads(row["manifest"])["eans"])
     execution = active_execution(store)
     if execution and execution.program == "continuity":
         continuity = continuity_row(store, execution.program_id)
@@ -187,19 +177,23 @@ def require_sync(store, eans: list[str], now: datetime) -> None:
             raise TrialDenied("Sincronización fuera del manifiesto activo de continuidad")
         return
     if execution:
+        row = trial_row(store)
+        if row is None:
+            raise TrialDenied("No existe un piloto activo para esta sincronización")
+        frozen = set(json.loads(row["manifest"])["eans"])
         if (row["status"] != "active" or now < datetime.fromisoformat(row["started_at"])
                 or now >= datetime.fromisoformat(row["expires_at"])
                 or execution.competitor_id or set(eans) != frozen or len(eans) != len(frozen)):
             raise TrialDenied("Sincronización fuera de alcance o ventana del piloto")
     else:
         continuity = continuity_row(store)
-        if continuity and continuity["status"] == "active":
+        if continuity:
             selected = set(json.loads(continuity["manifest"])["eans"])
-            if set(eans) == selected and len(eans) == len(set(eans)):
+            if (continuity["status"] == "active" and set(eans) == selected
+                    and len(eans) == len(set(eans))):
                 return
-            raise TrialDenied("Sincronización fuera del manifiesto activo de continuidad")
-        elif frozen.intersection(eans):
-            raise TrialDenied("EAN reservados al sincronizador filtrado del piloto de 72 h")
+            if set(eans) & selected:
+                raise TrialDenied("Sincronización fuera del manifiesto activo de continuidad")
 
 
 def budget_limits(store, cid: str, budget: dict) -> dict:
@@ -262,13 +256,10 @@ class PriceTrial:
             products = {r[0] for r in con.execute("SELECT ean FROM watch_products WHERE active=1")}
             shops = {r["id"]: r["name"] for r in con.execute("SELECT id,name FROM competitors WHERE active=1")}
             beat = con.execute("SELECT value FROM comparator_settings WHERE key=?", (HEARTBEAT_KEY,)).fetchone()
-            trial = con.execute("SELECT status FROM price_trial WHERE id=1").fetchone()
         if not set(frozen["eans"]) <= products:
             raise ValueError("Faltan EAN del manifiesto en la vigilancia activa; no se amplía silenciosamente")
         if any(shops.get(cid) != name for cid, name in frozen["competitors"].items()):
             raise ValueError("Los seis competidores del manifiesto no coinciden con el inventario activo")
-        if trial is None or trial["status"] not in {"expired", "stopped"}:
-            raise ValueError("La continuidad solo puede prepararse después del cierre del piloto original")
         if not beat or not timedelta(0) <= self.clock() - datetime.fromisoformat(beat[0]) < timedelta(minutes=2):
             raise ValueError("No hay heartbeat reciente del trabajador persistente; no se prepara")
         access = AccessControl(self.store, clock=self.clock)
@@ -303,9 +294,6 @@ class PriceTrial:
             pairs = {(r[0], r[1]) for r in con.execute(
                 "SELECT competitor_id,ean FROM price_continuity_pairs WHERE continuity_id=?", (row["id"],))}
             beat = con.execute("SELECT value FROM comparator_settings WHERE key=?", (HEARTBEAT_KEY,)).fetchone()
-            original_trial = con.execute("SELECT status FROM price_trial WHERE id=1").fetchone()
-        if not original_trial or original_trial["status"] not in {"expired", "stopped"}:
-            raise ValueError("La ampliación no puede solaparse con el piloto original")
         if len(shops) != 14 or set(shops.values()) != set(expected):
             raise ValueError("Faltan competidores activos o su identidad no coincide con los 14 documentados")
         if not set(original["eans"]) <= watched:
@@ -1735,8 +1723,12 @@ class PriceTrial:
         inventory = PriceMonitor(self.store, clock=self.clock).inventory()
         selected = inventory[inventory["competitor_id"].isin(row["manifest"]["competitors"])
                              & inventory["ean"].isin(row["manifest"]["eans"])]
-        row["summary"]["current_comparable_offers"] = int(selected["comparable"].fillna(False).sum())
-        row["summary"]["expired_offers"] = int(selected["status"].eq("Precio caducado").sum())
+        row["summary"]["current_comparable_offers"] = (
+            int(selected["comparable"].fillna(False).sum()) if "comparable" in selected else 0
+        )
+        row["summary"]["expired_offers"] = (
+            int(selected["status"].eq("Precio caducado").sum()) if "status" in selected else 0
+        )
         return row
 
     def report(self):
@@ -1851,12 +1843,7 @@ def serve(command):
             try:
                 if resolve_database_path().is_file():
                     store = PriceComparatorStore()
-                    service = PriceTrial(store)
-                    service.tick()
-                    service.continuity_tick()
-                    service.diagnostic_tick()
-                    from price_monitor import PriceMonitor
-                    PriceMonitor(store).review_refresh_tick()
+                    _watch_worker_cycle(store)
             except Exception:
                 LOG.exception("Price watch worker failed; no automatic reactivation")
             stopped.wait(30)
@@ -1868,6 +1855,16 @@ def serve(command):
     finally:
         stopped.set()
         thread.join(timeout=20)
+
+
+def _watch_worker_cycle(store):
+    """Run current governed workers without advancing the retired 72-hour pilot."""
+    service = PriceTrial(store)
+    service.continuity_tick()
+    service.diagnostic_tick()
+    from price_monitor import PriceMonitor
+
+    PriceMonitor(store).review_refresh_tick()
 
 
 def main(argv=None):

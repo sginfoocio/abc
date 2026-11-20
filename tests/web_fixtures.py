@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from price_comparator import PriceComparatorStore
 from price_web import WebPriceSearch
 from price_web_fetch import WebFetcher
+from price_watch import PriceWatch
 from tests.test_price_observations import COMPETITORS, PRODUCTS
 
 NOW = datetime(2026, 11, 1, 12, tzinfo=timezone.utc)
@@ -25,6 +26,13 @@ PRADA = {
 
 def url_of(slug: str) -> str:
     return f"{BASE}/gafas-de-sol/todas-las-solares/{slug}"
+
+
+def mark_vytria_current(store: PriceComparatorStore, eans) -> None:
+    synced_at = NOW.isoformat(timespec="seconds")
+    with store._connect() as connection, connection:
+        connection.executemany("UPDATE vytria_prices SET synced_at=? WHERE ean=?",
+                               ((synced_at, ean) for ean in eans))
 
 
 def page(*, name: str, price: float | str | None, gtin: str | None = None, stock: bool = True, lang: str | None = "es-ES",
@@ -90,6 +98,8 @@ def make_search(tmp_path, site: FakeSite, *, with_vytria: bool = True) -> tuple[
     if with_vytria:
         for ean, data in PRADA.items():
             _vytria(store, ean, data["vytria"])
+        mark_vytria_current(store, PRADA)
+    PriceWatch(store).add(PRADA, actor="fixture", source="manual")
     search = WebPriceSearch(store, fetcher_factory=site.factory, clock=lambda: NOW)
     return store, search
 

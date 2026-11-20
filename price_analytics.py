@@ -282,8 +282,7 @@ SUMMARY_SEGMENTS = {
     "cheaper": "Más barato",
     "equal": "Mismo precio",
     "higher": "Más caro",
-    "missing_own": "Sin precio Vytria",
-    "missing_competitor": "Sin oferta comparable",
+    "none": "Sin comparación válida",
 }
 
 
@@ -299,8 +298,7 @@ def summary_segment(summary: pd.DataFrame, segment: str) -> pd.DataFrame:
         "cheaper": valid & summary["difference_eur"].lt(0),
         "equal": valid & summary["difference_eur"].eq(0),
         "higher": valid & summary["difference_eur"].gt(0),
-        "missing_own": ~own,
-        "missing_competitor": own & ~valid,
+        "none": ~valid,
     }
     return summary.loc[masks[segment]].copy()
 
