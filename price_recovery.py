@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import ExitStack, closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -365,7 +365,7 @@ def _manual_review_rows(con, path, now):
         else:
             try:
                 identity_ok = _review_identity_valid(con, task)
-                sample_matches = _review_sample_matches(task)
+                sample_matches = _review_sample_matches(task, con=con, now=now)
                 ambiguous_sample = _review_sample_ambiguous(task)
             except (KeyError, TypeError, ValueError) as exc:
                 reason = f"Identidad o muestra ilegible: {type(exc).__name__}"
@@ -380,27 +380,57 @@ def _manual_review_rows(con, path, now):
                     policy_reason = _review_sample_policy_reason(con, task, now, interval)
                 except (KeyError, TypeError, ValueError) as exc:
                     policy_reason = f"Muestra comercial ilegible: {type(exc).__name__}"
-                if not policy_reason:
-                    category, reason = "already_resolved", "Lectura posterior y vigente de la misma ficha"
-                    if (task["status"] == "pending" or
-                            (task["status"] == "deferred" and
-                             task["detail"] == "Par reservado al piloto de 72 h o ventana finalizada")):
-                        action = "reconcile"
-                else:
+                if policy_reason == "La muestra posterior a la solicitud ha caducado":
+                    sample_matches = False
+                    if task["status"] == "done":
+                        category, action, reason = (
+                            "recoverable", "already_queued",
+                            "Lectura caducada; la vigilancia renovará el precio con la aprobación vigente")
+                elif not policy_reason:
+                    if task["status"] == "done":
+                        category, reason = "already_resolved", "Lectura vigente y compatible de la misma ficha"
+                    else:
+                        category, action, reason = (
+                            "recoverable", "local_reevaluation",
+                            "Lectura guardada vigente; reevaluar localmente sin HTTP")
+                elif sample_matches:
                     reason = policy_reason
             elif not reason and task["status"] == "done":
                 reason = "Solicitud terminada sin muestra posterior verificable de la misma ficha"
+            elif not reason and task["status"] == "running":
+                if task["lease_until"] and _time(task["lease_until"]) > now:
+                    category, action = "recoverable", "already_queued"
+                    reason = f"Lectura en curso hasta {task['lease_until']}"
+                else:
+                    since = (_time(task["started_at"]) - timedelta(seconds=1)
+                             if task["started_at"] else now - timedelta(minutes=5))
+                    uncertain = con.execute("""SELECT 1 FROM access_requests
+                        WHERE competitor_id=? AND (ean=? OR ean='' OR ean IS NULL)
+                          AND reserved_at>=? LIMIT 1""",
+                                             (cid, ean, since.isoformat())).fetchone()
+                    if uncertain:
+                        reason = "Interrupción con petición o reserva sin muestra recuperable"
+                    else:
+                        category, action = "recoverable", "already_queued"
+                        reason = "La misma solicitud en cola se reanudará al vencer la interrupción"
             elif not reason and task["status"] not in {"pending", "deferred"}:
                 reason = f"Estado de solicitud no recuperable: {task['status']}"
             elif (not reason and task["status"] == "deferred"
-                  and task["detail"] != "Par reservado al piloto de 72 h o ventana finalizada"):
+                  and "bloqueo de continuidad ocupado" in str(task["detail"] or "").casefold()):
+                category, action = "recoverable", "already_queued"
+                reason = f"Aplazado por bloqueo; próximo intento {task['retry_at'] or 'pendiente'}"
+            elif (not reason and task["status"] == "deferred"
+                  and task["detail"] != "Par reservado al piloto de 72 h o ventana finalizada"
+                  and "bloqueo de continuidad ocupado" not in str(task["detail"] or "").casefold()):
                 reason = f"Aplazamiento ajeno al defecto: {task['detail']}"
             elif not reason and task["continuity_pair_state"] == "running":
-                reason = "Lectura de continuidad en curso"
+                category, action, reason = (
+                    "recoverable", "already_queued", "Lectura de continuidad en curso; se reutilizará")
             elif not reason and task["continuity_pair_state"] not in {"pending", "review"}:
                 reason = f"Restricción del par: {task['continuity_pair_state']}"
             elif not reason and task["monitor_state"] == "running":
-                reason = "Lectura concurrente o interrupción sin resolver"
+                category, action, reason = (
+                    "recoverable", "already_queued", "Lectura del monitor en curso; no se duplica")
             elif not reason and task["monitor_state"] in {"review", "failed", "gone", "inactive"}:
                 reason = f"El monitor requiere revisión: {task['monitor_state']}"
             elif not reason and int(task["monitor_attempts"] or 0) >= MAX_ATTEMPTS:
@@ -526,7 +556,8 @@ def apply_manual_reviews(database, *, actor, note, build_commit, approved=False,
                 raise ValueError("Hay IDs de solicitud inexistentes")
             changed = []
             for item in rows:
-                if item["id"] not in selected or item["action"] not in {"requeue", "reconcile", "authorize"}:
+                if item["id"] not in selected or item["action"] not in {
+                        "requeue", "reconcile", "local_reevaluation", "authorize"}:
                     continue
                 before = dict(con.execute("SELECT * FROM manual_review_refreshes WHERE id=?",
                                           (item["id"],)).fetchone())

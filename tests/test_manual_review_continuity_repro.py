@@ -10,6 +10,7 @@ import pytest
 import requests
 
 from price_monitor import MonitorReport
+from price_comparator import PriceComparatorStore
 from price_recovery import apply_manual_reviews, preview_manual_reviews
 from price_web import WebPriceSearch
 from price_web_extract import ProductPage
@@ -60,6 +61,56 @@ def test_accepted_review_uses_active_continuity_after_pilot_expiry(expanded_revi
     assert refresh["status"] == "done"
     assert url in site.calls
     assert service.report()["status"] == "expired"
+
+
+@pytest.mark.parametrize("lock_kind", ["pair", "continuity"])
+def test_busy_lock_defers_same_approval_without_attempt_then_retries(expanded_review, lock_kind):
+    service, store, clock, cid, ean, url, site, monitor, task = expanded_review
+    lock = (service.continuity_pair_lock(cid, ean) if lock_kind == "pair"
+            else service.continuity_lock())
+    with lock:
+        result = monitor.review_refresh_tick()
+    with store._connect() as con:
+        deferred = con.execute("""SELECT status,detail,attempts,http_requests,retry_at
+            FROM manual_review_refreshes WHERE id=?""", (task,)).fetchone()
+    assert result["deferred"] == 1
+    assert deferred["status"] == "deferred" and "bloqueo" in deferred["detail"].lower()
+    assert deferred["attempts"] == deferred["http_requests"] == 0
+    assert deferred["retry_at"] == (clock() + timedelta(seconds=30)).isoformat(timespec="microseconds")
+    assert site.calls == []
+    preview = preview_manual_reviews(store.database_path, now=clock())
+    item = next(row for row in preview["requests"] if row["id"] == task)
+    assert item["category"] == "recoverable" and item["action"] == "already_queued"
+    recovery = apply_manual_reviews(
+        store.database_path, request_ids=[task], actor="operator", note="Previsualización idempotente",
+        build_commit="e" * 40, approved=True, now=clock())
+    assert recovery["changed"] == []
+    with store._connect() as con:
+        unchanged = con.execute("SELECT status,retry_at FROM manual_review_refreshes WHERE id=?",
+                                (task,)).fetchone()
+    assert unchanged["status"] == "deferred" and unchanged["retry_at"] == deferred["retry_at"]
+
+    clock.advance(seconds=30)
+    result = monitor.review_refresh_tick()
+    with store._connect() as con:
+        retried = con.execute("""SELECT status,attempts,http_requests FROM manual_review_refreshes
+            WHERE id=?""", (task,)).fetchone()
+    assert result["processed"] == 1 and retried["status"] == "done"
+    assert retried["attempts"] == 1 and retried["http_requests"] > 0
+    assert url in site.calls
+
+
+def test_preview_reuses_an_active_manual_read_without_requeueing(expanded_review):
+    _, store, clock, _, _, _, site, _, task = expanded_review
+    lease_until = (clock() + timedelta(minutes=2)).isoformat()
+    with store._connect() as con, con:
+        con.execute("""UPDATE manual_review_refreshes SET status='running',lease_until=? WHERE id=?""",
+                    (lease_until, task))
+    preview = preview_manual_reviews(store.database_path, now=clock())
+    item = next(row for row in preview["requests"] if row["id"] == task)
+    assert item["category"] == "recoverable" and item["action"] == "already_queued"
+    assert "en curso" in item["reason"]
+    assert site.calls == []
 
 
 @pytest.mark.parametrize("control", ["pause", "stop"])
@@ -343,10 +394,36 @@ def test_interrupted_request_without_sample_is_not_replayed(tmp_path):
     monitor.review_refresh_tick()
     assert site.calls == [f"{site.base}/robots.txt"]
     with store._connect() as con:
-        row = con.execute("SELECT status,detail,http_requests FROM manual_review_refreshes WHERE id=?",
+        row = con.execute("SELECT status,detail,http_requests,attempts FROM manual_review_refreshes WHERE id=?",
                           (task,)).fetchone()
     assert row["status"] == "blocked" and "reserva" in row["detail"]
     assert row["http_requests"] == 2
+    assert row["attempts"] == 0
+
+
+def test_restart_after_product_response_before_sample_never_repeats_http(tmp_path, monkeypatch):
+    store, locator, monitor, clock, cid, site, rows, urls = _review_env(tmp_path)
+    ean = rows[0][0]
+    task = locator.review(ean, cid, urls[0], accept=True, actor="operator", note="Synthetic review",
+                          update_price=True, expected_candidate=_expected(_candidate(locator, ean)))
+
+    def interrupt(*args, **kwargs):
+        raise Crash()
+
+    with monkeypatch.context() as patch:
+        patch.setattr("price_monitor.extract_product", interrupt)
+        with pytest.raises(Crash):
+            monitor.review_refresh_tick()
+    assert site.calls.count(urls[0]) == 1
+    clock.advance(minutes=11)
+    monitor.review_refresh_tick()
+    assert site.calls.count(urls[0]) == 1
+    with store._connect() as con:
+        row = con.execute("SELECT status,detail,attempts FROM manual_review_refreshes WHERE id=?",
+                          (task,)).fetchone()
+        assert row["status"] == "blocked" and "reserva" in row["detail"] and row["attempts"] == 1
+        assert con.execute("SELECT status FROM competitor_product_urls WHERE competitor_id=? AND ean=?",
+                           (cid, ean)).fetchone()[0] == "verified"
 
 
 @pytest.mark.parametrize("existing_offer", [False, True])
@@ -395,10 +472,40 @@ def test_rejected_import_does_not_record_the_sample_receipt(tmp_path):
                            "Mercado": "ES", "URL": urls[0], "Disponibilidad": "available",
                            "Estado coincidencia": "exact_match", "Evidencia": "Synthetic", "Método": "web:monitor"}])
     report = store.import_offers(frame, validate=lambda con: None,
-                                 review_sample=(task, clock().isoformat(), "synthetic"))
+                                 review_sample=(task, "synthetic", clock().isoformat(), "synthetic", "{}"))
     assert report.rejected
     with store._connect() as con:
-        assert con.execute("SELECT COUNT(*) FROM manual_review_recorded_samples").fetchone()[0] == 0
+        assert con.execute("SELECT COUNT(*) FROM manual_review_recorded_sample_events").fetchone()[0] == 0
+
+
+def test_observation_identity_is_idempotent_and_preserves_legacy_receipts(tmp_path):
+    store, locator, _, clock, cid, _, rows, urls = _review_env(tmp_path)
+    ean = rows[0][0]
+    task = locator.review(ean, cid, urls[0], accept=True, actor="operator", note="Synthetic review",
+                          update_price=True, expected_candidate=_expected(_candidate(locator, ean)))
+    frame = pd.DataFrame([{"EAN": ean, "Competidor": cid, "Precio": 120, "Moneda": "EUR",
+                           "Mercado": "ES", "URL": urls[0], "Disponibilidad": "available",
+                           "Estado coincidencia": "exact_match", "Evidencia": "Synthetic", "Método": "web:monitor"}])
+    at = clock().isoformat()
+    with store._connect() as con, con:
+        con.execute("INSERT INTO manual_review_recorded_samples VALUES(?,?,?)", (task, at, "old-digest"))
+    store = PriceComparatorStore(store.database_path)
+    assert store.import_offers(frame, validate=lambda con: None,
+                               review_sample=(task, f"legacy:{at}", at, "old-digest", "{}")).imported == 0
+    observation = (task, "new-execution", at, "new-digest", "{}")
+    store.import_offers(frame, validate=lambda con: None, review_sample=observation)
+    with store._connect() as con:
+        before = [tuple(row) for row in con.execute("SELECT * FROM offer_checks")]
+    store.import_offers(frame, validate=lambda con: None, review_sample=observation)
+    with pytest.raises(ValueError, match="muestra registrada"):
+        store.import_offers(frame, validate=lambda con: None,
+                            review_sample=(task, "new-execution", "2099-01-01", "new-digest", "{}"))
+    with store._connect() as con:
+        assert [tuple(row) for row in con.execute("SELECT * FROM offer_checks")] == before
+        assert con.execute("SELECT COUNT(*) FROM manual_review_recorded_sample_events WHERE refresh_id=?",
+                           (task,)).fetchone()[0] == 2
+        assert con.execute("SELECT COUNT(*) FROM manual_review_recorded_samples WHERE refresh_id=?",
+                           (task,)).fetchone()[0] == 1
 
 
 def _legacy_request(store, clock, task, *, deferred=False):
@@ -514,7 +621,10 @@ def test_recovery_reuses_a_later_result_without_a_new_request(expanded_review):
         assert monitor.run([cid], eans=[ean], max_jobs=1).processed == 1
     calls = list(site.calls)
     preview = preview_manual_reviews(store.database_path, now=clock())
-    assert preview["counts"]["already_resolved"] == 1
+    item = next(row for row in preview["requests"] if row["id"] == task)
+    assert preview["counts"]["recoverable"] == 1
+    assert item["action"] == "local_reevaluation"
+    assert item["classification"] == "2_reevaluable_local"
     result = apply_manual_reviews(store.database_path, actor="operator", note="Reuse", build_commit="e" * 40,
                                   approved=True, now=clock())
     assert result["changed"] == [task] and site.calls == calls

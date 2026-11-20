@@ -9,6 +9,8 @@ import tempfile
 from types import SimpleNamespace
 from zipfile import ZipFile
 
+import pandas as pd
+
 from price_comparator import PriceComparatorStore, normalize_gtin
 from price_diagnostic import EvidenceError, require_private_database, sanitise
 from price_trial import PriceTrial
@@ -117,6 +119,29 @@ def main():
                 companion.chmod(0o600)
             assert PriceTrial(store).diagnostic_artifact(1) == artifact
         assert PriceTrial(PriceComparatorStore(path)).diagnostic_artifact(1) == artifact
+        with store._connect() as con, con:
+            con.execute("""INSERT INTO locate_jobs(id,ean,competitor_id,created_at,updated_at)
+                VALUES(1,'0805289126577','fixture',?,?)""", (now.isoformat(), now.isoformat()))
+            con.execute("""INSERT INTO manual_review_refreshes
+                (id,locate_job_id,ean,competitor_id,url,actor,reason,requested_at,updated_at)
+                VALUES(1,1,'0805289126577','fixture',?,'fixture','offline',?,?)""",
+                        (url, now.isoformat(), now.isoformat()))
+        frame = pd.DataFrame([{"EAN": "0805289126577", "Competidor": "fixture",
+                               "Precio": 120, "Moneda": "EUR", "Mercado": "ES", "URL": url,
+                               "Disponibilidad": "available", "Estado coincidencia": "exact_match",
+                               "Evidencia": "Offline fixture", "Método": "web:monitor",
+                               "Fecha consulta": now.isoformat()}])
+        first = (1, "execution-one", now.isoformat(), "digest-one", '{"price":120}')
+        second_at = (now + timedelta(days=1)).isoformat()
+        second = (1, "execution-two", second_at, "digest-two", '{"price":120}')
+        assert not store.import_offers(frame, validate=lambda con: None, review_sample=first).rejected
+        frame["Fecha consulta"] = second_at
+        assert not store.import_offers(frame, validate=lambda con: None, review_sample=second).rejected
+        assert not store.import_offers(frame, validate=lambda con: None, review_sample=second).rejected
+        with PriceComparatorStore(path)._connect() as con:
+            assert con.execute("SELECT COUNT(*) FROM manual_review_recorded_sample_events").fetchone()[0] == 2
+            assert con.execute("SELECT COUNT(*) FROM offers").fetchone()[0] == 1
+            assert con.execute("SELECT checks FROM offer_checks").fetchone()[0] == 1
     print("Private SQLite and archived partial JSON-LD evidence verified offline as UID 1037")
 
 
