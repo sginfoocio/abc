@@ -40,6 +40,8 @@ class ProductPage:
     color: str = ""
     caliber: str = ""
     ean_published: str = ""
+    ean_published_raw: list[str] = field(default_factory=list)
+    offer_binding_source: str = ""
     identifiers: list[str] = field(default_factory=list)
     price: float | None = None
     previous_price: float | None = None
@@ -75,6 +77,8 @@ class ProductPage:
         return {"brand": self.brand, "model": self.model, "color": self.color, "caliber": self.caliber,
                 "group_reference": self.group_reference,
                 "ean_published": self.ean_published, "title": self.title,
+                "ean_published_raw": self.ean_published_raw,
+                "offer_binding_source": self.offer_binding_source,
                 "identifiers": self.identifiers, "ambiguous": self.ambiguous,
                 "offer_binding_unresolved": self.offer_binding_unresolved}
 
@@ -149,6 +153,16 @@ def _gtins(node: dict) -> list[str]:
             except ValueError:
                 continue
     return list(dict.fromkeys(found))
+
+
+def _raw_gtins(node: dict) -> list[str]:
+    found = []
+    for key in ("gtin13", "gtin12", "gtin14", "gtin8", "gtin", "ean"):
+        for value in _as_list(node.get(key)):
+            raw = str(value).strip() if value is not None else ""
+            if raw and raw not in found:
+                found.append(raw)
+    return found
 
 
 def _gtins_consistent(node: dict, expected: str) -> bool:
@@ -412,6 +426,7 @@ def _from_json_ld(html: str, url: str) -> ProductPage | None:
             page.structured_variants = matching
     elif not matching and len(products) == 1 and not page.variant_scoped:
         node = products[0]
+        record = {"product": node, "shared_offer": None}
     else:
         page.ambiguous = True
         page.variant_scoped = True
@@ -428,6 +443,7 @@ def _from_json_ld(html: str, url: str) -> ProductPage | None:
     page.color = _color_code(_name(node.get("color")))
     gtins = _gtins(node)
     page.ean_published = gtins[0] if gtins else ""
+    page.ean_published_raw = _raw_gtins(node)
     if len(gtins) > 1:
         page.ambiguous = True
         page.notes.append("EAN publicados contradictorios: " + ", ".join(gtins))
@@ -456,6 +472,11 @@ def _from_json_ld(html: str, url: str) -> ProductPage | None:
         page.ean_published = ""
     page.notes += facts["notes"]
     page.price, page.currency = facts.get("price"), facts.get("currency", "")
+    page.offer_binding_source = (
+        "variant_url" if facts.get("bound_variant_url") else
+        "product_group_offer" if record.get("shared_offer") else
+        "product_offer" if _as_list(node.get("offers")) else ""
+    )
     page.previous_price = facts.get("previous_price")
     page.availability = facts.get("availability", "unknown")
     if facts.get("sku_only_binding"):
@@ -1029,6 +1050,7 @@ def extract_product(html: str, url: str, *, price_selector: str = "", availabili
             if meta.get(key):
                 try:
                     page.ean_published = normalize_gtin(meta[key])
+                    page.ean_published_raw = [str(meta[key]).strip()]
                 except ValueError:
                     page.notes.append("EAN publicado no válido")
                 break

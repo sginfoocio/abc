@@ -172,28 +172,49 @@ def _review_sample_ambiguous(task: dict) -> bool:
             and requested <= sampled < requested + timedelta(seconds=1))
 
 
-def _accepted_edel_resolution(page: ProductPage, accepted_url: str, product: dict) -> bool:
+def _accepted_edel_resolution_reason(page: ProductPage, accepted_url: str, product: dict) -> str:
     from price_comparator import normalize_gtin
 
     accepted, selected = urlparse(accepted_url), urlparse(page.url)
     original_query = parse_qsl(accepted.query, keep_blank_values=True)
     selected_query = parse_qsl(selected.query, keep_blank_values=True)
-    if ((accepted.hostname or "").lower().removeprefix("www.") != "edel-optics.es"
-            or accepted._replace(query="") != selected._replace(query="")
-            or any(key == "selectedSize" for key, _ in original_query)
-            or selected_query != [*original_query, ("selectedSize", page.variant_id)]
-            or not page.variant_id.isdigit()
-            or page.url_trace.get("candidate_url") != accepted_url
-            or page.url_trace.get("final_url") != accepted_url
-            or page.url_trace.get("selected_variant_url") != page.url
-            or page.url_trace.get("offer_variant_url") != page.url
-            or page.url_trace.get("selected_variant_source") != "checked_radio"
-            or page.ambiguous or not page.ean_published):
-        return False
+    if (accepted.hostname or "").lower().removeprefix("www.") != "edel-optics.es":
+        return "el dominio de la URL aceptada no es Edel-Optics España"
+    if accepted._replace(query="") != selected._replace(query=""):
+        return "la ruta resuelta difiere de la ruta aceptada"
+    if any(key == "selectedSize" for key, _ in original_query):
+        return "la URL aceptada ya fija selectedSize y no se puede atribuir a otra selección"
+    if not page.variant_id.isdigit() or selected_query != [*original_query, ("selectedSize", page.variant_id)]:
+        return "selectedSize resuelto no coincide exactamente con la selección de variante"
+    if page.url_trace.get("candidate_url") != accepted_url:
+        return "la URL candidata no coincide con la ruta aceptada"
+    if page.url_trace.get("final_url") != accepted_url:
+        return "la URL final no coincide con la ruta aceptada"
+    if page.url_trace.get("selected_variant_url") != page.url:
+        return "la traza de selección no coincide con la URL de variante resuelta"
+    if page.url_trace.get("selected_variant_source") != "checked_radio":
+        return "la variante no procede del único radio marcado"
+    offer_url = page.url_trace.get("offer_variant_url")
+    if offer_url and offer_url != page.url:
+        return "la URL de Offer contradice la variante seleccionada"
+    if not offer_url and page.offer_binding_source not in {"product_offer", "product_group_offer"}:
+        return "la Offer no está vinculada a un Product seleccionado ni a su ProductGroup"
+    if page.offer_binding_unresolved:
+        return "la relación entre Product y Offer es ambigua"
+    if page.ambiguous:
+        return "el extractor marcó la ficha o la oferta como ambigua"
+    if not page.ean_published:
+        return "la variante seleccionada no publica EAN/UPC válido"
     try:
-        return normalize_gtin(page.ean_published) == normalize_gtin(product["ean"])
+        if normalize_gtin(page.ean_published) != normalize_gtin(product["ean"]):
+            return "el EAN/UPC publicado no coincide con el EAN solicitado"
     except (ValueError, KeyError):
-        return False
+        return "el EAN solicitado o publicado no es válido"
+    return ""
+
+
+def _accepted_edel_resolution(page: ProductPage, accepted_url: str, product: dict) -> bool:
+    return not _accepted_edel_resolution_reason(page, accepted_url, product)
 
 
 def _review_sample_policy_reason(con, task: dict, now: datetime, interval: float | None) -> str:
@@ -1135,6 +1156,15 @@ class PriceMonitor:
                     "identity_reasons": list(match.reasons) if match else [],
                     "rejection": product_page_rejection(fetched.text, fetched.url) if page is None else "",
                 }
+                edel_resolution_reason = ""
+                if page and match and match.status == EXACT and page.url != url \
+                        and (urlparse(url).hostname or "").lower().removeprefix("www.") == "edel-optics.es":
+                    edel_resolution_reason = _accepted_edel_resolution_reason(page, url, product)
+                    self._job_trace["accepted_url_resolution"] = {
+                        "accepted": not edel_resolution_reason,
+                        "reason": edel_resolution_reason,
+                        "offer_binding_source": page.offer_binding_source,
+                    }
                 if review_id is not None and not reuse_shared:
                     trace = page.url_trace if page else fetched.trace
                     hashed_urls = {name: hashlib.sha256(str(trace[name]).encode("utf-8")).hexdigest()
@@ -1153,16 +1183,23 @@ class PriceMonitor:
                                                                "receipt_ids": receipt_ids,
                                                                "identity_status": self._job_trace["identity_status"],
                                                                "selected_variant_source":
-                                                                   trace.get("selected_variant_source", "")}),
+                                                                   trace.get("selected_variant_source", ""),
+                                                               "accepted_url_resolution":
+                                                                   self._job_trace.get("accepted_url_resolution"),
+                                                               "offer_binding_source":
+                                                                   page.offer_binding_source if page else ""}),
                                      _iso(self._now())))
                 observer = _capture_observer.get()
                 if not reuse_shared and observer is not None:
                     observer(cid, ean, fetched, page, self._job_trace)
                 if validate is not None and page is not None and page.url != url:
-                    if (match and match.status == EXACT and _accepted_edel_resolution(page, url, product)):
+                    if (match and match.status == EXACT and not edel_resolution_reason
+                            and (urlparse(url).hostname or "").lower().removeprefix("www.") == "edel-optics.es"):
                         page.url = url
                     else:
-                        self._finish(job, "review", "La variante extraída no corresponde a la URL aceptada")
+                        detail = (edel_resolution_reason if edel_resolution_reason else
+                                  "La variante extraída no corresponde a la URL aceptada")
+                        self._finish(job, "review", f"La variante extraída no corresponde a la URL aceptada: {detail}")
                         return ""
                 if page is None or match is None or match.status != EXACT or page.ambiguous:
                     detail = ("; ".join(match.reasons) if match else "Sin datos legibles de producto")
