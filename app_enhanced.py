@@ -166,7 +166,7 @@ inject_styles()
 # ==============================================================================
 
 @st.cache_resource
-def get_db_engine():
+def get_db_engine(*, bounded=False):
     """Obtiene conexión a BD (cacheada)"""
     config = load_db_config()
     url = URL.create(
@@ -177,6 +177,8 @@ def get_db_engine():
         port=config.port,
         database=config.database,
     )
+    if bounded:
+        return create_engine(url, connect_args={"connect_timeout": 5}, pool_timeout=5)
     return create_engine(url)
 
 @st.cache_data(ttl=300)  # Cache por 5 minutos
@@ -2044,14 +2046,22 @@ MASTERDATA_KERING_IMAGES_PAGE = st.Page(
 
 
 def render_provider_images_page() -> None:
+    from app_pages.provider_orders_page import render_order_panel
+
+    require_admin_access()
     render_sidebar_shell("Proveedores de imágenes")
+    cloud_page_title("Proveedores de imágenes")
+    render_order_panel(partial(get_db_engine, bounded=True), _render_legacy_providers, LUXOPTICA_IMAGES_PAGE)
+    render_footer()
+
+
+def _render_legacy_providers() -> None:
     from provider_images_ui import (
         IMAGE_PROVIDER_KEYS,
         IMAGE_PROVIDER_OPTIONS,
         render_provider_page,
     )
 
-    cloud_page_title("Proveedores de imágenes")
     provider = st.segmented_control(
         "Proveedor",
         IMAGE_PROVIDER_OPTIONS,
@@ -2062,7 +2072,6 @@ def render_provider_images_page() -> None:
         key="image_provider_selector",
     )
     if provider is None:
-        render_footer()
         return
     if provider == "Luxottica":
         require_admin_access()
@@ -2079,7 +2088,6 @@ def render_provider_images_page() -> None:
             selected_provider=IMAGE_PROVIDER_KEYS[provider],
             show_title=False,
         )
-    render_footer()
 
 
 PROVIDER_IMAGES_PAGE = st.Page(render_provider_images_page, title="Proveedores de imágenes",
@@ -2100,6 +2108,7 @@ LUXOPTICA_IMAGES_PAGE = st.Page(
         require_admin_access=require_admin_access,
         render_footer=render_footer,
         engine_factory=get_db_engine,
+        return_to_orders=lambda: st.switch_page(PROVIDER_IMAGES_PAGE),
     ),
     title="Biblioteca de imágenes",
     icon=NAV_ICONS["luxoptica_images"],

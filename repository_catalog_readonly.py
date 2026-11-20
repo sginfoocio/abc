@@ -90,17 +90,25 @@ def open_catalog(path: Path | None):
                         "wal_bytes": wal.stat().st_size if wal.exists() else 0}
 
 
-def fetch_records(connection, codes) -> dict[str, list[dict]]:
+def fetch_records(connection, codes, *, max_per_literal=None) -> dict[str, list[dict]]:
     """Catalog rows by zero-insensitive code key; codes are looked up literally and in equivalent forms."""
     forms = list(dict.fromkeys(v for c in codes for v in code_variants(c)))
     found: dict[str, list[dict]] = {}
     try:
         for start in range(0, len(forms), 400):
             chunk = forms[start:start + 400]
-            rows = connection.execute(
+            select = (
                 "SELECT r.id AS record_id, r.provider, r.origin, r.view, r.market, r.name, r.date, "
-                "a.ean, a.checksum, a.pixels, a.path FROM representations r JOIN assets a ON a.id = r.asset_id "
-                f"WHERE a.ean IN ({','.join('?' for _ in chunk)}) ORDER BY r.id", chunk).fetchall()
+                "a.ean, a.checksum, a.pixels, a.path"
+            )
+            join = (" FROM representations r JOIN assets a ON a.id = r.asset_id "
+                    f"WHERE a.ean IN ({','.join('?' for _ in chunk)})")
+            if max_per_literal is None:
+                rows = connection.execute(select + join + " ORDER BY r.id", chunk)
+            else:
+                rows = connection.execute(
+                    f"SELECT * FROM ({select}, ROW_NUMBER() OVER (PARTITION BY a.ean ORDER BY r.id) AS rn"
+                    f"{join}) WHERE rn <= ? ORDER BY record_id", [*chunk, max_per_literal + 1])
             for row in rows:
                 found.setdefault(code_key(row["ean"]), []).append(dict(row))
     except sqlite3.Error as error:
@@ -118,6 +126,15 @@ def check_record(record: dict, image_root: Path | None, verify: bool):
         return None, None, "vista_no_valida"
     if not verify:
         return view, record["pixels"], None
+    _, pixels, issue = verified_original(record, image_root)
+    return (None, None, issue) if issue else (view, pixels, None)
+
+
+def verified_original(record: dict, image_root: Path):
+    """Verify an asset independently of its classification; never write a derivative."""
+    relative = Path(record["path"])
+    if relative.is_absolute() or ".." in relative.parts or "staging" in relative.parts:
+        return None, None, "ruta_excluida"
     root = image_root.resolve()
     target = (root / relative).resolve()
     if root not in target.parents:
@@ -126,7 +143,10 @@ def check_record(record: dict, image_root: Path | None, verify: bool):
         return None, None, "archivo_ausente"
     if target.stat().st_size > MAX_FILE_BYTES:
         return None, None, "archivo_demasiado_grande"
-    content = target.read_bytes()
+    with target.open("rb") as stream:
+        content = stream.read(MAX_FILE_BYTES + 1)
+    if len(content) > MAX_FILE_BYTES:
+        return None, None, "archivo_demasiado_grande"
     if hashlib.sha256(content).hexdigest() != record["checksum"]:
         return None, None, "checksum_incorrecto"
     try:
@@ -135,7 +155,7 @@ def check_record(record: dict, image_root: Path | None, verify: bool):
         return None, None, "imagen_invalida"
     if not record["pixels"] or pixels != record["pixels"]:
         return None, None, "huella_distinta"
-    return view, pixels, None
+    return content, pixels, None
 
 
 def coverage(records: list[dict], required, image_root: Path | None, verify: bool) -> dict:

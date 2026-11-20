@@ -160,6 +160,143 @@ def read_order_lines(engine, partner_ids, start: date, end: date, *, max_lines: 
     return lines, truncated
 
 
+ORDER_PAGE_SIZE = 50
+ORDER_LINE_BUDGET = 2000
+MAX_ORDER_DAYS = 366
+
+
+def read_purchase_page(engine, associations, providers, start, end, *, before=None):
+    """Read one bounded page of purchase orders in a single read-only transaction.
+
+    Associations are (provider key, partner ID, include commercial contacts). Resolve
+    all configured providers before filtering so a conflicting mapping is never hidden.
+    """
+    if not 0 <= (end - start).days < MAX_ORDER_DAYS:
+        raise ValueError(f"Seleccione un intervalo de hasta {MAX_ORDER_DAYS} días.")
+    if not associations or not providers:
+        return [], None
+    lower, upper = utc_interval(start, end)
+    parameters = {"providers": list(providers), "lower": lower, "upper": upper,
+                  "take": ORDER_PAGE_SIZE + 1, "line_limit": ORDER_LINE_BUDGET + 1}
+    values = []
+    for i, (provider, partner, family) in enumerate(associations):
+        parameters.update({f"provider{i}": provider, f"partner{i}": partner, f"family{i}": family})
+        values.append(f"(CAST(:provider{i} AS TEXT), CAST(:partner{i} AS INTEGER), :family{i})")
+    cursor_filter = ""
+    line_filter = ""
+    if before is not None:
+        parameters.update(before_date=before[0], before_id=before[1])
+        cursor_filter = "AND (po.date_order, po.id) < (:before_date, :before_id)"
+        if len(before) == 3:
+            cursor_filter = "AND (po.date_order, po.id) <= (:before_date, :before_id)"
+            line_filter = "WHERE id <> :before_id OR line_id > :before_line"
+            parameters["before_line"] = before[2]
+    postgres = engine.dialect.name == "postgresql"
+    metadata = """
+        COALESCE(to_jsonb(pt)->>'modelo', '') AS model,
+        COALESCE(to_jsonb(pt)->>'color_proveedor', '') AS color,
+        COALESCE((SELECT CASE WHEN COUNT(DISTINCT value) = 1 THEN MIN(value) END
+          FROM (
+            SELECT COALESCE(to_jsonb(pav.name)->>'es_ES', to_jsonb(pav.name)->>'en_US',
+                            to_jsonb(pav.name)#>>'{}') AS value
+            FROM product_variant_combination pvc
+            JOIN product_template_attribute_value ptav ON ptav.id = pvc.product_template_attribute_value_id
+            JOIN product_attribute_value pav ON pav.id = ptav.product_attribute_value_id
+            JOIN product_attribute pa ON pa.id = pav.attribute_id
+            WHERE pvc.product_product_id = pp.id
+              AND LOWER(COALESCE(to_jsonb(pa.name)->>'es_ES', to_jsonb(pa.name)->>'en_US',
+                                 to_jsonb(pa.name)#>>'{}')) = 'calibre'
+          ) AS sizes), '') AS caliber
+    """ if postgres else "'' AS model, '' AS color, '' AS caliber"
+    template = "LEFT JOIN product_template pt ON pt.id = pp.product_tmpl_id" if postgres else ""
+    statement = text(f"""
+        WITH associations(provider, partner_id, family) AS (VALUES {', '.join(values)}),
+        matched AS (
+            SELECT DISTINCT contact.id, a.provider
+            FROM associations a
+            JOIN res_partner selected ON selected.id = a.partner_id
+            JOIN res_partner contact ON contact.id = selected.id OR
+              (a.family AND COALESCE(contact.commercial_partner_id, contact.id) =
+                            COALESCE(selected.commercial_partner_id, selected.id))
+        ), partners AS (
+            SELECT id, MIN(provider) AS provider, COUNT(*) AS provider_count
+            FROM matched GROUP BY id
+            HAVING SUM(CASE WHEN provider IN :providers THEN 1 ELSE 0 END) > 0
+        ), orders AS (
+            SELECT po.id, po.name, po.date_order, po.state, po.partner_id,
+                   p.provider, p.provider_count, contact.name AS supplier
+            FROM purchase_order po JOIN partners p ON p.id = po.partner_id
+            JOIN res_partner contact ON contact.id = po.partner_id
+            WHERE po.date_order >= :lower AND po.date_order < :upper {cursor_filter}
+            ORDER BY po.date_order DESC, po.id DESC LIMIT :take
+        ), lines AS (
+            SELECT orders.*, pol.id AS line_id, pol.product_id, pol.name AS product,
+                   pol.product_qty AS quantity,
+                   COUNT(pol.id) OVER (PARTITION BY orders.id) AS line_count,
+                   ROW_NUMBER() OVER (PARTITION BY orders.id ORDER BY pol.id) AS line_number
+            FROM orders LEFT JOIN purchase_order_line pol ON pol.order_id = orders.id
+              AND COALESCE(pol.display_type, '') = '' AND pol.product_id IS NOT NULL
+        ), bounded_lines AS (
+            SELECT * FROM lines {line_filter}
+            ORDER BY date_order DESC, id DESC, line_id LIMIT :line_limit
+        )
+        SELECT b.*, pp.barcode, pp.default_code AS sku, {metadata},
+               EXISTS (SELECT 1 FROM purchase_order duplicate WHERE duplicate.id <> b.id
+                   AND duplicate.name = b.name AND duplicate.partner_id = b.partner_id
+                   AND SUBSTR(CAST(duplicate.date_order AS TEXT), 1, 10) =
+                       SUBSTR(CAST(b.date_order AS TEXT), 1, 10)) AS order_identity_conflict,
+               EXISTS (SELECT 1 FROM product_product other WHERE other.id <> pp.id
+                   AND other.barcode IN (
+                       pp.barcode,
+                       CASE WHEN LENGTH(LTRIM(pp.barcode, '0')) <= 8 THEN
+                           SUBSTR('00000000' || LTRIM(pp.barcode, '0'), LENGTH(LTRIM(pp.barcode, '0')) + 1) END,
+                       CASE WHEN LENGTH(LTRIM(pp.barcode, '0')) <= 12 THEN
+                           SUBSTR('000000000000' || LTRIM(pp.barcode, '0'), LENGTH(LTRIM(pp.barcode, '0')) + 1) END,
+                       CASE WHEN LENGTH(LTRIM(pp.barcode, '0')) <= 13 THEN
+                           SUBSTR('0000000000000' || LTRIM(pp.barcode, '0'), LENGTH(LTRIM(pp.barcode, '0')) + 1) END,
+                       SUBSTR('00000000000000' || LTRIM(pp.barcode, '0'), LENGTH(LTRIM(pp.barcode, '0')) + 1)
+                   )) AS barcode_conflict
+        FROM bounded_lines b LEFT JOIN product_product pp ON pp.id = b.product_id
+        {template}
+        ORDER BY b.date_order DESC, b.id DESC, b.line_id
+    """).bindparams(bindparam("providers", expanding=True))
+    try:
+        with engine.connect() as connection:
+            rows = _read_only(connection, statement, parameters)
+    except SQLAlchemyError:
+        raise OdooUnavailable("odoo_no_disponible") from None
+    orders = {}
+    for row in rows[:ORDER_LINE_BUDGET]:
+        order = orders.setdefault(row["id"], {
+            "id": row["id"], "name": row["name"], "date_order": str(row["date_order"]),
+            "cursor": (row["date_order"], row["id"]), "state": row["state"],
+            "partner_id": row["partner_id"], "supplier": row["supplier"],
+            "order_identity_conflict": bool(row["order_identity_conflict"]),
+            "provider": row["provider"] if row["provider_count"] == 1 else "",
+            "line_count": row["line_count"], "lines": [],
+        })
+        order["last_line_number"] = row["line_number"]
+        if row["line_id"] is not None:
+            order["lines"].append({
+                "id": row["line_id"], "product_id": row["product_id"], "product": row["product"],
+                "ean": (row["barcode"] or "").strip(), "sku": row["sku"] or "",
+                "quantity": str(row["quantity"]) if row["quantity"] is not None else "",
+                "model": row["model"], "color": row["color"], "caliber": row["caliber"],
+                "barcode_conflict": bool(row["barcode_conflict"]),
+            })
+    page = list(orders.values())[:ORDER_PAGE_SIZE]
+    has_more = len(orders) > len(page) or len(rows) > ORDER_LINE_BUDGET
+    if len(page) > 1 and page[-1]["last_line_number"] < page[-1]["line_count"]:
+        page.pop()  # Fetch the complete order first on the next page.
+    if not has_more or not page:
+        return page, None
+    last = page[-1]
+    cursor = last["cursor"]
+    if last["last_line_number"] < last["line_count"]:
+        cursor = (*cursor, last["lines"][-1]["id"])
+    return page, cursor
+
+
 def read_confirmed_skus(engine, partner_ids, eans) -> list[dict]:
     """Read exact SKU evidence for an explicit export operation, without writing to Odoo."""
     requested = [str(e).strip() for e in dict.fromkeys(eans) if str(e).strip()]
