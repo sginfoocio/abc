@@ -2052,6 +2052,13 @@ def render_provider_images_page() -> None:
     )
 
     cloud_page_title("Proveedores de imágenes")
+    require_admin_access()
+    from provider_orders_dashboard import render as render_order_dashboard
+    from provider_images_ui import data_root as provider_data_root
+    with st.expander("Pedidos y cobertura — consulta unificada", expanded=True):
+        render_order_dashboard(get_db_engine, provider_data_root())
+    st.divider()
+    st.subheader("Gestión específica por proveedor")
     provider = st.segmented_control(
         "Proveedor",
         IMAGE_PROVIDER_OPTIONS,
