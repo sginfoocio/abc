@@ -293,6 +293,13 @@ def render_dashboard(pages: dict, loader=dashboard_snapshot):
     else:
         st.info("Sin información de actividad reciente.")
     st.subheader("Accesos rápidos")
+    if role == "admin" and "provider_orders" in pages:
+        from app_pages.provider_order_snapshot import PROVIDERS
+
+        provider = st.selectbox("Proveedor de imágenes", list(PROVIDERS), format_func=PROVIDERS.__getitem__)
+        if st.button("Abrir pedidos del proveedor"):
+            st.session_state["supplier_order_home_provider"] = provider
+            st.switch_page(pages["provider_orders"])
     quick = [("images", "Buscar imágenes"), ("kering", "Pedidos Kering"), ("config", "Configuración")] \
         if role == "admin" else [("master", "Master Data"), ("dictionary", "Diccionario")]
     for column, (route, label) in zip(st.columns(len(quick)), quick):

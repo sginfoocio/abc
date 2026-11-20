@@ -1,6 +1,6 @@
 """Bounded, on-demand exports of current repository images (not historical copies)."""
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 from io import BytesIO
 import json
@@ -15,7 +15,7 @@ from image_naming import sanitize_filename
 from image_repository import ImageRecord, ImageRepository, collision_name, image_fingerprint
 import image_library as library
 from market_publication import (
-    MARKETS, ReadOnlyKeringReviewReader, _output_bytes, create_publication_plan, read_export_market_ids,
+    MARKETS, VIEW_NAMES, ReadOnlyKeringReviewReader, _output_bytes, create_publication_plan, read_export_market_ids,
 )
 from provider_images import ean_key
 from repository_catalog_readonly import MAX_FILE_BYTES
@@ -134,6 +134,7 @@ class _RepositoryExportReader:
     repository: ImageRepository
     selected: list[ImageRecord]
     deadline: float
+    verified_pixels: dict[int, str] = field(default_factory=dict, init=False)
 
     @property
     def root(self) -> Path:
@@ -159,6 +160,7 @@ class _RepositoryExportReader:
         pixels = image_fingerprint(content)
         if record.pixels and pixels != record.pixels:
             raise ValueError(f"{record.ean}/{record.name}: huella visual incorrecta.")
+        self.verified_pixels[record.id] = pixels
         _before_deadline(self.deadline)
         return content
 
@@ -213,11 +215,16 @@ def _original_export_entries(products: list[dict]) -> list[tuple[str, ImageRecor
     return entries
 
 
-def _commercial_export_entries(reader, products, export_format, engine_factory, temporary):
+def _commercial_export_entries(reader, products, export_format, engine_factory, temporary, *, expected_variants=None):
     if engine_factory is None:
         raise ValueError("La exportacion especial necesita conexion Odoo para verificar los IDs externos.")
     eans = [product["ean"] for product in products]
-    ids = read_export_market_ids(engine_factory(), eans, export_format)
+    if expected_variants is None:
+        ids = read_export_market_ids(engine_factory(), eans, export_format)
+    else:
+        ids = read_export_market_ids(engine_factory(), eans, export_format, expected_variants=expected_variants)
+        if len({item[export_format] for item in ids.values()}) != len(ids):
+            raise ValueError("Varias variantes comparten un identificador comercial.")
     # Publication reads the literal catalog EAN; the search may have used its UPC/EAN equivalent.
     literal_ids = {record.ean: ids[product["ean"]]
                    for product in products for record in product["records"]}
@@ -227,12 +234,19 @@ def _commercial_export_entries(reader, products, export_format, engine_factory, 
     )
     entries = []
     included = set()
+    views_by_photo = {}
     requested = {ean_key(ean): ean for ean in eans}
     for entry in plan.entries:
         key = (ean_key(entry.ean), entry.source_checksum)
-        if entry.market != export_format or key in included:
+        if entry.market != export_format:
             continue
         code = requested[ean_key(entry.ean)]
+        if expected_variants is not None:
+            photo = (key[0], reader.verified_pixels[entry.source_id])
+            if views_by_photo.setdefault(photo, entry.view) != entry.view:
+                raise ValueError(f"{code}: la misma fotografía acredita vistas incompatibles; requiere revisión.")
+        if key in included:
+            continue
         name = f"{export_format}/{code}/{Path(entry.relative_path).name}"
         if any(previous.casefold() == name.casefold() for previous, _, _ in entries):
             raise ValueError(f"{code}: colision de nombres comerciales; requiere revision.")
@@ -249,7 +263,7 @@ def _commercial_export_entries(reader, products, export_format, engine_factory, 
                                   and item.get("source") in {None, record.name}})
                 excluded.append({"ean": code, "source": record.name, "checksum": record.checksum,
                                  "reasons": reasons or ["sin_vista_original_acreditada"]})
-        if not any(ean_key(record.ean) == ean_key(code) for _, record, _ in entries):
+        if expected_variants is None and not any(ean_key(record.ean) == ean_key(code) for _, record, _ in entries):
             raise ValueError(f"{code}: ninguna fotografia publicable en {export_format}; "
                              "revise vistas acreditadas, formatos e historial Kering. Utilice Original.")
     return entries, excluded
@@ -258,15 +272,22 @@ def _commercial_export_entries(reader, products, export_format, engine_factory, 
 @contextmanager
 def prepare_repository_zip(
     repository: ImageRepository, eans: list[str], *, role: str | None,
-    export_format: str = "Original", engine_factory=None,
+    export_format: str = "Original", engine_factory=None, expected_variants=None,
+    preview_only=False, expected_preview=None,
 ):
     """Bounded local ZIP, independent of orders and without publishing or changing originals."""
     if role not in {"admin", "masterdata"}:
         raise PermissionError("La descarga requiere acceso a la biblioteca de imagenes.")
     if export_format not in {"Original", *MARKETS}:
         raise ValueError("Formato de exportacion no admitido.")
+    if expected_variants is not None and (len(eans) > 200 or set(eans) != set(expected_variants)):
+        raise ValueError("Seleccione hasta 200 variantes identificadas por lote.")
     deadline = monotonic() + MAX_REPOSITORY_EXPORT_SECONDS
-    snapshot = repository.catalog_records()
+
+    def catalog():
+        return repository.catalog_records(codes=eans) if expected_variants is not None else repository.catalog_records()
+
+    snapshot = catalog()
     signature = _catalog_signature(snapshot)
     products = _export_products(snapshot, eans)
     photos = [record for product in products for record in product["photos"]]
@@ -286,8 +307,35 @@ def prepare_repository_zip(
     with tempfile.TemporaryDirectory(prefix="repository-export-") as temporary:
         entries, excluded = (
             (_original_export_entries(products), []) if export_format == "Original" else
-            _commercial_export_entries(reader, products, export_format, engine_factory, temporary)
+            _commercial_export_entries(reader, products, export_format, engine_factory, temporary,
+                                       expected_variants=expected_variants)
         )
+        if expected_variants is not None:
+            if export_format == "Original" and preview_only:
+                for _, record, _ in entries:
+                    reader.verified_bytes(record)
+            literal_codes = {ean_key(ean): ean for ean in eans}
+            actual_views = {ean: set() for ean in eans}
+            for _, record, _ in entries:
+                actual_views[literal_codes[ean_key(record.ean)]].add(record.view)
+            preview = {
+                "signature": signature, "format": export_format, "eans": eans,
+                "files": [{"path": name, "ean": literal_codes[ean_key(record.ean)],
+                           "view": record.view, "source": record.name, "checksum": checksum}
+                          for name, record, checksum in entries],
+                "excluded": excluded,
+                "missing": {
+                    ean: sorted(set(VIEW_NAMES) - views) for ean, views in actual_views.items()
+                },
+            }
+            if preview_only:
+                _before_deadline(deadline)
+                yield preview
+                return
+            if expected_preview != preview:
+                raise ValueError("Cambió el catálogo o los identificadores. Prepare otra vista previa.")
+            if export_format != "Original" and any(preview["missing"].values()):
+                raise ValueError("Faltan vistas acreditadas para el ZIP comercial.")
         manifest = {"format": export_format, "catalog_signature": signature, "excluded": excluded,
                     "products": [{"ean": p["ean"], "models": list(p["identity"]["models"]),
                                   "colors": list(p["identity"]["colors"])} for p in products], "files": []}
@@ -319,7 +367,7 @@ def prepare_repository_zip(
                 archive.writestr("manifest.json", payload)
             if stream.tell() > MAX_REPOSITORY_EXPORT_BYTES:
                 raise ValueError("El ZIP supera 64 MiB; reduzca el listado.")
-            if signature != _catalog_signature(repository.catalog_records()):
+            if signature != _catalog_signature(catalog()):
                 raise ValueError("El catalogo cambio; vuelva a preparar el ZIP.")
             _before_deadline(deadline)
             stream.seek(0)

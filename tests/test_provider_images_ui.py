@@ -7,8 +7,8 @@ from streamlit.testing.v1 import AppTest
 import provider_images_ui as ui
 from app_navigation import build_navigation
 from image_repository import ImageRepository
-from provider_images import ProviderService, ProviderStore
-from provider_support import EANS, photo
+from provider_images import PortalPackage, ProviderService, ProviderStore
+from provider_support import EANS, photo, pfile
 
 
 def test_navigation_exposes_provider_page_only_to_full_role():
@@ -62,6 +62,27 @@ def test_page_renders_for_admin_without_contacting_portals(monkeypatch, tmp_path
     assert not app.exception and app.title[0].value == ui.TITLE
     assert any("desactivada" in c.value for c in app.caption)
     assert [t.label for t in app.tabs] == ["Solicitudes", "Planificar por EAN", "Revisión", "Biblioteca"]
+
+
+def test_provider_review_selector_includes_lifestyle(monkeypatch, tmp_path):
+    root = tmp_path / "providers"
+    monkeypatch.setenv("PROVIDER_DATA_ROOT", str(root))
+    monkeypatch.setenv("IMAGE_REPOSITORY_ROOT", str(tmp_path / "images"))
+    connector = ui.build_connector("marcolin", None, root=root)
+    plan = connector.service.store.plan(connector.service.settings, EANS[:1])
+    request_id = plan["created"][0]
+    connector.service.import_package(
+        request_id,
+        PortalPackage(files=[pfile("unknown.png", ean=EANS[0])]),
+    )
+    (item,) = connector.service.store.review_items()
+
+    app = AppTest.from_function(_page)
+    app.session_state["auth_role"] = "admin"
+    app.run()
+
+    selector = app.selectbox(key=f"rv_view_{item['id']}")
+    assert "lifestyle" in selector.options
 
 
 def test_library_records_show_provider_images_with_thumbnail_and_untouched_original(tmp_path, monkeypatch):
