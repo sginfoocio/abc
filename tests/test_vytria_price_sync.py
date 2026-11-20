@@ -641,6 +641,7 @@ def test_page_shows_odoo_price_section_with_manual_import_as_contingency(tmp_pat
     assert not app.exception
     from tests.admin_navigation import navigate
     navigate(app, "Datos e importaciones")
+    assert not app.exception
     assert "Precio de venta Vytria" in [item.value for item in app.subheader]
     assert any("pendiente (no validado)" in caption.value for caption in app.caption)
     assert [toggle.value for toggle in app.toggle] == [False]

@@ -169,9 +169,9 @@ def _render_vytria_prices(store: PriceComparatorStore) -> None:
     st.subheader("Precio de venta Vytria")
     st.caption("Odoo, tarifa 59 (España, EUR), es la referencia con IVA y descuentos de tarifa. "
                "Una oferta adicional de PrestaShop no es un error de Odoo.")
-    _render_native_prices(store, prices)
     last = sync.last_run()
     prices = sync.prices()
+    _render_native_prices(store, prices)
     confirmed = int(prices["usable"].sum()) if not prices.empty else 0
     columns = st.columns(4)
     columns[0].metric("Estado de conexión", {"ok": "Correcta", "partial": "Correcta (con incidencias)",
@@ -236,6 +236,7 @@ def _render_native_prices(store: PriceComparatorStore, prices: pd.DataFrame) -> 
         quotes = {r["ean"]: dict(r) for r in con.execute("SELECT * FROM prestashop_prices")}
     active = prestashop_prices.enabled()
     if not active:
+        st.caption("Contraste con el motor nativo de PrestaShop: pendiente (no validado).")
         st.info("Lectura de PrestaShop desactivada. Sin lectura previa se mantiene la referencia habitual; "
                 "si ya existe una lectura, no se sustituye por Odoo.")
     if not scope:
