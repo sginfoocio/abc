@@ -1,5 +1,7 @@
 import json
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pytest
@@ -15,6 +17,48 @@ EAN = "0889652637075"
 CONTEXT = {"shop_id": 1, "group_id": 2, "country_id": 6, "currency_id": 1,
            "market": "ES", "currency": "EUR", "customer_id": 0, "quantity": 1,
            "tax_included": True, "shipping_included": False, "cart_discount": False}
+OPEN = "0000-00-00 00:00:00"
+PRIORITY = "id_group;id_currency;id_country;id_shop"
+
+
+def rule(sid=5, aid=0, rule_id=0, shop=0, currency=0, country=0, group=0, quantity=1,
+         fixed="-1", discount="0.15", kind="percentage", included=0, start=OPEN, end=OPEN):
+    return (sid, aid, rule_id, shop, 0, currency, country, group, quantity,
+            Decimal(fixed), Decimal(discount), kind, included, start, end)
+
+
+def calculate(rules, priority=PRIORITY, taxes=((0, "0", "0", Decimal(21), 1, 0),)):
+    return ps._calculate((Decimal("100"), 0, 63, 1, 1, 1), (Decimal("10"), 0, 1),
+                         90, taxes, rules, priority, CONTEXT, NOW, ZoneInfo("Europe/Madrid"))
+
+
+@pytest.mark.parametrize(("rules", "final", "winner"), [
+    ([], "133.10", None),
+    ([rule()], "113.14", "5"),
+    ([rule(kind="amount", discount="10")], "121.00", "5"),
+    ([rule(kind="amount", discount="10", included=1)], "123.10", "5"),
+    ([rule(fixed="80", discount="0")], "108.90", "5"),
+    ([rule(sid=6, shop=1, rule_id=35), rule(aid=90, fixed="80")], "82.28", "5"),
+    ([rule(sid=6, shop=1), rule(group=2)], "113.14", "5"),
+    ([rule(quantity=2)], "133.10", None),
+    ([rule(sid=6, start="2026-11-20 11:00:00"), rule(end="2026-11-20 09:59:59")],
+     "133.10", None),
+])
+def test_mysql_calculator_order_rules_and_taxes(rules, final, winner):
+    quote = calculate(rules)
+    assert quote["price"] == final
+    assert (quote["offer"]["reference"] if quote["offer"] else None) == winner
+
+
+def test_mysql_calculator_bounds_and_fails_closed():
+    next_start = rule(start="2026-11-20 10:30:00")
+    assert calculate([next_start])["valid_until"] == (NOW + timedelta(minutes=30)).isoformat()
+    with pytest.raises(ps.QuoteError, match="Empate"):
+        calculate([rule(), rule(sid=6)])
+    with pytest.raises(ps.QuoteError, match="territorial"):
+        calculate([], taxes=((1, "0", "0", Decimal(21), 1, 0),))
+    with pytest.raises(ps.QuoteError, match="Reducción"):
+        calculate([rule(kind="custom")])
 
 
 def quote(**changes):

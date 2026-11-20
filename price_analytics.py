@@ -419,14 +419,27 @@ def _offer_frame(store: PriceComparatorStore, ean: str | None = None) -> pd.Data
 
 
 def _vytria_frame(store: PriceComparatorStore, ean: str | None = None) -> pd.DataFrame:
-    query = """SELECT id,ean,market,price,currency,price_includes_tax,recorded_at FROM vytria_price_history
+    query = """SELECT id,ean,market,price,currency,price_includes_tax,recorded_at,
+               'Odoo' AS price_origin FROM vytria_price_history
                WHERE validation_status='validated' AND currency='EUR' AND price_includes_tax=1"""
     params: tuple = ()
     if ean:
         query += " AND ean=?"
         params = (ean,)
     with store._connect() as connection:
-        return pd.read_sql_query(query + " ORDER BY recorded_at,id", connection, params=params)
+        odoo = pd.read_sql_query(query + " ORDER BY recorded_at,id", connection, params=params)
+        native = pd.read_sql_query("""SELECT id,ean,'ES' AS market,
+             CAST(json_extract(payload,'$.price') AS REAL) AS price,'EUR' AS currency,
+             1 AS price_includes_tax,observed_at AS recorded_at,'PrestaShop' AS price_origin
+             FROM prestashop_price_history""" + (" WHERE ean=?" if ean else ""),
+                                   connection, params=params)
+    if native.empty:
+        return odoo
+    first_native = _dated(native, "recorded_at").groupby("ean")["recorded_at"].min()
+    odoo = _dated(odoo, "recorded_at")
+    cutoff = odoo["ean"].map(first_native)
+    odoo = odoo[cutoff.isna() | (odoo["recorded_at"] < cutoff)]
+    return pd.concat([odoo, _dated(native, "recorded_at")], ignore_index=True).sort_values(["recorded_at", "id"])
 
 
 def recent_changes(store: PriceComparatorStore, days: int = 7, threshold_pct: float | None = None) -> pd.DataFrame:
@@ -450,10 +463,11 @@ def recent_changes(store: PriceComparatorStore, days: int = 7, threshold_pct: fl
     for ean, group in vytria.groupby("ean"):
         values = list(group.itertuples())
         for previous, current in zip(values[:-1], values[1:]):
-            if current.recorded_at >= since and previous.price:
+            if current.recorded_at >= since and previous.price and current.price_origin == previous.price_origin:
                 change = (current.price - previous.price) / previous.price * 100
                 if abs(change) >= threshold:
-                    rows.append({"ean": ean, "source": "Vytria", "before": previous.price, "after": current.price,
+                    rows.append({"ean": ean, "source": "Vytria · PrestaShop" if current.price_origin == "PrestaShop"
+                                 else "Vytria", "before": previous.price, "after": current.price,
                                  "change_pct": change, "detected_at": current.recorded_at.isoformat()})
     columns = ["ean", "source", "before", "after", "change_pct", "detected_at"]
     return pd.DataFrame(rows, columns=columns).sort_values("detected_at", ascending=False, ignore_index=True)
@@ -471,8 +485,10 @@ def price_series(store: PriceComparatorStore, ean: str, days: int, competitors=N
         market = own.sort_values(["recorded_at", "id"]).iloc[-1]["market"]
     if market:
         own = own[own["market"] == market]
+    changed_source = (own["price_origin"] == "PrestaShop").any()
     for item in own.itertuples():
-        rows.append({"series": "Vytria", "at": item.recorded_at, "eur": item.price, "kind": "change"})
+        series = f"Vytria · {item.price_origin}" if changed_source else "Vytria"
+        rows.append({"series": series, "at": item.recorded_at, "eur": item.price, "kind": "change"})
     offers = _dated(_offer_frame(store, ean), "captured_at")
     offers = offers[offers["captured_at"] <= end].copy()
     offers["last_ok_at"] = iso_datetimes(offers["last_ok_at"], "last_ok_at")

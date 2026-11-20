@@ -6,7 +6,7 @@ La tarifa 59 sigue siendo la referencia efectiva de Odoo. PrestaShop puede aplic
 ofertas posteriores a esa tarifa: son diferencias comerciales, no errores de Odoo.
 Cuando se habilita el lector, solo para la intersección del manifiesto existente de
 100 EAN con los vigilados activos y autorizados por la ejecución, se compara el
-resultado vigente del motor nativo. Una lectura fallida o caducada conserva el
+resultado vigente del cálculo MySQL. Una lectura fallida o caducada conserva el
 último resultado y su fecha real, pero no se compara ni se sustituye por Odoo.
 Sin habilitación y sin lectura anterior, la operativa existente no cambia.
 
@@ -51,25 +51,27 @@ con el mismo GTIN.
 **Antes de habilitar:** el login MySQL de la auditoría cifra la conexión
 pero tiene permisos de escritura y no se debe reutilizar en el contenedor.
 La auditoría se ejecutó vía SSH exclusivamente en transacciones `READ ONLY`.
-No se encontró una vista ni rutina de precios disponible en el esquema;
-`actionPresentProduct` tiene al menos un módulo activo, y MySQL por sí solo
-no acredita el código activo, los overrides ni su efecto sobre precios.
-El lector está preparado para
-una relación MySQL de solo lectura (vista o instantánea existente, que deberá
-conectar el responsable de PrestaShop con el cálculo nativo). No hay cálculo
-SQL aproximado, nuevo endpoint ni cambios en PrestaShop en este trabajo.
+El lector por lotes no necesita vista, rutina ni API. Abre una conexión,
+verifica los permisos, y lee en una instantánea `REPEATABLE READ`, `READ ONLY`.
+Reconstruye la selección de una única oferta, el impacto del calibre, impuestos
+y reducción con `Decimal`. Para el grupo visitante excluye precios de clientes,
+carritos y descuentos que requieren más de una unidad. Rechaza empates, IVA
+territorial/compuesto, ecotasa y configuraciones o módulos no soportados.
 
-1. Identificar con el responsable una salida de solo lectura del motor de
-   producción y auditar los módulos, hooks y overrides activos.
-2. Con el contexto auditado arriba, contrastar el resultado del motor con la ficha
-   anónima para el ejemplo antes de extenderlo a los restantes EAN. Verificar base
-   e impacto de combinación, precio específico y regla de catálogo seleccionados,
-   prioridades, fechas, cantidad y personalizaciones activas. No usar datos de
-   cupones, transporte o descuentos condicionados al carrito.
+1. Verificar los overrides PHP desplegados y los módulos `altautofiller`
+   (`actionPresentProduct`) y `revolutpayment` (`displayProductPriceBlock`).
+   Los contrastes de ficha no prueban su comportamiento para todo el catálogo.
+   Solo tras confirmar su efecto, establecer `PRESTASHOP_PRICE_CODE_AUDITED=1`.
+2. Provisionar, sin tocar el usuario compartido, un usuario dedicado con
+   `SELECT` sobre las tablas consultadas por el lector: `product[_shop]`,
+   `product_attribute[_shop]`, `shop`, `country`, `currency`, `group`,
+   `configuration`, `hook`, `hook_module`, `module`, `group_reduction`,
+   `tax_rule`, `tax`, `specific_price` y `specific_price_priority` (prefijo real).
+   El lector rechaza privilegios adicionales o delegables; la auditoría vía SSH
+   no acredita la conectividad del contenedor.
 3. Inyectar por el gestor de secretos aprobado en el entorno del proceso
    `PRESTASHOP_MYSQL_HOST`, `_PORT` (3306 si se omite), `_DATABASE`, `_USER`,
-   `_PASSWORD`, `_SSL_CA` (ruta al certificado CA), `_PREFIX` y
-   `_NATIVE_QUOTES` (nombre de la relación existente; sin esquema ni credenciales).
+   `_PASSWORD`, `_SSL_CA` (ruta al certificado CA) y `_PREFIX`.
    Aquí los nombres abreviados comparten el prefijo `PRESTASHOP_MYSQL`.
    Usar TLS con verificación de identidad, permisos exclusivamente `SELECT` sobre
    los objetos necesarios y transacciones `READ ONLY`. Configurar los IDs
@@ -77,36 +79,20 @@ SQL aproximado, nuevo endpoint ni cambios en PrestaShop en este trabajo.
    `_CURRENCY_ID` (prefijo `PRESTASHOP_PRICE`). Solo después de validar la
    instalación y obtener aprobación, `PRESTASHOP_PRICE_ENABLED=1`.
 
-**Contrato de la relación nativa:** columnas `ean` (GTIN-13 de texto, incluye
-ceros), `shop_id`, `country_id`, `currency_id`, `group_id` y `payload` (JSON).
-Una sola fila por EAN y contexto. La salida representa el precio unitario final
-que realmente publica el motor activo (incluidos módulos y reglas de catálogo)
-y contiene:
+**Resultado medido:** 11 consultas de lote, 1,86 s por SSH (incluye lecturas
+y cálculo; no es una medición del contenedor). De 100 EAN, se calcularon 43,
+52 no tenían precio público a una unidad según `product_shop`/combinación y
+5 no se localizaron. Se contrastaron 7 con el escaparate ES/EUR: Prada
+`8056597435581` 232,05 €, `0805289126584` 99 €, `0805289126591` 164 €,
+`0889214635310` 222 €, `0889214669742` 312 €, `0889652429717` 201,60 € y
+`0889652468983` 123 €. Los 36 importes calculados restantes no se contrastaron.
+Los resultados son evidencia de auditoría, no una sincronización de producción.
 
-- `product_id`, `combination_id` (0 solo si no hay combinación), IDs del
-  contexto como en las columnas, `market: "ES"`, `currency: "EUR"`,
-  `customer_id: 0`, `quantity: 1`, `tax_included: true`, `shipping_included: false`
-  y `cart_discount: false`.
-- `price`: importe final decimal en texto (p. ej. `"232.05"`); `engine`:
-  identificación/versionado del productor nativo; `fiscal_context`: descripción
-  del grupo de reglas/ámbito fiscal y tratamiento aplicado, sin datos personales.
-- `observed_at` y `valid_until` con zona horaria. El productor debe acotar
-  `valid_until` al siguiente momento de cambio conocido (incluido el inicio de
-  una promoción aún inactiva). ABC nunca usa una lectura más de 24 horas.
-- `offer`: `null` si no aplica; en otro caso `reference` (regla/oferta inequívoca),
-  `starts_at`/`ends_at` (ISO con zona, o `null` si abierto) y `conditions`
-  (`min_quantity` entero; además tienda, grupo, país, moneda, combinación,
-  prioridad, tipo de reducción y tratamiento fiscal según corresponda).
-- `other_calibres`: mapa de IDs de otras combinaciones del mismo modelo/color
-  a importes finales del mismo contexto, o `{}` si no hay otros. Las diferencias
-  se señalan, sin elegir otra combinación ni intercambiar sus precios. Enumerar
-  solo los calibres del producto; no incorporar EAN adicionales al manifiesto.
-
-La relación es un contrato de integración **aún no validado**. Una vista que
-solo reste un porcentaje o elija una fila de `specific_price` no cumple el
-contrato. Las pruebas offline verifican la aceptación/rechazo de resultados
-nativos simulados y la conservación del precio; no certifican la precedencia,
-el IVA ni los módulos de la tienda real.
+La instantánea conserva base, impacto, tipo/importe de reducción, regla,
+contexto, IVA, redondeo, versión del cálculo y vigencia. El resultado vence
+como máximo a las 24 horas o al siguiente cambio de oferta conocido. No se
+propaga el importe de un calibre a otro; las diferencias se señalan en
+administración. El stock no interviene en ese cálculo.
 
 En SQLite, `prestashop_prices` guarda la última lectura, vencimiento, último
 intento e incidencia; `prestashop_price_history` guarda cambios de precio,

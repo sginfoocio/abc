@@ -236,7 +236,7 @@ def _render_native_prices(store: PriceComparatorStore, prices: pd.DataFrame) -> 
         quotes = {r["ean"]: dict(r) for r in con.execute("SELECT * FROM prestashop_prices")}
     active = prestashop_prices.enabled()
     if not active:
-        st.caption("Contraste con el motor nativo de PrestaShop: pendiente (no validado).")
+        st.caption("Activación del cálculo MySQL: pendiente (no validado) para producción.")
         st.info("Lectura de PrestaShop desactivada. Sin lectura previa se mantiene la referencia habitual; "
                 "si ya existe una lectura, no se sustituye por Odoo.")
     if not scope:
@@ -264,7 +264,8 @@ def _render_native_prices(store: PriceComparatorStore, prices: pd.DataFrame) -> 
             "EAN": ean, "Precio Odoo": odoo.get(ean), "Precio final en Vytria": float(price) if price else None,
             "Oferta aplicada": offer["reference"] if offer else "Sin oferta" if payload else "—",
             "Última actualización": quote["observed_at"] if quote else None,
-            "Precio usado en comparación": used, "Incidencia": issue,
+            "Precio usado en comparación": used, "Incidencia": f"No actualizado: {issue}"
+            if issue and used != "Precio final en Vytria" else issue,
         })
     st.dataframe(pd.DataFrame(rows), column_config={
         column: st.column_config.NumberColumn(format="%.2f €")
