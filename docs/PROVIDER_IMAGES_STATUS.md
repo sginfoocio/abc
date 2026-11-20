@@ -145,3 +145,36 @@ aplican a la página adquirida, no a todos los pedidos del intervalo.
   normal ni escribir miniaturas. Los accesos anteriores permanecen; las herramientas por proveedor se abren
   deliberadamente desde **Herramientas existentes de los proveedores** y no forman parte del recorrido P0.1.
 
+## Acciones desde el pedido (P0.2)
+
+**Mostrar acciones del proveedor** abre los controles del pedido sin iniciar procesos. La preparación
+lista los EAN pendientes, vistas sin acreditar y referencias omitidas. Las acciones con efectos
+requieren confirmación y un administrador identificado; se vuelve a leer Odoo por ID y se verifica
+la cobertura antes de preparar o reintentar referencias. No se crea otro almacén.
+
+- **Kering:** usa el lote manual, el bloqueo y las validaciones del piloto existentes. Solo entrega al
+  ejecutor las líneas confirmadas. El panel exige modo de prueba y automatización desactivada; no cambia
+  configuración, corte ni lista de pedidos autorizados. Muestra progreso persistido y ofrece reintento
+  de lotes terminados en error o interrumpidos. No acredita vistas a partir de fotos `lifestyle`,
+  de detalle o desconocidas. `35600f2` pertenece a precios (#142); las correcciones de autenticación
+  observada están en `a34018b` y `7253a87` (fusionadas en #37), no son prueba del estado productivo actual.
+- **Luxottica:** lee recibos locales de monitor, correo y solicitudes; son globales, no evidencia
+  de entrega por pedido. No se invoca Graph ni se reenvían solicitudes desde el pedido.
+- **Marcolin, Sáfilo y NuORDER:** preparación local manual con evidencia Odoo persistida junto con la
+  solicitud, descarga de listados, importación de ZIP y revisión confirmadas. Marcolin también ofrece XLSX
+  y grupos diferidos ya registrados. Las solicitudes sin evidencia íntegra siguen en la herramienta
+  anterior; no se atribuyen al pedido ni se reenvían. El reintento local conserva la evidencia, excluye
+  EAN importados y no reintenta solicitudes con identificador remoto. No se añaden drivers ni permisos.
+
+### Piloto pendiente de P0.1: lectura real de Odoo
+
+Solo con autorización expresa para el entorno y los pedidos: un administrador debe abrir el panel
+sin pulsar acciones, elegir un proveedor con enlace confirmado y un intervalo de uno o dos días
+que incluya un máximo acordado de 1–3 pedidos. Pulsar exclusivamente **Consultar pedidos de Odoo**.
+Comparar contra una lectura autorizada de Odoo: ID/número de compra, contacto y entidad comercial,
+línea, variante, código literal (incluidos ceros) y cantidad. En Cloud verificar que la foto y la
+vista acreditada corresponden al EAN y que los registros sin vínculo no se atribuyen al pedido.
+Anotar fecha, SHA, alcance, conteos y discrepancias anonimizadas; no adjuntar originales ni secretos.
+No abrir acciones de proveedor, importar, revisar ni crear solicitudes. No se ha ejecutado este piloto:
+queda por verificar el esquema y los campos reales, asociaciones, lectura del NAS e historial disponible.
+

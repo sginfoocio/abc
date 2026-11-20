@@ -1,6 +1,7 @@
 from datetime import date
 from io import BytesIO
 from unittest.mock import MagicMock, Mock
+from zipfile import ZipFile
 
 from PIL import Image
 import pytest
@@ -10,10 +11,12 @@ from sqlalchemy.pool import StaticPool
 from streamlit.testing.v1 import AppTest
 
 from app_pages import provider_order_snapshot as data
+from app_pages import provider_order_actions as actions
 from app_pages.provider_orders_page import filter_orders
 from image_repository import ImageRepository
 from kering_images import ImageStore
 from provider_images import ProviderStore
+from provider_images_ui import build_connector
 from provider_odoo_orders import OdooUnavailable, read_purchase_page, save_link
 
 
@@ -290,3 +293,152 @@ def test_streamlit_explicit_query_and_retained_results(monkeypatch, tmp_path, en
     app.run()
     assert "administradores" in app.error[0].value
     assert not app.metric and acquire.call_count == 2
+
+
+@pytest.mark.parametrize("provider", ["marcolin", "safilo", "nuorder"])
+def test_assisted_operation_plans_once_and_imports_zip(provider, engine, tmp_path, monkeypatch):
+    root = tmp_path / "images"
+    repository = ImageRepository(root)
+    monkeypatch.setattr(actions, "data_root", lambda: tmp_path)
+    connector = build_connector(provider, root=tmp_path, repository=repository)
+    monkeypatch.setattr(actions, "build_connector", lambda key: connector)
+    orders, _ = read_purchase_page(engine, [(provider, 1, True)], (provider,), START, END, order_id=25)
+    order = orders[0]
+    eligible = {line["id"]: line for line in order["lines"]}
+    order["lines"] = [eligible[101]]
+    result = actions.prepare_assisted(order, "Prueba")
+    rid, = result["created"]
+    linked, = actions.linked_requests(order)
+    assert linked["id"] == rid and linked["mode"] == "manual" and linked["state"] == "ready"
+    assert actions.prepare_assisted(order, "Prueba")["already_live"] == [EAN]
+    assert actions.linked_requests({**order, "name": "PO24"}) == []
+    package = BytesIO()
+    with ZipFile(package, "w") as archive:
+        archive.writestr("photo.png", _image("blue"))
+        archive.writestr("manifest.csv", f"filename,ean,view\nphoto.png,{EAN},frontal\n")
+    result = connector.import_zip(rid, package.getvalue(), reviewer="Prueba")
+    assert result["imported"] == 1
+    with pytest.raises(ValueError, match="ya se importó"):
+        connector.import_zip(rid, package.getvalue(), reviewer="Prueba")
+    assert actions.prepare_assisted(order, "Prueba")["already_prepared"] == [EAN]
+    assert repository.verified_bytes(repository.records(EAN)[0]) == _image("blue")
+
+
+def test_manual_retry_keeps_order_evidence_and_cannot_repeat(tmp_path):
+    connector = build_connector("marcolin", root=tmp_path)
+    store, settings = connector.service.store, connector.service.settings
+    items = {EAN: {"ean": EAN, "sku": "AZUL", "order": "PO25", "supplier": "Sucursal",
+                   "date": "2026-11-22", "status": "confirmed"}}
+    rid, = store.plan(settings, [EAN], mode="manual", order_evidence=items, reviewer="Prueba")["created"]
+    with store.connect() as db:
+        db.execute("UPDATE requests SET state='failed' WHERE id=?", (rid,))
+        db.execute("UPDATE request_eans SET live=0 WHERE request_id=?", (rid,))
+    new = store.retry(settings, rid, manual_codes={EAN.zfill(14)}, reviewer="Prueba")
+    assert store.odoo_items(new) == store.odoo_items(rid)
+    with store.connect() as db:
+        db.execute("UPDATE request_eans SET live=0 WHERE request_id=?", (new,))
+    assert store.retry(settings, rid, manual_codes={EAN.zfill(14)}, reviewer="Prueba") is None
+
+
+def test_confirmed_action_rereads_odoo_and_stops_if_coverage_is_now_complete(engine, tmp_path, monkeypatch):
+    root = tmp_path / "images"
+    repo = ImageRepository(root)
+    monkeypatch.setattr(actions, "associations", lambda *_: (LINKS, []))
+    monkeypatch.setattr(actions, "state_root", lambda _: root)
+    order = read_purchase_page(engine, LINKS, ("kering",), START, END)[0][0]
+    order["date"] = "2026-11-22"
+    selected = {actions.line_identity(order["lines"][0])}
+    fresh = actions.revalidate(lambda: engine, order, selected, root)
+    assert [line["id"] for line in fresh["lines"]] == [101]
+    for view, color in zip(("frontal", "lateral", "perspectiva"), ("blue", "cyan", "navy")):
+        _save(repo, UPC, view, color)
+    with pytest.raises(ValueError, match="cobertura ha cambiado"):
+        actions.revalidate(lambda: engine, order, selected, root)
+
+
+def test_order_actions_require_confirmation_and_do_not_execute_on_rerender(engine, monkeypatch):
+    order = read_purchase_page(engine, LINKS, ("kering",), START, END)[0][0]
+    order["provider"] = "marcolin"
+    for line in order["lines"]:
+        line["image"] = {"status": data.COMPLETE if line["ean"] == OTHER else data.PARTIAL,
+                         "missing": ["perspectiva"], "incomplete": False}
+    load = Mock(return_value=order)
+    prepare = Mock(return_value={"created": [1], "already_live": [], "already_prepared": []})
+    monkeypatch.setattr(actions, "linked_requests", lambda _: [])
+    monkeypatch.setattr(actions, "revalidate", load)
+    monkeypatch.setattr(actions, "prepare_assisted", prepare)
+    app = AppTest.from_string("""
+import streamlit as st
+from app_pages.provider_order_actions import render_order_actions
+render_order_actions(st.session_state.order, None, None)
+""")
+    app.session_state["order"] = order
+    app.session_state["auth_role"] = "admin"
+    app.session_state["auth_user"] = "Prueba"
+    app.run()
+    app.checkbox[0].check().run()
+    assert app.multiselect[0].options == [EAN]
+    app.multiselect[0].select(EAN.zfill(14)).run()
+    assert not load.called
+    _button(app, "Preparar procesamiento").click().run()
+    assert not load.called and app.error
+    app.checkbox[1].check()
+    _button(app, "Preparar procesamiento").click().run()
+    assert not app.exception
+    assert prepare.call_count == 1
+    assert load.call_args.args[2] == {actions.line_identity(order["lines"][0])}
+    app.run()
+    assert prepare.call_count == 1
+    app.session_state["auth_role"] = "masterdata"
+    app.run()
+    assert not app.button
+
+
+def test_kering_uses_existing_batch_with_selected_lines_and_rejects_stale_preview(engine, monkeypatch):
+    order = read_purchase_page(engine, LINKS, ("kering",), START, END)[0][0]
+    order["date"] = "2026-11-22"
+    config = {"test_mode": True, "auto_enabled": False, "test_order_ids": [25],
+              "cutoff_date": "2026-10-05", "supplier_id": 2}
+    config_store = Mock()
+    config_store.load.return_value = config
+    monkeypatch.setattr(actions, "ConfigStore", lambda _: config_store)
+    selected, *rest = order["lines"]
+    revalidate = Mock(return_value={**order, "lines": [selected]})
+    monkeypatch.setattr(actions, "revalidate", revalidate)
+    portal, batch = object(), Mock()
+    monkeypatch.setattr(actions, "create_portal", lambda _: portal)
+    monkeypatch.setattr(actions, "kering_service", lambda: batch)
+    latest = Mock(return_value=None)
+    monkeypatch.setattr(actions, "latest_kering", latest)
+    keys = {actions.line_identity(selected)}
+    actions.kering_submission(None, order, keys, None, "Prueba", None)
+    args, kwargs = batch.submit_for_user.call_args
+    assert args[0][0]["lines"] == args[6](25)["lines"] == [selected]
+    assert kwargs["portal"] is portal
+    kwargs["preflight"](None)
+    latest.return_value = {"run_id": "already_started"}
+    with pytest.raises(ValueError, match="Otro operador"):
+        kwargs["preflight"](None)
+    config_store.load.return_value = {**config, "test_order_ids": []}
+    with pytest.raises(ValueError, match="no autorizado"):
+        actions.kering_submission(None, order, keys, None, "Prueba", None)
+
+
+def test_luxottica_only_reads_local_receipts(monkeypatch):
+    from cloud_dashboard import ProcessStatus
+
+    read = Mock(return_value=ProcessStatus("luxoptica-mail", "Correo", "luxpending"))
+    monkeypatch.setattr(actions, "read_journal", read)
+    app = AppTest.from_string("""
+import streamlit as st
+from app_pages.provider_order_actions import render_order_actions
+render_order_actions({"id": 25, "provider": "luxottica"}, None, None)
+""")
+    app.session_state["auth_role"] = "admin"
+    app.run()
+    assert not read.called
+    app.checkbox[0].check().run()
+    assert not app.exception and not app.button
+    assert [call.args[0] for call in read.call_args_list] == [
+        "luxoptica-monitor", "luxoptica-mail", "luxoptica-upload",
+    ]

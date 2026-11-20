@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import Callable, Protocol
 from zipfile import BadZipFile, ZipFile
 
+from filelock import FileLock
+
 from image_naming import classified_view, sanitize_filename
 from image_repository import IMAGE_VIEWS, VIEW_ALIASES, ImageRepository
 from kering_images import (
@@ -388,16 +390,30 @@ class ProviderStore:
         connection.execute("INSERT INTO events(request_id,at,from_state,to_state,detail) VALUES(?,?,?,?,?)",
                            (request_id, self.clock(), from_state, to_state, str(detail)[:500]))
 
-    def plan(self, settings: ProviderSettings, eans, *, mode: str = "portal") -> dict:
+    def plan(self, settings: ProviderSettings, eans, *, mode: str = "portal", order_evidence=None,
+             reviewer: str = "") -> dict:
         """Create ready requests for EANs with no live request; never duplicates pending ones."""
         valid, invalid = normalize_eans(eans)
-        created, skipped = [], []
+        created, skipped, previous = [], [], []
+        if order_evidence is not None and (not reviewer.strip() or set(valid) != set(order_evidence)):
+            raise ValueError("Falta evidencia del pedido o del administrador")
         with closing(self.connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             live = {r[0] for r in connection.execute(
                 "SELECT ean_key FROM request_eans WHERE provider=? AND live=1", (settings.provider,))}
             fresh = [e for e in valid if ean_key(e) not in live]
             skipped = [e for e in valid if ean_key(e) in live]
+            if order_evidence is not None:
+                for ean in fresh:
+                    item = order_evidence[ean]
+                    if connection.execute("""
+                        SELECT 1 FROM request_odoo_items i JOIN requests r ON r.id=i.request_id
+                        WHERE r.provider=? AND i.order_name=? AND i.supplier=? AND i.order_date=?
+                          AND i.sku=? AND substr('00000000000000' || i.ean, -14)=? LIMIT 1
+                    """, (settings.provider, item["order"], item["supplier"], item["date"],
+                          item["sku"], ean_key(ean))).fetchone():
+                        previous.append(ean)
+                fresh = [ean for ean in fresh if ean not in previous]
             size = max(1, settings.max_eans_per_request)
             now = self.clock()
             for start in range(0, len(fresh), size):
@@ -409,10 +425,18 @@ class ProviderStore:
                 connection.executemany(
                     "INSERT INTO request_eans(request_id,provider,ean) VALUES(?,?,?)",
                     [(rid, settings.provider, e) for e in chunk])
-                self._event(connection, rid, None, READY, f"{len(chunk)} EAN")
+                if order_evidence is not None:
+                    self._write_odoo_items(connection, rid, [order_evidence[e] for e in chunk])
+                detail = f"{len(chunk)} EAN"
+                if order_evidence is not None:
+                    detail += f" · preparado por {reviewer}"
+                self._event(connection, rid, None, READY, detail)
                 created.append(rid)
             connection.execute("COMMIT")
-        return {"created": created, "already_live": skipped, "invalid": invalid}
+        result = {"created": created, "already_live": skipped, "invalid": invalid}
+        if order_evidence is not None:
+            result["already_prepared"] = previous
+        return result
 
     def live_eans(self, provider: str) -> set[str]:
         with closing(self.connect()) as connection:
@@ -442,16 +466,20 @@ class ProviderStore:
             if connection.execute("SELECT 1 FROM requests WHERE id=?", (request_id,)).fetchone() is None:
                 connection.execute("ROLLBACK")
                 raise KeyError(request_id)
-            connection.executemany(
-                "INSERT OR REPLACE INTO request_odoo_items"
-                "(request_id,ean,sku,product,supplier,order_name,order_date,status,reason)"
-                " VALUES(?,?,?,?,?,?,?,?,?)",
-                [(request_id, str(item["ean"]), str(item.get("sku") or ""), str(item.get("product") or ""),
-                  str(item.get("supplier") or ""), str(item.get("order") or ""),
-                  str(item.get("date") or ""), str(item.get("status") or "pending"),
-                  str(item.get("reason") or "")) for item in items],
-            )
+            self._write_odoo_items(connection, request_id, items)
             connection.execute("COMMIT")
+
+    @staticmethod
+    def _write_odoo_items(connection, request_id, items):
+        connection.executemany(
+            "INSERT OR REPLACE INTO request_odoo_items"
+            "(request_id,ean,sku,product,supplier,order_name,order_date,status,reason)"
+            " VALUES(?,?,?,?,?,?,?,?,?)",
+            [(request_id, str(item["ean"]), str(item.get("sku") or ""), str(item.get("product") or ""),
+              str(item.get("supplier") or ""), str(item.get("order") or ""),
+              str(item.get("date") or ""), str(item.get("status") or "pending"),
+              str(item.get("reason") or "")) for item in items],
+        )
 
     def odoo_items(self, request_id: int) -> list[dict]:
         with closing(self.connect()) as connection:
@@ -515,15 +543,22 @@ class ProviderStore:
     def cancel(self, request_id: int) -> None:
         self.transition(request_id, CANCELLED)
 
-    def retry(self, settings: ProviderSettings, request_id: int) -> int | None:
-        request = self.get(request_id)
-        if request["state"] not in {FAILED, PARTIAL} or request["attempts"] >= settings.max_attempts:
-            return None
-        pending = [e["ean"] for e in request["eans"] if e["result"] != "imported"]
-        if not pending:
-            return None
+    def retry(self, settings: ProviderSettings, request_id: int, *, manual_codes=None, reviewer="") -> int | None:
         with closing(self.connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
+            request = connection.execute("SELECT * FROM requests WHERE id=?", (request_id,)).fetchone()
+            if (request is None or request["provider"] != settings.provider
+                    or request["state"] not in {FAILED, PARTIAL} or request["attempts"] >= settings.max_attempts):
+                return None
+            if manual_codes is not None and (
+                not reviewer.strip() or request["mode"] != "manual" or request["remote_id"]
+            ):
+                return None
+            if connection.execute("SELECT 1 FROM requests WHERE retry_of=? LIMIT 1", (request_id,)).fetchone():
+                return None
+            pending = [e["ean"] for e in connection.execute(
+                "SELECT ean FROM request_eans WHERE request_id=? AND result <> 'imported'", (request_id,))
+                if manual_codes is None or ean_key(e["ean"]) in manual_codes]
             live = {r[0] for r in connection.execute(
                 "SELECT ean_key FROM request_eans WHERE provider=? AND live=1", (request["provider"],))}
             pending = [e for e in pending if ean_key(e) not in live]
@@ -536,7 +571,14 @@ class ProviderStore:
                 (request["provider"], request["mode"], READY, request["attempts"] + 1, request_id, now, now)).lastrowid
             connection.executemany("INSERT INTO request_eans(request_id,provider,ean) VALUES(?,?,?)",
                                    [(rid, request["provider"], e) for e in pending])
-            self._event(connection, rid, None, READY, f"reintento de {request_id}")
+            connection.execute("""
+                INSERT INTO request_odoo_items
+                SELECT ?, i.ean, i.sku, i.product, i.supplier, i.order_name, i.order_date, i.status, i.reason
+                FROM request_odoo_items i JOIN request_eans e ON e.request_id=? AND e.ean=i.ean
+                WHERE i.request_id=?
+            """, (rid, rid, request_id))
+            detail = f"reintento de {request_id}" + (f" · preparado por {reviewer}" if manual_codes is not None else "")
+            self._event(connection, rid, None, READY, detail)
             connection.execute("COMMIT")
         return rid
 
@@ -858,5 +900,22 @@ class ProviderConnector:
         separator = self.list_separator if separator is None else separator
         return separator.join(e["ean"] for e in self.service.store.get(request_id)["eans"])
 
-    def import_zip(self, request_id: int, content: bytes) -> dict:
-        return self.service.import_package(request_id, read_zip_package(content))
+    def import_zip(self, request_id: int, content: bytes, *, reviewer="") -> dict:
+        package = read_zip_package(content)
+        with self.request_lock(request_id):
+            store = self.service.store
+            fingerprint = f"zip_sha256:{hashlib.sha256(content).hexdigest()}"
+            if reviewer:
+                with closing(store.connect()) as db:
+                    if db.execute("SELECT 1 FROM events WHERE request_id=? AND detail LIKE ?",
+                                  (request_id, f"{fingerprint} %")).fetchone():
+                        raise ValueError("Este ZIP ya se importó en la solicitud.")
+            result = self.service.import_package(request_id, package)
+            if reviewer:
+                state = store.get(request_id)["state"]
+                with closing(store.connect()) as db:
+                    store._event(db, request_id, state, state, f"{fingerprint} · importado por {reviewer}")
+            return result
+
+    def request_lock(self, request_id: int):
+        return FileLock(self.service.store.root / f".request-{int(request_id)}.lock", timeout=0)

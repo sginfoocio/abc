@@ -945,13 +945,16 @@ class BatchService:
                 lock.release()
                 self.slots.release()
 
-    def submit(self, orders, user, supplier, start, end, loader, portal=None, origin="Manual") -> str:
+    def submit(self, orders, user, supplier, start, end, loader, portal=None, origin="Manual",
+               *, preflight=None) -> str:
         if not self.slots.acquire(blocking=False):
             raise ValueError("Hay lotes activos; espere a que terminen")
         lock = batch_lock(self.store)
         try:
             lock.acquire()
             self.store.recover_abandoned()
+            if preflight is not None:
+                preflight(self.store)
             run_id = self.store.create_run(orders, user, supplier, start, end, origin)
             self.executor.submit(self.work, run_id, loader, portal or UnverifiedPortal(), lock)
         except Exception:
@@ -971,14 +974,15 @@ class BatchService:
         loader,
         portal=None,
         origin="Manual",
+        *,
+        preflight=None,
     ) -> str:
         if role != "admin" or not isinstance(user, str) or not user.strip():
             raise PermissionError(
                 "El procesamiento Kering requiere un usuario administrador"
             )
-        return self.submit(
-            orders, user, supplier, start, end, loader, portal, origin
-        )
+        options = {"preflight": preflight} if preflight is not None else {}
+        return self.submit(orders, user, supplier, start, end, loader, portal, origin, **options)
 
 
 def data_root() -> Path:
