@@ -165,7 +165,7 @@ ORDER_LINE_BUDGET = 2000
 MAX_ORDER_DAYS = 366
 
 
-def read_purchase_page(engine, associations, providers, start, end, *, before=None):
+def read_purchase_page(engine, associations, providers, start, end, *, before=None, order_id=None):
     """Read one bounded page of purchase orders in a single read-only transaction.
 
     Associations are (provider key, partner ID, include commercial contacts). Resolve
@@ -184,6 +184,10 @@ def read_purchase_page(engine, associations, providers, start, end, *, before=No
         values.append(f"(CAST(:provider{i} AS TEXT), CAST(:partner{i} AS INTEGER), :family{i})")
     cursor_filter = ""
     line_filter = ""
+    order_filter = ""
+    if order_id is not None:
+        parameters["order_id"] = order_id
+        order_filter = "AND po.id = :order_id"
     if before is not None:
         parameters.update(before_date=before[0], before_id=before[1])
         cursor_filter = "AND (po.date_order, po.id) < (:before_date, :before_id)"
@@ -227,7 +231,7 @@ def read_purchase_page(engine, associations, providers, start, end, *, before=No
                    p.provider, p.provider_count, contact.name AS supplier
             FROM purchase_order po JOIN partners p ON p.id = po.partner_id
             JOIN res_partner contact ON contact.id = po.partner_id
-            WHERE po.date_order >= :lower AND po.date_order < :upper {cursor_filter}
+            WHERE po.date_order >= :lower AND po.date_order < :upper {cursor_filter} {order_filter}
             ORDER BY po.date_order DESC, po.id DESC LIMIT :take
         ), lines AS (
             SELECT orders.*, pol.id AS line_id, pol.product_id, pol.name AS product,

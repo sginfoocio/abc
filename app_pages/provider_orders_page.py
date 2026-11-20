@@ -105,7 +105,7 @@ def _photo_counts(line):
             f"≥ {report['counts'][view]}" if report else "—" for view, label in LABELS.items()}
 
 
-def _detail(order, root, library_page):
+def _detail(order, root, library_page, engine_factory):
     st.subheader(f"{_provider(order)} · {order['name']}")
     st.text(f"{order['supplier']} · {order['date']} · Estado Odoo: {order['state']}")
     st.caption(f"{order['line_count']} referencias · {len(order['codes'])} EAN consultados · "
@@ -136,6 +136,9 @@ def _detail(order, root, library_page):
             line = variants[line_id]
             st.session_state[CONTEXT] = (owner(), order["name"], line["ean"], line["image"]["photos"], root)
             st.switch_page(library_page)
+    from app_pages.provider_order_actions import render_order_actions
+
+    render_order_actions(order, root, engine_factory)
     st.markdown("#### Historial de procesamiento")
     if order["history"]:
         st.dataframe([{"Fecha": item["date"], "Resultado": item["status"], "Fuente": item["source"],
@@ -231,7 +234,7 @@ def render_order_panel(engine_factory, legacy_renderer, library_page=None):
     selected = st.selectbox("Ver detalle del pedido", list(by_id), index=None, key="sup_order",
                             format_func=lambda i: f"{by_id[i]['name']} · {_provider(by_id[i])} · ID {i}")
     if selected in by_id:
-        _detail(by_id[selected], snapshot["root"], library_page)
+        _detail(by_id[selected], snapshot["root"], library_page, engine_factory)
 
 
 def render_contextual_photos(return_to_orders):
