@@ -59,17 +59,8 @@ def test_query_uses_confirmed_association_and_read_only_catalog(monkeypatch, tmp
     assert result["rows"][0]["Procesamiento"] == "No consultado"
 
 
-def test_no_hidden_odoo_read_when_dashboard_is_rendered(monkeypatch):
-    class Stop(Exception):
-        pass
-    fake = SimpleNamespace(
-        session_state={"auth_role": "admin"},
-        subheader=lambda *a, **k: None,
-        caption=lambda *a, **k: None,
-        selectbox=lambda label, opts, **k: opts[0],
-        columns=lambda n: [SimpleNamespace(__enter__=lambda s:s, __exit__=lambda s,*a:None)
-                            for _ in range(n)],
-    )
-    # Explicit queries are separate from the pure aggregation tests.
-    assert callable(dashboard.render)
-    assert "read_order_lines" not in dashboard.render.__code__.co_names
+
+def test_query_function_is_not_called_implicitly():
+    # The render path owns the explicit Streamlit button; aggregation is pure.
+    assert "read_order_lines" not in dashboard.aggregate.__code__.co_names
+    assert "catalog_coverage" not in dashboard.aggregate.__code__.co_names
