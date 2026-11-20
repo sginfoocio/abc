@@ -16,7 +16,7 @@ from filelock import Timeout
 import marcolin_images
 import nuorder_images
 import safilo_images
-from image_repository import ImageRepository
+from image_repository import IMAGE_CLASSIFICATIONS, ImageRepository
 from provider_images import (
     FAILED, NEEDS_REVIEW, PARTIAL, PROVIDERS, ProviderService, ProviderStore, load_settings,
     parse_ean_file, parse_ean_text,
@@ -417,7 +417,7 @@ def _review(connector) -> None:
         with st.expander(f"{item['name']} — {item['reason']} (solicitud {item['request_id']})"):
             reviewer = st.session_state.get("auth_user") or st.session_state.get("auth_role") or "admin"
             reason = st.text_input("Motivo de la decisión", key=f"rv_reason_{item['id']}")
-            views = ["frontal", "lateral", "perspectiva", "detalle"]
+            views = list(IMAGE_CLASSIFICATIONS)
             view = st.selectbox("Vista", views, key=f"rv_view_{item['id']}")
             ean = item["ean"]
             if item["record_id"] is None:

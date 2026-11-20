@@ -30,6 +30,7 @@ from repository_storage import (
 LOGGER = logging.getLogger(__name__)
 IMAGE_REPOSITORY_ROOT_ENV = "IMAGE_REPOSITORY_ROOT"
 IMAGE_VIEWS = ("frontal", "lateral", "perspectiva", "detalle")
+IMAGE_CLASSIFICATIONS = (*IMAGE_VIEWS, "lifestyle")
 VIEW_ALIASES = {"V1": "frontal", "V2": "perspectiva", "V3": "lateral"}
 
 
@@ -452,14 +453,14 @@ class ImageRepository:
 
     def review_view(self, record_id: int, view: str, *, reviewer: str, reason: str,
                     evidence: dict | None = None) -> None:
-        if view not in {*IMAGE_VIEWS, "unknown", "lifestyle"} or not reviewer.strip() or not reason.strip():
+        invalid_view = view not in {*IMAGE_CLASSIFICATIONS, "unknown"}
+        invalid_review = not reviewer.strip() or not reason.strip()
+        if invalid_view or invalid_review:
             raise ValueError("La revision requiere vista, revisor y motivo")
         records = [record for record in self.records() if record.id == record_id]
         if not records:
             raise ValueError("Imagen no encontrada para revisar")
         record = records[0]
-        if view == "lifestyle" and record.provider != "Kering":
-            raise ValueError("La clasificación lifestyle solo está disponible para Kering")
         with self.lock(record.ean), self.maintenance_lock(), self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             current = connection.execute(
