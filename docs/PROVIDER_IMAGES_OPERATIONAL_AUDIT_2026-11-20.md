@@ -13,6 +13,7 @@ No se accedió a Odoo, correo, portales, contenedores, NAS ni bases de datos pro
 - Luxottica y Kering tienen evidencia de operación real histórica; Marcolin tiene evidencia limitada de portal, pero no se ha reconciliado con la solicitud local ni demostrado la importación de su entrega. NuORDER y Sáfilo no tienen piloto real documentado.
 - La automatización de nuevos conectores está desactivada por defecto. No se validaron las configuraciones efectivas de producción ni el estado de workers, NAS o copias independientes.
 - No se encontró código ni documentación de Thélios. Su pertenencia al alcance vigente debe confirmarse antes de diseñar o anunciar un conector.
+- **P0 — Panel único de pedidos e imágenes:** `/proveedores-imagenes` ya reúne accesos por proveedor, pero no ofrece un resumen, tabla de pedidos y detalle comunes. Esa unificación pasa a ser condición de cierre operativo, sin sustituir los procesos existentes.
 - La referencia de Kering del encargo requiere corrección: el SHA `35600f278eeea11b3cb9cf57c3b93fa58c7fda73` es el commit de la PR #142, pero esa PR trata de recuperación de lecturas de precios y no modifica módulos Kering. La afirmación aportada sobre una prueba real de autenticación no se puede validar con esa referencia.
 
 ## Matriz de estado
@@ -50,6 +51,39 @@ El ciclo no es todavía una única orquestación: Graph de Luxottica, Kering y e
 
 La documentación de despliegue prohíbe ejecutar el procedimiento sin aprobación y limita el cambio descrito a la aplicación. La evidencia productiva/NAS más reciente contenida en los documentos revisados es histórica (octubre); no se inspeccionó producción en esta auditoría. Deben verificarse por separado el SHA efectivo de app/workers, integridad catálogo–archivos, espacio/permisos NAS, persistencia y copia independiente. Un contenedor activo o un despliegue exitoso no demuestra una ejecución correcta del proveedor.
 
+## P0 — Panel único `/proveedores-imagenes`
+
+### Punto de partida y reutilización
+
+La ruta existente en [la aplicación](../app_enhanced.py) selecciona un proveedor y renderiza flujos distintos. No hay un panel global de pedidos ni un detalle operativo compartido. Se ampliará esa ruta en lugar de crear otra pantalla o un segundo motor:
+
+| Proveedor | Reutilizar | Brecha para el panel |
+|---|---|---|
+| Luxottica | Solicitudes existentes, [Graph](../graph_mail_downloader.py), [monitor](../monitor_luxoptica_downloads.py) y recibos del [panel de procesos](../cloud_dashboard.py). | Mostrar entregas y solicitudes vinculadas por evidencia a pedidos. El panel actual de pendientes de copias de mercado no equivale a pedidos pendientes de imágenes. Mostrar las entregas no conciliadas sin asignarlas por marca ni solo por EAN. |
+| Kering | [Consulta y procesamiento de pedidos](../kering_images.py), [UI de pedidos e historial](../kering_images_ui.py) y [scheduler](../kering_jobs.py). | Llevar al detalle común la preparación, autenticación explícita, progreso, resultados y reintentos, sin duplicar ejecutores ni alterar la programación. |
+| Marcolin | [Conector diferido](../marcolin_images.py), solicitudes, importación ZIP y revisión del [panel actual](../provider_images_ui.py). | Mostrar identidad remota, espera, entregas e importación junto al pedido. Mantener intacta la solicitud nº 1 mientras no se acredite su identidad remota. |
+| Sáfilo | [Conector](../safilo_images.py) y planificación/importación asistida. | Guiar la selección masiva autorizada, revisar correspondencia archivo–EAN–vista e importar en el contexto del pedido. |
+| NuORDER | [Conector asistido](../nuorder_images.py) y planificación/importación asistida. | Guiar por grupo/marca confirmados, sin deducir permisos ni automatización; importar y revisar desde el pedido. |
+| Thélios | Ninguno acreditado. | Incluirlo solo si se confirma el alcance; no mostrar capacidad operativa supuesta. |
+
+### Consulta, presentación y acciones
+
+- **Resumen superior:** estado de conexión/disponibilidad según evidencia registrada, su origen y antigüedad, última ejecución y resultado, automatización por proveedor y totales de pedidos pendientes, en proceso, completos, parciales y con errores, EAN pendientes, fotos y cobertura. Distinguir conexión no verificada, falta de datos, error, dato antiguo y cero real. Un recibo Graph o un latido no prueba acceso al portal ni entrega. Los totales declaran su período y si la consulta está truncada; no mezclar pedidos, solicitudes, referencias y fotos.
+- **Filtros y tabla única:** proveedor, fechas, número de pedido, estado y EAN/UPC. La consulta de Odoo se ejecuta en solo lectura al pulsar **Consultar pedidos**; filtros locales, paginación y apertura del detalle reutilizan los resultados con alcance, fecha de consulta y límite visibles. Cambiar parámetros que amplían el alcance requiere una nueva consulta explícita. Reutilizar los contratos de [pedidos por proveedor](../provider_odoo_orders.py), [búsqueda masiva](../bulk_image_search.py) y [lectura de catálogo](../repository_catalog_readonly.py), con una capa de consulta y presentación sobre los almacenes existentes, sin migrarlos ni fusionarlos.
+- **Identidad, estados y cobertura:** usar el ID del pedido y de la línea/variante de Odoo al conciliar; conservar EAN/UPC literal y equivalencias acreditadas. No atribuir una solicitud o intento a un pedido por un EAN coincidente. Mostrar por separado el estado de compra de Odoo, el estado operativo normalizado y el estado original con su fuente. Contar referencias con cobertura completa, parcial, sin imágenes o desconocida; no tratar fallos del catálogo como ausencia. Separar número de fotos de cobertura frontal/lateral/perspectiva. Detalle, `lifestyle` y desconocidas no completan vistas técnicas. Mantener la política vigente mientras no se apruebe otra.
+- **Detalle del pedido:** proveedor, número, fecha, estados, total de referencias y EAN únicos; por línea, producto, modelo, color y calibre si están acreditados, fotos disponibles, vistas técnicas presentes y pendientes y fotos adicionales. Mostrar último intento, progreso, historial y errores de cada proveedor. Ofrecer navegación contextual a la biblioteca filtrada por pedido/EAN y a la exportación existente, sin adquirir ni publicar imágenes al navegar.
+- **Acciones y permisos:** desde el pedido, consultar, previsualizar y confirmar la preparación, procesar manualmente, reintentar, importar ZIP, revisar y exportar según permisos, estado y capacidades acreditadas. La selección y la previsualización no generan trabajo. Antes de ejecutar, volver a comprobar permisos, cobertura, trabajo vivo y estado en el servicio de origen para evitar duplicados, incluso tras reruns o selecciones concurrentes. El modo automático solo se refleja o usa cuando ya está configurado y autorizado; el panel no lo activa. Mantener la configuración en una sección administrativa separada. No invocar Odoo, portales ni acciones mutantes por abrir, actualizar el navegador o cambiar filtros; la consulta local previa debe ser acotada y de solo lectura.
+
+### Implantación progresiva y pruebas
+
+| Entrega | Alcance y criterio de paso |
+|---|---|
+| **P0.1 — Lectura común** | Resumen local y tabla/detalle de solo lectura sobre datos sintéticos, con consulta Odoo explícita y paginación. Probar todos los estados, el recuento por pedido/referencia/EAN, equivalencias con ceros, ambigüedades, errores de fuente y datos truncados. Verificar cero llamadas externas y cero escrituras en carga, rerun y navegación. |
+| **P0.2 — Operación por proveedor** | Reutilizar acciones de Kering/Luxottica primero y después integrar las asistidas de Marcolin, Sáfilo y NuORDER. Probar permisos en UI y servidor, confirmación, concurrencia, idempotencia, historial intacto y que el fallo de un proveedor no oculta ni bloquea a los demás. Las capacidades sin autorización o evidencia se muestran como no disponibles, con motivo. |
+| **P0.3 — Navegación y aceptación** | Integrar biblioteca y exportación contextual; no retirar accesos anteriores hasta probar paridad y conservar enlaces existentes. Verificar interfaz en escritorio y móvil con datos sintéticos y ejecutar regresiones por proveedor. Para declarar cerrado el P0, un administrador debe poder localizar un pedido pendiente, inspeccionar cobertura, ejecutar el procedimiento autorizado, revisar resultados y abrir/exportar las imágenes desde el panel para cada proveedor incluido. Los pilotos reales requieren autorización separada y se registran aparte de las pruebas offline. |
+
+**Coordinación:** [#147](https://github.com/sginfoocio/abc/pull/147) contiene esta auditoría y el plan; no implementa la pantalla. [#146](https://github.com/sginfoocio/abc/pull/146) se limita a clasificación y revisión de `lifestyle`: reutilizarla tras su integración, sin repetirla ni bloquear por ella la consulta de solo lectura. Las futuras PR de P0 se separan por entrega. Mantener [#38](https://github.com/sginfoocio/abc/issues/38) para la validación específica de Kering y [#59](https://github.com/sginfoocio/abc/issues/59) para la identidad, reconciliación y pilotos de los otros conectores, sin cerrarlas por el mero cambio de navegación.
+
 ## Issues y referencias vigentes consultadas
 
 - [#38](https://github.com/sginfoocio/abc/issues/38) permanece abierta. Incluye trabajo pendiente de búsqueda/ZIP por pedido, separación de superficies y verificación funcional/operativa; los avances anteriores no demuestran estado actual de NAS o producción.
@@ -62,10 +96,10 @@ La documentación de despliegue prohíbe ejecutar el procedimiento sin aprobaci�
 | Fase | Trabajo | Dependencia / aceptación |
 |---|---|---|
 | **A — Auditoría consolidada** | Inventario del código, pruebas, issues, documentación y límites de evidencia. | Esta auditoría cubre código/documentación y GitHub; la inspección actual de producción queda explícitamente pendiente de acceso autorizado. |
-| **B — Arquitectura común** | Alinear clasificación opcional, procedencia, identidad y estados sin sustituir el repositorio común. | Lifestyle aceptado solo con evidencia explícita o revisión; no cuenta como vista técnica. Reutilización por checksum y originales intactos. |
-| **C — Proveedores** | Cerrar las brechas de los conectores implementados y determinar el alcance Thélios. | Un circuito manual asistido completo es válido si la automatización no está autorizada; no asociar referencias ambiguas. |
+| **B — Arquitectura común** | Alinear clasificación opcional, procedencia e identidad; iniciar P0.1: resumen, consulta y detalle de solo lectura. | No sustituir el repositorio ni los almacenes; `lifestyle` no cuenta como vista técnica. P0.1 no espera pilotos reales ni la fusión de #146. |
+| **C — Proveedores** | Cerrar brechas de los conectores y determinar el alcance Thélios. P0.2 integra acciones sobre los servicios existentes. | Un circuito manual asistido completo es válido si la automatización no está autorizada; no asociar referencias ambiguas. |
 | **D — Validación funcional** | Muestras pequeñas, una por proveedor, con datos sintéticos offline y lotes reales autorizados por separado. | Registrar EAN anonimizado cuando corresponda, evidencia archivo–producto–vista, errores/recuperación, SHA y resultado; no confundir simulación con portal real. |
-| **E — Cloud** | Validar biblioteca, filtros, revisión, originales y ZIP/manifiestos con compatibilidad de exportación. | Comprobación offline antes de una prueba de navegador autorizada; ninguna publicación externa automática. |
+| **E — Cloud** | P0.3: acceso contextual a biblioteca y exportación; validar filtros, revisión, originales y ZIP/manifiestos. | Comprobar paridad antes de retirar accesos duplicados. Ninguna publicación externa automática. |
 | **F — Preparación productiva** | Verificar workers, NAS, backups, observabilidad, rollback y autorización de automatización. | CI y revisión antes de desplegar; configuración y scheduler permanecen sin cambios hasta aprobación explícita. |
 
 ### Criterios para declarar un proveedor terminado
@@ -77,11 +111,12 @@ La documentación de despliegue prohíbe ejecutar el procedimiento sin aprobaci�
 5. Originales, checksum, procedencia, revisión y exportación verificables; no se pierde ni sobrescribe contenido al repetir.
 6. Política comercial de vistas requerida aprobada por proveedor/destino. Lifestyle y detalle no rellenan V1/V2/V3.
 7. Operación productiva y autorización de automatización se aprueban por separado; tests y despliegues no las implican.
+8. El recorrido operativo de ese proveedor es accesible desde el panel único, sin perder permisos, historial ni protecciones de duplicados.
 
 ## Próximos pasos seguros
 
-1. Corregir la referencia PR/SHA de autenticación Kering antes de cerrar esa validación.
-2. Implementar la clasificación `lifestyle` como categoría común trazable, opcional y no computable como cobertura técnica; validarla con datos sintéticos.
+1. Empezar por P0.1 (lectura común) en una PR de implementación separada; no tocar aún los procesos de proveedor.
+2. Revisar #146 como cambio independiente de `lifestyle` y corregir la referencia PR/SHA de autenticación Kering antes de cerrar esa validación.
 3. Mantener #38 y #59 como seguimiento de los pilotos/accesos externos; no reenviar la solicitud Marcolin nº 1.
 4. Solicitar a un administrador la evidencia de solo lectura de workers/NAS y autorizaciones de portal; sin ella, producción permanece «No verificada».
 5. Confirmar si Thélios pertenece al alcance actual antes de iniciar un adaptador.
