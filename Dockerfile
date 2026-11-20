@@ -46,7 +46,7 @@ COPY market_publication.py .
 COPY repository_storage.py image_work_storage.py .
 COPY image_thumbnails.py .
 COPY image_library.py bulk_image_search.py cloud_design.py .
-COPY provider_images.py provider_images_ui.py provider_odoo_orders.py repository_catalog_readonly.py .
+COPY provider_images.py provider_images_ui.py provider_orders_dashboard.py provider_odoo_orders.py repository_catalog_readonly.py .
 COPY marcolin_images.py safilo_images.py nuorder_images.py .
 COPY scripts/provider_requests_migrate.py ./scripts/provider_requests_migrate.py
 COPY migrate_image_repository.py .
