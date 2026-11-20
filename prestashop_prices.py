@@ -222,16 +222,29 @@ def read_batch(cur, eans: list[str], context: dict, *, audit: bool = False) -> t
                                   priorities.get(pid) or settings["PS_SPECIFIC_PRICE_PRIORITIES"],
                                   context, now, tz)
 
-            payload = calculate(aid)
-            other = {str(sibling): calculate(sibling) for sibling in variants[pid] if sibling != aid}
-            payload["valid_until"] = min([payload["valid_until"]] + [p["valid_until"] for p in other.values()])
+            payload = _with_other_calibres(calculate, aid, variants[pid])
             payload.update(context, product_id=pid, combination_id=aid, engine=ENGINE,
-                           other_calibres={k: p["price"] for k, p in other.items()},
                            observed_at=now.isoformat())
             quotes.append((ean, json.dumps(payload)))
         except QuoteError as exc:
             quotes.append((ean, exc))
     return identities, quotes
+
+
+def _with_other_calibres(calculate: Callable[[int], dict], combination: int, siblings: Iterable[int]) -> dict:
+    payload = calculate(combination)
+    prices, issues = {}, {}
+    for sibling in siblings:
+        if sibling == combination:
+            continue
+        try:
+            quote = calculate(sibling)
+        except QuoteError as exc:
+            issues[str(sibling)] = str(exc)
+            continue
+        prices[str(sibling)] = quote["price"]
+        payload["valid_until"] = min(payload["valid_until"], quote["valid_until"])
+    return {**payload, "other_calibres": prices, "other_calibre_issues": issues}
 
 
 def _calculate(base, variant, combination, taxes, rules, priority, context, now, tz):
@@ -260,7 +273,12 @@ def _calculate(base, variant, combination, taxes, rules, priority, context, now,
     local_minute = now.astimezone(tz).replace(second=0, microsecond=0, tzinfo=None)
 
     def bound(raw):
-        return None if raw == "0000-00-00 00:00:00" else datetime.fromisoformat(raw)
+        if raw == "0000-00-00 00:00:00":
+            return None
+        try:
+            return datetime.fromisoformat(raw)
+        except (ValueError, TypeError):
+            raise QuoteError("Fecha de vigencia de oferta no verificable") from None
 
     for row in rules:
         _, aid, rule, _, _, _, _, _, quantity, _, _, _, _, start, end = row
@@ -359,6 +377,8 @@ def _decode(raw: str, identity: tuple[int, int], context: dict, now: datetime) -
     snapshot = {**context, "product_id": product, "combination_id": combination,
                 "price": price, "offer": offer, "other_calibres": other_calibres,
                 "engine": payload["engine"], "fiscal_context": payload["fiscal_context"], "source": SOURCE}
+    if payload.get("other_calibre_issues"):
+        snapshot["other_calibre_issues"] = payload["other_calibre_issues"]
     for key in ("base_price_ex_tax", "combination_impact_ex_tax", "taxable_base", "vat_rate", "rounding"):
         if key in payload:
             snapshot[key] = payload[key]

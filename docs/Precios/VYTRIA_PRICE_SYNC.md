@@ -81,8 +81,11 @@ territorial/compuesto, ecotasa y configuraciones o módulos no soportados.
 
 **Resultado medido:** 11 consultas de lote, 1,86 s por SSH (incluye lecturas
 y cálculo; no es una medición del contenedor). De 100 EAN, se calcularon 43,
-52 no tenían precio público a una unidad según `product_shop`/combinación y
-5 no se localizaron. Se contrastaron 7 con el escaparate ES/EUR: Prada
+52 tenían precio base registrado en tienda 1, pero estaban inactivos
+(`ps_product_shop.active=0`, 37 productos simples y 15 combinaciones).
+Ninguno de esos 52 estaba excluido por precio oculto ni por cantidad mínima.
+Otros 5 no pudieron vincularse a una identidad en los campos auditados;
+esto no acredita que carezcan de precio. Se contrastaron 7 con el escaparate ES/EUR: Prada
 `8056597435581` 232,05 €, `0805289126584` 99 €, `0805289126591` 164 €,
 `0889214635310` 222 €, `0889214669742` 312 €, `0889652429717` 201,60 € y
 `0889652468983` 123 €. Los 36 importes calculados restantes no se contrastaron.
@@ -92,7 +95,53 @@ La instantánea conserva base, impacto, tipo/importe de reducción, regla,
 contexto, IVA, redondeo, versión del cálculo y vigencia. El resultado vence
 como máximo a las 24 horas o al siguiente cambio de oferta conocido. No se
 propaga el importe de un calibre a otro; las diferencias se señalan en
-administración. El stock no interviene en ese cálculo.
+administración. Una incidencia de otro calibre se muestra aparte, sin
+invalidar la combinación solicitada. El stock no interviene en ese cálculo.
+
+### Identidades sin resolver: consulta para el responsable
+
+Se buscaron coincidencias exactas en `ps_product` y `ps_product_attribute`
+(`ean13`, `upc`, `reference`), además de `ps_stock` y
+`ps_supply_order_detail` (`ean13`, `upc`). Los cinco EAN sin coincidencia
+son `0889214095985`, `8056262600078`, `8056262833902`,
+`8056597669016` y `8056597669023`. Tres casos con IDs de referencia
+**de Odoo**, no de PrestaShop:
+
+| EAN | Variante Odoo | Plantilla Odoo | Formas a probar |
+|---|---:|---:|---|
+| `0889214095985` | 49928 | 48684 | `0889214095985`, `889214095985` |
+| `8056262600078` | 90270 | 83941 | `8056262600078` |
+| `8056597669016` | 56714 | 55254 | `8056597669016` |
+
+Ejecutar con parámetros de texto. En los GTIN sin UPC equivalente se repite
+el EAN como segundo parámetro. Los `LEFT JOIN` permiten distinguir una fila
+global de una que realmente está vinculada a la tienda:
+
+```sql
+SELECT p.id_product, p.ean13, p.upc, p.reference, p.price AS global_price,
+       ps.id_shop, ps.price, ps.active, ps.show_price, ps.minimal_quantity
+FROM ps_product p
+LEFT JOIN ps_product_shop ps ON ps.id_product=p.id_product AND ps.id_shop=%s
+WHERE p.ean13 IN (%s,%s) OR p.upc IN (%s,%s) OR p.reference IN (%s,%s);
+
+SELECT a.id_product, a.id_product_attribute, a.ean13, a.upc, a.reference,
+       ats.id_shop, ats.price AS impact_ex_tax, ats.minimal_quantity,
+       ps.price AS shop_price, ps.active, ps.show_price
+FROM ps_product_attribute a
+LEFT JOIN ps_product_attribute_shop ats
+  ON ats.id_product_attribute=a.id_product_attribute AND ats.id_shop=%s
+LEFT JOIN ps_product_shop ps ON ps.id_product=a.id_product AND ps.id_shop=%s
+WHERE a.ean13 IN (%s,%s) OR a.upc IN (%s,%s) OR a.reference IN (%s,%s);
+```
+
+Parámetros: tienda `1` (dos veces en la segunda consulta), seguida de las
+dos formas repetidas para cada campo. Una vez identificados `id_product` e
+`id_product_attribute`, el cálculo toma `ps_product_shop.price` y el impacto
+`ps_product_attribute_shop.price`; consulta `ps_specific_price` y
+`ps_specific_price_priority` para la regla elegida, y `ps_tax_rule`/`ps_tax`
+para el IVA. El importe específico, si sustituye la base, viene de
+`ps_specific_price.price`. Falta la tabla o clave de correspondencia para
+los cinco EAN anteriores; no se infiere del nombre ni de un ID Odoo.
 
 En SQLite, `prestashop_prices` guarda la última lectura, vencimiento, último
 intento e incidencia; `prestashop_price_history` guarda cambios de precio,

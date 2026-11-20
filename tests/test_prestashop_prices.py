@@ -27,9 +27,9 @@ def rule(sid=5, aid=0, rule_id=0, shop=0, currency=0, country=0, group=0, quanti
             Decimal(fixed), Decimal(discount), kind, included, start, end)
 
 
-def calculate(rules, priority=PRIORITY, taxes=((0, "0", "0", Decimal(21), 1, 0),)):
+def calculate(rules, priority=PRIORITY, taxes=((0, "0", "0", Decimal(21), 1, 0),), *, combination=90):
     return ps._calculate((Decimal("100"), 0, 63, 1, 1, 1), (Decimal("10"), 0, 1),
-                         90, taxes, rules, priority, CONTEXT, NOW, ZoneInfo("Europe/Madrid"))
+                         combination, taxes, rules, priority, CONTEXT, NOW, ZoneInfo("Europe/Madrid"))
 
 
 @pytest.mark.parametrize(("rules", "final", "winner"), [
@@ -59,6 +59,20 @@ def test_mysql_calculator_bounds_and_fails_closed():
         calculate([], taxes=((1, "0", "0", Decimal(21), 1, 0),))
     with pytest.raises(ps.QuoteError, match="Reducción"):
         calculate([rule(kind="custom")])
+
+
+def test_sibling_issue_does_not_invalidate_selected_combination():
+    def price_for(aid):
+        if aid == 91:
+            raise ps.QuoteError("Ecotasa o combinación no verificable")
+        return calculate([rule(aid=aid, fixed="80" if aid == 92 else "100")], combination=aid)
+
+    payload = ps._with_other_calibres(price_for, 90, [90, 91, 92])
+    assert payload["price"] == "102.85"
+    assert payload["other_calibres"] == {"92": "82.28"}
+    assert payload["other_calibre_issues"] == {"91": "Ecotasa o combinación no verificable"}
+    with pytest.raises(ps.QuoteError, match="Ecotasa"):
+        ps._with_other_calibres(price_for, 91, [90, 91, 92])
 
 
 def quote(**changes):

@@ -260,6 +260,8 @@ def _render_native_prices(store: PriceComparatorStore, prices: pd.DataFrame) -> 
         if any(other != price for other in alternative.values()):
             difference = ", ".join(f"combinación {key}: {value} €" for key, value in alternative.items())
             issue = " · ".join(filter(None, (issue, f"Diferencia entre calibres: {difference}")))
+        for combination, reason in payload.get("other_calibre_issues", {}).items():
+            issue = " · ".join(filter(None, (issue, f"Otro calibre ({combination}) no verificable: {reason}")))
         rows.append({
             "EAN": ean, "Precio Odoo": odoo.get(ean), "Precio final en Vytria": float(price) if price else None,
             "Oferta aplicada": offer["reference"] if offer else "Sin oferta" if payload else "—",
