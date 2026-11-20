@@ -45,7 +45,9 @@ MARKET_ID_QUERY = text("""
 """).bindparams(bindparam("codes", expanding=True))
 
 
-def read_export_market_ids(engine, eans: list[str], market: str) -> dict[str, dict[str, str]]:
+def read_export_market_ids(
+    engine, eans: list[str], market: str, *, expected_variants: dict[str, int] | None = None,
+) -> dict[str, dict[str, str]]:
     """Original website-ID contract, with explicit ambiguity checks for interactive exports."""
     if market not in MARKETS:
         raise ValueError("Mercado de exportacion no admitido.")
@@ -61,6 +63,8 @@ def read_export_market_ids(engine, eans: list[str], market: str) -> dict[str, di
     site = {"Farfetch": 3, "Miinto": 2}[market]
     for ean in eans:
         candidates = indexed.get(ean_key(ean), [])
+        if expected_variants is not None and {row["product_id"] for row in candidates} != {expected_variants[ean]}:
+            raise ValueError(f"{ean}: la variante Odoo no coincide con el pedido.")
         if len({row["product_id"] for row in candidates}) > 1:
             raise ValueError(f"{ean}: varias variantes Odoo comparten el codigo; requiere revision.")
         identifiers = {
@@ -105,19 +109,45 @@ class ReadOnlyImageRepository:
         check_image_root(self.root)
         return sqlite3.connect(f"{self.database.as_uri()}?mode=ro", uri=True, timeout=30)
 
+    def resolve(self, relative: str) -> Path:
+        path = self.root / relative
+        resolved = path.resolve()
+        if (path != resolved or self.root not in resolved.parents
+                or excluded_staging_path(resolved.relative_to(self.root))):
+            raise ValueError("ruta_catalogo_fuera_del_repositorio")
+        return resolved
+
+    def catalog_records(self, *, codes=None) -> list[ImageRecord]:
+        if codes is None:
+            return self.records()
+        forms = tuple(dict.fromkeys(form for code in codes for form in code_variants(code)))
+        if not forms:
+            return []
+        marks = ",".join("?" for _ in forms)
+        where = f""" WHERE a.ean IN ({marks}) OR a.checksum IN (SELECT checksum FROM assets WHERE ean IN ({marks}))
+                     OR a.pixels IN (SELECT pixels FROM assets WHERE ean IN ({marks}) AND pixels <> '')
+                     ORDER BY r.id LIMIT 4001"""
+        rows = self._read_records(where, forms * 3)
+        if len(rows) > 4000:
+            raise ValueError("Demasiados registros relacionados; reduzca la selección.")
+        return self._convert_records(rows)
+
     def records(self, ean: str | None = None) -> list[ImageRecord]:
         if ean is not None:
             validate_ean(ean)
+        clause = (" WHERE a.ean=?" if ean is not None else "") + " ORDER BY r.id"
+        return self._convert_records(self._read_records(clause, (ean,) if ean is not None else ()))
+
+    def _read_records(self, clause, parameters):
         with closing(self._connect()) as connection:
             connection.row_factory = sqlite3.Row
             query = """
                 SELECT r.*, a.ean, a.checksum, a.pixels, a.path FROM representations r
                 JOIN assets a ON a.id=r.asset_id
             """
-            rows = connection.execute(
-                query + (" WHERE a.ean=?" if ean is not None else "") + " ORDER BY r.id",
-                (ean,) if ean is not None else (),
-            ).fetchall()
+            return connection.execute(query + clause, parameters).fetchall()
+
+    def _convert_records(self, rows):
         records = []
         for row in rows:
             relative = Path(row["path"])

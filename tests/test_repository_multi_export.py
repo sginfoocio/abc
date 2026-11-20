@@ -13,7 +13,7 @@ import bulk_image_search as bulk
 import image_exports as exports
 import image_library as library
 from image_repository import ImageRepository
-from market_publication import read_export_market_ids
+from market_publication import ReadOnlyImageRepository, read_export_market_ids
 from provider_images import parse_ean_text
 from provider_support import EANS, photo
 
@@ -95,6 +95,79 @@ def test_original_download_is_local_for_every_provider(repository, provider):
     assert list(files.values()) == [record.path.read_bytes()]
     assert manifest["files"][0]["representations"][0]["provider"] == provider
     factory.assert_not_called()
+
+
+@pytest.mark.parametrize("kind", ["Original", "Farfetch", "Miinto"])
+def test_contextual_preview_and_zip_reuse_shared_formats(repository, engine, monkeypatch, kind):
+    monkeypatch.setenv("IMAGE_REPOSITORY_STATE_ROOT", str(repository.state_root))
+    for seed, view in enumerate(("frontal", "perspectiva", "lateral", "lifestyle", "unknown"), 1):
+        save(repository, view=view, seed=seed)
+    readonly = ReadOnlyImageRepository(repository.root)
+    factory = Mock(return_value=engine)
+    options = dict(role="admin", export_format=kind, engine_factory=factory, expected_variants={EAN: 0})
+    before = {path: path.read_bytes() for root in (repository.root, repository.state_root)
+              for path in root.rglob("*") if path.is_file()}
+    with exports.prepare_repository_zip(readonly, [EAN], preview_only=True, **options) as plan:
+        assert plan["missing"] == {EAN: []}
+        assert len(plan["files"]) == (5 if kind == "Original" else 3)
+        assert len(plan["excluded"]) == (0 if kind == "Original" else 2)
+    with exports.prepare_repository_zip(readonly, [EAN], expected_preview=plan, **options) as prepared:
+        with ZipFile(prepared.stream) as archive:
+            manifest = json.loads(archive.read("manifest.json"))
+            assert {item["ean"] for item in manifest["files"]} == {EAN}
+            for item in manifest["files"]:
+                assert sha256(archive.read(item["path"])).hexdigest() == item["output_checksum"]
+    assert {path: path.read_bytes() for root in (repository.root, repository.state_root)
+            for path in root.rglob("*") if path.is_file()} == before
+    assert factory.call_count == (0 if kind == "Original" else 2)
+
+
+def test_contextual_commercial_preview_blocks_incomplete_or_wrong_variant(repository, engine, monkeypatch):
+    monkeypatch.setenv("IMAGE_REPOSITORY_STATE_ROOT", str(repository.state_root))
+    save(repository)
+    save(repository, view="lifestyle", seed=2)
+    readonly = ReadOnlyImageRepository(repository.root)
+    options = dict(role="admin", export_format="Farfetch", engine_factory=lambda: engine)
+    with exports.prepare_repository_zip(readonly, [EAN], preview_only=True,
+                                        expected_variants={EAN: 0}, **options) as plan:
+        assert plan["missing"][EAN] == ["lateral", "perspectiva"]
+    with pytest.raises(ValueError, match="Faltan vistas acreditadas"):
+        with exports.prepare_repository_zip(readonly, [EAN], expected_preview=plan,
+                                            expected_variants={EAN: 0}, **options):
+            pytest.fail("No debe existir un ZIP comercial parcial")
+    with pytest.raises(ValueError, match="variante Odoo"):
+        with exports.prepare_repository_zip(readonly, [EAN], preview_only=True,
+                                            expected_variants={EAN: 1}, **options):
+            pytest.fail("No debe admitir otra variante")
+
+
+def test_scoped_preview_checks_other_eans_without_scanning_files(repository, monkeypatch):
+    monkeypatch.setenv("IMAGE_REPOSITORY_STATE_ROOT", str(repository.state_root))
+    record = save(repository)
+    save(repository, ean=EANS[0], content=record.path.read_bytes())
+    with pytest.raises(ValueError, match="coincidencias con otros EAN"):
+        with exports.prepare_repository_zip(ReadOnlyImageRepository(repository.root), [EAN], role="admin",
+                                            preview_only=True, expected_variants={EAN: 0}):
+            pytest.fail("EAN ajeno comparte los píxeles")
+
+
+def test_contextual_zip_never_uses_changed_or_corrupt_original(repository, monkeypatch):
+    monkeypatch.setenv("IMAGE_REPOSITORY_STATE_ROOT", str(repository.state_root))
+    record = save(repository)
+    readonly = ReadOnlyImageRepository(repository.root)
+    options = dict(role="admin", expected_variants={EAN: 0})
+    with exports.prepare_repository_zip(readonly, [EAN], preview_only=True, **options) as plan:
+        pass
+    content = record.path.read_bytes()
+    record.path.write_bytes(b"corrupt")
+    with pytest.raises(ValueError, match="checksum incorrecto"):
+        with exports.prepare_repository_zip(readonly, [EAN], expected_preview=plan, **options):
+            pytest.fail("No debe existir un ZIP con un original corrupto")
+    record.path.write_bytes(content)
+    save(repository, view="detalle", seed=3)
+    with pytest.raises(ValueError, match="Cambió el catálogo"):
+        with exports.prepare_repository_zip(readonly, [EAN], expected_preview=plan, **options):
+            pytest.fail("No debe existir un ZIP distinto de la vista previa")
 
 
 def test_control_characters_in_original_names_block_archive(repository):
