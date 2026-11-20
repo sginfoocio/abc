@@ -10,6 +10,11 @@ from pathlib import Path
 
 ROOT_TESTS = ("test_transform_luxottica_masterdata.py", "test_validate_masterdata_odoo_dryrun.py")
 RULES = {
+    "ci": (
+        (".github/workflows/deploy.yml", "scripts/ci_test_selection.py"),
+        ("tests/test_ci_stacked_prs.py", "tests/test_cloud_production_deploy.py",
+         "tests/test_release_versioning.py", "tests/test_dockerfile_provider_modules.py"),
+    ),
     "images": (
         ("app_pages/*image*.py", "app_pages/provider*.py", "image*.py", "repository*.py", "bulk_image*.py",
          "provider*.py", "market_publication.py", "migrate_image*.py", "marcolin*.py", "safilo*.py", "nuorder*.py",
@@ -133,7 +138,7 @@ def main():
     safe_reasons = [json.dumps(reason, ensure_ascii=True).replace("`", "\\u0060") for reason in reasons]
     summary = "\n".join(("### Offline CI selection", "```text", *(safe_reasons or ["No functional changes"]),
                          "Tests: " + json.dumps(targets).replace("`", "\\u0060"), "```", ""))
-    print(summary)
+    print(summary, flush=True)
     with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as file:
         file.write(summary)
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as file:

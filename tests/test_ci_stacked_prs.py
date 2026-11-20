@@ -58,6 +58,9 @@ def test_production_deploy_is_only_triggered_by_a_successful_push_run_on_main():
 
 @pytest.mark.parametrize(("files", "included", "root_tests"), [
     (["docs/README.md"], set(), set()),
+    ([".github/workflows/deploy.yml", "scripts/ci_test_selection.py", "tests/test_ci_stacked_prs.py"],
+     {"test_ci_stacked_prs.py", "test_cloud_production_deploy.py", "test_release_versioning.py",
+      "test_dockerfile_provider_modules.py"}, set()),
     (["app_pages/provider_orders_page.py"], {"test_provider_order_panel.py", "test_image_library.py"}, set()),
     (["kering_portal.py"], {"test_kering_images.py", "test_repository_storage.py"}, set()),
     (["poll_luxoptica_mail.py"], {"test_luxoptica_stop.py", "test_graph_mail_downloader.py"}, set()),

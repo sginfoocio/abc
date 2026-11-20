@@ -15,6 +15,7 @@ la publicación siguen sujetas al check; este workflow no sustituye al
 | Precios | Comparador, adaptadores, seguimiento y sincronización relacionados. |
 | Odoo/masterdata | Consultas y regresiones relacionadas. Las dos pruebas de raíz se añaden solo si cambian sus dependencias declaradas. |
 | Documentación Markdown | Comprobación de formato del diff y controles estáticos; sin pytest ni *smoke* de imagen en PR. |
+| Workflow de publicación o selector | Contrato de CI, controlador de despliegue, versionado y empaquetado. El *smoke* de imagen se conserva. |
 | Dependencias comunes o configuración de pytest | Suite completa, incluidos los dos módulos de raíz. |
 | Código o infraestructura no clasificados | Regresión conservadora de `tests/`; añade pruebas de raíz si otro archivo del cambio afecta a sus dependencias. |
 
