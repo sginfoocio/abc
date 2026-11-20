@@ -134,6 +134,18 @@ def test_hyphenated_tom_ford_codes_remain_complete_model_aliases():
     assert refs.model_key("FT6082-B") != refs.model_key("FT6082")
 
 
+def test_complete_tom_ford_b_models_parse_in_hyphenated_and_compact_forms():
+    for compact, hyphenated in (("FT5737B", "FT5737-B"), ("FT6058B", "FT6058-B"),
+                                ("FT6082B", "FT6082-B")):
+        for published, catalogue in ((compact, hyphenated), (hyphenated, compact)):
+            parsed = refs.parse_reference(f"Tom Ford {published} 0A0",
+                                          brands=["Tom Ford"], models=[catalogue])
+            assert parsed.brand == "Tom Ford"
+            assert parsed.model_key == refs.model_key(compact)
+            assert parsed.color_key == "0A0"
+        assert refs.model_key(compact) != refs.model_key(compact[:-1])
+
+
 def test_ray_ban_901_58_color_remains_distinct_from_901_and_901_32():
     product = {"ean": "0805289126591", "brand": "Ray Ban", "model": "RB2140", "color": "90158"}
     assert refs.classify(product, {"title": "Ray Ban RB2140 901/58 54-18"}).status == refs.EXACT

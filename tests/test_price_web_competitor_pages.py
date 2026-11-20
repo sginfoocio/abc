@@ -223,6 +223,55 @@ def test_edel_selected_product_offer_without_own_url_is_bound_by_checked_radio_a
         "la Offer no está vinculada a un Product seleccionado ni a su ProductGroup")
 
 
+def test_edel_resolution_normalizes_valid_upc_to_catalogue_ean():
+    from price_monitor import _accepted_edel_resolution
+
+    product = {"ean": "0805289126577", "brand": "Ray Ban", "model": "RB2140", "color": "901"}
+    url = "https://www.edel-optics.es/RB2140-901-de-Ray-Ban.html"
+    node = _edel_variant_node("1907958", "0805289126577", 243.5, "InStock")
+    node.update({"name": "Ray Ban RB2140 901", "brand": {"@type": "Brand", "name": "Ray Ban"},
+                 "model": "RB2140", "color": "901"})
+    variant_url = url + "?selectedSize=1907958"
+    node["url"] = node["offers"]["url"] = variant_url
+    node.pop("gtin13")
+    node["gtin12"] = "805289126577"
+    html = ('<input type="radio" id="prd1907958" checked>'
+            '<script type="application/ld+json">' + json.dumps(node) + '</script>')
+
+    page = extract_product(html, url, url_trace={"candidate_url": url, "final_url": url})
+
+    assert page is not None
+    assert page.ean_published == product["ean"]
+    assert page.ean_published_raw == ["805289126577"]
+    assert classify(product, page.candidate()).status == "exact_match"
+    assert _accepted_edel_resolution(page, url, product)
+
+
+def test_edel_redirect_trace_is_preserved_and_changed_final_url_is_rejected():
+    from price_monitor import _accepted_edel_resolution_reason
+
+    product = {"ean": "8056597875349", "brand": "Prada", "model": "PR 27ZS", "color": "16K08Z"}
+    url = "https://www.edel-optics.es/PR-27ZS-16K08Z-de-Prada.html"
+    selected_url = url + "?selectedSize=1907958"
+    redirect = {"url": url, "status": 302, "location": selected_url}
+    html = ('<input type="radio" id="prd1907958" checked>'
+            '<script type="application/ld+json">' +
+            json.dumps(_edel_variant_node("1907958", product["ean"], 243.5, "InStock")) +
+            '</script>')
+    trace = {"requested_url": url, "candidate_url": url, "final_url": selected_url,
+             "redirects": [redirect]}
+
+    page = extract_product(html, selected_url, url_trace=trace)
+
+    assert page is not None and page.variant_id == "1907958"
+    assert page.url_trace["candidate_url"] == url
+    assert page.url_trace["redirects"] == [redirect]
+    assert page.url_trace["final_url"] == selected_url
+    assert page.url_trace["selected_variant_url"] == selected_url
+    assert _accepted_edel_resolution_reason(page, url, product) == (
+        "la URL final no coincide con la ruta aceptada")
+
+
 def test_edel_selected_variant_uses_common_model_color_price_and_its_own_stock():
     base = "https://www.edel-optics.es/PR-27ZS-16K08Z-de-Prada.html"
     variants = []
