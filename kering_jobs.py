@@ -317,6 +317,11 @@ def main(argv=None):
         while not stop.is_set():
             delay = 60
             try:
+                from gio_cloud import tick as gio_tick
+                gio_tick(engine_factory)
+            except Exception as error:
+                LOGGER.error("gio stage=worker_tick exception_type=%s", type(error).__name__)
+            try:
                 status = scheduler.tick()
                 event = {"result": status["result"], "run_id": status.get("run_id")}
                 if event != last_event:

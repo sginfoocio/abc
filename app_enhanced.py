@@ -20,6 +20,7 @@ from streamlit_cookies_controller import CookieController
 from db_loader import load_odoo_dataframe
 from adyen_reconciliation_ui import render_reconciliation_page
 from kering_images_ui import render_kering_page, render_kering_settings
+from app_pages.gio import render as render_gio_page
 from engine import run_abcd_engine
 from db_config import load_db_config, load_env_file
 from transform_luxottica_masterdata import (
@@ -2142,6 +2143,7 @@ ALERTA_PEDIDOS_PAGE = st.Page(
     url_path="alerta-pedidos",
 )
 SETTINGS_PAGE = st.Page(render_settings_page, title="Configuración", icon=NAV_ICONS["settings"], url_path="config")
+GIO_PAGE = st.Page(render_gio_page, title="GIO", icon=NAV_ICONS["gio"], url_path="gio")
 ODOO_RECONCILIATION_PAGE = st.Page(render_odoo_reconciliation_page, title="Conciliación Odoo", icon=NAV_ICONS["reconciliation"], url_path="conciliacion-odoo")
 PRICE_COMPARATOR_PAGE = st.Page(
     render_price_comparator_route,
@@ -2173,6 +2175,7 @@ navigation = build_navigation(
         "reconciliation": ODOO_RECONCILIATION_PAGE,
         "price_comparator": PRICE_COMPARATOR_PAGE,
         "settings": SETTINGS_PAGE,
+        "gio": GIO_PAGE,
     },
 )
 
