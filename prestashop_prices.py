@@ -33,8 +33,16 @@ CREATE TABLE IF NOT EXISTS prestashop_price_history (
 CREATE INDEX IF NOT EXISTS prestashop_price_history_ean ON prestashop_price_history(ean,id);
 """
 SOURCE = "PrestaShop · MySQL"
-ENGINE = "PrestaShop 8.2.1 / ABC SQL v2"
+ENGINE = "PrestaShop 8.2.1 / ABC SQL v3"
 INCOMPLETE = "Lectura en curso o interrumpida"
+# EAN solicitado -> (código original, producto, combinación, marca, modelo, color, referencia).
+PRICE_REFERENCES = {
+    "0889214095985": ("889214095978", 949, 11091, "Tom Ford", "FT0751N", "01A", "FT0751N01A"),
+    "8056262600078": ("8056262600085", 7917, 8481, "Miu Miu", "MU 01YV", "14L1O1", "MU01YV14L1O1"),
+    "8056262833902": ("8056262833919", 9404, 0, "Ray-Ban", "RB4472", "13592", "RB447213592"),
+    "8056597669016": ("8056262667484", 9090, 13347, "Miu Miu", "MU 04UV", "1AB1O1", "MU04UV1AB1O1"),
+    "8056597669023": ("8056262667491", 1615, 13343, "Miu Miu", "MU 04UV", "VAU1O1", "MU04UVVAU1O1"),
+}
 
 
 class QuoteError(ValueError):
@@ -126,7 +134,9 @@ def read_batch(cur, eans: list[str], context: dict, *, audit: bool = False) -> t
 
     (reference,), = select("SELECT UTC_TIMESTAMP(6)")
     now = datetime.fromisoformat(str(reference)).replace(tzinfo=timezone.utc)
-    forms = [form for ean in eans for form in ((ean, ean[1:]) if ean.startswith("0") else (ean,))]
+    references = {ean: PRICE_REFERENCES[ean] for ean in eans if ean in PRICE_REFERENCES}
+    forms = sorted({form for ean in eans for form in ((ean, ean[1:]) if ean.startswith("0") else (ean,))}
+                   | {ref[0] for ref in references.values()})
     identity_marks = ",".join(["%s"] * len(forms))
     identities = select("""SELECT p.ean13, p.id_product, 0,
                     EXISTS (SELECT 1 FROM {product_attribute} a
@@ -142,9 +152,32 @@ def read_batch(cur, eans: list[str], context: dict, *, audit: bool = False) -> t
                 ON ats.id_product_attribute=a.id_product_attribute AND ats.id_shop=%s
                 JOIN {product_shop} ps ON ps.id_product=a.id_product AND ps.id_shop=ats.id_shop
                 WHERE a.ean13 IN (MARKS)""".replace("MARKS", identity_marks), (shop, *forms, shop, *forms))
+    reference_links = {}
+    reference_issues = {}
+    pending = {ean: ref for ean, ref in references.items()
+               if not any(row[0].zfill(13) == ean for row in identities)}
+    if pending:
+        refs = sorted({row[6] for row in pending.values()})
+        reference_rows = select("""SELECT p.id_product,m.name,p.reference FROM {product} p
+            JOIN {manufacturer} m ON m.id_manufacturer=p.id_manufacturer
+            JOIN {product_shop} ps ON ps.id_product=p.id_product AND ps.id_shop=%s
+            WHERE p.reference IN (MARKS)""".replace("MARKS", ",".join(["%s"] * len(refs))), (shop, *refs))
+        for ean, ref in pending.items():
+            original, pid, aid, brand, _, _, reference = ref
+            matching_rows = {row for row in identities if row[0].zfill(13) == original.zfill(13)}
+            expected_rows = {(original, pid, aid, 0), (original, pid, 0, bool(aid))}
+            live = {row[0] for row in reference_rows if row[1:] == (brand, reference)}
+            if live == {pid} and (original, pid, aid, 0) in matching_rows and matching_rows <= expected_rows:
+                reference_links[ean] = ref
+                identities.append((ean, pid, aid, 0))
+            else:
+                reference_issues[ean] = QuoteError(
+                    "La ficha de referencia auditada cambió, no pertenece a la tienda o es ambigua")
+    requested = set(eans)
+    identities = [row for row in identities if row[0].zfill(13) in requested]
     products = sorted({row[1] for row in identities})
     if not products:
-        return identities, []
+        return identities, list(reference_issues.items())
     marks = ",".join(["%s"] * len(products))
     settings = {}
     market = select("""SELECT s.id_shop_group,co.iso_code,cu.iso_code,cu.`precision`,g.price_display_method,
@@ -215,7 +248,7 @@ def read_batch(cur, eans: list[str], context: dict, *, audit: bool = False) -> t
         tz = ZoneInfo(settings.get("PS_TIMEZONE") or "")
     except (ValueError, ZoneInfoNotFoundError):
         raise QuoteError("Zona horaria de PrestaShop no verificable") from None
-    quotes = []
+    quotes = list(reference_issues.items())
     seen = set()
     for raw_ean, pid, aid, unresolved in identities:
         ean = raw_ean.zfill(13)
@@ -230,15 +263,34 @@ def read_batch(cur, eans: list[str], context: dict, *, audit: bool = False) -> t
                                   context, now, tz)
 
             payload = _with_other_calibres(calculate, aid, variants[pid])
+            if ean in reference_links:
+                _annotate_reference(payload, ean, reference_links[ean])
             quantities = stock[pid, aid]
             payload.update(context, product_id=pid, combination_id=aid, engine=ENGINE,
-                           active=bool(bases[pid][3]),
-                           in_stock=quantities[0] > 0 if len(quantities) == 1 else None,
                            observed_at=now.isoformat())
+            if ean not in reference_links:
+                payload["active"] = bool(bases[pid][3])
+                payload["in_stock"] = quantities[0] > 0 if len(quantities) == 1 else None
             quotes.append((ean, json.dumps(payload)))
         except QuoteError as exc:
             quotes.append((ean, exc))
     return identities, quotes
+
+
+def _annotate_reference(payload: dict, ean: str, link: tuple) -> None:
+    if payload["other_calibre_issues"]:
+        raise QuoteError("No se pudo descartar un precio distinto en otra combinación de la referencia")
+    if any(_money(price) != _money(payload["price"]) for price in payload["other_calibres"].values()):
+        raise QuoteError("La referencia tiene precios distintos entre combinaciones")
+    original, _, _, brand, model, colour, reference = link
+    payload["price_reference"] = {
+        "kind": "marca/modelo/color", "requested_ean": ean, "original_barcode": original,
+        "brand": brand, "model": model, "colour": colour, "reference": reference,
+        "evidence": "Auditoría PR #145: catálogo vigilado, ps_manufacturer, ps_product.reference, "
+                    "ps_product_lang.name y características Modelo/Color",
+        "reason": "Mismo modelo y color; el código coincide solo con la ficha de referencia. "
+                  "No acredita variante ni disponibilidad del EAN solicitado.",
+    }
 
 
 def _with_other_calibres(calculate: Callable[[int], dict], combination: int, siblings: Iterable[int]) -> dict:
@@ -387,6 +439,8 @@ def _decode(raw: str, identity: tuple[int, int], context: dict, now: datetime) -
                 "engine": payload["engine"], "fiscal_context": payload["fiscal_context"], "source": SOURCE}
     if payload.get("other_calibre_issues"):
         snapshot["other_calibre_issues"] = payload["other_calibre_issues"]
+    if payload.get("price_reference"):
+        snapshot["price_reference"] = payload["price_reference"]
     for key in ("active", "in_stock"):
         if type(payload.get(key)) is bool:
             snapshot[key] = payload[key]
@@ -415,7 +469,8 @@ def resolve(eans: list[str], identities: Iterable[tuple], rows: Iterable[tuple],
             if combinations:
                 matches = combinations
         if not matches:
-            results[ean] = "EAN no localizado en la tienda de PrestaShop"
+            results[ean] = (str(quotes[ean][0]) if len(quotes[ean]) == 1 and isinstance(quotes[ean][0], QuoteError)
+                            else "EAN no localizado en la tienda de PrestaShop")
         elif len(matches) != 1 or next(iter(matches))[2]:
             results[ean] = "EAN ambiguo o sin combinación inequívoca en PrestaShop"
         elif len(quotes[ean]) != 1:

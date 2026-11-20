@@ -251,6 +251,7 @@ def _render_native_prices(store: PriceComparatorStore, prices: pd.DataFrame) -> 
         quote = quotes.get(ean)
         payload = json.loads(quote["payload"]) if quote and quote["payload"] else {}
         offer = payload.get("offer")
+        reference = payload.get("price_reference")
         price = payload.get("price")
         alternative = payload.get("other_calibres", {})
         issue = quote["issue"] if quote else "Sin lectura de PrestaShop"
@@ -266,6 +267,8 @@ def _render_native_prices(store: PriceComparatorStore, prices: pd.DataFrame) -> 
         rows.append({
             "EAN": ean, "Precio Odoo": odoo.get(ean), "Precio final en Vytria": float(price) if price else None,
             "Oferta aplicada": offer["reference"] if offer else "Sin oferta" if payload else "—",
+            "Vinculación": (f"Referencia marca/modelo/color · {reference['original_barcode']}"
+                            if reference else "EAN exacto" if payload else "—"),
             "Estado en tienda": {True: "Activo", False: "Inactivo"}.get(payload.get("active"), "Sin verificar"),
             "Stock": {True: "Con stock", False: "Sin stock"}.get(payload.get("in_stock"), "Sin verificar"),
             "Última actualización": quote["observed_at"] if quote else None,

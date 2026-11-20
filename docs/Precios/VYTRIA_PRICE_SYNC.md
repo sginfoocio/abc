@@ -64,7 +64,7 @@ territorial/compuesto, ecotasa y configuraciones o módulos no soportados.
    Solo tras confirmar su efecto, establecer `PRESTASHOP_PRICE_CODE_AUDITED=1`.
 2. Provisionar, sin tocar el usuario compartido, un usuario dedicado con
    `SELECT` sobre las tablas consultadas por el lector: `product[_shop]`,
-   `product_attribute[_shop]`, `shop`, `shop_group`, `stock_available`, `country`, `currency`, `group`,
+   `product_attribute[_shop]`, `manufacturer`, `shop`, `shop_group`, `stock_available`, `country`, `currency`, `group`,
    `configuration`, `hook`, `hook_module`, `module`, `group_reduction`,
    `tax_rule`, `tax`, `specific_price` y `specific_price_priority` (prefijo real).
    El lector rechaza privilegios adicionales o delegables; la auditoría vía SSH
@@ -79,16 +79,17 @@ territorial/compuesto, ecotasa y configuraciones o módulos no soportados.
    `_CURRENCY_ID` (prefijo `PRESTASHOP_PRICE`). Solo después de validar la
    instalación y obtener aprobación, `PRESTASHOP_PRICE_ENABLED=1`.
 
-**Resultado medido (cálculo v2):** 12 consultas de lote, 1,89 s por SSH
-(incluye lecturas y cálculo; no es una medición del contenedor). De 100 EAN,
-se calcularon los 95 vinculados: 43 activos con stock y 52 inactivos sin
-stock (37 productos simples y 15 combinaciones). Se conservan los controles
+**Resultado medido (cálculo v3):** 13 consultas de lote, 1,61 s por SSH
+(incluye lecturas y cálculo; no es una medición del contenedor). Se calcularon
+100 precios: 95 por código de barras (43 activos con stock y 52 inactivos
+sin stock) y 5 mediante referencia explícita de marca/modelo/color.
+Se conservan los controles
 de visibilidad de precio y de cantidad mínima.
-Otros 5 no pudieron vincularse a una identidad en los campos auditados;
-esto no acredita que carezcan de precio. Se contrastaron 7 con el escaparate ES/EUR: Prada
+Los 5 enlaces de referencia no son coincidencias de EAN. Se contrastaron
+7 de los exactos con el escaparate ES/EUR: Prada
 `8056597435581` 232,05 €, `0805289126584` 99 €, `0805289126591` 164 €,
 `0889214635310` 222 €, `0889214669742` 312 €, `0889652429717` 201,60 € y
-`0889652468983` 123 €. Los otros 88 importes son cálculos, no contrastes públicos.
+`0889652468983` 123 €. Los otros 93 importes son cálculos, no contrastes públicos.
 Los resultados son evidencia de auditoría, no una sincronización de producción.
 
 La instantánea conserva base, impacto, tipo/importe de reducción, regla,
@@ -102,7 +103,28 @@ separado y no condicionan el precio propio ni crean puntos en su histórico.
 ni eso ni el precio calculado acreditan que pueda comprarse. Si falta una fila
 de stock inequívoca en el ámbito de tienda o grupo, el stock queda sin verificar.
 
-### Identidades sin resolver: consulta para el responsable
+### Referencias de precio por marca/modelo/color
+
+Se acreditó la coincidencia del modelo completo y código de color del
+catálogo vigilado con el fabricante, referencia, nombre y características
+Modelo/Color de cada ficha MySQL. No se acreditó que la divergencia de
+código se deba al calibre, ni que ambos códigos sean la misma variante.
+
+| EAN solicitado | Marca, modelo y color | Código original | Producto/combinación | Precio con IVA | Oferta / IVA |
+|---|---|---|---|---:|---|
+| `0889214095985` | Tom Ford FT0751N 01A | `889214095978` | 949/11091 | 189,00 € | 487154 / 21 % |
+| `8056262600078` | Miu Miu MU 01YV 14L1O1 | `8056262600085` | 7917/8481 | 208,00 € | 387339 / 10 % |
+| `8056262833902` | Ray-Ban RB4472 13592 | `8056262833919` | 9404/sin combinación | 82,00 € | Sin oferta / 21 % |
+| `8056597669016` | Miu Miu MU 04UV 1AB1O1 | `8056262667484` | 9090/13347 | 256,00 € | 594137 / 10 % |
+| `8056597669023` | Miu Miu MU 04UV VAU1O1 | `8056262667491` | 1615/13343 | 224,00 € | 593897 / 10 % |
+
+El lector solo usa estas correspondencias explícitas si no hay coincidencia
+del código solicitado. Revalida el código original, los IDs, la pertenencia a
+la tienda, la marca y la referencia completa. Si la ficha cambia, hay varias
+identidades o no se puede descartar un precio distinto en otra combinación,
+deja el caso pendiente. No traslada actividad ni stock al EAN consultado.
+
+### Consultas de identidad exacta (auditoría)
 
 Se buscaron coincidencias exactas en `ps_product` y `ps_product_attribute`
 (`ean13`, `upc`, `reference`), además de `ps_stock` y
@@ -147,7 +169,8 @@ para el IVA. El importe específico, si sustituye la base, viene de
 `ps_specific_price.price`. Falta la tabla o clave de correspondencia para
 los cinco EAN anteriores; tampoco hubo coincidencias para sus variantes o
 plantillas Odoo en `ps_cc_co_equivalenciaproductos.id_odoo` ni en
-`ps_cc_co_equivalenciacombinaciones.id_odoo`. No se infiere del nombre ni de un ID Odoo.
+`ps_cc_co_equivalenciacombinaciones.id_odoo`. Los enlaces de precio de la tabla
+anterior no sustituyen esa identidad exacta.
 
 En SQLite, `prestashop_prices` guarda la última lectura, vencimiento, último
 intento e incidencia; `prestashop_price_history` guarda cambios de precio,

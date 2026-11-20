@@ -37,6 +37,30 @@ def test_inactive_product_keeps_the_same_offer_and_tax():
     assert calculate(rules, active=0) == calculate(rules, active=1)
 
 
+@pytest.mark.parametrize("siblings,issues,reason", [
+    ({}, {}, None),
+    ({"91": "232.06"}, {}, "precios distintos"),
+    ({}, {"91": "IVA no verificable"}, "No se pudo descartar"),
+])
+def test_price_reference_is_traceable_and_does_not_guess_variant_price(siblings, issues, reason):
+    ean = "8056262600078"
+    link = ps.PRICE_REFERENCES[ean]
+    original, pid, aid, *_ = link
+    raw = quote(product_id=pid, combination_id=aid, other_calibres=siblings, other_calibre_issues=issues)
+    if reason:
+        with pytest.raises(ps.QuoteError, match=reason):
+            ps._annotate_reference(raw, ean, link)
+        return
+    ps._annotate_reference(raw, ean, link)
+    stored, _, _ = ps.resolve([ean], [(ean, pid, aid, 0)], [(ean, json.dumps(raw))], CONTEXT, NOW)[ean]
+    snapshot = json.loads(stored)
+    assert snapshot["price_reference"]["kind"] == "marca/modelo/color"
+    assert snapshot["price_reference"]["requested_ean"] == ean
+    assert snapshot["price_reference"]["original_barcode"] == original
+    assert snapshot["combination_id"] == aid
+    assert snapshot["price"] == "232.05" and "in_stock" not in snapshot
+
+
 @pytest.mark.parametrize(("rules", "final", "winner"), [
     ([], "133.10", None),
     ([rule()], "113.14", "5"),
