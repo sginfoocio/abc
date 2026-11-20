@@ -247,6 +247,7 @@ def test_corrected_error_replays_exact_saved_html_and_is_idempotent(trial):
     assert item["action"] == "recover_corrected_error", item
     assert item["evidence"]["approval_audits"] == 1
     assert item["evidence"]["artifact_evaluations"][0]["result"] == "exact_identity"
+    assert item["evidence"]["artifact_evaluations"][0]["offer_comparable"] is False
     assert item["http_requests"] == 0
     assert site.calls == []
 

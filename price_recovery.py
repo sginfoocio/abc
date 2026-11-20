@@ -656,7 +656,7 @@ def _reevaluate_saved_artifacts(con, task, now, recovery_rule):
     from price_monitor import _accepted_edel_resolution_reason
     from price_references import EXACT, classify
     from price_web import comparability_gap
-    from price_web_extract import extract_product, select_product_variant
+    from price_web_extract import extract_product, resolve_market, select_product_variant
 
     product = con.execute("SELECT * FROM products WHERE ean=?", (task["ean"],)).fetchone()
     config_row = con.execute("""SELECT w.*,c.domain,c.market,c.currency
@@ -756,6 +756,7 @@ def _reevaluate_saved_artifacts(con, task, now, recovery_rule):
                  and not edel_reason and page.url_trace.get("candidate_url") == task["url"]
                  and page.url_trace.get("final_url") == task["url"])
         gap = comparability_gap(page, config)
+        market, _, _ = resolve_market(page, config)
         item.update({
             "result": ("contradiction" if specific_conflict else
                        "exact_identity" if exact else "ambiguous_or_incomplete"),
@@ -766,6 +767,11 @@ def _reevaluate_saved_artifacts(con, task, now, recovery_rule):
             "offer_variant_url": page.url_trace.get("offer_variant_url", ""),
             "edel_resolution_reason": edel_reason,
             "commercial_gap": gap,
+            "market": market,
+            "currency": page.currency or config["currency"],
+            "includes_tax": page.includes_tax,
+            "offer_comparable": False,
+            "validity": "No establecida: el artefacto no es una observación vigente del monitor",
             "has_price": page.has_price,
             "availability": page.availability,
             "stock_conflict": page.stock_conflict,

@@ -1549,6 +1549,8 @@ def _render_approved_read_recovery(store: PriceComparatorStore, names: dict[str,
                           row["evidence"].get("artifact_evaluations", []))
                 or row["evidence"]["sample_kind"]
             ),
+            "Oferta comparable": ("Sí · muestra vigente" if row["action"] == "local_reevaluation"
+                                  else "No · requiere lectura gobernada"),
             "Acción / motivo": f"{row['action']}: {row['reason']}",
             "HTTP previos": row["http_requests"],
             "Recibos": ", ".join(
