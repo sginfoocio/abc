@@ -22,7 +22,8 @@ EXPECTED_COUNTS = {
     "congafasdesol-com": 64, "optica-optima-com": 43, "amevista-com": 35,
     "domanci-com": 25, "visiofactory-es": 14, "edel-optics-es": 1,
 }
-MANUAL_ERROR_RECOVERY_RULES = "approved-read-errors-2"
+MANUAL_ERROR_RECOVERY_RULES = "approved-read-errors-1"
+MANUAL_CORRECTED_ERROR_RECOVERY_VERSION = "approved-read-errors-2"
 _AMEVISTA_ERROR_RULES = (
     (re.compile(r"Distinto modelo: catálogo FT1044, ficha BRONSON, FT1044", re.IGNORECASE),
      "tomford-bronson-ft1044"),
@@ -876,7 +877,7 @@ def _manual_recovery_identity(task, identity, evidence, recovery_rule):
     payload = {
         "request_id": task["id"],
         "approval_ref": evidence["approval_ref"],
-        "rules_version": MANUAL_ERROR_RECOVERY_RULES,
+        "rules_version": MANUAL_CORRECTED_ERROR_RECOVERY_VERSION,
         "recovery_rule": recovery_rule,
         "identity_digest": identity_digest,
         "evidence_digest": evidence_digest,
@@ -888,7 +889,7 @@ def _manual_recovery_identity(task, identity, evidence, recovery_rule):
         "evidence": {
             "identity_digest": identity_digest,
             "evidence_digest": evidence_digest,
-            "recovery_version": MANUAL_ERROR_RECOVERY_RULES,
+            "recovery_version": MANUAL_CORRECTED_ERROR_RECOVERY_VERSION,
             "recovery_key": recovery_key,
         },
     }
@@ -1226,7 +1227,7 @@ def apply_manual_reviews(database, *, actor, note, build_commit, approved=False,
                         identity_digest,evidence_digest,historical_error,outcome,actor,note,build_commit,created_at
                     ) VALUES(?,?,?,?,?,?,?,?,?,'queued',?,?,?,?)""",
                                 (item["id"], continuity_id, item["recovery_key"],
-                                 MANUAL_ERROR_RECOVERY_RULES, item["recovery_rule"],
+                                 MANUAL_CORRECTED_ERROR_RECOVERY_VERSION, item["recovery_rule"],
                                  recovery_evidence["approval_ref"], recovery_evidence["identity_digest"],
                                  recovery_evidence["evidence_digest"], item["detail"], actor.strip(),
                                  note.strip(), build_commit, now.isoformat()))
@@ -1264,6 +1265,8 @@ def apply_manual_reviews(database, *, actor, note, build_commit, approved=False,
                              actor.strip(), json.dumps({"reason": note.strip(), "build_commit": build_commit,
                                                        "continuity_id": continuity_id,
                                                        "rules_version": MANUAL_ERROR_RECOVERY_RULES,
+                                                       "recovery_version": item.get("evidence", {}).get(
+                                                           "recovery_version"),
                                                        "recovery_rule": item.get("recovery_rule"),
                                                        "recovery_key": item.get("recovery_key"),
                                                        "historical_error": item.get("detail"),
