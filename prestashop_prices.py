@@ -293,17 +293,13 @@ def read_batch(cur, eans: list[str], context: dict, *, audit: bool = False) -> t
 
 
 def _annotate_reference(payload: dict, ean: str, link: tuple) -> None:
-    if payload["other_calibre_issues"]:
-        raise QuoteError("No se pudo descartar un precio distinto en otra combinación de la referencia")
-    if any(_money(price) != _money(payload["price"]) for price in payload["other_calibres"].values()):
-        raise QuoteError("La referencia tiene precios distintos entre combinaciones")
     original, _, _, brand, model, colour, reference = link
     payload["price_reference"] = {
         "kind": "marca/modelo/color", "requested_ean": ean, "original_barcode": original,
         "brand": brand, "model": model, "colour": colour, "reference": reference,
         "evidence": "Auditoría PR #145: catálogo vigilado, ps_manufacturer, ps_product.reference, "
                     "ps_product_lang.name y características Modelo/Color",
-        "reason": "Mismo modelo y color; el código coincide solo con la ficha de referencia. "
+        "reason": "Mismo modelo y color; el calibre no modifica el precio. El código coincide solo con la ficha de referencia. "
                   "No acredita variante ni disponibilidad del EAN solicitado.",
     }
 

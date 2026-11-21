@@ -13,7 +13,7 @@ from filelock import FileLock, Timeout
 from competitor_requirements import business_tax_evidence, business_tax_policy_for
 from price_comparator import PriceComparatorStore
 from price_monitor import _iso
-from price_web_extract import ProductPage
+from price_web_extract import ProductPage, resolve_market
 from price_web import WebPriceSearch
 from price_web_extract import apply_tax_policy
 from price_references import EXACT, classify
@@ -87,17 +87,28 @@ class SavedSampleReevaluation:
             return self._result(case, "identity", "EAN o identidad ambigua")
         if page.get("url") != case["url"] or page.get("offer_binding_unresolved"):
             return self._result(case, "identity", "URL o vinculación de oferta no acreditadas")
+        binding = page.get("offer_binding_source")
+        if binding not in {"product_offer", "product_group_offer", "variant_url"}:
+            return self._result(case, "identity", "La oferta no tiene un vínculo verificable con el producto")
+        if binding in {"product_group_offer", "variant_url"} and not page.get("variant_scoped"):
+            return self._result(case, "identity", "La oferta no está vinculada a la variante seleccionada")
         if page.get("availability") not in {"available", "unavailable"}:
             return self._result(case, "evidence", "Disponibilidad no acreditada")
         if page.get("currency") != "EUR" or page.get("price") is None:
             return self._result(case, "commercial", "Precio o moneda no acreditados")
 
         commercial = case.get("commercial_config") or {}
-        market = commercial.get("sales_market", "")
-        market_verified = bool(commercial.get("market_verified"))
-        if not market_verified or market != "ES":
+        from dataclasses import fields
+        page_obj = ProductPage(**{field.name: page[field.name] for field in fields(ProductPage) if field.name in page})
+        market, market_reason, market_conflict = resolve_market(page_obj, commercial)
+        if market_conflict:
+            return self._result(case, "contradiction", market_reason, expires=expires, current_market=market)
+        if market and market != "ES":
+            return self._result(case, "commercial", f"Mercado observado {market}; se requiere ES",
+                                expires=expires, current_market=market)
+        if not commercial.get("market_verified") or commercial.get("sales_market") != "ES":
             return self._result(case, "commercial", "Mercado ES no confirmado para esta reevaluación",
-                                expires=expires)
+                                expires=expires, current_market=market)
         policy = "included"
         if page.get("includes_tax") is False:
             return self._result(case, "contradiction", "IVA excluido contradice la política vigente")
@@ -107,11 +118,12 @@ class SavedSampleReevaluation:
                 return self._result(case, "commercial", "Política fiscal vigente no confirmada")
 
         return self._result(case, "eligible", "Muestra vigente, identidad exacta y configuración ES/IVA incluido",
-                            expires=expires)
+                            expires=expires, current_market=market or "ES")
 
-    def _result(self, case: dict, category: str, reason: str, *, expires=None) -> dict:
+    def _result(self, case: dict, category: str, reason: str, *, expires=None, current_market=None) -> dict:
         sample = case.get("sample") or {}
         page = sample.get("page") or {}
+        commercial = case.get("commercial_config") or {}
         return {
             "request_id": case["id"], "ean": case["ean"], "competitor_id": case["competitor_id"],
             "url": case["url"], "category": category, "reason": reason,
@@ -119,7 +131,8 @@ class SavedSampleReevaluation:
             "expires_at": expires.isoformat() if expires else None,
             "previous_gap": (sample.get("gap") or ""),
             "previous_tax_policy": page.get("configured_tax_policy", "unknown"),
-            "current_market": "ES",
+            "current_market": current_market if current_market is not None
+            else page.get("market") or commercial.get("sales_market", ""),
             "current_tax_policy": "included",
             "http_required": False, "sample_digest": _sample_digest(case),
         }
@@ -151,12 +164,8 @@ class SavedSampleReevaluation:
                     persisted = json.loads(persisted_sample)
                 except (TypeError, json.JSONDecodeError):
                     persisted = None
-                persisted_page = persisted.get("page") if isinstance(persisted, dict) else {}
                 if (not isinstance(persisted, dict)
-                        or persisted.get("at") != case["sample"].get("at")
-                        or persisted.get("gap") != case["sample"].get("gap")
-                        or persisted_page.get("url") != case["sample"]["page"].get("url")
-                        or persisted_page.get("ean_published") != case["ean"]):
+                        or _sample_digest({"sample": persisted}) != digest):
                     raise ValueError("La muestra persistida no coincide con el paquete histórico")
 
                 previous_audit = con.execute("""SELECT id FROM access_audit
@@ -169,7 +178,6 @@ class SavedSampleReevaluation:
                 values = {field.name: page.get(field.name) for field in fields(ProductPage)
                           if field.name in page}
                 page_obj = ProductPage(**values)
-                apply_tax_policy(page_obj, "included")
                 product = con.execute("SELECT * FROM products WHERE ean=?", (case["ean"],)).fetchone()
                 con.execute("INSERT OR IGNORE INTO competitor_web_config(competitor_id)"
                             " SELECT id FROM competitors WHERE id=?", (case["competitor_id"],))
@@ -179,10 +187,13 @@ class SavedSampleReevaluation:
                 if not product or not config:
                     raise ValueError("Producto o configuración comercial no disponible")
                 config = dict(config)
-                config.update({"sales_market": "ES", "market_verified": 1,
-                              "market_evidence_url": commercial_market_url(case),
-                              "market_note": commercial_market_note(case),
-                              "tax_policy": "included"})
+                market, market_reason, market_conflict = resolve_market(page_obj, config)
+                if market_conflict or market != "ES":
+                    raise ValueError(market_reason or f"Mercado actual no compatible: {market or 'sin confirmar'}")
+                apply_tax_policy(page_obj, config["tax_policy"])
+                if page_obj.includes_tax is not True:
+                    raise ValueError("IVA incluido no está confirmado en la configuración actual")
+                monitor_eligible = int(page_obj.availability == "available" and not page_obj.stock_conflict)
                 from price_web import Outcome
                 outcome = Outcome(case["ean"], case["competitor_id"], config["name"], "exact",
                                  url=case["url"], page=page_obj, match_status=EXACT,
@@ -191,10 +202,12 @@ class SavedSampleReevaluation:
                 frame = pd.DataFrame([search.frame_row(dict(product), config, outcome, case["sampled_at"])])
 
                 def validate(transaction):
-                    transaction.execute("""UPDATE monitor_jobs SET detail=?,eligible=1,last_ok_at=?,valid_until=?,updated_at=?
+                    transaction.execute("""UPDATE monitor_jobs SET detail=?,eligible=?,last_ok_at=?,valid_until=?,updated_at=?
                         WHERE id=?""",
-                               ("Reevaluación local: ES/IVA incluido; muestra original conservada",
-                                case["sampled_at"], expires.isoformat(), at.isoformat(), job["id"]))
+                               ("Reevaluación local: ES/IVA incluido; muestra original conservada"
+                                if monitor_eligible else
+                                "Reevaluación local: sin stock; precio conservado, no comparable",
+                                monitor_eligible, case["sampled_at"], expires.isoformat(), at.isoformat(), job["id"]))
                     transaction.execute("""INSERT INTO access_audit(scope,scope_id,action,previous,current,actor,note,at)
                         VALUES('manual_review',?,'reevaluate_saved_sample',?,?,?,?,?)""",
                                (str(request_id),
@@ -204,7 +217,8 @@ class SavedSampleReevaluation:
                                            ensure_ascii=False),
                                 json.dumps({"market": "ES", "tax_policy": "included",
                                             "sampled_at": case["sampled_at"], "expires_at": expires.isoformat(),
-                                            "sample_digest": digest, "eligible": 1, "offer_imported": True},
+                                            "sample_digest": digest, "eligible": monitor_eligible,
+                                            "availability": page_obj.availability, "offer_imported": True},
                                            ensure_ascii=False),
                                 actor.strip(), json.dumps({"reason": note.strip(), "build_commit": build_commit,
                                                           "http_requests": 0}, ensure_ascii=False),

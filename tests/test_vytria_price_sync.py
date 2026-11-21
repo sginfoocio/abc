@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import hashlib
+import json
 from decimal import Decimal
 from pathlib import Path
 import sqlite3
@@ -15,6 +16,7 @@ from streamlit.testing.v1 import AppTest
 
 import vytria_price_sync
 from price_comparator import PriceComparatorStore, normalize_gtin
+from price_watch import PriceWatch
 from vytria_price_sync import (
     OdooProduct, PriceRow, SqlOdooPriceReader, SyncInProgress, VytriaPriceSync,
     validate_product,
@@ -648,3 +650,53 @@ def test_page_shows_odoo_price_section_with_manual_import_as_contingency(tmp_pat
     assert [expander.label for expander in app.expander if "Contingencia" in expander.label]
     navigate(app, "Historial y diagnósticos")
     assert [button.label for button in app.button if button.label == "Sincronizar precios Vytria desde Odoo"]
+
+
+def test_admin_and_product_detail_show_native_price_provenance(tmp_path, monkeypatch) -> None:
+    ean = "8056597435581"
+    now = datetime(2026, 11, 20, 9, tzinfo=timezone.utc)
+    monkeypatch.setenv("PRESTASHOP_PRICE_ENABLED", "1")
+    app = _page(tmp_path, monkeypatch, eans=[ean])
+    store = PriceComparatorStore(tmp_path / "ui.sqlite3")
+    PriceWatch(store).add([ean], actor="test")
+    offer = {
+        "reference": "427094",
+        "conditions": {"type": "percentage", "reduction": "0.15", "fixed_price_ex_tax": "225.6198",
+                       "reduction_tax_included": False, "min_quantity": 1},
+    }
+    payload = {
+        "price": "232.05", "source": "PrestaShop · MySQL", "offer": offer,
+        "active": False, "in_stock": False, "observed_at": now.isoformat(),
+        "valid_until": (now + timedelta(hours=12)).isoformat(),
+    }
+    with store._connect() as con, con:
+        con.execute("""INSERT INTO vytria_prices(ean,market,price,currency,price_includes_tax,source,pricelist_id,
+                    validation_status,comparable,fingerprint,first_seen_at,changed_at,synced_at)
+                    VALUES(?,'ES',273,'EUR',1,'Odoo tarifa 59',59,'validated',1,'prada',?,?,?)""",
+                    (ean, *(now.isoformat(),) * 3))
+        con.execute("""INSERT INTO prestashop_prices(ean,payload,observed_at,valid_until,synced_at,attempted_at,issue)
+                    VALUES(?,?,?,?,?,?, '')""",
+                    (ean, json.dumps(payload), now.isoformat(), payload["valid_until"],
+                     now.isoformat(), now.isoformat()))
+
+    app.run()
+    assert not app.exception
+    details = next(frame.value for frame in app.dataframe if "Precio final Vytria" in frame.value.columns)
+    assert details.loc[0, "Precio Odoo"] == 273
+    assert details.loc[0, "Precio final Vytria"] == 232.05
+    assert details.loc[0, "Descuento/oferta aplicada"] == (
+        "ID 427094 · 15 % · precio fijo sin IVA 225.62 €")
+    assert details.loc[0, "Origen"] == "PrestaShop · MySQL"
+    assert details.loc[0, "Última actualización"] == now.isoformat()
+
+    from tests.admin_navigation import navigate
+    navigate(app, "Datos e importaciones")
+    native = next(frame.value for frame in app.dataframe if "Descuento/oferta aplicada" in frame.value.columns)
+    assert native.loc[native["EAN"] == ean, "Origen"].iloc[0] == "PrestaShop · MySQL"
+    assert native.loc[native["EAN"] == ean, "Precio final en Vytria"].iloc[0] == 232.05
+    from tests.admin_navigation import watch_section
+    watch_section(app, "Precios y monitorización")
+    assert not app.exception
+    assert any("Referencia: Odoo tarifa 59." in caption.value for caption in app.caption)
+    assert app.checkbox(key="watch_vytria_approved").label == (
+        "Autorizo la lectura supervisada de precios Vytria para los EAN vigilados")

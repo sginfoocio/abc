@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from io import BytesIO
 import logging
 import json
@@ -266,9 +267,10 @@ def _render_native_prices(store: PriceComparatorStore, prices: pd.DataFrame) -> 
             issue = " · ".join(filter(None, (issue, f"Otro calibre ({combination}) no verificable: {reason}")))
         rows.append({
             "EAN": ean, "Precio Odoo": odoo.get(ean), "Precio final en Vytria": float(price) if price else None,
-            "Oferta aplicada": offer["reference"] if offer else "Sin oferta" if payload else "—",
+            "Descuento/oferta aplicada": _native_offer_label(offer) if payload else "—",
             "Vinculación": (f"Referencia marca/modelo/color · {reference['original_barcode']}"
                             if reference else "EAN exacto" if payload else "—"),
+            "Origen": payload.get("source", "") if payload else "—",
             "Estado en tienda": {True: "Activo", False: "Inactivo"}.get(payload.get("active"), "Sin verificar"),
             "Stock": {True: "Con stock", False: "Sin stock"}.get(payload.get("in_stock"), "Sin verificar"),
             "Última actualización": quote["observed_at"] if quote else None,
@@ -279,6 +281,23 @@ def _render_native_prices(store: PriceComparatorStore, prices: pd.DataFrame) -> 
         column: st.column_config.NumberColumn(format="%.2f €")
         for column in ("Precio Odoo", "Precio final en Vytria")
     }, width="stretch", hide_index=True)
+
+
+def _native_offer_label(offer: dict | None) -> str:
+    if not offer:
+        return "Sin oferta"
+    conditions = offer["conditions"]
+    parts = [f"ID {offer['reference']}"]
+    reduction = Decimal(str(conditions.get("reduction", "0")))
+    if conditions.get("type") == "percentage" and reduction:
+        parts.append(f"{format((reduction * 100).normalize(), 'f')} %")
+    elif conditions.get("type") == "amount" and reduction:
+        tax = "IVA incluido" if conditions.get("reduction_tax_included") else "IVA excluido"
+        parts.append(f"{reduction:.2f} € ({tax})")
+    fixed = Decimal(str(conditions.get("fixed_price_ex_tax", "-1")))
+    if fixed >= 0:
+        parts.append(f"precio fijo sin IVA {fixed:.2f} €")
+    return " · ".join(parts)
 
 
 def _render_actions(store: PriceComparatorStore) -> None:
@@ -621,6 +640,22 @@ def _render_products(store: PriceComparatorStore, data: dict) -> None:
 def _render_dashboard_product(store: PriceComparatorStore, data: dict, summary: pd.DataFrame, ean: str,
                               days: int, selected_competitors, key_prefix: str = "dashboard") -> None:
     row = summary[summary["ean"] == ean].iloc[0]
+    source = row["native_price_source"] or row["own_price_source"] or row["odoo_price_source"] or "—"
+    updated = (row["native_price_checked_at"] or row["own_price_checked_at"]
+               or row["odoo_price_checked_at"])
+    details = pd.DataFrame([{
+        "Precio Odoo": row["odoo_price_eur"],
+        "Precio final Vytria": row["native_price_eur"],
+        "Descuento/oferta aplicada": _native_offer_label(row["native_offer"])
+        if row["native_offer"] else "—",
+        "Origen": source,
+        "Última actualización": updated,
+        "Estado": row["own_price_status"] or "Sin verificar",
+    }])
+    st.dataframe(details, width="stretch", hide_index=True, column_config={
+        column: st.column_config.NumberColumn(format="%.2f €")
+        for column in ("Precio Odoo", "Precio final Vytria")
+    })
     own = row["own_price_eur"]
     competitor = row["competitor_min_eur"]
     delta = row["difference_eur"]

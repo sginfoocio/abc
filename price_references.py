@@ -30,6 +30,7 @@ _COMMERCIAL_NAMES = {
     ("TOMFORD", "FT0711"): {"FAUSTO"},
 }
 _BRAND_ALIASES = {"TIFFANY": "TIFFANYCO", "TIFFANYCO": "TIFFANYCO"}
+_MIU_A06S_DESCRIPTOR = re.compile(r"(?<![A-Z0-9])GAFASDESOLMIUMIUA06S(?![A-Z0-9])", re.IGNORECASE)
 
 
 def _ascii(value: Any) -> str:
@@ -311,11 +312,43 @@ def _valid_gtin(value: Any) -> str:
         return ""
 
 
+def _normalize_miu_a06s_descriptor(product: Mapping[str, Any], candidate: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Normalize Optical H's merged descriptor only with the exact catalogue color and brand."""
+    identity = (_valid_gtin(product.get("ean")), _brand_key(product.get("brand")),
+                model_key(product.get("model")), key(product.get("color")))
+    if identity != ("8056262407691", "MIUMIU", "MUA06S", "14L09Z"):
+        return candidate
+    if _brand_key(candidate.get("brand")) != "MIUMIU":
+        return candidate
+
+    identifiers = candidate.get("identifiers") or []
+    texts = [candidate.get("title"), candidate.get("model"), *identifiers]
+    has_descriptor = any(_MIU_A06S_DESCRIPTOR.search(str(text or "")) for text in texts)
+    has_color = (key(candidate.get("color")) == "14L09Z"
+                 or any(key(token) == "14L09Z" for text in texts for token in tokens(text)))
+    if not has_descriptor or not has_color:
+        return candidate
+
+    canonical_model = str(product.get("model") or "")
+    normalized = dict(candidate)
+    title = normalized.get("title")
+    if isinstance(title, str):
+        normalized["title"] = _MIU_A06S_DESCRIPTOR.sub(f"Miu Miu {canonical_model}", title)
+    model = normalized.get("model")
+    if isinstance(model, str):
+        normalized["model"] = _MIU_A06S_DESCRIPTOR.sub(canonical_model, model)
+    normalized["identifiers"] = [
+        _MIU_A06S_DESCRIPTOR.sub(f"Miu Miu {canonical_model}", str(value))
+        if isinstance(value, str) else value for value in identifiers]
+    return normalized
+
+
 def classify(product: Mapping[str, Any], candidate: Mapping[str, Any]) -> MatchResult:
     """Decide whether ``candidate`` (a competitor listing) is the catalogue ``product``.
 
     candidate keys (all optional): ean_published, brand, model, color, caliber, title.
     """
+    candidate = _normalize_miu_a06s_descriptor(product, candidate)
     own_model, own_color, own_brand = (
         model_key(product.get("model")), key(product.get("color")), _brand_key(product.get("brand")))
     title = str(candidate.get("title") or "")

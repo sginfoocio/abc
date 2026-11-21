@@ -9,6 +9,10 @@ Cuando se habilita el lector, solo para la intersección del manifiesto existent
 resultado vigente del cálculo MySQL. Una lectura fallida o caducada conserva el
 último resultado y su fecha real, pero no se compara ni se sustituye por Odoo.
 Sin habilitación y sin lectura anterior, la operativa existente no cambia.
+Administración y ficha muestran por separado el Precio Odoo, el Precio final
+Vytria, la oferta/descuento aplicado, el origen y la fecha de actualización.
+La ficha marca además el estado de vigencia; un precio anterior puede quedar
+visible como referencia histórica, pero no se usa en la comparación.
 
 **Contraste público (2026-11-20):** un GET sin sesión autenticada a la
 [ficha Prada PR 17WS 2AU8C1](https://www.vytria.com/es/pr-17ws-2au8c1.html)
@@ -106,10 +110,12 @@ Los resultados son evidencia de auditoría, no una sincronización de producció
 La instantánea conserva base, impacto, tipo/importe de reducción, regla,
 contexto, IVA, redondeo, versión del cálculo y vigencia. El resultado vence
 como máximo a las 24 horas o al siguiente cambio de oferta conocido. No se
-propaga el importe de un calibre a otro; las diferencias se señalan en
-administración. Una incidencia de otro calibre se muestra aparte, sin
-invalidar la combinación solicitada. Actividad y stock se muestran por
-separado y no condicionan el precio propio ni crean puntos en su histórico.
+transfiere disponibilidad entre calibres. Para una referencia de precio con
+marca, modelo completo y color auditados, el calibre no cambia el precio ni se
+exige conocerlo para aceptar la referencia; las diferencias o incidencias de
+otras combinaciones se muestran aparte y no invalidan esa referencia.
+Actividad y stock se muestran por separado y no condicionan el precio propio
+ni crean puntos en su histórico.
 «Con stock» significa cantidad positiva en la fila de la combinación exacta;
 ni eso ni el precio calculado acreditan que pueda comprarse. Si falta una fila
 de stock inequívoca en el ámbito de tienda o grupo, el stock queda sin verificar.

@@ -234,7 +234,11 @@ def dashboard_scope(summary: pd.DataFrame, offers: pd.DataFrame, *, brands=(), c
     if "commercial_name" in scoped.columns:
         result["model"] = scoped["commercial_name"].where(
             scoped["commercial_name"].fillna("").astype(bool), scoped.get("model", ""))
-    for column in ("market", "own_price_status", "confirmed_offer_count"):
+    for column in (
+        "market", "own_price_status", "own_price_source", "own_price_checked_at", "confirmed_offer_count",
+        "odoo_price_eur", "odoo_price_source", "odoo_price_checked_at",
+        "native_price_eur", "native_offer", "native_price_source", "native_price_checked_at",
+    ):
         if column in scoped.columns:
             result[column] = scoped[column].values
     result["competitor_count"] = recalculated["competitor_count"].values

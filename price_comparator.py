@@ -1710,6 +1710,7 @@ class PriceComparatorStore:
         # A synchronized Odoo price supersedes the manual contingency import for its EAN. It takes part
         # in comparisons only when validated, not flagged stale by a later incident and recently synced.
         synced = vytria_price_states(synced, self.price_expiry_days(), watched, now=now)
+        odoo_by_ean = {row["ean"]: row for row in synced.to_dict("records")}
         # Manual contingency prices of watched products have the same maximum daily validity.
         own_dates = iso_datetimes(own["captured_at"], "captured_at")
         daily_now = pd.Timestamp(now)
@@ -1745,8 +1746,12 @@ class PriceComparatorStore:
 
         rows: list[dict[str, Any]] = []
         for product in products.to_dict("records"):
+            ean = product["ean"]
             own_rows = own[own["ean"] == product["ean"]]
             own_record = _chronological(own_rows, "captured_at").iloc[-1].to_dict() if not own_rows.empty else None
+            odoo_record = odoo_by_ean.get(ean)
+            native_record = native.get(ean)
+            native_payload = json.loads(native_record["payload"]) if native_record and native_record["payload"] else {}
             valid_product_offers = product_offers = comparable_offers(
                 offers[offers["ean"] == product["ean"]])
             comparable = []
@@ -1801,6 +1806,14 @@ class PriceComparatorStore:
                                          synced_by_ean.get(product["ean"], {}).get("synced_at")),
                 "own_price_status": (synced_by_ean[product["ean"]]["current_status"]
                                      if product["ean"] in synced_by_ean else ""),
+                "odoo_price_eur": float(odoo_record["price"]) if odoo_record and pd.notna(odoo_record["price"]) else None,
+                "odoo_price_source": odoo_record["source"] if odoo_record else "",
+                "odoo_price_checked_at": odoo_record["synced_at"] if odoo_record else None,
+                "odoo_price_status": odoo_record["current_status"] if odoo_record else "",
+                "native_price_eur": float(native_payload["price"]) if native_payload.get("price") is not None else None,
+                "native_offer": native_payload.get("offer"),
+                "native_price_source": native_payload.get("source", ""),
+                "native_price_checked_at": native_record["observed_at"] if native_record and native_payload else None,
             })
         result = pd.DataFrame(rows)
         statuses = {

@@ -95,20 +95,16 @@ def test_inactive_product_keeps_the_same_offer_and_tax():
     assert calculate(rules, active=0) == calculate(rules, active=1)
 
 
-@pytest.mark.parametrize("siblings,issues,reason", [
-    ({}, {}, None),
-    ({"91": "232.06"}, {}, "precios distintos"),
-    ({}, {"91": "IVA no verificable"}, "No se pudo descartar"),
+@pytest.mark.parametrize("siblings,issues", [
+    ({}, {}),
+    ({"91": "232.06"}, {}),
+    ({}, {"91": "IVA no verificable"}),
 ])
-def test_price_reference_is_traceable_and_does_not_guess_variant_price(siblings, issues, reason):
+def test_price_reference_does_not_require_a_known_calibre(siblings, issues):
     ean = "8056262600078"
     link = ps.PRICE_REFERENCES[ean]
     original, pid, aid, *_ = link
     raw = quote(product_id=pid, combination_id=aid, other_calibres=siblings, other_calibre_issues=issues)
-    if reason:
-        with pytest.raises(ps.QuoteError, match=reason):
-            ps._annotate_reference(raw, ean, link)
-        return
     ps._annotate_reference(raw, ean, link)
     stored, _, _ = ps.resolve([ean], [(ean, pid, aid, 0)], [(ean, json.dumps(raw))], CONTEXT, NOW)[ean]
     snapshot = json.loads(stored)
@@ -117,6 +113,8 @@ def test_price_reference_is_traceable_and_does_not_guess_variant_price(siblings,
     assert snapshot["price_reference"]["original_barcode"] == original
     assert snapshot["combination_id"] == aid
     assert snapshot["price"] == "232.05" and "in_stock" not in snapshot
+    assert snapshot["other_calibres"] == siblings
+    assert snapshot.get("other_calibre_issues", {}) == issues
 
 
 @pytest.mark.parametrize(("rules", "final", "winner"), [
@@ -264,6 +262,7 @@ def test_watched_sync_is_scoped_deduplicates_and_does_not_fall_back(tmp_path, mo
     result = sync.run(watched_only=True)
     assert result.prestashop == {"monitored": 100, "issues": 100}
     assert calls == [set(scope)] * 4
+    assert comparison()["native_price_eur"] == 230
     assert pd.isna(comparison()["own_price_eur"])
     assert comparison()["own_price_status"] == "stale"
     with store._connect() as con:
@@ -277,3 +276,49 @@ def test_watched_sync_is_scoped_deduplicates_and_does_not_fall_back(tmp_path, mo
         assert all("in_stock" not in json.loads(row[0]) for row in history)
         assert "OperationalError" in current["issue"] and "private" not in current["issue"]
         assert con.execute("SELECT price FROM vytria_prices WHERE ean=?", (EAN,)).fetchone()[0] == 273
+
+
+def test_prada_offer_is_applied_once_and_keeps_odoo_as_reference(tmp_path, monkeypatch):
+    ean = "8056597435581"
+    assert ean in ps.manifest_eans()
+    monkeypatch.setenv("PRESTASHOP_PRICE_ENABLED", "1")
+    monkeypatch.setattr(ps, "_context", lambda: CONTEXT)
+    store = PriceComparatorStore(tmp_path / "prada.sqlite")
+    store.import_products(pd.DataFrame([{
+        "EAN": ean, "MARCA": "Prada", "NOMBRE": "PR 17WS 2AU8C1", "MODELO": "PR 17WS",
+        "COLOR": "2AU8C1", "CATEGORIA": "Sol",
+    }]))
+    PriceWatch(store).add([ean], actor="test")
+    with store._connect() as con, con:
+        con.execute("""INSERT INTO vytria_prices(ean,market,price,currency,price_includes_tax,source,pricelist_id,
+                    validation_status,comparable,fingerprint,first_seen_at,changed_at,synced_at)
+                    VALUES(?,'ES',273,'EUR',1,'Odoo tarifa 59',59,'validated',1,'prada',?,?,?)""",
+                    (ean, *(NOW.isoformat(),) * 3))
+
+    calculated = ps._calculate(
+        (Decimal("225.6198"), 0, 63, 1, 1, 1), (Decimal("0"), 0, 1), 9367,
+        [(0, "0", "0", Decimal("21"), 1, 0)],
+        [rule(sid=427094, aid=9367, fixed="225.6198", discount="0.15")],
+        PRIORITY, CONTEXT, NOW, ZoneInfo("Europe/Madrid"),
+    )
+    assert calculated["price"] == "232.05"
+    payload = quote(product_id=498, combination_id=9367, price=calculated["price"],
+                    offer=calculated["offer"], observed_at=NOW.isoformat(),
+                    valid_until=calculated["valid_until"])
+    monkeypatch.setattr(ps, "_mysql_rows", lambda eans, context: (
+        [(ean, 498, 9367, 0)], [(ean, json.dumps(payload))]))
+    sync = VytriaPriceSync(store, clock=lambda: NOW)
+    monkeypatch.setattr(sync, "_fetch_with_retries", lambda eans: [])
+    monkeypatch.setattr(sync, "_apply", lambda *args: None)
+
+    result = sync.run(watched_only=True)
+    row = store.dashboard(now=NOW)[0].set_index("ean").loc[ean]
+
+    assert result.prestashop == {"monitored": 1, "issues": 0}
+    assert row["odoo_price_eur"] == 273
+    assert row["native_price_eur"] == row["own_price_eur"] == 232.05
+    assert row["native_price_source"] == ps.SOURCE
+    assert row["native_offer"]["reference"] == "427094"
+    assert row["native_price_checked_at"] == NOW.isoformat()
+    with store._connect() as con:
+        assert con.execute("SELECT price FROM vytria_prices WHERE ean=?", (ean,)).fetchone()[0] == 273

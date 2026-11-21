@@ -38,7 +38,8 @@ RULES = {
          "tests/test_provider_order_panel.py"),
     ),
     "prices": (
-        ("price_*.py", "price_*.json", "vytria_price_sync.py", "competitor_requirements.py", "app_pages/price*.py",
+        ("price_*.py", "prestashop_prices.py", "price_*.json", "vytria_price_sync.py",
+         "competitor_requirements.py", "app_pages/price*.py",
          "scripts/*price*.py", "scripts/audit_vytria*.py", "scripts/reevaluate_discovery_candidates.py"),
         ("tests/test_price*.py", "tests/test_vytria*.py", "tests/test_audit_vytria*.py",
          "tests/test_manual_review_continuity_repro.py"),
@@ -47,11 +48,66 @@ RULES = {
         ("db_config.py", "db_loader*.py", "app_exports.py", "*masterdata*.py", "database/*"),
         ("tests/test_app_exports.py", "tests/test_abcd_snapshots*.py", "tests/test_audit*.py",
          "tests/test_provider*.py", "tests/test_marcolin_odoo_pilot.py", "tests/test_kering_images.py",
-         "tests/test_vytria*.py", "tests/test_adyen*.py", "tests/test_order_alert*.py"),
+         "tests/test_adyen*.py", "tests/test_order_alert*.py"),
     ),
 }
-GLOBAL_DEPENDENCIES = ("requirements*.txt", "requirements*.in", "db_config.py", "Dockerfile",
-                       "pyproject.toml", "pytest.ini", "setup.cfg", "conftest.py", "tests/conftest.py")
+PRICE_SOURCE_TESTS = {
+    "app_pages/price_comparator.py": (
+        "tests/test_prestashop_prices.py",
+        "tests/test_price_analytics.py",
+        "tests/test_price_analytics_dates.py",
+        "tests/test_price_comparator.py",
+        "tests/test_price_settings_ui.py",
+        "tests/test_vytria_price_sync.py",
+    ),
+    "app_pages/price_watch.py": (
+        "tests/test_vytria_price_sync.py",
+    ),
+    "price_analytics.py": ("tests/test_price_analytics.py", "tests/test_price_analytics_dates.py"),
+    "price_comparator.py": (
+        "tests/test_prestashop_prices.py",
+        "tests/test_price_analytics.py",
+        "tests/test_price_analytics_dates.py",
+        "tests/test_price_comparator.py",
+        "tests/test_price_settings_ui.py",
+        "tests/test_vytria_price_sync.py",
+    ),
+    "price_references.py": (
+        "tests/test_price_references.py",
+        "tests/test_price_identity_regression.py",
+        "tests/test_price_web_competitor_pages.py",
+    ),
+    "price_saved_reevaluation.py": ("tests/test_price_saved_reevaluation.py",),
+    "price_recovery.py": (
+        "tests/test_price_recovery.py",
+        "tests/test_manual_review_continuity_repro.py",
+        "tests/test_price_review_fixes.py",
+        "tests/test_price_review_refresh.py",
+    ),
+    "prestashop_prices.py": ("tests/test_prestashop_prices.py",),
+    "scripts/smoke_price_diagnostic.py": ("tests/test_dockerfile_provider_modules.py",),
+    "vytria_price_sync.py": ("tests/test_prestashop_prices.py", "tests/test_vytria_price_sync.py"),
+}
+SCOPED_DEPENDENCY_TESTS = {
+    "Dockerfile": ("tests/test_dockerfile_provider_modules.py",),
+    "requirements-dev.txt": (
+        "tests/test_dockerfile_provider_modules.py",
+        "tests/test_prestashop_prices.py",
+        "tests/test_vytria_price_sync.py",
+    ),
+    "requirements.in": (
+        "tests/test_dockerfile_provider_modules.py",
+        "tests/test_prestashop_prices.py",
+        "tests/test_vytria_price_sync.py",
+    ),
+    "requirements.txt": (
+        "tests/test_dockerfile_provider_modules.py",
+        "tests/test_prestashop_prices.py",
+        "tests/test_vytria_price_sync.py",
+    ),
+}
+GLOBAL_DEPENDENCIES = ("db_config.py", "pyproject.toml", "pytest.ini", "setup.cfg", "conftest.py",
+                       "tests/conftest.py")
 MASTERDATA_DEPENDENCIES = {
     ROOT_TESTS[0]: ("transform_luxottica_masterdata.py", ROOT_TESTS[0], "app_exports.py",
                     "image_repository.py", "repository_storage.py", "service_stop.py"),
@@ -98,11 +154,35 @@ def select(paths, test_files):
     for path in paths:
         if matches(path, DOCS):
             continue
+        if path in SCOPED_DEPENDENCY_TESTS:
+            group_tests = {test for test in SCOPED_DEPENDENCY_TESTS[path] if test in test_files}
+            if group_tests:
+                tests.update(group_tests)
+                reasons.append(f"scoped runtime/image dependency: {path}")
+            else:
+                broad = True
+                reasons.append(f"conservative regression: missing dependency tests for {path}")
+            continue
         if matches(path, GLOBAL_DEPENDENCIES):
             return ["tests", *ROOT_TESTS], [f"shared dependency or test configuration: {path}"]
         groups = [name for name, (source, suite) in RULES.items() if matches(path, (*source, *suite))]
         covered = False
         for name in groups:
+            if name == "prices":
+                if path in test_files:
+                    group_tests = {path}
+                    reason = f"direct price regression: {path}"
+                else:
+                    group_tests = {test for test in PRICE_SOURCE_TESTS.get(path, ()) if test in test_files}
+                    if group_tests:
+                        reason = f"price dependencies: {path}"
+                    else:
+                        group_tests = {test for test in test_files if matches(test, RULES[name][1])}
+                        reason = f"conservative price regression: unclassified source {path}"
+                covered |= bool(group_tests)
+                tests.update(group_tests)
+                reasons.append(reason)
+                continue
             group_tests = {test for test in test_files if matches(test, RULES[name][1])}
             covered |= bool(group_tests)
             tests.update(group_tests)
