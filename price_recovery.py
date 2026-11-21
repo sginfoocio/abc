@@ -649,6 +649,11 @@ def _corrected_error_rule(task, identity):
     domain = (identity.get("domain") or "").lower().removeprefix("www.")
     brand = _BRAND_ALIASES.get(key(identity.get("brand")), key(identity.get("brand")))
     model = model_key(identity.get("model"))
+    if (domain == "opticalh.com" and detail ==
+            "Distinto modelo: catálogo MUA06S, ficha GAFASDESOLMIUMIUA06S"
+            and identity.get("ean") == "8056262407691" and brand == "MIUMIU"
+            and model == "MUA06S" and key(identity.get("color")) == "14L09Z"):
+        return "miu-a06s-merged-descriptor"
     if domain == "edel-optics.es" and detail == "La variante extraída no corresponde a la URL aceptada":
         return "edel-selected-variant-url"
     if domain != "amevista.com":
@@ -818,6 +823,8 @@ def _known_recovery_alias_reason(reason, recovery_rule):
         "tomford-joey02-ft1301": r"Distinto modelo: catálogo FT1301, ficha JOEY02(?:\s+FT1301)?",
         "tiffany-brand-alias": r"Distinto marca: catálogo TIFFANYCO, ficha TIFFANY",
         "gucci-logotipo-gg": r"Distinto modelo: catálogo GG(?:1660S|1680S), ficha LOGOTIPOGG",
+        "miu-a06s-merged-descriptor":
+            r"Distinto modelo: catálogo MUA06S, ficha GAFASDESOLMIUMIUA06S",
     }
     pattern = allowed.get(recovery_rule)
     return bool(pattern and re.fullmatch(pattern, reason.strip(), re.IGNORECASE))

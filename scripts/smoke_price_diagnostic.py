@@ -17,6 +17,7 @@ from price_access import AccessControl
 from price_diagnostic import EvidenceError, require_private_database, sanitise
 from price_locator import PriceLocator
 from price_recovery import apply_manual_reviews, preview_manual_reviews
+from price_saved_reevaluation import SavedSampleReevaluation
 from price_trial import PriceTrial, manifest
 from price_references import EXACT, PROBABLE, REJECTED, classify
 from price_web_extract import extract_product, select_product_variant
@@ -72,6 +73,30 @@ def smoke_approved_recovery(path, now):
         assert con.execute("SELECT COUNT(*) FROM access_audit WHERE action='recover_approved_identity'").fetchone()[0] == 1
 
 
+def smoke_saved_sample_preview(directory):
+    now = datetime.now(timezone.utc)
+    sample_at = now - timedelta(minutes=5)
+    url = "https://opticalh.com/products/rb2140"
+    case = {
+        "id": 1, "ean": "0805289126577", "competitor_id": "opticalh-com", "url": url,
+        "requested_at": (sample_at - timedelta(minutes=1)).isoformat(), "sampled_at": sample_at.isoformat(),
+        "sample": {"at": sample_at.isoformat(), "gap": "market_currency", "page": {
+            "url": url, "ean_published": "0805289126577", "offer_binding_source": "product_offer",
+            "offer_binding_unresolved": False, "availability": "available", "currency": "EUR",
+            "price": 109.85, "includes_tax": True, "market": "FR",
+        }},
+        "commercial_config": {
+            "sales_market": "ES", "market_verified": 1, "market_evidence_url": "https://opticalh.com/",
+            "market_note": "Synthetic smoke", "tax_policy": "included",
+        },
+    }
+    evidence = Path(directory) / "saved-sample.json"
+    evidence.write_text(json.dumps({"cases": [case]}), encoding="utf-8")
+    store = PriceComparatorStore(Path(directory) / "saved-sample.sqlite3")
+    result = SavedSampleReevaluation(store, evidence, clock=lambda: now).preview(1)
+    assert result["category"] == "contradiction" and result["current_market"] == "FR"
+
+
 def main():
     assert (os.geteuid(), os.getegid()) == (1037, 100)
     evidence_path = (Path(__file__).resolve().parents[1] / "docs" / "Precios" / "100_EAN"
@@ -99,6 +124,12 @@ def main():
     mia = extract_product(partial_pages["mia-burton-sanitizado.html"].decode("utf-8"), mia_url)
     assert mia and classify(target, mia.candidate()).status == PROBABLE
     assert mia.price == 174 and mia.availability == "unknown" and not mia.ean_published
+    miu = classify(
+        {"ean": "8056262407691", "brand": "Miu Miu", "model": "MU A06S", "color": "14L09Z"},
+        {"brand": "Miu Miu", "model": "GAFASDESOLMIUMIUA06S", "color": "14L09Z",
+         "title": "GAFASDESOLMIUMIUA06S 14L09Z"},
+    )
+    assert miu.status == EXACT
     captures = [
         (7, "cf239f7c16c29e5d05743eef881dd34e349a76ecfb73948574aea5b0f5ffa533",
          "https://www.amevista.com/es/gucci-gg1660s-001",
@@ -227,6 +258,7 @@ def main():
             assert con.execute("SELECT COUNT(*) FROM offers").fetchone()[0] == 1
             assert con.execute("SELECT checks FROM offer_checks").fetchone()[0] == 1
         smoke_approved_recovery(Path(directory) / "recovery.sqlite3", now)
+        smoke_saved_sample_preview(directory)
     print("Private SQLite and archived partial JSON-LD evidence verified offline as UID 1037")
 
 

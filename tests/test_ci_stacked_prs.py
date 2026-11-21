@@ -70,7 +70,17 @@ def test_production_deploy_is_only_triggered_by_a_successful_push_run_on_main():
     (["app_exports.py"], {"test_app_exports.py"}, {ROOT_TESTS[0]}),
     (["image_repository.py"], {"test_repository_multi_export.py"}, {ROOT_TESTS[0]}),
     (["db_config.py"], {"tests"}, set(ROOT_TESTS)),
-    (["requirements.txt"], {"tests"}, set(ROOT_TESTS)),
+    (["requirements.txt"], {"test_dockerfile_provider_modules.py", "test_prestashop_prices.py",
+                            "test_vytria_price_sync.py"}, set()),
+    (["Dockerfile"], {"test_dockerfile_provider_modules.py"}, set()),
+    (["price_comparator.py"], {"test_price_comparator.py", "test_price_analytics.py",
+                               "test_price_analytics_dates.py", "test_prestashop_prices.py",
+                               "test_price_settings_ui.py", "test_vytria_price_sync.py"}, set()),
+    (["prestashop_prices.py"], {"test_prestashop_prices.py"}, set()),
+    (["tests/test_vytria_price_sync.py"], {"test_vytria_price_sync.py"}, set()),
+    (["app_pages/price_comparator.py"], {"test_prestashop_prices.py", "test_price_analytics.py",
+                                         "test_price_analytics_dates.py", "test_price_comparator.py",
+                                         "test_price_settings_ui.py", "test_vytria_price_sync.py"}, set()),
     (["new_service.py"], {"tests"}, set()),
     (["new_service.py", "app_exports.py"], {"tests"}, {ROOT_TESTS[0]}),
     (["tests/fixtures/new.json"], {"tests"}, set()),
@@ -82,6 +92,38 @@ def test_impact_selection(files, included, root_tests):
     assert included <= {Path(p).name for p in targets}
     assert ("tests" in targets) == ("tests" in included)
     assert bool(targets) == bool(reasons) == bool(included)
+
+
+def test_price_module_selects_direct_regressions_instead_of_entire_price_suite():
+    inventory = {p.relative_to(ROOT).as_posix() for p in (ROOT / "tests").rglob("test_*.py")}
+    targets, reasons = select(["price_references.py"], inventory)
+    assert set(targets) == {
+        "tests/test_price_references.py",
+        "tests/test_price_identity_regression.py",
+        "tests/test_price_web_competitor_pages.py",
+    }
+    assert len(targets) < sum(path.startswith("tests/test_price") for path in inventory)
+    assert reasons == ["price dependencies: price_references.py"]
+
+
+def test_vytria_dependency_selection_avoids_the_full_price_suite():
+    inventory = {p.relative_to(ROOT).as_posix() for p in (ROOT / "tests").rglob("test_*.py")}
+    targets, _ = select([
+        "prestashop_prices.py", "price_comparator.py", "app_pages/price_comparator.py",
+        "app_pages/price_watch.py", "requirements.txt", "Dockerfile",
+    ], inventory)
+    assert "tests" not in targets
+    assert not set(targets).intersection(ROOT_TESTS)
+    assert {
+        "tests/test_prestashop_prices.py",
+        "tests/test_price_comparator.py",
+        "tests/test_price_analytics.py",
+        "tests/test_vytria_price_sync.py",
+        "tests/test_dockerfile_provider_modules.py",
+    } <= set(targets)
+    assert "tests/test_app_exports.py" not in targets
+    assert "tests/test_price_watch.py" not in targets
+    assert len(targets) < sum(path.startswith("tests/test_price") for path in inventory)
 
 
 def test_stacked_pr_and_multi_commit_push_use_different_bases(tmp_path):

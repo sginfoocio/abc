@@ -153,6 +153,25 @@ def test_ray_ban_901_58_color_remains_distinct_from_901_and_901_32():
         assert refs.classify(product, {"title": title}).status == refs.REJECTED
 
 
+def test_miu_a06s_merged_opticalh_descriptor_requires_exact_brand_model_and_color():
+    product = {"ean": "8056262407691", "brand": "Miu Miu", "model": "MU A06S", "color": "14L09Z"}
+    candidate = {
+        "brand": "Miu Miu",
+        "model": "GAFASDESOLMIUMIUA06S",
+        "color": "14L09Z",
+        "title": "GAFASDESOLMIUMIUA06S 14L09Z",
+    }
+    assert refs.classify(product, candidate).status == refs.EXACT
+    for changed in (
+        {"color": "14L09X"},
+        {"brand": "Other"},
+        {"model": "GAFASDESOLMIUMIUA06S2"},
+        {"ean_published": "8056262407684"},
+    ):
+        result = refs.classify(product, {**candidate, **changed})
+        assert result.status != refs.EXACT, changed
+
+
 def test_parse_reference_recognizes_tiffany_brand_alias_prefix():
     parsed = refs.parse_reference("Tiffany TF3104D 6216S4", brands=["Tiffany & Co."],
                                   models=["TF3104D"])

@@ -13,7 +13,8 @@ import requests
 
 from price_monitor import MonitorReport, PriceMonitor
 from price_comparator import PriceComparatorStore
-from price_recovery import apply_manual_reviews, preview_manual_reviews
+from price_recovery import (_corrected_error_rule, _known_recovery_alias_reason, apply_manual_reviews,
+                            preview_manual_reviews)
 from price_web import WebPriceSearch
 from price_web_extract import ProductPage
 from tests.test_price_locator import Crash, _gtin, _watch
@@ -50,6 +51,19 @@ def expanded_review(trial):
     task = locator.review(ean, cid, url, accept=True, actor="operator", note="Synthetic review",
                           update_price=True, expected_candidate=_expected(row))
     return service, store, clock, cid, ean, url, site, monitor, task
+
+
+def test_opticalh_miu_merged_descriptor_reuses_only_exact_catalogue_identity():
+    detail = "Distinto modelo: catálogo MUA06S, ficha GAFASDESOLMIUMIUA06S"
+    task = {"status": "error", "monitor_state": "review", "detail": detail, "monitor_detail": detail}
+    identity = {"domain": "opticalh.com", "ean": "8056262407691", "brand": "Miu Miu",
+                "model": "MU A06S", "color": "14L09Z"}
+    rule = _corrected_error_rule(task, identity)
+    assert rule == "miu-a06s-merged-descriptor"
+    assert _known_recovery_alias_reason(detail, rule)
+    for field, value in (("domain", "other.example"), ("ean", "8056262407684"),
+                         ("brand", "Other"), ("model", "MU A06S2"), ("color", "14L09X")):
+        assert not _corrected_error_rule(task, {**identity, field: value}), field
 
 
 def test_accepted_review_uses_active_continuity_after_pilot_expiry(expanded_review):

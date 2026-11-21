@@ -12,4 +12,5 @@ Pillow>=10.0
 streamlit-cookies-controller>=0.0.4
 cryptography>=46.0.5
 filelock>=3.20
+pymysql>=1.1.2,<2
 tzdata>=2025.2
