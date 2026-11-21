@@ -375,6 +375,37 @@ def test_versioned_recovery_event_authorizes_new_continuity_without_replacing_gr
     assert site.calls.count(url) == 1
 
 
+def test_versioned_corrected_error_preserves_monitor_attempt_limit(trial):
+    from price_locator import MAX_ATTEMPTS
+
+    review = _accepted_ft1044_review(trial)
+    alias_url = review[6].product("Tom Ford", "Bronson", "001", gtin=review[4])
+    html = review[6].pages[alias_url]
+    store, clock, cid, ean, _, site, task = _record_corrected_amevista_error(review, html)
+    with store._connect() as con, con:
+        con.execute("UPDATE monitor_jobs SET attempts=? WHERE competitor_id=? AND ean=?",
+                    (MAX_ATTEMPTS, cid, ean))
+
+    now = clock() + timedelta(seconds=2)
+    item = preview_manual_reviews(store.database_path, request_ids=[task], now=now)["requests"][0]
+    assert item["category"] == "excluded"
+    assert item["reason"] == "Máximo de intentos del monitor alcanzado"
+    result = apply_manual_reviews(
+        store.database_path, request_ids=[task], actor="operator", note="No superar intentos",
+        build_commit="f" * 40, approved=True, now=now,
+    )
+    assert result["changed"] == []
+    with store._connect() as con:
+        status = con.execute(
+            "SELECT status FROM manual_review_refreshes WHERE id=?", (task,)).fetchone()[0]
+        attempts = con.execute(
+            "SELECT attempts FROM monitor_jobs WHERE competitor_id=? AND ean=?", (cid, ean)).fetchone()[0]
+        recovery_events = con.execute(
+            "SELECT COUNT(*) FROM manual_review_recovery_events WHERE refresh_id=?", (task,)).fetchone()[0]
+    assert status == "error" and attempts == MAX_ATTEMPTS and recovery_events == 0
+    assert site.calls == []
+
+
 def test_corrected_error_with_contradictory_saved_html_stays_excluded(trial):
     review = _accepted_ft1044_review(trial)
     _, _, _, _, ean, url, site, _, _ = review
