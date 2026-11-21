@@ -279,6 +279,102 @@ def test_corrected_error_replays_exact_saved_html_and_is_idempotent(trial):
     assert site.calls == []
 
 
+def test_versioned_corrected_error_can_follow_legacy_grant_once(trial):
+    review = _accepted_ft1044_review(trial)
+    alias_url = review[6].product("Tom Ford", "Bronson", "001", gtin=review[4])
+    html = review[6].pages[alias_url]
+    store, clock, cid, ean, url, site, task = _record_corrected_amevista_error(review, html)
+    with store._connect() as con, con:
+        continuity_id = con.execute(
+            "SELECT id FROM price_continuity ORDER BY id DESC LIMIT 1").fetchone()[0]
+        con.execute("""DELETE FROM access_audit WHERE scope='product_review'
+            AND action='candidate_confirmed' AND scope_id=?""",
+                    (f"{cid}:{ean}:{url}",))
+        con.execute("""INSERT INTO manual_review_recovery_grants
+            (refresh_id,continuity_id,actor,note,build_commit,granted_at)
+            VALUES(?,?,'operator','legacy recovery','a','2026-01-01T00:00:00+00:00')""",
+                    (task, continuity_id))
+
+    now = clock() + timedelta(seconds=2)
+    preview = preview_manual_reviews(store.database_path, request_ids=[task], now=now)
+    item = preview["requests"][0]
+    assert item["action"] == "recover_corrected_error", (
+        item["reason"], item["identity_valid"], item["approval_audits"],
+        item["monitor_state"], item["attempts"])
+    assert item["evidence"]["approval_source"] == "locate_event"
+    assert item["approval_audits"] == 1
+    assert item["recovery_key"] and item["evidence"]["recovery_version"] == "approved-read-errors-2"
+    applied = apply_manual_reviews(
+        store.database_path, request_ids=[task], actor="operator", note="Nueva regla corregida",
+        build_commit="f" * 40, approved=True, now=now,
+    )
+    assert applied["changed"] == [task]
+    with store._connect() as con:
+        grant = con.execute(
+            "SELECT actor,note,build_commit,granted_at FROM manual_review_recovery_grants WHERE refresh_id=?",
+            (task,)).fetchone()
+        event = con.execute("""SELECT recovery_key,approval_ref,rules_version,recovery_rule,
+            identity_digest,evidence_digest,historical_error,outcome FROM manual_review_recovery_events
+            WHERE refresh_id=?""", (task,)).fetchone()
+    assert tuple(grant) == ("operator", "legacy recovery", "a", "2026-01-01T00:00:00+00:00")
+    assert event["recovery_key"] == item["recovery_key"]
+    assert event["approval_ref"] == item["evidence"]["approval_ref"]
+    assert event["rules_version"] == "approved-read-errors-2"
+    assert event["outcome"] == "queued" and event["historical_error"]
+
+    queued = preview_manual_reviews(store.database_path, request_ids=[task], now=now)["requests"][0]
+    assert queued["action"] == "already_queued"
+    assert apply_manual_reviews(
+        store.database_path, request_ids=[task], actor="operator", note="Repetición",
+        build_commit="f" * 40, approved=True, now=now,
+    )["changed"] == []
+    with store._connect() as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM manual_review_recovery_events WHERE refresh_id=?", (task,)
+        ).fetchone()[0] == 1
+    assert site.calls == []
+
+
+def test_versioned_recovery_event_authorizes_new_continuity_without_replacing_grant(trial):
+    review = _accepted_ft1044_review(trial)
+    alias_url = review[6].product("Tom Ford", "Bronson", "001", gtin=review[4])
+    html = review[6].pages[alias_url]
+    store, clock, _cid, _ean, url, site, task = _record_corrected_amevista_error(review, html)
+    monitor = review[7]
+    with store._connect() as con, con:
+        con.execute("""INSERT INTO manual_review_recovery_grants
+            (refresh_id,continuity_id,actor,note,build_commit,granted_at)
+            VALUES(?,1,'operator','legacy recovery','a','2026-01-01T00:00:00+00:00')""", (task,))
+        con.execute("""INSERT INTO price_continuity
+            (status,prepared_at,started_at,actor,build_commit,manifest,limits,interval_hours)
+            SELECT status,prepared_at,started_at,actor,build_commit,manifest,limits,interval_hours
+            FROM price_continuity WHERE id=1""")
+        con.execute("""INSERT INTO price_continuity_pairs(continuity_id,competitor_id,ean,state)
+            SELECT 2,competitor_id,ean,state FROM price_continuity_pairs WHERE continuity_id=1""")
+
+    now = clock() + timedelta(seconds=2)
+    preview = preview_manual_reviews(store.database_path, request_ids=[task], now=now)["requests"][0]
+    assert preview["action"] == "recover_corrected_error", preview["reason"]
+    assert apply_manual_reviews(
+        store.database_path, request_ids=[task], actor="operator", note="Nueva continuidad",
+        build_commit="f" * 40, approved=True, now=now,
+    )["changed"] == [task]
+    with store._connect() as con, con:
+        grant = con.execute(
+            "SELECT continuity_id,build_commit FROM manual_review_recovery_grants WHERE refresh_id=?",
+            (task,)).fetchone()
+        recovery = con.execute(
+            "SELECT continuity_id FROM manual_review_recovery_events WHERE refresh_id=?", (task,)).fetchone()
+    assert tuple(grant) == (1, "a")
+    assert recovery["continuity_id"] == 2
+    result = monitor.review_refresh_tick()
+    with store._connect() as con:
+        status = con.execute(
+            "SELECT status FROM manual_review_refreshes WHERE id=?", (task,)).fetchone()[0]
+    assert result["processed"] == 1 and status == "done", (result, status)
+    assert site.calls.count(url) == 1
+
+
 def test_corrected_error_with_contradictory_saved_html_stays_excluded(trial):
     review = _accepted_ft1044_review(trial)
     _, _, _, _, ean, url, site, _, _ = review

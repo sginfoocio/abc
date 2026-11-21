@@ -991,6 +991,26 @@ class PriceComparatorStore:
                         build_commit TEXT NOT NULL,
                         granted_at TEXT NOT NULL
                     );
+                    CREATE TABLE IF NOT EXISTS manual_review_recovery_events (
+                        id INTEGER PRIMARY KEY,
+                        refresh_id INTEGER NOT NULL REFERENCES manual_review_refreshes(id),
+                        continuity_id INTEGER NOT NULL REFERENCES price_continuity(id),
+                        recovery_key TEXT NOT NULL,
+                        rules_version TEXT NOT NULL,
+                        recovery_rule TEXT NOT NULL,
+                        approval_ref TEXT NOT NULL,
+                        identity_digest TEXT NOT NULL,
+                        evidence_digest TEXT NOT NULL,
+                        historical_error TEXT NOT NULL,
+                        outcome TEXT NOT NULL,
+                        actor TEXT NOT NULL,
+                        note TEXT NOT NULL,
+                        build_commit TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        UNIQUE(refresh_id,continuity_id,recovery_key)
+                    );
+                    CREATE INDEX IF NOT EXISTS manual_review_recovery_events_scope_idx
+                        ON manual_review_recovery_events(refresh_id,continuity_id);
                     CREATE TABLE IF NOT EXISTS monitor_schedule (
                         competitor_id TEXT PRIMARY KEY REFERENCES competitors(id),
                         enabled INTEGER NOT NULL DEFAULT 0,
