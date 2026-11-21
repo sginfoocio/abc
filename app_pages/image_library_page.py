@@ -462,9 +462,16 @@ def render_images_page(
     require_admin_access: Callable[[], None],
     render_footer: Callable[[], None],
     engine_factory=None,
+    return_to_orders=None,
 ) -> None:
     render_sidebar_shell("Repositorio de imágenes")
     require_admin_access()
+    if return_to_orders is not None:
+        from app_pages.provider_orders_page import render_contextual_photos
+
+        if render_contextual_photos(return_to_orders):
+            render_footer()
+            return
     design.inject_styles()
     _keep_widget_state()
     try:

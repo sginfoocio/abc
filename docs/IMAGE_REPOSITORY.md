@@ -1,5 +1,11 @@
 # Repositorio comun de imagenes por EAN
 
+`frontal`, `perspectiva`, `lateral` y `detalle` son clasificaciones de imagen
+del repositorio. `lifestyle` tambien se conserva como categoria opcional, pero
+no satisface la cobertura tecnica V1/V2/V3. Una asociacion a lifestyle requiere
+evidencia de origen o revision explicita; la revision registra su procedencia y
+no modifica los bytes ni el nombre original.
+
 ## Galeria: fotografias y representaciones (17/11/2026)
 
 La biblioteca y el detalle de busqueda masiva muestran una fotografia por

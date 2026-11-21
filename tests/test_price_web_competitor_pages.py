@@ -48,6 +48,9 @@ def test_sanitized_partial_diagnostic_captures(number, url, product, digest, pri
     page = select_product_variant(extract_product(content.decode("utf-8"), url), product)
     assert classify(product, page.candidate()).status == "exact_match"
     assert (page.price, page.currency, page.availability) == (price, "EUR", stock)
+    if number == 7:
+        assert page.ean_published == "0889652494821" == product["ean"]
+        assert page.ean_published_raw == ["889652494821"]
     if number == 8:
         assert page.ean_published == ""
         assert page.url_trace["selected_variant_url"].endswith("?variant=48783648653611")
@@ -177,6 +180,98 @@ def test_edel_internal_selection_requires_radio_offer_and_exact_gtin():
     assert not _accepted_edel_resolution(page, url + "?selectedSize=1907959", product)
 
 
+def test_edel_selected_product_offer_without_own_url_is_bound_by_checked_radio_and_gtin():
+    from dataclasses import replace
+    from price_monitor import _accepted_edel_resolution, _accepted_edel_resolution_reason
+
+    product = {"ean": "8056597875349", "brand": "Prada", "model": "PR 27ZS", "color": "16K08Z"}
+    url = "https://www.edel-optics.es/PR-27ZS-16K08Z-de-Prada.html"
+    selected_url = url + "?selectedSize=1907958"
+    html = (
+        '<input type="radio" id="prd1907958" checked>'
+        '<script type="application/ld+json">' + json.dumps({
+            "@context": "https://schema.org",
+            "@type": "Product",
+            "url": selected_url,
+            "name": "Prada PR 27ZS 16K08Z",
+            "brand": {"@type": "Brand", "name": "Prada"},
+            "model": "PR 27ZS",
+            "color": "16K08Z",
+            "gtin13": "8056597875349",
+            "offers": {
+                "@type": "Offer", "price": "243.50", "priceCurrency": "EUR",
+                "availability": "https://schema.org/InStock",
+            },
+        }) + "</script>"
+    )
+
+    page = extract_product(html, url, url_trace={"candidate_url": url})
+
+    assert page is not None
+    assert page.url == selected_url
+    assert page.url_trace["final_url"] == url
+    assert page.url_trace["selected_variant_source"] == "checked_radio"
+    assert page.url_trace.get("offer_variant_url") is None
+    assert page.offer_binding_source == "product_offer"
+    assert page.ean_published == product["ean"]
+    assert page.ean_published_raw == ["8056597875349"]
+    assert classify(product, page.candidate()).status == "exact_match"
+    assert _accepted_edel_resolution(page, url, product)
+    assert _accepted_edel_resolution_reason(page, url, product) == ""
+    unbound = replace(page, offer_binding_source="")
+    assert _accepted_edel_resolution_reason(unbound, url, product) == (
+        "la Offer no está vinculada a un Product seleccionado ni a su ProductGroup")
+
+
+def test_edel_resolution_normalizes_valid_upc_to_catalogue_ean():
+    from price_monitor import _accepted_edel_resolution
+
+    product = {"ean": "0805289126577", "brand": "Ray Ban", "model": "RB2140", "color": "901"}
+    url = "https://www.edel-optics.es/RB2140-901-de-Ray-Ban.html"
+    node = _edel_variant_node("1907958", "0805289126577", 243.5, "InStock")
+    node.update({"name": "Ray Ban RB2140 901", "brand": {"@type": "Brand", "name": "Ray Ban"},
+                 "model": "RB2140", "color": "901"})
+    variant_url = url + "?selectedSize=1907958"
+    node["url"] = node["offers"]["url"] = variant_url
+    node.pop("gtin13")
+    node["gtin12"] = "805289126577"
+    html = ('<input type="radio" id="prd1907958" checked>'
+            '<script type="application/ld+json">' + json.dumps(node) + '</script>')
+
+    page = extract_product(html, url, url_trace={"candidate_url": url, "final_url": url})
+
+    assert page is not None
+    assert page.ean_published == product["ean"]
+    assert page.ean_published_raw == ["805289126577"]
+    assert classify(product, page.candidate()).status == "exact_match"
+    assert _accepted_edel_resolution(page, url, product)
+
+
+def test_edel_redirect_trace_is_preserved_and_changed_final_url_is_rejected():
+    from price_monitor import _accepted_edel_resolution_reason
+
+    product = {"ean": "8056597875349", "brand": "Prada", "model": "PR 27ZS", "color": "16K08Z"}
+    url = "https://www.edel-optics.es/PR-27ZS-16K08Z-de-Prada.html"
+    selected_url = url + "?selectedSize=1907958"
+    redirect = {"url": url, "status": 302, "location": selected_url}
+    html = ('<input type="radio" id="prd1907958" checked>'
+            '<script type="application/ld+json">' +
+            json.dumps(_edel_variant_node("1907958", product["ean"], 243.5, "InStock")) +
+            '</script>')
+    trace = {"requested_url": url, "candidate_url": url, "final_url": selected_url,
+             "redirects": [redirect]}
+
+    page = extract_product(html, selected_url, url_trace=trace)
+
+    assert page is not None and page.variant_id == "1907958"
+    assert page.url_trace["candidate_url"] == url
+    assert page.url_trace["redirects"] == [redirect]
+    assert page.url_trace["final_url"] == selected_url
+    assert page.url_trace["selected_variant_url"] == selected_url
+    assert _accepted_edel_resolution_reason(page, url, product) == (
+        "la URL final no coincide con la ruta aceptada")
+
+
 def test_edel_selected_variant_uses_common_model_color_price_and_its_own_stock():
     base = "https://www.edel-optics.es/PR-27ZS-16K08Z-de-Prada.html"
     variants = []
@@ -207,6 +302,7 @@ def test_edel_selected_variant_uses_common_model_color_price_and_its_own_stock()
     assert page.variant_id == "222"
     assert (page.ean_published, page.caliber, page.price, page.currency, page.availability) == (
         "8056597875349", "54-21", 243.5, "EUR", "available")
+    assert page.offer_binding_source == "variant_url"
     assert classify(
         {"ean": "8056597875349", "brand": "Prada", "model": "PR 27ZS",
          "color": "16K08Z", "caliber": "54-21"},
@@ -241,6 +337,43 @@ def test_edel_variant_selection_conflicts_remain_ambiguous_without_offer_facts()
     assert page is not None and page.ambiguous
     assert page.price is None and page.availability == "unknown"
     assert any("más de una opción" in note for note in page.notes)
+
+
+def test_edel_common_product_group_offer_is_bound_to_selected_product_and_gtin():
+    from price_monitor import _accepted_edel_resolution
+
+    product = {"ean": "8056597875349", "brand": "Prada", "model": "PR 27ZS", "color": "16K08Z"}
+    url = "https://www.edel-optics.es/PR-27ZS-16K08Z-de-Prada.html"
+    selected_url = url + "?selectedSize=1907958"
+    html = (
+        '<input type="radio" id="prd1907958" checked>'
+        '<script type="application/ld+json">' + json.dumps({
+            "@context": "https://schema.org",
+            "@type": "ProductGroup",
+            "url": url,
+            "offers": {"@type": "Offer", "price": "243.50", "priceCurrency": "EUR",
+                       "availability": "https://schema.org/InStock"},
+            "hasVariant": [{
+                "@type": "Product",
+                "url": selected_url,
+                "name": "Prada PR 27ZS 16K08Z 54-21",
+                "brand": {"@type": "Brand", "name": "Prada"},
+                "model": "PR 27ZS",
+                "color": "16K08Z",
+                "size": "54-21",
+                "gtin13": product["ean"],
+            }],
+        }) + "</script>"
+    )
+
+    page = extract_product(html, url, url_trace={"candidate_url": url})
+
+    assert page is not None and not page.ambiguous
+    assert page.url == selected_url
+    assert page.offer_binding_source == "product_group_offer"
+    assert page.ean_published == product["ean"]
+    assert page.price == 243.5 and page.availability == "unknown"
+    assert _accepted_edel_resolution(page, url, product)
 
 
 @pytest.mark.parametrize(("product_id", "offer_id", "accepted"), [

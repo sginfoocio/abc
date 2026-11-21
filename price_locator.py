@@ -729,7 +729,8 @@ class PriceLocator:
                 self._event(connection, job["id"], state, "review" if not update_price else "review+price",
                             url, f"{actor}: {note}", 0)
             if update_price:
-                from price_monitor import _done_job_restriction, _review_identity
+                from price_monitor import (_done_job_restriction, _review_identity,
+                                           _review_saved_sample_reusable)
 
                 monitor_job = connection.execute("""SELECT * FROM monitor_jobs
                     WHERE competitor_id=? AND ean=?""", (competitor_id, ean)).fetchone()
@@ -745,12 +746,22 @@ class PriceLocator:
                 retry_at = None
                 refresh_state, refresh_detail = "pending", "Lectura solicitada tras confirmar la ficha"
                 monitor_state = monitor_job["state"]
+                saved_sample_reusable = _review_saved_sample_reusable(connection, {
+                    "monitor_state": monitor_state,
+                    "monitor_sample": monitor_job["sample"],
+                    "monitor_sampled_at": monitor_job["sampled_at"],
+                    "monitor_last_ok_at": monitor_job["last_ok_at"],
+                    "monitor_valid_until": monitor_job["valid_until"],
+                    "url": url, "ean": ean, "competitor_id": competitor_id,
+                }, self._now())
+                if saved_sample_reusable:
+                    refresh_detail = "Lectura guardada vigente; se reevaluará localmente"
                 if monitor_state == "running" and monitor_job["lease_until"]:
                     lease = datetime.fromisoformat(monitor_job["lease_until"])
                     if lease > self._now():
                         retry_at = lease
                         refresh_detail = "Otra lectura ya está en curso; se reutilizará su resultado"
-                if monitor_state == "done":
+                if monitor_state == "done" and not saved_sample_reusable:
                     restriction = _done_job_restriction(dict(monitor_job))
                     if restriction and restriction > self._now():
                         retry_at = restriction

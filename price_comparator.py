@@ -99,12 +99,12 @@ _MONITOR_OFFER_GUARD = """AND (NOT EXISTS(
         ON u.competitor_id=m.competitor_id AND u.ean=m.ean AND u.url=m.url AND u.status='verified'
         WHERE m.ean=o.ean AND m.competitor_id=o.competitor_id AND m.last_offer_id=o.id AND m.eligible=1
           AND m.state NOT IN ('gone','review','blocked','unavailable','inactive')
-          AND julianday(m.valid_until)>=julianday('now')
+          AND julianday(m.valid_until)>=julianday(:evaluation_time)
           AND julianday(m.last_ok_at) + COALESCE(
               (SELECT g.interval_hours FROM watch_products w JOIN watch_groups g ON g.name=w.group_name
                WHERE w.ean=m.ean),
               (SELECT s.interval_hours FROM competitor_schedule s WHERE s.competitor_id=m.competitor_id),
-              24)/24.0 >= julianday('now')))"""
+              24)/24.0 >= julianday(:evaluation_time)))"""
 
 
 def iso_datetimes(values: pd.Series, field: str) -> pd.Series:
@@ -977,6 +977,14 @@ class PriceComparatorStore:
                         sampled_at TEXT NOT NULL,
                         sample_digest TEXT NOT NULL
                     );
+                    CREATE TABLE IF NOT EXISTS manual_review_recorded_sample_events (
+                        refresh_id INTEGER NOT NULL REFERENCES manual_review_refreshes(id),
+                        observation_id TEXT NOT NULL,
+                        sampled_at TEXT NOT NULL,
+                        sample_digest TEXT NOT NULL,
+                        sample_json TEXT,
+                        PRIMARY KEY(refresh_id,observation_id)
+                    );
                     CREATE TABLE IF NOT EXISTS manual_review_recovery_grants (
                         refresh_id INTEGER PRIMARY KEY REFERENCES manual_review_refreshes(id),
                         continuity_id INTEGER NOT NULL REFERENCES price_continuity(id),
@@ -985,6 +993,26 @@ class PriceComparatorStore:
                         build_commit TEXT NOT NULL,
                         granted_at TEXT NOT NULL
                     );
+                    CREATE TABLE IF NOT EXISTS manual_review_recovery_events (
+                        id INTEGER PRIMARY KEY,
+                        refresh_id INTEGER NOT NULL REFERENCES manual_review_refreshes(id),
+                        continuity_id INTEGER NOT NULL REFERENCES price_continuity(id),
+                        recovery_key TEXT NOT NULL,
+                        rules_version TEXT NOT NULL,
+                        recovery_rule TEXT NOT NULL,
+                        approval_ref TEXT NOT NULL,
+                        identity_digest TEXT NOT NULL,
+                        evidence_digest TEXT NOT NULL,
+                        historical_error TEXT NOT NULL,
+                        outcome TEXT NOT NULL,
+                        actor TEXT NOT NULL,
+                        note TEXT NOT NULL,
+                        build_commit TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        UNIQUE(refresh_id,continuity_id,recovery_key)
+                    );
+                    CREATE INDEX IF NOT EXISTS manual_review_recovery_events_scope_idx
+                        ON manual_review_recovery_events(refresh_id,continuity_id);
                     CREATE TABLE IF NOT EXISTS monitor_schedule (
                         competitor_id TEXT PRIMARY KEY REFERENCES competitors(id),
                         enabled INTEGER NOT NULL DEFAULT 0,
@@ -1009,6 +1037,10 @@ class PriceComparatorStore:
                     for name, definition in columns.items():
                         if name not in existing:
                             connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+                connection.execute("""INSERT OR IGNORE INTO manual_review_recorded_sample_events
+                    (refresh_id,observation_id,sampled_at,sample_digest)
+                    SELECT refresh_id,'legacy:' || sampled_at,sampled_at,sample_digest
+                    FROM manual_review_recorded_samples""")
                 index = connection.execute("SELECT sql FROM sqlite_master WHERE name='idx_price_diagnostic_active'").fetchone()
                 if index and "status!='expired'" in index["sql"]:
                     connection.execute("DROP INDEX idx_price_diagnostic_active")
@@ -1017,6 +1049,7 @@ class PriceComparatorStore:
                     WHERE status NOT IN ('expired','rejected')""")
                 connection.execute("""CREATE UNIQUE INDEX IF NOT EXISTS idx_price_diagnostic_retry
                     ON price_diagnostic_requests(retry_of) WHERE retry_of IS NOT NULL""")
+                connection.commit()
 
     def seed_defaults(self) -> dict[str, int]:
         """Persist the initial configuration. Idempotent: existing values are never overwritten.
@@ -1249,7 +1282,7 @@ class PriceComparatorStore:
 
     def import_offers(self, frame: pd.DataFrame, *,
                       validate: Callable[[sqlite3.Connection], None] | None = None,
-                      review_sample: tuple[int, str, str] | None = None,
+                      review_sample: tuple[int, str, str, str, str] | None = None,
                       connection: sqlite3.Connection | None = None) -> ImportReport:
         required = {"EAN", "Competidor", "Precio", "Moneda", "Mercado", "URL", "Disponibilidad",
                     "Estado coincidencia", "Evidencia", "Método"}
@@ -1266,10 +1299,12 @@ class PriceComparatorStore:
                     connection.execute("BEGIN IMMEDIATE")
                 validate(connection)
             if review_sample is not None:
-                recorded = connection.execute("""SELECT sampled_at,sample_digest
-                    FROM manual_review_recorded_samples WHERE refresh_id=?""", (review_sample[0],)).fetchone()
+                recorded = connection.execute("""SELECT sampled_at,sample_digest,sample_json
+                    FROM manual_review_recorded_sample_events
+                    WHERE refresh_id=? AND observation_id=?""", review_sample[:2]).fetchone()
                 if recorded:
-                    if tuple(recorded) != review_sample[1:]:
+                    if tuple(recorded)[:2] != review_sample[2:4] or (
+                            recorded["sample_json"] is not None and recorded["sample_json"] != review_sample[4]):
                         raise ValueError("La muestra registrada de esta revisión ha cambiado")
                     return ImportReport(0, 0, ())
             competitors = {row["name"].casefold(): row for row in connection.execute("SELECT * FROM competitors")}
@@ -1424,8 +1459,9 @@ class PriceComparatorStore:
                 if rejected:
                     connection.rollback()
                 else:
-                    connection.execute("""INSERT INTO manual_review_recorded_samples
-                        (refresh_id,sampled_at,sample_digest) VALUES(?,?,?)""", review_sample)
+                    connection.execute("""INSERT INTO manual_review_recorded_sample_events
+                        (refresh_id,observation_id,sampled_at,sample_digest,sample_json)
+                        VALUES(?,?,?,?,?)""", review_sample)
         return ImportReport(imported, updated, tuple(errors))
 
     @staticmethod
@@ -1620,7 +1656,7 @@ class PriceComparatorStore:
                 WHERE c.active=1
                 """ + _MONITOR_OFFER_GUARD + """
                 ORDER BY o.captured_at DESC,o.id DESC
-            """, connection)
+            """, connection, params={"evaluation_time": now.isoformat()})
         return _fresh_offers(frame, now, max_age_days).iloc[::-1].reset_index(drop=True)
 
     def current_search_results(self, max_age_days: int = 30) -> pd.DataFrame:
@@ -1653,7 +1689,7 @@ class PriceComparatorStore:
                 WHERE c.active=1
                 """ + _MONITOR_OFFER_GUARD + """
                 ORDER BY o.captured_at DESC,o.id DESC
-            """, connection)
+            """, connection, params={"evaluation_time": now.isoformat()})
             search_results = pd.read_sql_query("""
                 SELECT s.* FROM search_results s
                 JOIN competitors c ON c.id=s.competitor_id

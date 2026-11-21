@@ -1,4 +1,9 @@
 from pathlib import Path
+import subprocess
+
+import pytest
+
+from scripts.ci_test_selection import ROOT_TESTS, changed_paths, comparison_base, select
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = (ROOT / ".github/workflows/deploy.yml").read_text(encoding="utf-8")
@@ -29,8 +34,11 @@ def test_push_is_still_limited_to_main_and_master():
 
 
 def test_tests_job_runs_for_pull_requests_and_is_required_by_the_build():
-    assert "if: github.event_name == 'pull_request' || github.event_name == 'push'" in block("tests")
+    assert "\n    if:" not in block("tests")
+    assert "fetch-depth: 0" in block("tests")
     assert "needs: tests" in block("build-and-push")
+    assert "workflow_dispatch:" in WORKFLOW and "schedule:" in WORKFLOW
+    assert "if: github.event_name == 'push' || (github.event_name == 'pull_request'" in block("build-and-push")
 
 
 def test_publication_and_registry_login_remain_push_only():
@@ -46,3 +54,65 @@ def test_production_deploy_is_only_triggered_by_a_successful_push_run_on_main():
     production = (ROOT / ".github/workflows/deploy-cloud-production.yml").read_text(encoding="utf-8")
     assert "github.event.workflow_run.event == 'push'" in production
     assert "github.event.workflow_run.head_branch == 'main'" in production
+
+
+@pytest.mark.parametrize(("files", "included", "root_tests"), [
+    (["docs/README.md"], set(), set()),
+    ([".github/workflows/deploy.yml", "scripts/ci_test_selection.py", "tests/test_ci_stacked_prs.py"],
+     {"test_ci_stacked_prs.py", "test_cloud_production_deploy.py", "test_release_versioning.py",
+      "test_dockerfile_provider_modules.py"}, set()),
+    (["app_pages/provider_orders_page.py"], {"test_provider_order_panel.py", "test_image_library.py"}, set()),
+    (["kering_portal.py"], {"test_kering_images.py", "test_repository_storage.py"}, set()),
+    (["poll_luxoptica_mail.py"], {"test_luxoptica_stop.py", "test_graph_mail_downloader.py"}, set()),
+    (["price_web_fetch.py"], {"test_price_web.py", "test_price_monitor.py"}, set()),
+    (["transform_luxottica_masterdata.py"], {"test_provider_odoo_orders.py"}, {ROOT_TESTS[0]}),
+    (["validate_masterdata_odoo_dryrun.py"], {"test_app_exports.py"}, {ROOT_TESTS[1]}),
+    (["app_exports.py"], {"test_app_exports.py"}, {ROOT_TESTS[0]}),
+    (["image_repository.py"], {"test_repository_multi_export.py"}, {ROOT_TESTS[0]}),
+    (["db_config.py"], {"tests"}, set(ROOT_TESTS)),
+    (["requirements.txt"], {"tests"}, set(ROOT_TESTS)),
+    (["new_service.py"], {"tests"}, set()),
+    (["new_service.py", "app_exports.py"], {"tests"}, {ROOT_TESTS[0]}),
+    (["tests/fixtures/new.json"], {"tests"}, set()),
+])
+def test_impact_selection(files, included, root_tests):
+    inventory = {p.relative_to(ROOT).as_posix() for p in (ROOT / "tests").rglob("test_*.py")}
+    targets, reasons = select(files, inventory)
+    assert set(targets).intersection(ROOT_TESTS) == root_tests
+    assert included <= {Path(p).name for p in targets}
+    assert ("tests" in targets) == ("tests" in included)
+    assert bool(targets) == bool(reasons) == bool(included)
+
+
+def test_stacked_pr_and_multi_commit_push_use_different_bases(tmp_path):
+    def run_git(*args):
+        return subprocess.check_output(["git", *args], cwd=tmp_path)
+
+    def commit(file):
+        (tmp_path / file).write_text(file, encoding="utf-8")
+        run_git("add", file)
+        run_git("commit", "-qm", file)
+        return run_git("rev-parse", "HEAD").decode().strip()
+
+    run_git("init", "-qb", "main")
+    run_git("config", "user.email", "test@example.invalid")
+    run_git("config", "user.name", "CI selector test")
+    start = commit("README.md")
+    base = commit("kering_portal.py")
+    run_git("switch", "-qc", "stacked")
+    commit("price_monitor.py")
+    run_git("mv", "price_monitor.py", "price_scheduler.py")
+    tip = commit("price_scheduler.py")
+    run_git("switch", "-q", "main")
+    run_git("merge", "--no-ff", "-qm", "Synthetic PR merge", "stacked")
+    head = run_git("rev-parse", "HEAD").decode().strip()
+    payload = {"pull_request": {"base": {"sha": base}, "head": {"sha": tip}}}
+    pr_base = comparison_base("pull_request", payload, head, run_git)
+    push_base = comparison_base("push", {"before": start, "after": head}, head, run_git)
+    assert changed_paths(pr_base, head, run_git) == ["price_scheduler.py"]
+    assert changed_paths(push_base, head, run_git) == ["kering_portal.py", "price_scheduler.py"]
+    assert changed_paths(tip, head, run_git) == []
+    with pytest.raises(ValueError, match="does not match"):
+        comparison_base("pull_request", payload, tip, run_git)
+    with pytest.raises(ValueError, match="no usable base"):
+        comparison_base("push", {"before": "0" * 40, "after": head}, head, run_git)

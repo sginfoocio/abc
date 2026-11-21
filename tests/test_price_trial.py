@@ -77,7 +77,7 @@ def test_current_worker_cycle_does_not_advance_the_retired_72h_pilot(trial, monk
 
     price_trial._watch_worker_cycle(store)
 
-    assert calls == ["continuity", "diagnostic", "reviews"]
+    assert calls == ["reviews", "continuity", "diagnostic"]
 
 
 def test_retired_pilot_reservation_does_not_block_current_query_or_odoo_read(trial):
@@ -681,7 +681,11 @@ def test_diagnostic_requested_during_normal_check_runs_once_afterward(trial):
             return pd.DataFrame([{"next_check_at": (clock() + timedelta(days=1)).isoformat()}])
 
         def execute(self, eans, competitors, **kwargs):
+            from filelock import Timeout
+
             entered.set()
+            with pytest.raises(Timeout):
+                service.continuity_pair_lock(cid, normal_ean).acquire()
             assert release.wait(10)
             return {"pairs": [{"ean": eans[0], "competitor_id": competitors[0], "processed": True,
                                "category": "checked_now", "requests": 0, "outcomes": []}]}

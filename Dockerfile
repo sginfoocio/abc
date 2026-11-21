@@ -71,6 +71,7 @@ COPY price_pilot.py price_discovery.py price_auto_confirm.py price_access.py pri
 COPY price_batch.py price_url_candidates.py price_diagnostic.py price_trial.py price_trial_manifest.json price_watch_continuity.json .
 COPY docs/PRICE_COVERAGE_MEASUREMENT_EVIDENCE.csv ./docs/
 COPY docs/Precios/100_EAN/evidencia_replay_133_20261116.zip ./docs/Precios/100_EAN/evidencia_replay_133_20261116.zip
+COPY docs/Precios/100_EAN/correcciones_29_edel_amevista_20261120/MATRIZ_100x14_ESTADO_CLOUD_20261120.csv docs/Precios/100_EAN/correcciones_29_edel_amevista_20261120/MATRIZ_RUTAS_29_EDEL_AMEVISTA_20261120.csv ./docs/Precios/100_EAN/correcciones_29_edel_amevista_20261120/
 COPY docs/Precios/busqueda_38_20261119/38-fichas-y-rutas.json ./docs/Precios/busqueda_38_20261119/
 COPY assets ./assets
 COPY static ./static
