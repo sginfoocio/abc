@@ -335,6 +335,41 @@ def test_versioned_corrected_error_can_follow_legacy_grant_once(trial):
     assert site.calls == []
 
 
+def test_failed_versioned_recovery_is_reported_as_already_recovered(trial):
+    review = _accepted_ft1044_review(trial)
+    alias_url = review[6].product("Tom Ford", "Bronson", "001", gtin=review[4])
+    html = review[6].pages[alias_url]
+    store, clock, cid, ean, _, site, task = _record_corrected_amevista_error(review, html)
+    now = clock() + timedelta(seconds=2)
+    assert apply_manual_reviews(
+        store.database_path, request_ids=[task], actor="operator", note="Primera recuperación",
+        build_commit="f" * 40, approved=True, now=now,
+    )["changed"] == [task]
+
+    with store._connect() as con, con:
+        monitor_job_id = con.execute(
+            "SELECT monitor_job_id FROM manual_review_refreshes WHERE id=?", (task,)
+        ).fetchone()[0]
+        con.execute("""UPDATE manual_review_refreshes
+            SET status='error',detail='Error distinto de la lectura nueva' WHERE id=?""", (task,))
+        con.execute("""UPDATE monitor_jobs
+            SET state='review',detail='Error distinto de la lectura nueva' WHERE id=?""", (monitor_job_id,))
+
+    item = preview_manual_reviews(store.database_path, request_ids=[task], now=now)["requests"][0]
+    assert item["category"] == "already_resolved"
+    assert "recuperación versionada ya se aplicó" in item["reason"]
+    repeated = apply_manual_reviews(
+        store.database_path, request_ids=[task], actor="operator", note="Repetición tras error",
+        build_commit="f" * 40, approved=True, now=now,
+    )
+    with store._connect() as con:
+        recovery_events = con.execute(
+            "SELECT COUNT(*) FROM manual_review_recovery_events WHERE refresh_id=?", (task,)
+        ).fetchone()[0]
+    assert repeated["changed"] == [] and recovery_events == 1
+    assert site.calls == []
+
+
 def test_versioned_recovery_event_authorizes_new_continuity_without_replacing_grant(trial):
     review = _accepted_ft1044_review(trial)
     alias_url = review[6].product("Tom Ford", "Bronson", "001", gtin=review[4])

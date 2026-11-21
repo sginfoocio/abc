@@ -399,6 +399,21 @@ def _manual_review_rows(con, path, now):
             if not reason and not identity_ok:
                 reason = "La identidad aceptada cambió o no puede acreditarse"
             if not reason and task["status"] == "error":
+                identity_payload = json.dumps(
+                    identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                identity_digest = hashlib.sha256(identity_payload.encode("utf-8")).hexdigest()
+                applied_recovery = None
+                if evidence["approval_audits"] == 1 and evidence["approval_ref"]:
+                    applied_recovery = con.execute("""SELECT outcome FROM manual_review_recovery_events
+                        WHERE refresh_id=? AND rules_version=? AND approval_ref=? AND identity_digest=?
+                        ORDER BY id DESC LIMIT 1""",
+                                                   (task["id"], MANUAL_CORRECTED_ERROR_RECOVERY_VERSION,
+                                                    evidence["approval_ref"], identity_digest)).fetchone()
+                if applied_recovery:
+                    category = "already_resolved"
+                    reason = ("La recuperación versionada ya se aplicó "
+                              f"(resultado: {applied_recovery['outcome']}); no se repite automáticamente")
+            if not reason and task["status"] == "error":
                 error_rule = _corrected_error_rule(task, identity)
                 if error_rule:
                     artifact_evaluations = _reevaluate_saved_artifacts(con, task, now, error_rule)
@@ -431,8 +446,8 @@ def _manual_review_rows(con, path, now):
                             WHERE refresh_id=? AND recovery_key=?""",
                                                        (task["id"], recovery["recovery_key"])).fetchone()
                         if already_applied:
-                            reason = ("La misma recuperación versionada ya se aplicó; "
-                                      "no se repite automáticamente")
+                            category = "already_resolved"
+                            reason = "La misma recuperación versionada ya se aplicó; no se repite automáticamente"
                         elif task["monitor_state"] in {"pending", "waiting"}:
                             category, action = "recoverable", "already_queued"
                             reason = "El monitor ya tiene una lectura pendiente; se conserva sin duplicarla"
