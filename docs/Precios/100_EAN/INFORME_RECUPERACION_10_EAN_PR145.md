@@ -95,3 +95,73 @@ de un runtime y una conexión real de solo lectura autorizados.
 - En consecuencia, la cobertura actual 100 EAN, 14 competidores y 1.400 pares, el heartbeat frente al avance de cola, errores, presupuestos, solicitudes completas, continuidad, observaciones y evidencias **no quedaron comprobados en vivo**. El 71/100 del 20/11 y el 90/100 comunicado siguen siendo instantáneas históricas; no se presenta ninguna como cifra actual.
 - No se reabrió ningún EAN ni se cambió estado: solicitudes creadas=0, lecturas comerciales a competidores=0, recuperaciones=0, duplicados creados=0; vigilancia y reservas no tocadas. La tabla anterior permanece como guía histórica, no como línea base de hoy.
 - Siguiente paso pendiente: iniciar sesión en la pestaña compartida y exportar desde la interfaz los informes documentados de comparados/no comparados, solicitudes, continuidad/parejas y observaciones/evidencias. Solo después cruzar IDs y recibos, previsualizar casos aún elegibles y revalidar antes de una recuperación gobernada.
+
+## Revisión viva tras iniciar sesión en Cloud — 2026-11-21 (21:23–21:25 Madrid)
+
+La interfaz autenticada de `https://cloud.diagonaleyewear.net/comparador-precios`
+actualizó el resumen a las **21:23 Madrid**:
+
+- **Comparación:** 90/100 EAN, 10 sin competencia comparable y 0 sin precio Vytria.
+  Los diez EAN de la tabla anterior siguen fuera de la comparación en este corte.
+- **Alcance:** 100 productos vigilados, 14 competidores activos y 1.400 pares.
+  Administración muestra 468 fichas verificadas, 182 precios vigentes, 147
+  caducados y 344 trabajos pendientes/en ejecución; además, 10 alertas recientes y
+  2 incidencias abiertas. La bandeja de revisión manual muestra 40 candidatas y
+  0 filas seleccionadas.
+- **Continuidad:** el manifiesto visible conserva 100 EAN × 14 tiendas. Figura
+  `active`, `paused_at_madrid=NULL`, `stopped_at_madrid=NULL` y `error=""`.
+  Heartbeat: `2026-11-21T21:25:04.825117+01:00`; próxima sincronización:
+  `2026-11-21T23:27:21.155829+01:00`. Límites visibles: 200 HTTP/24 h por
+  competidor, 10/minuto y pausa mínima de 3 segundos. La interfaz indicó
+  «Vigilancia activa · Esperando próxima lectura». El heartbeat no demuestra avance
+  de cola ni finalización de trabajos.
+- La vista previa del lote supervisado no se preparó ni ejecutó. La última
+  previsualización legible de Cartier `0843023181451` × Visio Factory (21:15)
+  indicaba 1 par, 1 ficha verificada y **0 tareas elegibles**; estado de cola
+  `done`, 0 intentos y `no antes de 2026-11-17T19:58:48.681605+00:00`. No se
+  reprogramó ni se creó trabajo.
+- El lote guardado 4672 (21:07 Madrid) no pudo reconciliarse: no se inspeccionaron
+  sus recibos ni el avance por par. La tabla de solicitudes limita su vista a las últimas 100; el botón
+  anuncia que el CSV contiene el inventario completo, pero no se obtuvo ese archivo
+  en la sesión. Por tanto, las solicitudes antiguas, aprobaciones y recibos siguen
+  sin reconciliarse; ausencia en la tabla no se trata como ausencia de solicitud.
+
+### Diez EAN: comparación actual y estado operativo disponible
+
+La comparación actual confirma que los diez siguen sin oferta comparable; los
+detalles por solicitud/candidata que siguen se conservan de la vista legible de
+21:15. No se pudieron reconciliar con el inventario completo de solicitudes y
+recibos ni deben presentarse como una nueva lectura de cada par a las 21:23.
+
+| EAN | Estado visible y decisión operativa |
+|---|---|
+| `0843023181451` Cartier CT0550S 001 | Sigue sin comparación. El preflight Visio anterior devolvió 0 tareas elegibles; no se aplicó. La solicitud Mia Burton #28 y su aprobación/recibo requieren cotejo con el inventario completo antes de reutilizarla. |
+| `8056597886932` Miu Miu MU 52YS 7OE01T | Sigue sin comparación. Los registros legibles anteriores eran Bassol #218 (`error`, identidad ambigua) y Visual-Click #219 (`blocked`, límite de intentos). No se repitió HTTP ni se reiniciaron intentos. |
+| `8056262407691` Miu Miu MU A06S 14L09Z | Sigue sin comparación. Optical H #179/#294 mostraban distinto modelo (`MUA06S` frente a `GAFASDESOLMIUMIUA06S`). La bandeja actual muestra 40 candidatas, pero el filtro por EAN no se pudo reconciliar con sus filas; no se confirmó una candidata aprobada para corregirlo. No se aceptó ficha ni se creó solicitud. |
+| `8056597875349` Prada PR 27ZS 16K08Z | Sigue sin comparación. No se pudo reconciliar la bandeja de 40 candidatas ni la solicitud/aprobación actual para este EAN; los precios disponibles siguen siendo históricos. Elegibilidad pendiente del CSV completo y recibos. |
+| `0889214625984` Tom Ford FT1310 01A | Sigue sin comparación. Mia Burton #290 mostraba una oferta de 188,50 EUR, pero el estado de par/mercado/IVA actual no quedó acreditado y la continuidad filtrada no la contaba como vigente. La muestra Edel #705 mantiene `availability=unknown`; no se declaró oferta. |
+| `0889214042422` Tom Ford FT5634B 001 | Sigue sin comparación. Óptica Óptima #49 había guardado 186,00 EUR, pero su vigencia terminó el 21/11 a las 16:09 UTC. La muestra #777 con disponibilidad desconocida no se convirtió en stock. No se solicitó otra lectura. |
+| `0889214599834` Tom Ford FT6082B 051 | Sigue sin comparación. Edel #53 constaba con error de variante; la muestra #720 conserva `availability=unknown`. No se forzó mercado ES desde `/fr` ni se reintentó la solicitud. |
+| `0805289126577` Ray-Ban RB2140 901 | Sigue sin comparación. Bassol #297 continúa diferida por presupuesto hasta `2026-11-21T22:44:34.444000Z` (23:44 Madrid); no está vencida al corte. Las candidatas 1320 y 1323 permanecen sin seleccionar. No se modificaron presupuesto ni fecha. |
+| `0805289126591` Ray-Ban RB2140 90158 | Sigue sin comparación. Mia Burton #298 mostraba ambigüedad; las candidatas 1339 (Bassol, ambigua), 1341 (Óptica Universitaria, EAN solicitado) y 1340 (Optical H, EAN publicado `0805289126607`) no se confirmaron. Se mantiene distinto el EAN `0805289126607`; sin equivalencia ni traslado de stock. |
+| `0889214586650` Tom Ford FT6058B 001 | Sigue sin comparación. El trabajo Otticait seguía pendiente por discrepancia entre contexto de mercado y configuración. No se forzó ES/EUR ni se inició otra consulta. |
+
+### Acciones, límites y siguientes pasos
+
+- **HTTP nuevo: 0; solicitudes creadas: 0; fichas confirmadas/descartadas: 0;
+  recuperaciones aplicadas: 0; duplicados introducidos: 0.** No se ejecutó ni
+  preparó una recuperación masiva, no se pausó/detuvo/reinició la vigilancia y no
+  se cambiaron reservas, presupuestos, intentos o fechas.
+- Ninguna de las diez se declara «oferta comparable vigente» a partir de una ruta
+  candidata, precio histórico, lectura vencida, disponibilidad desconocida o
+  contexto ES/EUR incompleto. La única acción elegible comprobada en preflight
+  (Cartier × Visio) tuvo cero tareas elegibles; las demás requieren primero
+  reconciliar solicitud, aprobación, recibo y estado actual por ID.
+- MySQL/SSH no se volvió a probar. Consultas MySQL y lectura actual de precios
+  Vytria: **0**; el precio almacenado, la fuente del comparador desplegado y el
+  estado de la oferta del 15 % para `8056597435581` siguen sin verificación actual.
+  La PR sigue sin desplegarse; no se atribuye el lector de la rama a producción.
+- El código no cambió. El HEAD de #145 al iniciar esta actualización era
+  `edab5a5a1424dd9a5a755e32718b31888430220c`; esta adición es solo evidencia
+  operativa. No se repitieron CI ni Docker manualmente. Sin merge, despliegue ni
+  activación.
