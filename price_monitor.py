@@ -742,6 +742,8 @@ class PriceMonitor:
                           AND (EXISTS(SELECT 1 FROM manual_review_identity i WHERE i.refresh_id=r.id)
                                OR EXISTS(SELECT 1 FROM manual_review_recovery_grants g WHERE g.refresh_id=r.id
                                    AND g.continuity_id=(SELECT id FROM price_continuity ORDER BY id DESC LIMIT 1))
+                               OR EXISTS(SELECT 1 FROM manual_review_recovery_events e WHERE e.refresh_id=r.id
+                                   AND e.continuity_id=(SELECT id FROM price_continuity ORDER BY id DESC LIMIT 1))
                                OR NOT EXISTS(SELECT 1 FROM price_continuity_pairs p
                                    WHERE p.continuity_id=(SELECT id FROM price_continuity ORDER BY id DESC LIMIT 1)
                                      AND p.competitor_id=r.competitor_id AND p.ean=r.ean))

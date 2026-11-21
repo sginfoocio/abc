@@ -23,6 +23,7 @@ EXPECTED_COUNTS = {
     "domanci-com": 25, "visiofactory-es": 14, "edel-optics-es": 1,
 }
 MANUAL_ERROR_RECOVERY_RULES = "approved-read-errors-1"
+MANUAL_CORRECTED_ERROR_RECOVERY_VERSION = "approved-read-errors-2"
 _AMEVISTA_ERROR_RULES = (
     (re.compile(r"Distinto modelo: catálogo FT1044, ficha BRONSON, FT1044", re.IGNORECASE),
      "tomford-bronson-ft1044"),
@@ -355,13 +356,15 @@ def _manual_review_rows(con, path, now):
             p.state AS continuity_pair_state,
             EXISTS(SELECT 1 FROM manual_review_identity i WHERE i.refresh_id=r.id) AS identity_captured,
             EXISTS(SELECT 1 FROM manual_review_recovery_grants g
-                   WHERE g.refresh_id=r.id AND g.continuity_id=?) AS recovery_granted
+                   WHERE g.refresh_id=r.id AND g.continuity_id=?)
+            OR EXISTS(SELECT 1 FROM manual_review_recovery_events e
+                   WHERE e.refresh_id=r.id AND e.continuity_id=?) AS recovery_granted
         FROM manual_review_refreshes r
         LEFT JOIN monitor_jobs j ON j.id=r.monitor_job_id
         LEFT JOIN watch_products w ON w.ean=r.ean
         LEFT JOIN competitors c ON c.id=r.competitor_id
         LEFT JOIN price_continuity_pairs p ON p.continuity_id=? AND p.competitor_id=r.competitor_id AND p.ean=r.ean
-        ORDER BY r.requested_at,r.id""", (continuity_id, continuity_id)).fetchall()
+        ORDER BY r.requested_at,r.id""", (continuity_id, continuity_id, continuity_id)).fetchall()
     result = []
     for record in rows:
         task = dict(record)
@@ -396,6 +399,21 @@ def _manual_review_rows(con, path, now):
             if not reason and not identity_ok:
                 reason = "La identidad aceptada cambió o no puede acreditarse"
             if not reason and task["status"] == "error":
+                identity_payload = json.dumps(
+                    identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                identity_digest = hashlib.sha256(identity_payload.encode("utf-8")).hexdigest()
+                applied_recovery = None
+                if evidence["approval_audits"] == 1 and evidence["approval_ref"]:
+                    applied_recovery = con.execute("""SELECT outcome FROM manual_review_recovery_events
+                        WHERE refresh_id=? AND rules_version=? AND approval_ref=? AND identity_digest=?
+                        ORDER BY id DESC LIMIT 1""",
+                                                   (task["id"], MANUAL_CORRECTED_ERROR_RECOVERY_VERSION,
+                                                    evidence["approval_ref"], identity_digest)).fetchone()
+                if applied_recovery:
+                    category = "already_resolved"
+                    reason = ("La recuperación versionada ya se aplicó "
+                              f"(resultado: {applied_recovery['outcome']}); no se repite automáticamente")
+            if not reason and task["status"] == "error":
                 error_rule = _corrected_error_rule(task, identity)
                 if error_rule:
                     artifact_evaluations = _reevaluate_saved_artifacts(con, task, now, error_rule)
@@ -416,36 +434,44 @@ def _manual_review_rows(con, path, now):
                         category, action = "recoverable", "already_queued"
                         related_request_id = duplicate["id"]
                         reason = f"Solicitud equivalente {related_request_id} ya está en cola"
-                    elif task["recovery_granted"]:
-                        reason = "La solicitud ya recibió una recuperación auditada en esta continuidad"
                     elif evidence["approval_audits"] != 1:
                         reason = "La aprobación vigente no tiene una auditoría única y completa"
                     elif evidence["unresolved_reservation"]:
                         reason = "Existe una reserva HTTP sin recibo final; requiere reconciliación"
-                    elif task["monitor_state"] in {"pending", "waiting"}:
-                        category, action = "recoverable", "already_queued"
-                        reason = "El monitor ya tiene una lectura pendiente; se conserva sin duplicarla"
-                    elif task["monitor_state"] == "running":
-                        if task["monitor_lease_until"] and _time(task["monitor_lease_until"]) > now:
-                            category, action = "recoverable", "already_queued"
-                            reason = f"Lectura del monitor en curso hasta {task['monitor_lease_until']}"
-                        else:
-                            reason = "Lectura del monitor interrumpida; reconciliar antes de reprogramar"
-                    elif int(task["monitor_attempts"] or 0) >= MAX_ATTEMPTS:
-                        reason = "Máximo de intentos del monitor alcanzado"
-                    elif task["monitor_not_before"] and _time(task["monitor_not_before"]) > now:
-                        reason = f"Reintento del monitor aplazado hasta {task['monitor_not_before']}"
-                    elif task["continuity_pair_state"] not in {"pending", "review"}:
-                        reason = f"Restricción del par: {task['continuity_pair_state']}"
                     else:
-                        category, action = "recoverable", "recover_corrected_error"
-                        offline_exact = any(item["result"] == "exact_identity"
-                                            for item in artifact_evaluations)
-                        evidence_note = ("Artefacto guardado reevaluado como identidad exacta; "
-                                         if offline_exact else
-                                         "Sin artefacto reevaluable suficiente; ")
-                        reason = (f"Rechazo histórico cubierto por {error_rule}; {evidence_note}"
-                                  "requiere lectura gobernada actual")
+                        recovery = _manual_recovery_identity(
+                            task, identity, evidence, error_rule)
+                        evidence.update(recovery["evidence"])
+                        already_applied = con.execute("""SELECT id FROM manual_review_recovery_events
+                            WHERE refresh_id=? AND recovery_key=?""",
+                                                       (task["id"], recovery["recovery_key"])).fetchone()
+                        if already_applied:
+                            category = "already_resolved"
+                            reason = "La misma recuperación versionada ya se aplicó; no se repite automáticamente"
+                        elif task["monitor_state"] in {"pending", "waiting"}:
+                            category, action = "recoverable", "already_queued"
+                            reason = "El monitor ya tiene una lectura pendiente; se conserva sin duplicarla"
+                        elif task["monitor_state"] == "running":
+                            if task["monitor_lease_until"] and _time(task["monitor_lease_until"]) > now:
+                                category, action = "recoverable", "already_queued"
+                                reason = f"Lectura del monitor en curso hasta {task['monitor_lease_until']}"
+                            else:
+                                reason = "Lectura del monitor interrumpida; reconciliar antes de reprogramar"
+                        elif int(task["monitor_attempts"] or 0) >= MAX_ATTEMPTS:
+                            reason = "Máximo de intentos del monitor alcanzado"
+                        elif task["monitor_not_before"] and _time(task["monitor_not_before"]) > now:
+                            reason = f"Reintento del monitor aplazado hasta {task['monitor_not_before']}"
+                        elif task["continuity_pair_state"] not in {"pending", "review"}:
+                            reason = f"Restricción del par: {task['continuity_pair_state']}"
+                        else:
+                            category, action = "recoverable", "recover_corrected_error"
+                            offline_exact = any(item["result"] == "exact_identity"
+                                                for item in artifact_evaluations)
+                            evidence_note = ("Artefacto guardado reevaluado como identidad exacta; "
+                                             if offline_exact else
+                                             "Sin artefacto reevaluable suficiente; ")
+                            reason = (f"Rechazo histórico cubierto por {error_rule}; {evidence_note}"
+                                      "requiere lectura gobernada actual")
                 elif task["monitor_state"] in {"pending", "waiting", "running"}:
                     if (task["monitor_state"] != "running"
                             or (task["monitor_lease_until"] and _time(task["monitor_lease_until"]) > now)):
@@ -567,6 +593,7 @@ def _manual_review_rows(con, path, now):
                        "approval_id": evidence["approval_id"], "approval_audits": evidence["approval_audits"],
                        "identity_valid": identity_ok,
                        "recovery_rule": error_rule,
+                       "recovery_key": evidence.get("recovery_key"),
                        "evidence": evidence, "related_request_id": related_request_id,
                        "classification": _classify_manual_row({
                            "category": category, "action": action, "reason": reason})})
@@ -822,9 +849,25 @@ def _manual_review_evidence(con, task):
         AND action='candidate_confirmed' AND at=? AND scope_id=?
         AND actor<>'' AND note<>'' AND current='verified' ORDER BY id""",
                             (task.get("requested_at"), audit_scope)).fetchall()
+    approval_source = "access_audit" if len(approvals) == 1 else ""
+    approval_ref = f"access_audit:{approvals[0]['id']}" if len(approvals) == 1 else ""
+    if not approvals and task.get("status") == "error":
+        from price_monitor import _review_identity, _review_identity_valid
+
+        identity = _review_identity(con, task)
+        if identity and _review_identity_valid(con, task):
+            event = con.execute("""SELECT id FROM locate_events
+                WHERE id=? AND job_id=? AND method IN ('review','review+price') AND url=?""",
+                                (identity["review_event_id"], task["locate_job_id"], task["url"])).fetchall()
+            if len(event) == 1:
+                approvals = event
+                approval_source = "locate_event"
+                approval_ref = f"locate_event:{event[0]['id']}"
     return {
         "approval_id": approvals[0]["id"] if len(approvals) == 1 else None,
         "approval_audits": len(approvals),
+        "approval_source": approval_source if len(approvals) == 1 else "",
+        "approval_ref": approval_ref if len(approvals) == 1 else "",
         "sample_kind": sample_kind,
         "sample_digest": sample_digest,
         "raw_html_available": raw_html,
@@ -837,6 +880,33 @@ def _manual_review_evidence(con, task):
         ],
         "completed_receipt_count": sum(row["result"] not in (None, "", "reserved") for row in receipts),
         "unresolved_reservation": any(row["result"] in (None, "", "reserved") for row in receipts),
+    }
+
+
+def _manual_recovery_identity(task, identity, evidence, recovery_rule):
+    identity_payload = json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    evidence_payload = json.dumps(
+        evidence.get("artifact_evaluations", []), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    identity_digest = hashlib.sha256(identity_payload.encode("utf-8")).hexdigest()
+    evidence_digest = hashlib.sha256(evidence_payload.encode("utf-8")).hexdigest()
+    payload = {
+        "request_id": task["id"],
+        "approval_ref": evidence["approval_ref"],
+        "rules_version": MANUAL_CORRECTED_ERROR_RECOVERY_VERSION,
+        "recovery_rule": recovery_rule,
+        "identity_digest": identity_digest,
+        "evidence_digest": evidence_digest,
+    }
+    recovery_key = hashlib.sha256(json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    return {
+        "recovery_key": recovery_key,
+        "evidence": {
+            "identity_digest": identity_digest,
+            "evidence_digest": evidence_digest,
+            "recovery_version": MANUAL_CORRECTED_ERROR_RECOVERY_VERSION,
+            "recovery_key": recovery_key,
+        },
     }
 
 
@@ -1155,13 +1225,27 @@ def apply_manual_reviews(database, *, actor, note, build_commit, approved=False,
                         "SELECT * FROM manual_review_recovery_grants WHERE refresh_id=?", (item["id"],)).fetchone()
                     if previous_grant:
                         before["previous_grant"] = dict(previous_grant)
-                    con.execute("""INSERT INTO manual_review_recovery_grants
-                        (refresh_id,continuity_id,actor,note,build_commit,granted_at) VALUES(?,?,?,?,?,?)
-                        ON CONFLICT(refresh_id) DO UPDATE SET continuity_id=excluded.continuity_id,
-                            actor=excluded.actor,note=excluded.note,build_commit=excluded.build_commit,
-                            granted_at=excluded.granted_at""",
-                                (item["id"], continuity_id, actor.strip(), note.strip(), build_commit,
-                                 now.isoformat()))
+                    if item["action"] != "recover_corrected_error" or not previous_grant:
+                        con.execute("""INSERT INTO manual_review_recovery_grants
+                            (refresh_id,continuity_id,actor,note,build_commit,granted_at) VALUES(?,?,?,?,?,?)
+                            ON CONFLICT(refresh_id) DO UPDATE SET continuity_id=excluded.continuity_id,
+                                actor=excluded.actor,note=excluded.note,build_commit=excluded.build_commit,
+                                granted_at=excluded.granted_at""",
+                                    (item["id"], continuity_id, actor.strip(), note.strip(), build_commit,
+                                     now.isoformat()))
+                if item["action"] == "recover_corrected_error":
+                    recovery_evidence = item["evidence"]
+                    if not item["recovery_key"] or not recovery_evidence.get("approval_ref"):
+                        raise ValueError("La recuperación carece de identidad versionada o aprobación vinculada")
+                    con.execute("""INSERT INTO manual_review_recovery_events(
+                        refresh_id,continuity_id,recovery_key,rules_version,recovery_rule,approval_ref,
+                        identity_digest,evidence_digest,historical_error,outcome,actor,note,build_commit,created_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?,'queued',?,?,?,?)""",
+                                (item["id"], continuity_id, item["recovery_key"],
+                                 MANUAL_CORRECTED_ERROR_RECOVERY_VERSION, item["recovery_rule"],
+                                 recovery_evidence["approval_ref"], recovery_evidence["identity_digest"],
+                                 recovery_evidence["evidence_digest"], item["detail"], actor.strip(),
+                                 note.strip(), build_commit, now.isoformat()))
                 if item["action"] == "requeue":
                     status, detail = "pending", "Recuperación auditada de reserva; pendiente de lectura gobernada"
                     finished = before["finished_at"]
@@ -1196,9 +1280,13 @@ def apply_manual_reviews(database, *, actor, note, build_commit, approved=False,
                              actor.strip(), json.dumps({"reason": note.strip(), "build_commit": build_commit,
                                                        "continuity_id": continuity_id,
                                                        "rules_version": MANUAL_ERROR_RECOVERY_RULES,
+                                                       "recovery_version": item.get("evidence", {}).get(
+                                                           "recovery_version"),
                                                        "recovery_rule": item.get("recovery_rule"),
+                                                       "recovery_key": item.get("recovery_key"),
                                                        "historical_error": item.get("detail"),
                                                        "approval_id": item.get("approval_id"),
+                                                       "approval_ref": item.get("evidence", {}).get("approval_ref"),
                                                        "evidence": item.get("evidence")}, ensure_ascii=False),
                              now.isoformat()))
                 changed.append(item["id"])
