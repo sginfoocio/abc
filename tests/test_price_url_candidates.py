@@ -1,11 +1,13 @@
 """Documentary URL checks and explicitly SYNTHETIC shop responses. No captured HTML or live HTTP."""
 from dataclasses import asdict
 import csv
+import hashlib
 import json
 import sqlite3
 from io import StringIO
 from pathlib import Path
 from urllib.parse import urlparse
+from zipfile import ZipFile
 
 import pytest
 import requests
@@ -182,11 +184,21 @@ def test_11x14_primary_routes_are_scoped_candidates_not_verified_offers():
 
 def test_11x14_pairs_are_a_subset_of_the_canonical_1400_pair_matrix():
     root = Path(__file__).resolve().parents[1]
+    evidence_directory = root / "docs/Precios/100_EAN/busqueda_11_20261122"
     evidence = json.loads(
-        (root / "docs/Precios/100_EAN/busqueda_11_20261122/matriz_11x14.json").read_text(
-            encoding="utf-8"
-        )
+        (evidence_directory / "matriz_11x14.json").read_text(encoding="utf-8")
     )
+    route_index = json.loads(
+        (evidence_directory / "rutas_candidatas_primarias.json").read_text(encoding="utf-8")
+    )
+    archive_path = root / "docs/Precios/100_EAN/paquete_11x14_20261122.zip"
+    archive_bytes = archive_path.read_bytes()
+    matrix_bytes = (evidence_directory / "matriz_11x14.json").read_bytes()
+    assert hashlib.sha256(archive_bytes).hexdigest() == route_index["source_archive_sha256"]
+    with ZipFile(archive_path) as archive:
+        assert archive.testzip() is None
+        assert archive.read(route_index["source_entry"]) == matrix_bytes
+
     source_to_manifest_id = {
         "miaburton-com": "mia-burton-com",
         "opticauniversitaria-es": "optica-universitaria-es",

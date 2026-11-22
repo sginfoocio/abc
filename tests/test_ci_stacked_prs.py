@@ -58,6 +58,12 @@ def test_production_deploy_is_only_triggered_by_a_successful_push_run_on_main():
 
 @pytest.mark.parametrize(("files", "included", "root_tests"), [
     (["docs/README.md"], set(), set()),
+    (["docs/Precios/100_EAN/busqueda_11_20261122/matriz_11x14.json"],
+     {"test_price_url_candidates.py"}, set()),
+    (["docs/Precios/100_EAN/busqueda_11_20261122/rutas_candidatas_primarias.json"],
+     {"test_price_url_candidates.py", "test_dockerfile_provider_modules.py"}, set()),
+    (["docs/Precios/100_EAN/paquete_11x14_20261122.zip"],
+     {"test_price_url_candidates.py"}, set()),
     ([".github/workflows/deploy.yml", "scripts/ci_test_selection.py", "tests/test_ci_stacked_prs.py"],
      {"test_ci_stacked_prs.py", "test_cloud_production_deploy.py", "test_release_versioning.py",
       "test_dockerfile_provider_modules.py"}, set()),

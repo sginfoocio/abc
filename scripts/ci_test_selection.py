@@ -108,6 +108,16 @@ PRICE_SOURCE_TESTS = {
 SCOPED_DEPENDENCY_TESTS = {
     "pytest.ini": ("tests/test_ci_stacked_prs.py", "tests/test_price_monitor.py"),
     "Dockerfile": ("tests/test_dockerfile_provider_modules.py",),
+    "docs/Precios/100_EAN/busqueda_11_20261122/matriz_11x14.json": (
+        "tests/test_price_url_candidates.py",
+    ),
+    "docs/Precios/100_EAN/busqueda_11_20261122/rutas_candidatas_primarias.json": (
+        "tests/test_price_url_candidates.py",
+        "tests/test_dockerfile_provider_modules.py",
+    ),
+    "docs/Precios/100_EAN/paquete_11x14_20261122.zip": (
+        "tests/test_price_url_candidates.py",
+    ),
     "requirements-dev.txt": (
         "tests/test_dockerfile_provider_modules.py",
         "tests/test_prestashop_prices.py",

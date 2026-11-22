@@ -660,14 +660,20 @@ ni despliegue.
 
 ### Validación local de la integración
 
-- Selección por el diff funcional: 10 archivos de pruebas, **491 passed, 3
-  skipped, 0 failed en 47,54 s**. Los tres skips son controles POSIX/root no
-  aplicables en Windows; el conjunto incluyó la regresión del cruce 154/1.400.
-- Cinco pruebas focalizadas de rutas 11×14, redirección Edel y matriz canónica:
-  **5 passed en 1,57 s**. `py_compile` y `git diff --check` pasaron.
-- Flake8 con los códigos de CI pasó en los archivos modificados, aislando el
-  `F841` previo de `tests/test_price_url_candidates.py` (línea asignada al
-  commit del 20/11; no forma parte de este cambio).
+- Ejecución offline inicial de 10 archivos de pruebas por el diff funcional:
+  **491 passed, 3 skipped, 0 failed en 47,54 s**. Los tres skips son controles
+  POSIX/root no aplicables en Windows.
+- Al comprobar la selección reproducible del CI se detectó que los tres artefactos
+  JSON/ZIP del paquete activaban el fallback de toda la suite. Se añadieron
+  dependencias explícitas: la matriz y el ZIP seleccionan la prueba del cruce; el
+  índice de rutas selecciona además la prueba de copia Docker. El selector ahora
+  da **20 archivos de prueba específicos y no selecciona `tests` completa** para
+  el diff real de la PR. Sus regresiones de selector, cruce/archivo y copia Docker:
+  **152 passed en 13,67 s**.
+- `py_compile` y `git diff --check` del diff completo de la PR pasaron. Flake8
+  con los códigos de CI pasó en los archivos modificados, aislando el `F841`
+  previo de `tests/test_price_url_candidates.py` (línea asignada al commit del
+  20/11; no forma parte de este cambio).
 - Docker no está instalado en este equipo; no se ejecutó el smoke de contenedor
-  con UID/GID 1037:100. El check Docker/CI para el commit actualizado queda
-  pendiente y no se atribuyen a este SHA los resultados anteriores.
+  con UID/GID 1037:100. Queda pendiente el check CI/Docker del nuevo SHA; no se
+  atribuyen a este cambio los resultados anteriores.
