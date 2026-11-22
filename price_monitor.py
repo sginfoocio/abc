@@ -116,14 +116,16 @@ def _review_saved_sample_reusable(con, task: dict, now: datetime) -> bool:
                 or _inventory_datetime(task["monitor_last_ok_at"]) != sampled
                 or _inventory_datetime(task["monitor_valid_until"]) <= now):
             return False
-        page = scope_availability_to_ean(ProductPage(**sample["page"]), task["ean"])
+        product = con.execute("SELECT * FROM products WHERE ean=?", (task["ean"],)).fetchone()
+        if not product:
+            return False
+        product = dict(product)
+        page = scope_availability_to_ean(ProductPage(**sample["page"]), task["ean"], product=product)
         if (page.url != task["url"]
                 or (page.url_trace or {}).get("candidate_url") != task["url"]
                 or not page.has_price or page.ambiguous):
             return False
-        product = con.execute("SELECT * FROM products WHERE ean=?", (task["ean"],)).fetchone()
-        if (not product or classify(dict(product), page.candidate(),
-                                    allow_reference_match=True).status != EXACT):
+        if classify(product, page.candidate(), allow_reference_match=True).status != EXACT:
             return False
         shared = sample.get("shared_source")
         if shared is None:
@@ -225,7 +227,10 @@ def _review_sample_policy_reason(con, task: dict, now: datetime, interval: float
     if interval is None or _inventory_datetime(task["monitor_sampled_at"]) + timedelta(hours=interval) <= now:
         return "La muestra posterior a la solicitud ha caducado"
     sample = json.loads(task["monitor_sample"])
-    page = scope_availability_to_ean(ProductPage(**sample["page"]), task["ean"])
+    product = con.execute("SELECT * FROM products WHERE ean=?", (task["ean"],)).fetchone()
+    if not product:
+        return "Falta el producto de catálogo"
+    page = scope_availability_to_ean(ProductPage(**sample["page"]), task["ean"], product=dict(product))
     config = con.execute("""SELECT w.*,c.name,c.url AS site_url,c.domain,c.market,c.currency
         FROM competitor_web_config w JOIN competitors c ON c.id=w.competitor_id
         WHERE w.competitor_id=?""", (task["competitor_id"],)).fetchone()

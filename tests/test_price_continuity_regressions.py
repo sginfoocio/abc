@@ -181,7 +181,7 @@ def test_color_suffix_is_not_mistaken_for_a_caliber(suffix):
 
 
 @pytest.mark.parametrize("multiple_variants", [False, True])
-def test_explicit_large_caliber_conflict_in_product_group_remains_a_review(multiple_variants):
+def test_explicit_large_caliber_conflict_keeps_common_price_but_not_variant_stock(multiple_variants):
     url = "https://example.test/products/fixture"
     target = {"ean": "0805289126577", "brand": "Ray Ban", "model": "RB2140",
               "color": "901", "caliber": "50-22"}
@@ -195,8 +195,10 @@ def test_explicit_large_caliber_conflict_in_product_group_remains_a_review(multi
 
     page = select_product_variant(extract_product(_ld(node), url), target)
 
-    assert page.ambiguous and page.availability == "unknown"
-    assert any("calibre" in note.lower() and "contradice" in note.lower() for note in page.notes)
+    assert not page.ambiguous and page.availability == "unknown"
+    assert page.price == 174 and page.ean_published == target["ean"]
+    assert classify(target, page.candidate()).status == EXACT
+    assert any("calibre difiere" in note.lower() and "precio" in note.lower() for note in page.notes)
 
 
 def test_mia_burton_sanitized_facts_common_price_without_variant_stock_or_ean(tmp_path):
@@ -589,19 +591,24 @@ def test_common_group_price_survives_size_conflict_without_transferring_stock(tm
     page = select_product_variant(extract_product(_ld(group), url),
                                   {"ean": "0805289126577", "caliber": "54"})
     assert page.price == 200 and page.currency == "EUR"
-    assert page.ambiguous and not page.ean_published
+    assert not page.ambiguous and page.ean_published == "0805289126577"
     assert page.availability == "unknown" and page.stock_conflict
-    assert any("solo como evidencia" in note for note in page.notes)
+    assert any("se conserva el precio" in note for note in page.notes)
     target = {"ean": "0805289126577", "brand": "Ray-Ban", "model": "RB2140",
               "color": "901", "caliber": "54"}
     outcome, store, _ = _visit(tmp_path, target, url, _ld(group))
-    assert outcome.state != "exact"
+    assert outcome.state == "exact" and outcome.page.price == 200
+    with store._connect() as connection:
+        offer = connection.execute("""SELECT match_status,price,availability FROM offers
+            WHERE ean=? ORDER BY id DESC LIMIT 1""", (target["ean"],)).fetchone()
+    assert offer and offer["match_status"] == "exact_match"
+    assert offer["price"] == 200 and offer["availability"] == "unknown"
     assert store.dashboard(now=NOW)[1]["confirmed"] == 0
 
     del group["offers"]
     page = select_product_variant(extract_product(_ld(group), url),
                                   {"ean": "0805289126577", "caliber": "54"})
-    assert page.ambiguous and page.price is None and page.availability == "unknown"
+    assert not page.ambiguous and page.price is None and page.availability == "unknown"
 
 
 def _observed_edel_layout(url, ean, product_id, title, second_title, price, *, different_stock=False):

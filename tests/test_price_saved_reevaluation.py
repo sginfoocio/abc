@@ -17,7 +17,7 @@ def forbid_network(monkeypatch):
 
 def _evidence(tmp_path, *, market="ES", page_market="", tax="unknown", sampled=True, before_request=False,
               availability="available", binding="product_offer", variant_scoped=False,
-              published_ean="0805289126577"):
+              published_ean=""):
     at = datetime(2026, 11, 17, 17, 9, 4, 92181, tzinfo=timezone.utc)
     requested = at + timedelta(hours=1) if before_request else at - timedelta(minutes=30)
     page = {
@@ -107,7 +107,10 @@ def test_optical_h_local_preview_and_apply_are_audited_without_http(tmp_path):
     assert not repeated["applied"]
     with store._connect() as con:
         assert con.execute("SELECT COUNT(*) FROM offers").fetchone()[0] == 1
+        offer = con.execute("SELECT match_status,match_basis,ean_published,availability FROM offers").fetchone()
         assert con.execute("SELECT COUNT(*) FROM access_audit WHERE action='reevaluate_saved_sample'").fetchone()[0] == 1
+        assert offer["match_status"] == "exact_match" and offer["match_basis"] == "reference"
+        assert offer["ean_published"] == "" and offer["availability"] == "available"
         audit = con.execute("SELECT previous,current,note FROM access_audit "
                             "WHERE action='reevaluate_saved_sample'").fetchone()
         assert json.loads(audit["current"])["sampled_at"].startswith("2026-11-17T17:09:04.092181")

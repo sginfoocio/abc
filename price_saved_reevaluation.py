@@ -87,7 +87,7 @@ class SavedSampleReevaluation:
         if (not product or
                 classify(dict(product), page_obj.candidate(), allow_reference_match=True).status != EXACT):
             return self._result(case, "identity", "EAN o identidad ambigua")
-        scope_availability_to_ean(page_obj, case["ean"])
+        scope_availability_to_ean(page_obj, case["ean"], product=dict(product))
         if page.get("url") != case["url"] or page.get("offer_binding_unresolved"):
             return self._result(case, "identity", "URL o vinculación de oferta no acreditadas")
         binding = page.get("offer_binding_source")
@@ -188,7 +188,7 @@ class SavedSampleReevaluation:
                 if not product or not config:
                     raise ValueError("Producto o configuración comercial no disponible")
                 config = dict(config)
-                scope_availability_to_ean(page_obj, case["ean"])
+                scope_availability_to_ean(page_obj, case["ean"], product=dict(product))
                 if classify(dict(product), page_obj.candidate(),
                             allow_reference_match=True).status != EXACT:
                     raise ValueError("La identidad actual no acredita marca, modelo y color")

@@ -10,11 +10,11 @@ from dataclasses import dataclass, field, replace
 from html.parser import HTMLParser
 import json
 import re
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 from price_comparator import normalize_gtin
-from price_references import (caliber_from_code, compare_calibers, extract_caliber, extract_lens,
+from price_references import (EXACT, caliber_from_code, classify, compare_calibers, extract_caliber, extract_lens,
                               normalize_caliber, parse_reference)
 
 _LD_JSON = re.compile(r"<script[^>]+type=[\"']application/ld\+json[\"'][^>]*>(.*?)</script>", re.I | re.S)
@@ -118,13 +118,25 @@ def availability_of(value: Any) -> str:
     return "unknown"
 
 
-def scope_availability_to_ean(page: ProductPage, requested_ean: Any) -> ProductPage:
-    """Keep the price evidence but never transfer variant availability across EANs."""
+def scope_availability_to_ean(page: ProductPage, requested_ean: Any, *,
+                               product: Mapping[str, Any] | None = None) -> ProductPage:
+    """Keep reference-price matching separate from evidence for the requested variant's stock."""
     if not page.ean_published:
-        page.availability = "unknown"
-        note = "Disponibilidad no atribuida al EAN solicitado: la ficha no publica un EAN"
-        if note not in page.notes:
-            page.notes.append(note)
+        match = classify(product, page.candidate()) if product else None
+        product_caliber = normalize_caliber(product.get("caliber")) if product else ""
+        listing_caliber = normalize_caliber(page.caliber)
+        direct_product_offer = (page.offer_binding_source == "product_offer"
+                                and not page.variant_scoped and not page.structured_variants)
+        selected_variant_offer = (page.offer_binding_source == "variant_url" and page.variant_scoped
+                                  and bool(page.variant_id) and bool(page.url_trace.get("selected_variant_url")))
+        if (match is None or match.status != EXACT or match.basis != "reference"
+                or not product_caliber or listing_caliber != product_caliber
+                or page.ambiguous or page.offer_binding_unresolved or page.stock_conflict
+                or not (direct_product_offer or selected_variant_offer)):
+            page.availability = "unknown"
+            note = "Disponibilidad no atribuida: falta vínculo verificable entre la variante y la ficha"
+            if note not in page.notes:
+                page.notes.append(note)
         return page
     try:
         same_ean = normalize_gtin(page.ean_published) == normalize_gtin(requested_ean)
@@ -579,21 +591,13 @@ def select_product_variant(page: ProductPage | None, product: dict[str, Any]) ->
     published_caliber = normalize_caliber(selected.caliber)
     if selected_from_group and target_caliber and published_caliber \
             and compare_calibers(target_caliber, published_caliber) == "different":
-        common_price = bool(record["shared_offer"]) and not selected.ambiguous and selected.price is not None
-        selected.ambiguous = True
-        selected.offer_binding_unresolved = False
-        selected.ean_published = ""
-        if not common_price:
-            selected.price = None
-            selected.currency = ""
         selected.availability = "unknown"
         selected.stock_conflict = True
-        selected.notes.append("El calibre de la variante estructurada contradice el producto objetivo")
-        if common_price:
-            selected.notes.append("Precio común del grupo conservado solo como evidencia; stock e identidad requieren revisión")
+        selected.notes.append(
+            "El calibre difiere: se conserva el precio del modelo/color y se desconoce el stock de la variante")
     elif selected_from_group:
         selected.notes.append("Variante ProductGroup vinculada por EAN normalizado, no por orden de listas")
-    return scope_availability_to_ean(selected, product.get("ean"))
+    return scope_availability_to_ean(selected, product.get("ean"), product=product)
 
 
 class _EdelSelectedRadios(HTMLParser):

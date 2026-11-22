@@ -475,7 +475,7 @@ def test_shared_amevista_product_group_binds_upc_size_price_and_stock_by_ean(ean
     assert any("no por orden de listas" in note for note in page.notes)
 
 
-def test_shared_product_group_keeps_ean_size_contradiction_ambiguous():
+def test_shared_product_group_keeps_common_price_but_not_conflicting_variant_stock():
     base = "https://www.amevista.com/es/ray-ban-rb2140-901-wayfarer"
     html = '<script type="application/ld+json">' + json.dumps({
         "@context": "https://schema.org", "@type": "ProductGroup", "url": base,
@@ -497,9 +497,14 @@ def test_shared_product_group_keeps_ean_size_contradiction_ambiguous():
         "color": "901", "caliber": "54-18",
     })
 
-    assert page is not None and page.ambiguous
-    assert page.ean_published == "" and page.price is None and page.availability == "unknown"
-    assert any("calibre" in note for note in page.notes)
+    assert page is not None and not page.ambiguous
+    assert page.ean_published == "0805289126577" and page.price == 99.6
+    assert page.availability == "unknown" and page.stock_conflict
+    assert classify({
+        "ean": "0805289126577", "brand": "Ray-Ban", "model": "RB2140",
+        "color": "901", "caliber": "54-18",
+    }, page.candidate()).status == "exact_match"
+    assert any("calibre difiere" in note.lower() for note in page.notes)
 
 
 @pytest.mark.parametrize(("model", "color", "ean", "size", "price"), [

@@ -923,7 +923,7 @@ class WebPriceSearch:
         if page:
             from price_web_extract import apply_tax_policy
 
-            scope_availability_to_ean(page, product["ean"])
+            scope_availability_to_ean(page, product["ean"], product=product)
             apply_tax_policy(page, page.configured_tax_policy)
         status = {"exact": "exact_match", "probable": "probable_match", "rejected": "rejected"}.get(
             outcome.state, outcome.match_status or "manual_review")
