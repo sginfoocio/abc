@@ -11,9 +11,9 @@ from typing import Iterable
 from filelock import FileLock, Timeout
 
 from competitor_requirements import business_tax_evidence, business_tax_policy_for
-from price_comparator import PriceComparatorStore
+from price_comparator import PriceComparatorStore, normalize_gtin
 from price_monitor import _iso
-from price_web_extract import ProductPage, resolve_market
+from price_web_extract import ProductPage, resolve_market, scope_availability_to_ean
 from price_web import WebPriceSearch
 from price_web_extract import apply_tax_policy
 from price_references import EXACT, classify
@@ -83,8 +83,14 @@ class SavedSampleReevaluation:
         if case["requested_at"] and at <= _utc(case["requested_at"]):
             return self._result(case, "contradiction", "La muestra es anterior o igual a la solicitud",
                                 expires=expires)
-        if page.get("ean_published") != case["ean"] or page.get("ambiguous"):
+        from dataclasses import fields
+        page_obj = ProductPage(**{field.name: page[field.name] for field in fields(ProductPage) if field.name in page})
+        with self.store._connect() as con:
+            product = con.execute("SELECT * FROM products WHERE ean=?", (case["ean"],)).fetchone()
+        if (not product or
+                classify(dict(product), page_obj.candidate(), allow_reference_match=True).status != EXACT):
             return self._result(case, "identity", "EAN o identidad ambigua")
+        scope_availability_to_ean(page_obj, case["ean"])
         if page.get("url") != case["url"] or page.get("offer_binding_unresolved"):
             return self._result(case, "identity", "URL o vinculación de oferta no acreditadas")
         binding = page.get("offer_binding_source")
@@ -92,14 +98,12 @@ class SavedSampleReevaluation:
             return self._result(case, "identity", "La oferta no tiene un vínculo verificable con el producto")
         if binding in {"product_group_offer", "variant_url"} and not page.get("variant_scoped"):
             return self._result(case, "identity", "La oferta no está vinculada a la variante seleccionada")
-        if page.get("availability") not in {"available", "unavailable"}:
+        if page_obj.availability not in {"available", "unavailable"}:
             return self._result(case, "evidence", "Disponibilidad no acreditada")
-        if page.get("currency") != "EUR" or page.get("price") is None:
+        if page_obj.currency != "EUR" or page_obj.price is None:
             return self._result(case, "commercial", "Precio o moneda no acreditados")
 
         commercial = case.get("commercial_config") or {}
-        from dataclasses import fields
-        page_obj = ProductPage(**{field.name: page[field.name] for field in fields(ProductPage) if field.name in page})
         market, market_reason, market_conflict = resolve_market(page_obj, commercial)
         if market_conflict:
             return self._result(case, "contradiction", market_reason, expires=expires, current_market=market)
@@ -117,7 +121,7 @@ class SavedSampleReevaluation:
             if policy != "included":
                 return self._result(case, "commercial", "Política fiscal vigente no confirmada")
 
-        return self._result(case, "eligible", "Muestra vigente, identidad exacta y configuración ES/IVA incluido",
+        return self._result(case, "eligible", "Muestra vigente, identidad acreditada y configuración ES/IVA incluido",
                             expires=expires, current_market=market or "ES")
 
     def _result(self, case: dict, category: str, reason: str, *, expires=None, current_market=None) -> dict:
@@ -187,6 +191,10 @@ class SavedSampleReevaluation:
                 if not product or not config:
                     raise ValueError("Producto o configuración comercial no disponible")
                 config = dict(config)
+                scope_availability_to_ean(page_obj, case["ean"])
+                if classify(dict(product), page_obj.candidate(),
+                            allow_reference_match=True).status != EXACT:
+                    raise ValueError("La identidad actual no acredita marca, modelo y color")
                 market, market_reason, market_conflict = resolve_market(page_obj, config)
                 if market_conflict or market != "ES":
                     raise ValueError(market_reason or f"Mercado actual no compatible: {market or 'sin confirmar'}")
@@ -195,9 +203,11 @@ class SavedSampleReevaluation:
                     raise ValueError("IVA incluido no está confirmado en la configuración actual")
                 monitor_eligible = int(page_obj.availability == "available" and not page_obj.stock_conflict)
                 from price_web import Outcome
+                published_ean = normalize_gtin(page_obj.ean_published) if page_obj.ean_published else ""
+                match_basis = "reference" if published_ean != normalize_gtin(case["ean"]) else ""
                 outcome = Outcome(case["ean"], case["competitor_id"], config["name"], "exact",
                                  url=case["url"], page=page_obj, match_status=EXACT,
-                                 method="historical:local-reevaluation")
+                                 method="historical:local-reevaluation", match_basis=match_basis)
                 search = WebPriceSearch(self.store)
                 frame = pd.DataFrame([search.frame_row(dict(product), config, outcome, case["sampled_at"])])
 

@@ -1394,6 +1394,10 @@ class PriceComparatorStore:
                     availability = _text(row["Disponibilidad"]).lower()
                     if availability not in AVAILABILITY_STATES:
                         raise ValueError("Disponibilidad no válida")
+                    if identity[0] and identity[0] != ean:
+                        availability = "unknown"
+                        evidence += (" | Disponibilidad no atribuida al EAN solicitado: "
+                                     "la ficha publica otro EAN")
                     price = _number(row["Precio"], "Precio")
                     promo = _number(row.get("Precio promocional"), "Precio promocional", optional=True)
                     if promo is not None and promo > price:
@@ -1498,7 +1502,8 @@ class PriceComparatorStore:
                 "ean_published": published, "brand": _text(row.get("Marca")), "model": model,
                 "color": color, "caliber": caliber, "title": _text(row.get("Título")),
                 "identifiers": row.get("Identificadores") if isinstance(row.get("Identificadores"), list) else [],
-                "ambiguous": row.get("Ambigua") is True})
+                "ambiguous": row.get("Ambigua") is True},
+                allow_reference_match=match_status == "exact_match" and basis == "reference")
             if validation is not None:
                 validation.update(result.normalized)
                 validation.update({"reasons": result.reasons, "observations": result.observations})

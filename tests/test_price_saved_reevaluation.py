@@ -16,12 +16,16 @@ def forbid_network(monkeypatch):
 
 
 def _evidence(tmp_path, *, market="ES", page_market="", tax="unknown", sampled=True, before_request=False,
-              availability="available", binding="product_offer", variant_scoped=False):
+              availability="available", binding="product_offer", variant_scoped=False,
+              published_ean="0805289126577"):
     at = datetime(2026, 11, 17, 17, 9, 4, 92181, tzinfo=timezone.utc)
     requested = at + timedelta(hours=1) if before_request else at - timedelta(minutes=30)
     page = {
         "url": "https://opticalh.com/products/rb2140",
-        "ean_published": "0805289126577",
+        "ean_published": published_ean,
+        "brand": "Ray-Ban",
+        "model": "RB2140",
+        "color": "901",
         "ambiguous": False,
         "offer_binding_unresolved": False,
         "offer_binding_source": binding,
@@ -121,6 +125,21 @@ def test_saved_sample_requires_known_stock_and_bound_offer(tmp_path, evidence_kw
                                       clock=lambda: datetime(2026, 11, 17, 18, 0, tzinfo=timezone.utc))
     result = service.preview(1)
     assert result["category"] == category and reason in result["reason"]
+
+
+def test_saved_sample_with_other_ean_keeps_price_but_not_variant_stock(tmp_path):
+    evidence = _evidence(tmp_path, published_ean="0805289126584")
+    store = _store(tmp_path)
+    _persist_sample(store, evidence)
+    service = SavedSampleReevaluation(store, evidence,
+                                      clock=lambda: datetime(2026, 11, 17, 18, 0, tzinfo=timezone.utc))
+
+    result = service.preview(1)
+
+    assert result["category"] == "evidence"
+    assert result["reason"] == "Disponibilidad no acreditada"
+    with store._connect() as con:
+        assert con.execute("SELECT COUNT(*) FROM offers").fetchone()[0] == 0
 
 
 def test_saved_sample_preserves_explicit_foreign_market_contradiction(tmp_path):

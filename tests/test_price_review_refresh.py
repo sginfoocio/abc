@@ -488,7 +488,7 @@ def test_immediate_read_does_not_bypass_a_future_monitor_restriction(tmp_path):
     assert site.calls == []
 
 
-def test_access_budget_and_identity_contradiction_never_create_comparable_offers(tmp_path):
+def test_access_budget_blocks_read_and_reference_identity_keeps_stock_unknown(tmp_path):
     store, locator, monitor, _, cid, site, rows, urls = _review_env(tmp_path)
     AccessControl(store).set_budget("competitor", cid, daily_limit=0, per_minute_limit=600,
                                     pause_seconds=0, actor="ana")
@@ -513,11 +513,19 @@ def test_access_budget_and_identity_contradiction_never_create_comparable_offers
                             expected_candidate=_expected(row2))
     assert monitor2.review_refresh_tick()["processed"] == 1
     progress2 = monitor2.review_refreshes().set_index("id").loc[task2]
-    assert progress2["status"] == "error" and "EAN" in progress2["detail"]
+    assert progress2["status"] == "done"
     with store2._connect() as con:
+        offer = con.execute("SELECT ean_published,availability,match_basis FROM offers WHERE ean=?",
+                            (rows2[0][0],)).fetchone()
+        eligible = con.execute("SELECT eligible FROM monitor_jobs WHERE ean=? AND competitor_id=?",
+                               (rows2[0][0], cid2)).fetchone()[0]
         assert con.execute("SELECT status FROM competitor_product_urls WHERE ean=? AND competitor_id=?",
-                           (rows2[0][0], cid2)).fetchone()[0] == "probable"
-        assert con.execute("SELECT COUNT(*) FROM offers WHERE ean=?", (rows2[0][0],)).fetchone()[0] == 0
+                           (rows2[0][0], cid2)).fetchone()[0] == "verified"
+    assert offer["ean_published"] == _gtin("841999999999")
+    assert offer["availability"] == "unknown" and offer["match_basis"] == "reference"
+    assert eligible == 0
+    summary, _ = store2.dashboard()
+    assert summary.loc[summary["ean"].eq(rows2[0][0]), "competitor_count"].item() == 0
 
 
 def test_review_tray_excludes_advanced_locator_controls(tmp_path, monkeypatch):

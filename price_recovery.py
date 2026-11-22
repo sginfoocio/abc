@@ -775,7 +775,7 @@ def _reevaluate_saved_artifacts(con, task, now, recovery_rule):
             results.append(item)
             continue
         page = select_product_variant(page, product)
-        match = classify(product, page.candidate())
+        match = classify(product, page.candidate(), allow_reference_match=True)
         edel_reason = ""
         if ((config.get("domain") or "").lower().removeprefix("www.") == "edel-optics.es"
                 and page.url != task["url"]):

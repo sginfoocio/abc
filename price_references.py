@@ -343,10 +343,12 @@ def _normalize_miu_a06s_descriptor(product: Mapping[str, Any], candidate: Mappin
     return normalized
 
 
-def classify(product: Mapping[str, Any], candidate: Mapping[str, Any]) -> MatchResult:
+def classify(product: Mapping[str, Any], candidate: Mapping[str, Any], *,
+             allow_reference_match: bool = False) -> MatchResult:
     """Decide whether ``candidate`` (a competitor listing) is the catalogue ``product``.
 
     candidate keys (all optional): ean_published, brand, model, color, caliber, title.
+    Reference matching must be explicitly enabled by an approved caller; it never equates GTINs.
     """
     candidate = _normalize_miu_a06s_descriptor(product, candidate)
     own_model, own_color, own_brand = (
@@ -447,8 +449,11 @@ def classify(product: Mapping[str, Any], candidate: Mapping[str, Any]) -> MatchR
             reasons.append(f"{name} no confirmado: catálogo {expected or 'desconocido'}, "
                            f"ficha {', '.join(sorted(found)) or 'desconocido'}")
     if ean and ean != _valid_gtin(product.get("ean")):
-        reasons.insert(0, f"EAN publicado distinto: {ean}; revisión manual obligatoria")
-        return result(REJECTED if contradictions else PROBABLE)
+        if not allow_reference_match:
+            reasons.insert(0, f"EAN publicado distinto: {ean}; revisión manual obligatoria")
+            return result(REJECTED if contradictions else PROBABLE)
+        observations.append(
+            f"EAN publicado distinto ({ean}); precio identificado por marca, modelo y color, sin equivalencia de EAN")
     if contradictions:
         return result(PROBABLE if verified_ean else REJECTED)
     if ambiguous:

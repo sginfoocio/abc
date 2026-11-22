@@ -159,9 +159,11 @@ def test_edel_selected_radio_resolves_variant_id_and_scopes_offer_facts():
     assert any("Product Id 1907958 resuelto" in note for note in page.notes)
 
 
-def test_edel_internal_selection_requires_radio_offer_and_exact_gtin():
+def test_edel_internal_selection_requires_radio_offer_and_valid_gtin():
     from dataclasses import replace
     from price_monitor import _accepted_edel_resolution
+    from price_web_extract import scope_availability_to_ean
+    from tests.test_price_locator import _gtin
 
     product = {"ean": "8056597875349", "brand": "Prada", "model": "PR 27ZS", "color": "16K08Z"}
     url = "https://www.edel-optics.es/PR-27ZS-16K08Z-de-Prada.html"
@@ -170,7 +172,15 @@ def test_edel_internal_selection_requires_radio_offer_and_exact_gtin():
             '<script type="application/ld+json">' + json.dumps(node) + '</script>')
     page = extract_product(html, url, url_trace={"candidate_url": url})
     assert _accepted_edel_resolution(page, url, product)
-    assert not _accepted_edel_resolution(page, url, {**product, "ean": "8056597875226"})
+    other_ean = replace(page, ean_published=_gtin("123456789012"))
+    assert _accepted_edel_resolution(other_ean, url, product)
+    assert classify(product, other_ean.candidate()).status != "exact_match"
+    assert classify(product, other_ean.candidate(), allow_reference_match=True).status == "exact_match"
+    scope_availability_to_ean(other_ean, product["ean"])
+    assert other_ean.availability == "unknown"
+    missing_ean = replace(page, ean_published="")
+    scope_availability_to_ean(missing_ean, product["ean"])
+    assert missing_ean.availability == "unknown"
     assert not _accepted_edel_resolution(replace(page, ambiguous=True), url, product)
     assert not _accepted_edel_resolution(
         replace(page, url_trace={**page.url_trace, "offer_variant_url": url + "?selectedSize=1907959"}),

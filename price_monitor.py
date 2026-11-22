@@ -32,7 +32,8 @@ from price_locator import LEASE, MAX_ATTEMPTS, PriceLocator, job_deferral
 from price_references import EXACT, classify
 from price_watch import PriceWatch
 from price_web import Outcome, WebPriceSearch, WebSearchError, comparability_gap, validate_competitor_url
-from price_web_extract import ProductPage, extract_product, select_product_variant
+from price_web_extract import (ProductPage, extract_product, scope_availability_to_ean,
+                               select_product_variant)
 from price_web_fetch import Fetched, PageGone, RobotsDenied, _requests_transport
 from vytria_price_sync import SyncInProgress, VytriaPriceSync
 
@@ -115,13 +116,14 @@ def _review_saved_sample_reusable(con, task: dict, now: datetime) -> bool:
                 or _inventory_datetime(task["monitor_last_ok_at"]) != sampled
                 or _inventory_datetime(task["monitor_valid_until"]) <= now):
             return False
-        page = ProductPage(**sample["page"])
+        page = scope_availability_to_ean(ProductPage(**sample["page"]), task["ean"])
         if (page.url != task["url"]
                 or (page.url_trace or {}).get("candidate_url") != task["url"]
                 or not page.has_price or page.ambiguous):
             return False
         product = con.execute("SELECT * FROM products WHERE ean=?", (task["ean"],)).fetchone()
-        if not product or classify(dict(product), page.candidate()).status != EXACT:
+        if (not product or classify(dict(product), page.candidate(),
+                                    allow_reference_match=True).status != EXACT):
             return False
         shared = sample.get("shared_source")
         if shared is None:
@@ -206,10 +208,10 @@ def _accepted_edel_resolution_reason(page: ProductPage, accepted_url: str, produ
     if not page.ean_published:
         return "la variante seleccionada no publica EAN/UPC válido"
     try:
-        if normalize_gtin(page.ean_published) != normalize_gtin(product["ean"]):
-            return "el EAN/UPC publicado no coincide con el EAN solicitado"
+        normalize_gtin(page.ean_published)
+        normalize_gtin(product["ean"])
     except (ValueError, KeyError):
-        return "el EAN solicitado o publicado no es válido"
+        return "el EAN/UPC solicitado o publicado no es válido"
     return ""
 
 
@@ -223,7 +225,7 @@ def _review_sample_policy_reason(con, task: dict, now: datetime, interval: float
     if interval is None or _inventory_datetime(task["monitor_sampled_at"]) + timedelta(hours=interval) <= now:
         return "La muestra posterior a la solicitud ha caducado"
     sample = json.loads(task["monitor_sample"])
-    page = ProductPage(**sample["page"])
+    page = scope_availability_to_ean(ProductPage(**sample["page"]), task["ean"])
     config = con.execute("""SELECT w.*,c.name,c.url AS site_url,c.domain,c.market,c.currency
         FROM competitor_web_config w JOIN competitors c ON c.id=w.competitor_id
         WHERE w.competitor_id=?""", (task["competitor_id"],)).fetchone()
@@ -295,7 +297,10 @@ def _review_identity_valid(con, task: dict) -> bool:
         return False
     if identity["ean_published"]:
         try:
-            if normalize_gtin(identity["ean_published"]) != identity["ean"]:
+            published_ean = normalize_gtin(identity["ean_published"])
+            if (published_ean != identity["ean"]
+                    and (identity["match_status"] != "exact_match"
+                         or not identity["model_code"] or not identity["color_code"])):
                 return False
         except ValueError:
             return False
@@ -1158,7 +1163,8 @@ class PriceMonitor:
                     sampled_at = _iso(self._now())
                     product = self.search._product(ean)
                     page = select_product_variant(page, product)
-                match = classify(product, page.candidate()) if page else None
+                match = classify(product, page.candidate(), allow_reference_match=review_id is not None) \
+                    if page else None
                 from price_web_extract import product_page_rejection
                 self._job_trace = {
                     "candidate_url": url,
@@ -1295,9 +1301,17 @@ class PriceMonitor:
                        validate=None, review_id: int | None = None) -> None:
         page = ProductPage(**sample["page"])
         at = datetime.fromisoformat(sample["at"])
+        match_basis = ""
+        if review_id is not None:
+            from price_comparator import normalize_gtin
+
+            published_ean = normalize_gtin(page.ean_published) if page.ean_published else ""
+            if published_ean != normalize_gtin(job["ean"]):
+                match_basis = "reference"
         outcome = Outcome(job["ean"], job["competitor_id"], config["name"], "exact",
                           url=job["url"], page=page, match_status=EXACT, method="web:monitor",
-                          detail="Identidad revalidada: marca + modelo + color; calibre no vinculante")
+                          detail="Identidad revalidada: marca + modelo + color; calibre no vinculante",
+                          match_basis=match_basis)
         search = WebPriceSearch(self.store, clock=lambda: at)
         if review_id is not None:
             sample_json = json.dumps(sample, ensure_ascii=False, sort_keys=True)

@@ -116,6 +116,26 @@ def availability_of(value: Any) -> str:
     return "unknown"
 
 
+def scope_availability_to_ean(page: ProductPage, requested_ean: Any) -> ProductPage:
+    """Keep the price evidence but never transfer variant availability across EANs."""
+    if not page.ean_published:
+        page.availability = "unknown"
+        note = "Disponibilidad no atribuida al EAN solicitado: la ficha no publica un EAN"
+        if note not in page.notes:
+            page.notes.append(note)
+        return page
+    try:
+        same_ean = normalize_gtin(page.ean_published) == normalize_gtin(requested_ean)
+    except (TypeError, ValueError):
+        same_ean = False
+    if not same_ean:
+        page.availability = "unknown"
+        note = "Disponibilidad no atribuida al EAN solicitado: el EAN publicado es distinto o no válido"
+        if note not in page.notes:
+            page.notes.append(note)
+    return page
+
+
 def _truthy(value: Any) -> bool | None:
     if isinstance(value, bool):
         return value
@@ -571,7 +591,7 @@ def select_product_variant(page: ProductPage | None, product: dict[str, Any]) ->
             selected.notes.append("Precio común del grupo conservado solo como evidencia; stock e identidad requieren revisión")
     elif selected_from_group:
         selected.notes.append("Variante ProductGroup vinculada por EAN normalizado, no por orden de listas")
-    return selected
+    return scope_availability_to_ean(selected, product.get("ean"))
 
 
 class _EdelSelectedRadios(HTMLParser):

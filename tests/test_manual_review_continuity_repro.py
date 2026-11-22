@@ -81,10 +81,13 @@ def test_accepted_review_uses_active_continuity_after_pilot_expiry(expanded_revi
 
 def test_pending_legacy_request_reuses_original_locate_event_approval(expanded_review):
     _, store, clock, cid, ean, url, site, monitor, task = expanded_review
+    published_ean = _gtin("123456789012")
     with store._connect() as con, con:
         con.execute("DELETE FROM manual_review_identity WHERE refresh_id=?", (task,))
         con.execute("""DELETE FROM access_audit WHERE scope='product_review'
             AND action='candidate_confirmed' AND scope_id=?""", (f"{cid}:{ean}:{url}",))
+        con.execute("""UPDATE competitor_product_urls SET ean_published=?,model_code='GG1660S',color_code='001'
+            WHERE competitor_id=? AND ean=? AND url=?""", (published_ean, cid, ean, url))
         con.execute("UPDATE products SET updated_at=? WHERE ean=?",
                     ((clock() - timedelta(days=1)).isoformat(), ean))
 
@@ -99,6 +102,15 @@ def test_pending_legacy_request_reuses_original_locate_event_approval(expanded_r
     assert item["action"] == "authorize"
     assert item["http_requests"] == 0
     assert site.calls.count(url) == before_calls
+
+    with store._connect() as con, con:
+        con.execute("""UPDATE competitor_product_urls SET match_status='manual_review'
+            WHERE competitor_id=? AND ean=? AND url=?""", (cid, ean, url))
+    declined = preview_manual_reviews(store.database_path, request_ids=[task], now=clock())["requests"][0]
+    assert not declined["identity_valid"]
+    with store._connect() as con, con:
+        con.execute("""UPDATE competitor_product_urls SET match_status='exact_match'
+            WHERE competitor_id=? AND ean=? AND url=?""", (cid, ean, url))
 
     result = apply_manual_reviews(
         store.database_path,

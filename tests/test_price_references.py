@@ -79,6 +79,18 @@ def test_exact_by_reference_without_ean():
     assert (result.status, result.basis) == (refs.EXACT, "reference")
 
 
+def test_reference_price_can_ignore_ean_only_with_exact_model_and_color():
+    candidate = {"ean_published": "8056597875226", "brand": "Prada",
+                 "model": "PR 27ZS", "color": "16K08Z"}
+    assert refs.classify(PR27, candidate).status == refs.PROBABLE
+    result = refs.classify(PR27, candidate, allow_reference_match=True)
+    assert (result.status, result.basis) == (refs.EXACT, "reference")
+    assert "EAN publicado distinto" in result.observations[0]
+
+    candidate["color"] = "ZVN09T"
+    assert refs.classify(PR27, candidate, allow_reference_match=True).status != refs.EXACT
+
+
 def test_tiffany_brand_aliases_are_equivalent_but_explicit():
     product = {"ean": "8056262010730", "brand": "Tiffany & Co.", "model": "TF3104D", "color": "6216S4"}
     for brand, title in (
