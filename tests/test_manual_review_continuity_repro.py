@@ -79,6 +79,45 @@ def test_accepted_review_uses_active_continuity_after_pilot_expiry(expanded_revi
     assert service.report()["status"] == "expired"
 
 
+def test_pending_legacy_request_reuses_original_locate_event_approval(expanded_review):
+    _, store, clock, cid, ean, url, site, monitor, task = expanded_review
+    with store._connect() as con, con:
+        con.execute("DELETE FROM manual_review_identity WHERE refresh_id=?", (task,))
+        con.execute("""DELETE FROM access_audit WHERE scope='product_review'
+            AND action='candidate_confirmed' AND scope_id=?""", (f"{cid}:{ean}:{url}",))
+        con.execute("UPDATE products SET updated_at=? WHERE ean=?",
+                    ((clock() - timedelta(days=1)).isoformat(), ean))
+
+    before_calls = site.calls.count(url)
+    preview = preview_manual_reviews(
+        store.database_path, request_ids=[task], now=clock()
+    )
+    item = preview["requests"][0]
+    assert item["identity_valid"], item["reason"]
+    assert item["evidence"]["approval_source"] == "locate_event", item
+    assert item["evidence"]["approval_audits"] == 1
+    assert item["action"] == "authorize"
+    assert item["http_requests"] == 0
+    assert site.calls.count(url) == before_calls
+
+    result = apply_manual_reviews(
+        store.database_path,
+        request_ids=[task],
+        actor="operator",
+        note="Reutilizar aprobación histórica",
+        build_commit="f" * 40, approved=True, now=clock())
+    assert result["changed"] == [task]
+    assert monitor.review_refresh_tick()["processed"] == 1
+    assert site.calls.count(url) == before_calls + 1
+    assert apply_manual_reviews(
+        store.database_path,
+        request_ids=[task],
+        actor="operator",
+        note="Repetición idempotente",
+        build_commit="f" * 40, approved=True, now=clock())["changed"] == []
+    assert site.calls.count(url) == before_calls + 1
+
+
 @pytest.mark.parametrize("lock_kind", ["pair", "continuity"])
 def test_busy_lock_defers_same_approval_without_attempt_then_retries(expanded_review, lock_kind):
     service, store, clock, cid, ean, url, site, monitor, task = expanded_review

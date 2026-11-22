@@ -299,15 +299,24 @@ def _review_identity_valid(con, task: dict) -> bool:
                 return False
         except ValueError:
             return False
-    saved = con.execute("SELECT snapshot FROM manual_review_identity WHERE refresh_id=?", (task["id"],)).fetchone()
+    saved = con.execute(
+        "SELECT snapshot FROM manual_review_identity WHERE refresh_id=?", (task["id"],)
+    ).fetchone()
     if saved:
         return identity == json.loads(saved["snapshot"])
-    product = con.execute("SELECT updated_at FROM products WHERE ean=?", (task["ean"],)).fetchone()
-    if not product or _inventory_datetime(product["updated_at"]) >= _inventory_datetime(task["requested_at"]):
+    product = con.execute(
+        "SELECT updated_at FROM products WHERE ean=?", (task["ean"],)
+    ).fetchone()
+    if (not product
+            or _inventory_datetime(product["updated_at"]) >= _inventory_datetime(task["requested_at"])):
         return False
-    events = con.execute("""SELECT id FROM locate_events WHERE job_id=? AND at=? AND method='review+price'
-        AND url=? AND detail=?""", (task["locate_job_id"], task["requested_at"], task["url"],
-                                   f"{task['actor']}: {task['reason']}"[:1000])).fetchall()
+    events = con.execute(
+        """SELECT id,at FROM locate_events
+        WHERE job_id=? AND method='review+price' AND url=? AND detail=?""",
+        (task["locate_job_id"], task["url"], f"{task['actor']}: {task['reason']}"[:1000]),
+    ).fetchall()
+    events = [event for event in events
+              if _inventory_datetime(event["at"]) == _inventory_datetime(task["requested_at"])]
     return len(events) == 1 and events[0]["id"] == identity["review_event_id"]
 
 

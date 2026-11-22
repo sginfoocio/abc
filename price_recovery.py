@@ -858,7 +858,7 @@ def _manual_review_evidence(con, task):
                             (task.get("requested_at"), audit_scope)).fetchall()
     approval_source = "access_audit" if len(approvals) == 1 else ""
     approval_ref = f"access_audit:{approvals[0]['id']}" if len(approvals) == 1 else ""
-    if not approvals and task.get("status") == "error":
+    if not approvals:
         from price_monitor import _review_identity, _review_identity_valid
 
         identity = _review_identity(con, task)
