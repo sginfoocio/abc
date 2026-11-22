@@ -6,13 +6,10 @@ import json
 import pandas as pd
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterable
 
-from filelock import FileLock, Timeout
+from filelock import FileLock
 
-from competitor_requirements import business_tax_evidence, business_tax_policy_for
 from price_comparator import PriceComparatorStore, normalize_gtin
-from price_monitor import _iso
 from price_web_extract import ProductPage, resolve_market, scope_availability_to_ean
 from price_web import WebPriceSearch
 from price_web_extract import apply_tax_policy

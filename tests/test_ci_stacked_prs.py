@@ -106,6 +106,32 @@ def test_price_module_selects_direct_regressions_instead_of_entire_price_suite()
     assert reasons == ["price dependencies: price_references.py"]
 
 
+@pytest.mark.parametrize(("source", "expected"), [
+    ("price_monitor.py", {
+        "tests/test_manual_review_continuity_repro.py",
+        "tests/test_price_recovery.py",
+        "tests/test_price_review_fixes.py",
+        "tests/test_price_review_refresh.py",
+    }),
+    ("price_web.py", {
+        "tests/test_price_saved_reevaluation.py",
+        "tests/test_price_web_competitor_pages.py",
+    }),
+    ("price_web_extract.py", {
+        "tests/test_price_comparator.py",
+        "tests/test_price_saved_reevaluation.py",
+        "tests/test_price_web_competitor_pages.py",
+    }),
+])
+def test_price_dependencies_select_focused_regressions(source, expected):
+    inventory = {p.relative_to(ROOT).as_posix() for p in (ROOT / "tests").rglob("test_*.py")}
+    targets, reasons = select([source], inventory)
+    assert set(targets) == expected
+    assert "tests/test_price_watch.py" not in targets
+    assert "tests/test_price_monitor.py" not in targets
+    assert reasons == [f"price dependencies: {source}"]
+
+
 def test_vytria_dependency_selection_avoids_the_full_price_suite():
     inventory = {p.relative_to(ROOT).as_posix() for p in (ROOT / "tests").rglob("test_*.py")}
     targets, _ = select([
@@ -123,6 +149,7 @@ def test_vytria_dependency_selection_avoids_the_full_price_suite():
     } <= set(targets)
     assert "tests/test_app_exports.py" not in targets
     assert "tests/test_price_watch.py" not in targets
+    assert "tests/test_price_monitor.py" not in targets
     assert len(targets) < sum(path.startswith("tests/test_price") for path in inventory)
 
 

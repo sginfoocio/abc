@@ -72,6 +72,12 @@ PRICE_SOURCE_TESTS = {
         "tests/test_price_settings_ui.py",
         "tests/test_vytria_price_sync.py",
     ),
+    "price_monitor.py": (
+        "tests/test_manual_review_continuity_repro.py",
+        "tests/test_price_recovery.py",
+        "tests/test_price_review_fixes.py",
+        "tests/test_price_review_refresh.py",
+    ),
     "price_references.py": (
         "tests/test_price_references.py",
         "tests/test_price_identity_regression.py",
@@ -85,6 +91,15 @@ PRICE_SOURCE_TESTS = {
         "tests/test_price_review_refresh.py",
     ),
     "prestashop_prices.py": ("tests/test_prestashop_prices.py",),
+    "price_web.py": (
+        "tests/test_price_saved_reevaluation.py",
+        "tests/test_price_web_competitor_pages.py",
+    ),
+    "price_web_extract.py": (
+        "tests/test_price_comparator.py",
+        "tests/test_price_saved_reevaluation.py",
+        "tests/test_price_web_competitor_pages.py",
+    ),
     "scripts/smoke_price_diagnostic.py": ("tests/test_dockerfile_provider_modules.py",),
     "vytria_price_sync.py": ("tests/test_prestashop_prices.py", "tests/test_vytria_price_sync.py"),
 }
