@@ -545,8 +545,19 @@ una aprobación sustituta.
 
 La descripción de #145 se actualizó por la vía autenticada para resumir este corte,
 los EAN pendientes, la corrección y sus límites. No se sustituyó por un comentario.
-En el primer sondeo del nuevo HEAD, GitHub todavía no había registrado jobs: el
-estado era `pending` con cero checks, así que **CI/Docker aún no se acredita**.
+
+### CI/Docker de la corrección
+
+- El commit con código `578ac2525f6a2737007dcaa50454024310e940ac` pasó el run
+  [45038963466](https://github.com/sginfoocio/abc/actions/runs/45038963466):
+  job `tests` y `build-and-push` terminaron `success`. El job Docker comprobó el
+  SHA de artefacto, imports y smoke tests con red deshabilitada; por ser evento
+  `pull_request`, login/publicación de imagen y despliegue no se ejecutaron.
+- El HEAD posterior
+  `ec3fd68aceee110848837de75da2cee15a88b0ca` solo cambia este informe. Su
+  workflow automático `45039035621` seguía ejecutando tests al último sondeo;
+  no se hizo una segunda ejecución manual por documentación. No cambió el código
+  comprobado en el run 45038963466.
 
 ### Validación local
 
@@ -556,5 +567,6 @@ estado era `pending` con cero checks, así que **CI/Docker aún no se acredita**
 - `py_compile` de `price_recovery.py` y el test: pasó. Flake8 con los códigos
   seleccionados por CI (`E9,F63,F7,F82,F401,F841`) y `git diff --check`: pasaron.
 - Se omitieron las suites completas de precios, masterdata, estrés y los pilotos
-  con servicios reales; no se generó HTTP. CI y Docker del nuevo SHA quedan
-  pendientes de comprobar después de actualizar la rama de #145.
+  con servicios reales; no se generó HTTP. CI y Docker de la corrección están
+  comprobados en el commit de código indicado arriba; el commit posterior es
+  documentación únicamente.
