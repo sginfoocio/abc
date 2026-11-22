@@ -182,6 +182,71 @@ def test_11x14_primary_routes_are_scoped_candidates_not_verified_offers():
         assert evidence["current_comparable_verified"] is False
 
 
+def test_all_11x14_primary_routes_reach_the_locator_with_provenance():
+    root = Path(__file__).resolve().parents[1]
+    evidence_directory = root / "docs" / "Precios" / "100_EAN" / "busqueda_11_20261122"
+    matrix = json.loads((evidence_directory / "matriz_11x14.json").read_text(encoding="utf-8"))
+    route_index = json.loads(
+        (evidence_directory / "rutas_candidatas_primarias.json").read_text(encoding="utf-8")
+    )
+    source_pairs = {
+        (pair["ean"], pair["competitor_id"]): (pair, next(
+            route for route in pair["routes"] if route.get("url") == pair["primary_url"]
+        ))
+        for pair in matrix["pairs"]
+        if pair.get("primary_url")
+    }
+    brand_names = ("Saint Laurent", "Miu Miu", "Ray-Ban", "Tom Ford", "Cartier", "Prada")
+    products = {}
+    for row in matrix["per_model"]:
+        full_name = row["model"]
+        brand = next(name for name in brand_names if full_name.startswith(name + " "))
+        model, color = full_name[len(brand):].strip().rsplit(" ", 1)
+        products[row["ean"]] = {
+            "ean": row["ean"], "brand": brand, "model": model, "color": color,
+            "category": "All / Gafas de Sol",
+        }
+
+    assert len(route_index["routes"]) == 94
+    for route in route_index["routes"]:
+        pair, source_route = source_pairs[(route["ean"], route["competitor_id"])]
+        assert route["url"] == pair["primary_url"]
+        assert route["model"] == pair["model"]
+        assert route["source_crawl_age"] == source_route.get("source_crawl_age", "")
+        for field in (
+            "evidence", "market_route_hint", "notes", "current_comparable_verified",
+            "identity_verified_for_current_read", "market_currently_verified",
+        ):
+            assert (route.get(field) or None) == (source_route.get(field) or None)
+        plan = candidate_plan(products[route["ean"]], urlparse(route["url"]).netloc)
+        candidates = [candidate for candidate in plan.candidates if candidate.url == route["url"]]
+        assert candidates, (route["ean"], route["competitor_id"], route["url"], plan.reason)
+        candidate = candidates[0]
+        route_id = f"11x14:{route['ean']}:{route['competitor_id']}"
+        additional = json.loads(candidate.attributes.get("additional_route_evidence", "[]"))
+        represented_ids = set(candidate.evidence)
+        represented_ids.update(item["route_id"] for item in additional)
+        assert route_id in represented_ids
+        if candidate.attributes.get("route_evidence_id") == route_id:
+            route_evidence = json.loads(candidate.attributes["route_evidence"])
+        else:
+            route_evidence = next(item["evidence"] for item in additional if item["route_id"] == route_id)
+        assert route_evidence["source_crawl_age"] == route["source_crawl_age"]
+        assert candidate.state in {"pending_verification", "probable"}
+        assert not {"price", "availability", "currency", "stock"} & candidate.attributes.keys()
+        assert candidate.attributes.get("current_comparable_verified") != "true"
+        if route["ean"] == "0889652429687" and route["competitor_id"] == "visual-click-com":
+            assert plan.reason_code == "route_identity_conflict"
+            assert candidate.state == "probable" and not candidate.runnable
+            assert "ruta heredada" in candidate.reason
+            conflicts = json.loads(candidate.attributes["legacy_identity_conflicts"])
+            assert conflicts and all(
+                {"id", "url", "source", "review_date", "source_ean", "brand", "model", "color"}
+                <= conflict.keys()
+                for conflict in conflicts
+            )
+
+
 def test_11x14_pairs_are_a_subset_of_the_canonical_1400_pair_matrix():
     root = Path(__file__).resolve().parents[1]
     evidence_directory = root / "docs/Precios/100_EAN/busqueda_11_20261122"
@@ -297,8 +362,13 @@ def test_bounded_generation_and_specific_aliases(shop, product, expected):
     assert provenance["evidence"] and provenance["rule"]
     assert provenance["attributes"]["ean"] == normalize_gtin(product["ean"])
     assert provenance["attributes"]["color"] == product["color"]
-    assert provenance["review_date"] == "2026-11-04"
-    assert provenance["origin"].endswith("Evidencias_47.csv")
+    expected_review_date = "2026-11-22" if provenance["rule"] == "matrix_primary_route_11x14" else "2026-11-04"
+    assert provenance["review_date"] == expected_review_date
+    expected_source = (
+        "rutas_candidatas_primarias.json" if provenance["rule"] == "matrix_primary_route_11x14"
+        else "Evidencias_47.csv"
+    )
+    assert provenance["origin"].endswith(expected_source)
 
 
 @pytest.mark.parametrize("shop", ["bassol", "visual", "visio"])
@@ -899,7 +969,10 @@ def test_commercial_names_and_dune_opt_remain_distinct():
            "color": "VAU1O1", "category": "montura"}
     assert "/regard-mu-01xv-vau1o1" in urls(plan_for(miu, "mia"))[0]
     dune = {**PRADA, "ean": "889652429687", "brand": "Saint Laurent", "model": "SL 596 DUNE", "color": "003"}
-    assert "/dune-sl-596-003" in urls(plan_for(dune, "mia"))[0]
+    dune_plan = plan_for(dune, "mia")
+    dune_candidate = next(candidate for candidate in dune_plan.candidates if "/dune-sl-596-003" in candidate.url)
+    assert dune_candidate.state == "probable" and not dune_candidate.runnable
+    assert "mercado no resuelto" in dune_candidate.reason
     assert not plan_for({**dune, "model": "SL 596 DUNE OPT"}, "mia").runnable
     assert not plan_for({**miu, "model": "MU 01YV"}, "mia").runnable
     fausto = {**PRADA, "ean": "889214029614", "brand": "Tom Ford", "model": "FT0711", "color": "01A"}
@@ -951,7 +1024,9 @@ def test_parent_handles_and_historical_urls_are_pending_not_product_absence():
             assert any("PRADA-65ZS.html" in candidate.url and not candidate.runnable for candidate in plan.candidates)
         assert plan.reason_code == "needs_authorized_discovery"
     celine = plan_for(PRADA, "celine")
-    assert len(celine.candidates) == 1 and not celine.runnable and "variante" in celine.reason
+    assert len(celine.candidates) == 1 and celine.runnable
+    evidence = json.loads(celine.runnable[0].attributes["route_evidence"])
+    assert "seleccionar y vincular variante" in evidence["notes"]
     chloe = {**PRADA, "ean": "889652543574", "brand": "Chloe", "model": "CH0289S", "color": "003"}
     domanci = plan_for(chloe, "domanci")
     assert len(domanci.candidates) == 1 and not domanci.runnable
@@ -1198,21 +1273,33 @@ def test_legacy_tables_get_only_additive_metadata_migrations(tmp_path):
                                           "model": "CH0289S", "color": "003"}),
     ("Céline Opticien Lunetier", "https://www.celine-opticien-lunetier.com", PRADA),
 ])
-def test_nonrunnable_documentary_plan_is_audited_without_fetching_or_linking(tmp_path, name, base, product):
+def test_documentary_candidates_do_not_link_without_a_validated_page(tmp_path, name, base, product):
     site = Site(base=base)
     store, _, locator, _, cid = _env(tmp_path, site, name=name, template=None, methods=("ficha",))
     ean = normalize_gtin(product["ean"])
     _watch(store, [(ean, product["brand"], product["model"], product["color"], "")])
     locator.run([cid])
-    assert not site.calls and _urls(store, cid).empty
+    assert _urls(store, cid).empty
     with store._connect() as con:
         metadata = json.loads(con.execute(
             "SELECT metadata FROM locate_events ORDER BY id DESC LIMIT 1").fetchone()[0])
         plan = metadata["candidate_plan"]
-        assert plan["reason_code"] == "needs_authorized_discovery"
-        assert plan["candidates"] and all(candidate["state"] == "probable" for candidate in plan["candidates"])
+        if name == "Céline Opticien Lunetier":
+            assert site.calls == [
+                base + "/robots.txt",
+                base + "/products/sunglasses-prada-symbole-pr-27zs",
+            ]
+            assert plan["candidates"] and any(
+                candidate["state"] == "pending_verification" for candidate in plan["candidates"]
+            )
+        else:
+            assert not site.calls
+            assert plan["reason_code"] == "needs_authorized_discovery"
+            assert plan["candidates"] and all(candidate["state"] == "probable" for candidate in plan["candidates"])
         assert all(candidate["attributes"]["ean"] == ean for candidate in plan["candidates"])
-        assert all(candidate["evidence"] and candidate["reason"] for candidate in plan["candidates"])
+        assert all(candidate["evidence"] for candidate in plan["candidates"])
+        if name != "Céline Opticien Lunetier":
+            assert all(candidate["reason"] for candidate in plan["candidates"])
 
 
 def test_batch_ui_shows_local_candidates_without_preparing_jobs_or_http(tmp_path, monkeypatch):

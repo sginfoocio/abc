@@ -13,7 +13,7 @@
   "limitations": [
     "Documentary route hints only; no current offers, identity, availability, market or VAT are verified.",
     "Exactly one primary route is retained per localized pair; documentary candidates, catalog clues, rejected redirects and alternate URLs are not runnable hints.",
-    "No prices, currencies, availability values or own-price fields are copied into this runtime hint index."
+    "No structured price, currency, availability or own-price fields are copied. Source notes may quote historical contradictions; they are documentary only and never populate offers."
   ],
   "competitors": [
     {
@@ -87,7 +87,8 @@
       "notes": "El código publicado se normaliza con cero inicial; el informe previo que señala otro EAN debe contrastarse con la captura actual.",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": "3 months ago"
     },
     {
       "ean": "0843023181451",
@@ -102,7 +103,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0843023181451",
@@ -117,7 +119,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0843023181451",
@@ -132,7 +135,8 @@
       "notes": "Ficha antigua indexada con referencia CT0550S 001. Resolver destino actual sin inferir precio ES.",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "8056597886932",
@@ -147,7 +151,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "8056597886932",
@@ -162,7 +167,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "8056597886932",
@@ -177,7 +183,8 @@
       "notes": "Referencia y EAN explícitos.",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": "today"
     },
     {
       "ean": "8056597886932",
@@ -192,7 +199,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "8056597886932",
@@ -207,7 +215,8 @@
       "notes": "El sufijo C53/C54/C58 es presentación de calibre del sitio, no parte del modelo. Vincular color con datos técnicos.",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "8056597886932",
@@ -222,7 +231,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "8056597886932",
@@ -237,7 +247,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "8056597886932",
@@ -252,7 +263,8 @@
       "notes": "EAN exacto publicado; BARCODE interno diferente no debe tratarse como GTIN contradictorio sin conocer su semántica.",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "8056597886932",
@@ -267,7 +279,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "8056597886932",
@@ -282,7 +295,8 @@
       "notes": "Página compartida de modelo con el color buscado en el resultado; seleccionar y vincular variante antes de aceptar precio o stock.",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "8056262407691",
@@ -297,7 +311,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "8056262407691",
@@ -312,7 +327,8 @@
       "notes": "No aplicar promociones condicionadas a lentes adicionales.",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": "last month"
     },
     {
       "ean": "8056262407691",
@@ -327,7 +343,8 @@
       "notes": "Mantener A06S completo; la letra A forma parte del modelo.",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": "last month"
     },
     {
       "ean": "8056262407691",
@@ -342,7 +359,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "8056262407691",
@@ -357,7 +375,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "8056262407691",
@@ -372,7 +391,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "8056262407691",
@@ -387,7 +407,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "8056262407691",
@@ -402,7 +423,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "8056262407691",
@@ -417,7 +439,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "8056262407691",
@@ -432,7 +455,8 @@
       "notes": "Página compartida de modelo con el color buscado en el resultado; seleccionar y vincular variante antes de aceptar precio o stock.",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "8056597875349",
@@ -447,7 +471,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "8056597875349",
@@ -462,7 +487,8 @@
       "notes": "Referencia y EAN explícitos.",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": "last month"
     },
     {
       "ean": "8056597875349",
@@ -477,7 +503,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "8056597875349",
@@ -492,7 +519,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "8056597875349",
@@ -507,7 +535,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "8056597875349",
@@ -522,7 +551,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "8056597875349",
@@ -537,7 +567,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "8056597875349",
@@ -552,7 +583,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "8056597875349",
@@ -567,7 +599,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "8056597875349",
@@ -582,7 +615,8 @@
       "notes": "Página compartida de modelo con el color buscado en el resultado; seleccionar y vincular variante antes de aceptar precio o stock.",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0805289126591",
@@ -597,7 +631,8 @@
       "notes": "Enlace extraído de productos relacionados de la ficha 901; 901 es otra variante y su precio no se acepta.",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0805289126591",
@@ -612,7 +647,8 @@
       "notes": "Lista EAN por calibres: incluye 805289126591. Precio común admisible con identidad modelo/color, stock individual separado; no asignar todos los EAN al radio activo.",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0805289126591",
@@ -627,7 +663,8 @@
       "notes": "90158 corresponde al color 901/58; no confundir con calibre 58 ni con color 901.",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": "4 days ago"
     },
     {
       "ean": "0805289126591",
@@ -642,7 +679,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0805289126591",
@@ -657,7 +695,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0805289126591",
@@ -672,7 +711,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0805289126591",
@@ -687,7 +727,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0805289126591",
@@ -702,7 +743,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0805289126591",
@@ -717,7 +759,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0805289126591",
@@ -732,7 +775,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0805289126591",
@@ -747,7 +791,8 @@
       "notes": "Página compartida de modelo con el color buscado en el resultado; seleccionar y vincular variante antes de aceptar precio o stock.",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0889652429687",
@@ -762,7 +807,8 @@
       "notes": "Ficha de sol; no usar la ficha DUNE OPT para este par.",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0889652429687",
@@ -777,7 +823,8 @@
       "notes": "Ficha ES de modelo-color; EAN no localizado en texto recuperado. DUNE y DUNE OPT son referencias distintas.",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0889652429687",
@@ -792,7 +839,8 @@
       "notes": "Product Id 1971609. No equiparar entrega diferida con stock inmediato.",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": "last month"
     },
     {
       "ean": "0889652429687",
@@ -807,7 +855,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0889652429687",
@@ -822,7 +871,8 @@
       "notes": "Página muestra España/EUR; falta validar vínculo EAN-oferta-stock.",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0889652429687",
@@ -837,7 +887,8 @@
       "notes": "Índice español del modelo de sol DUNE 003. No confundir con el ID 5010623020728320 de DUNE OPT.",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0889652429687",
@@ -852,7 +903,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0889652429687",
@@ -867,7 +919,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0889652429687",
@@ -882,7 +935,8 @@
       "notes": "Página compartida de modelo con el color buscado en el resultado; seleccionar y vincular variante antes de aceptar precio o stock.",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0889214625984",
@@ -897,7 +951,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0889214625984",
@@ -912,7 +967,8 @@
       "notes": "Product Id 2282520. Chloe-02 es nombre comercial; FT1310 es modelo.",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": "2 months ago"
     },
     {
       "ean": "0889214625984",
@@ -927,7 +983,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0889214625984",
@@ -942,7 +999,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0889214625984",
@@ -957,7 +1015,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0889214625984",
@@ -972,7 +1031,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0889214625984",
@@ -987,7 +1047,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0889214625984",
@@ -1002,7 +1063,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0889214625984",
@@ -1017,7 +1079,8 @@
       "notes": "Color 01A figura en índice neerlandés; falta contexto España y variante.",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0889214669742",
@@ -1032,7 +1095,8 @@
       "notes": "Resultado indexado en RON, pese a URL española: revalidar contexto EUR; no convertir ni asumir precio español.",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": "last month"
     },
     {
       "ean": "0889214669742",
@@ -1047,7 +1111,8 @@
       "notes": "Product Id 2431458. No incorporar como disponible.",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": "3 months ago"
     },
     {
       "ean": "0889214669742",
@@ -1062,7 +1127,8 @@
       "notes": "Página inglesa dirigida a España según resultado indexado. Identidad por modelo-color; no acreditar EAN. Ruta raíz española no accesible con la herramienta.",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": "2 months ago"
     },
     {
       "ean": "0889214669742",
@@ -1077,7 +1143,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0889214669742",
@@ -1092,7 +1159,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0889214669742",
@@ -1107,7 +1175,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0889214669742",
@@ -1122,7 +1191,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0889214669742",
@@ -1137,7 +1207,8 @@
       "notes": "Página compartida de modelo con el color buscado en el resultado; seleccionar y vincular variante antes de aceptar precio o stock.",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0889214042422",
@@ -1152,7 +1223,8 @@
       "notes": "GTIN exacto normalizado; precios/descuentos inconsistentes en texto: 123,04 EUR, base 310,00, reducción 147,00 y porcentaje 47,42. No escoger importe ni reconstruir sin variante/contexto.",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": "last week"
     },
     {
       "ean": "0889214042422",
@@ -1167,7 +1239,8 @@
       "notes": "Página recuperada; código de barras no localizado en texto. Categoría española indexada ayer muestra 232,50 EUR, no acreditar precio de variante con categoría.",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": "2 weeks ago"
     },
     {
       "ean": "0889214042422",
@@ -1182,7 +1255,8 @@
       "notes": "FT5634-B/V y código 889214042422 publicados juntos; alias acotado por fuente y GTIN, conservar B.",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0889214042422",
@@ -1197,7 +1271,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0889214042422",
@@ -1212,7 +1287,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0889214042422",
@@ -1227,7 +1303,8 @@
       "notes": "El sufijo C53/C54/C58 es presentación de calibre del sitio, no parte del modelo. Vincular color con datos técnicos.",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0889214042422",
@@ -1242,7 +1319,8 @@
       "notes": "Página compartida de modelo con el color buscado en el resultado; seleccionar y vincular variante antes de aceptar precio o stock.",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0889214586650",
@@ -1257,7 +1335,8 @@
       "notes": "IVA incluido, calibre 58; conservar sufijo B; no aplicar descuento adicional condicionado a graduación.",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": "2 months ago"
     },
     {
       "ean": "0889214586650",
@@ -1272,7 +1351,8 @@
       "notes": "FT6058-B/V y 889214586650 publicados juntos; alias acotado por evidencia.",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0889214586650",
@@ -1287,7 +1367,8 @@
       "notes": "EAN normalizable exacto; Product Id 2146764.",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0889214586650",
@@ -1302,7 +1383,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0889214586650",
@@ -1317,7 +1399,8 @@
       "notes": "El sufijo C53/C54/C58 es presentación de calibre del sitio, no parte del modelo. Vincular color con datos técnicos.",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0889214586650",
@@ -1332,7 +1415,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0889214586650",
@@ -1347,7 +1431,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0889214599834",
@@ -1362,7 +1447,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0889214599834",
@@ -1377,7 +1463,8 @@
       "notes": "Solo resultado de búsqueda; apertura falló por caché. Product Id 2267203. No acredita stock ni precio actual.",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": "4 months ago"
     },
     {
       "ean": "0889214599834",
@@ -1392,7 +1479,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0889214599834",
@@ -1407,7 +1495,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0889214599834",
@@ -1422,7 +1511,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0889214599834",
@@ -1437,7 +1527,8 @@
       "notes": "",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     },
     {
       "ean": "0889214599834",
@@ -1452,7 +1543,8 @@
       "notes": "Impuestos incluidos en índice. Apertura falló por caché. No inferir stock por botón.",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": "last month"
     },
     {
       "ean": "0889214599834",
@@ -1467,7 +1559,8 @@
       "notes": "Alternativa indexada en español; falta acreditar país ES y selección de variante/código con captura gobernada.",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": "last month"
     },
     {
       "ean": "0889214599834",
@@ -1482,7 +1575,8 @@
       "notes": "Página compartida de modelo con el color buscado en el resultado; seleccionar y vincular variante antes de aceptar precio o stock.",
       "current_comparable_verified": false,
       "identity_verified_for_current_read": false,
-      "market_currently_verified": false
+      "market_currently_verified": false,
+      "source_crawl_age": ""
     }
   ],
   "excluded_routes": [

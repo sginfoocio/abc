@@ -590,6 +590,24 @@ competidores:
 (`Otticait Eyewear`), pero ambos registros configuran el host `otticait.com`;
 el test valida el dominio y que los 154 pares sigan dentro de la matriz de 1.400.
 
+La revisión del recorrido encontró que algunas rutas primarias no llegaban al
+plan del localizador cuando ya existía una candidata histórica para el mismo
+par. Ahora se conserva cada URL primaria de los 94 pares con su procedencia; las
+rutas previas sustituidas quedan como alternativas con origen y fecha, y una
+contradicción de identidad heredada mantiene la nueva ruta en `probable` y no
+consultable hasta revisión. La ruta de Visual Click para SL 596 DUNE conserva
+el conflicto legado con URL, fuente y fecha; no se considera resuelta ni oferta.
+Las páginas compartidas con variantes siguen necesitando vincular la variante
+antes de aceptar precio o disponibilidad.
+
+El índice runtime conserva ahora `source_crawl_age` literalmente desde cada
+registro fuente. Solo 17 de las 94 rutas traen edad en la matriz; las otras 77
+siguen sin fecha/antigüedad y no se les asigna una. Esa edad relativa es
+procedencia histórica, no una fecha de captura ni vigencia actual. Una regresión
+offline comprueba las 94 URL primarias contra el par y registro exactos de la
+matriz, que su identidad/estado/notas coincidan, y que la edad llegue al
+localizador sin convertir candidatas en ofertas.
+
 La matriz documenta **94 pares con ruta primaria localizada, 12 con candidata
 solo documental, 2 con pista de catálogo, 1 redirección a categoría descartada
 y 45 sin ruta en ese índice**. Una ruta localizada no acredita una página

@@ -562,8 +562,12 @@ def _route_11_index() -> tuple[dict, dict, dict]:
         parsed = urlparse(url)
         shop = shop_by_id.get(route.get("competitor_id"))
         if (ean != route.get("ean") or not shop or parsed.scheme != "https"
-                or DOMAINS.get((parsed.hostname or "").lower().removeprefix("www.")) != shop):
-            raise ValueError(f"Ruta fuera de identidad/competidor en {ROUTE_11_EVIDENCE_SOURCE}: {url}")
+                or DOMAINS.get((parsed.hostname or "").lower().removeprefix("www.")) != shop
+                or route.get("evidence") not in {
+                    "indexed_legacy_foreign", "indexed_product", "indexed_variant_page", "retrieved_product"
+                }
+                or not isinstance(route.get("source_crawl_age", ""), str)):
+            raise ValueError(f"Ruta fuera del contrato documental o del dominio en {ROUTE_11_EVIDENCE_SOURCE}: {url}")
         if any(route.get(name) is not False for name in (
                 "current_comparable_verified", "identity_verified_for_current_read", "market_currently_verified")):
             raise ValueError(f"Una ruta documental figura como verificada en {ROUTE_11_EVIDENCE_SOURCE}: {url}")
@@ -619,6 +623,7 @@ def _route_11_candidate(product: dict, shop: str, attributes: dict) -> tuple[Url
         "evidence": route.get("evidence", ""),
         "source_ref": route.get("source_ref", ""),
         "source_crawl": route.get("source_crawl", ""),
+        "source_crawl_age": route.get("source_crawl_age", ""),
         "market_route_hint": market_hint,
         "notes": route.get("notes", ""),
         "source_date": ROUTE_11_EVIDENCE_DATE,
@@ -816,6 +821,83 @@ def _same_documented_page(left: str, right: str) -> bool:
     )
 
 
+def _retain_matrix_candidate(
+    candidates: dict[str, UrlCandidate],
+    matrix_candidate: UrlCandidate | None,
+    *,
+    replace_market_blocked: bool,
+    identity_conflicts: list[dict[str, str]],
+) -> dict[str, UrlCandidate]:
+    if matrix_candidate is None:
+        return candidates
+    if identity_conflicts:
+        matrix_candidate.state = "probable"
+        matrix_candidate.attributes["legacy_identity_conflicts"] = json.dumps(
+            identity_conflicts, ensure_ascii=False, sort_keys=True,
+        )
+        matrix_candidate.reason = "; ".join(dict.fromkeys(
+            [
+                matrix_candidate.reason,
+                *(
+                    f"La ruta heredada {conflict['id']} contradice marca, modelo o color; "
+                    f"requiere revisión antes de consultarla ({conflict['url']}; "
+                    f"fuente {conflict['source']}; revisión {conflict['review_date']})."
+                    for conflict in identity_conflicts
+                ),
+            ]
+        ))
+
+    same_url = next(
+        (candidate for candidate in candidates.values()
+         if _same_documented_page(candidate.url, matrix_candidate.url)),
+        None,
+    )
+    if same_url and matrix_candidate.state == "probable":
+        additional = json.loads(same_url.attributes.get("additional_route_evidence", "[]"))
+        route_id = matrix_candidate.attributes["route_evidence_id"]
+        if not any(item.get("route_id") == route_id for item in additional):
+            additional.append({
+                "route_id": route_id,
+                "source": matrix_candidate.attributes["route_evidence_source"],
+                "url": matrix_candidate.attributes["route_evidence_url"],
+                "evidence": json.loads(matrix_candidate.attributes["route_evidence"]),
+            })
+        same_url.attributes["additional_route_evidence"] = json.dumps(
+            additional, ensure_ascii=False, sort_keys=True,
+        )
+        same_url.evidence = list(dict.fromkeys([*same_url.evidence, *matrix_candidate.evidence]))
+        same_url.state = "probable"
+        same_url.reason = "; ".join(filter(None, dict.fromkeys(
+            [same_url.reason, matrix_candidate.reason]
+        )))
+        return candidates
+
+    if same_url or not candidates or (
+        matrix_candidate.state == "pending_verification" and replace_market_blocked
+    ):
+        if candidates:
+            matrix_candidate.attributes["alternate_documented_routes"] = json.dumps(
+                [
+                    {
+                        "url": candidate.url,
+                        "evidence": candidate.evidence,
+                        "reason": candidate.reason,
+                        "origin": candidate.origin,
+                        "review_date": candidate.review_date,
+                        "review_base": candidate.review_base,
+                        "route_evidence": candidate.attributes.get("route_evidence", ""),
+                    }
+                    for candidate in candidates.values()
+                ],
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        return {matrix_candidate.url: matrix_candidate}
+
+    candidates[matrix_candidate.url] = matrix_candidate
+    return candidates
+
+
 def _supplied_pattern_plan(product: dict, shop: str, category: str, attributes: dict) -> CandidatePlan:
     """User-supplied route hypotheses; page identity and access remain governed by the reader."""
     if shop != "domanci":
@@ -953,6 +1035,7 @@ def _candidate_plan(product: dict, domain: str) -> CandidatePlan:
     candidates: dict[str, UrlCandidate] = {}
     matrix_candidate, matrix_conflict = _route_11_candidate(product, shop, attributes)
     has_exact_legacy_route = False
+    legacy_route_conflicts: list[dict[str, str]] = []
     for example in examples:
         if example.source_ean and example.source_ean != ean:
             continue
@@ -975,6 +1058,20 @@ def _candidate_plan(product: dict, domain: str) -> CandidatePlan:
                 )
                 same_model = same_model or exact_ean_model_alias
             if key(example.brand) != brand or not same_model or key(example.color) != color:
+                if matrix_candidate:
+                    legacy_route_conflicts.append(
+                        {
+                            "id": example.id,
+                            "url": example.url,
+                            "source": example.source,
+                            "review_date": example.review_date,
+                            "source_ean": example.source_ean,
+                            "brand": example.brand,
+                            "model": example.model,
+                            "color": example.color,
+                        }
+                    )
+                    continue
                 return CandidatePlan(
                     reason_code="route_identity_conflict",
                     reason=(f"La ruta documental asociada al EAN {ean} contradice marca, modelo o color "
@@ -1099,17 +1196,12 @@ def _candidate_plan(product: dict, domain: str) -> CandidatePlan:
             for candidate in candidates.values()
         )
     )
-    if matrix_candidate and (not candidates or matrix_can_replace_market_blocked):
-        if candidates:
-            matrix_candidate.attributes["alternate_documented_routes"] = json.dumps(
-                [
-                    {"url": candidate.url, "evidence": candidate.evidence, "reason": candidate.reason}
-                    for candidate in candidates.values()
-                ],
-                ensure_ascii=False,
-                sort_keys=True,
-            )
-        candidates = {matrix_candidate.url: matrix_candidate}
+    candidates = _retain_matrix_candidate(
+        candidates,
+        matrix_candidate,
+        replace_market_blocked=matrix_can_replace_market_blocked,
+        identity_conflicts=legacy_route_conflicts,
+    )
 
     if candidates:
         foreign_route_only = all(
@@ -1132,10 +1224,14 @@ def _candidate_plan(product: dict, domain: str) -> CandidatePlan:
         )
     else:
         foreign_route_only = False
-    if candidates and not foreign_route_only:
+    if candidates and (not foreign_route_only or legacy_route_conflicts):
         needs_review = any(not candidate.runnable for candidate in candidates.values())
+        reason_code = (
+            "route_identity_conflict" if legacy_route_conflicts
+            else "needs_authorized_discovery" if needs_review else ""
+        )
         return CandidatePlan(list(candidates.values()),
-                             "needs_authorized_discovery" if needs_review else "",
+                             reason_code,
                              "; ".join(candidate.reason for candidate in candidates.values() if candidate.reason))
 
     if shop == "domanci" and normalize_caliber(product.get("caliber", "")):
