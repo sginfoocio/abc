@@ -1,7 +1,7 @@
 """Offline regressions for accepted review reads and queue fairness."""
 from dataclasses import asdict, replace
 from concurrent.futures import ThreadPoolExecutor
-from datetime import timedelta
+from datetime import datetime, timedelta
 from io import BytesIO
 import json
 from threading import Event
@@ -15,7 +15,7 @@ from price_monitor import MonitorReport, PriceMonitor
 from price_comparator import PriceComparatorStore
 from price_recovery import (_corrected_error_rule, _known_recovery_alias_reason, apply_manual_reviews,
                             preview_manual_reviews)
-from price_web import WebPriceSearch
+from price_web import WebPriceSearch, comparability_gap
 from price_web_extract import ProductPage
 from tests.test_price_locator import Crash, _gtin, _watch
 from tests.test_price_review_refresh import _candidate, _expected, _review_env
@@ -79,6 +79,133 @@ def test_accepted_review_uses_active_continuity_after_pilot_expiry(expanded_revi
     assert service.report()["status"] == "expired"
 
 
+def test_done_manual_read_reconciles_review_pair_without_promoting_unknown_stock(expanded_review):
+    service, store, clock, cid, ean, url, site, monitor, task = expanded_review
+    continuity_id = service.report()["id"]
+    with store._connect() as con, con:
+        con.execute("""UPDATE price_continuity_pairs SET state='review',checked_at=?,next_check_at=NULL,
+            defer_reason='Piloto desactivado o con ejecución pendiente: no se inicia otra'
+            WHERE continuity_id=? AND competitor_id=? AND ean=?""",
+                    ((clock() - timedelta(days=1)).isoformat(), continuity_id, cid, ean))
+
+    result = monitor.review_refresh_tick()
+    assert result["processed"] == 1
+    calls_after_read = len(site.calls)
+    with store._connect() as con, con:
+        job = con.execute("SELECT id,last_offer_id,sample,valid_until FROM monitor_jobs "
+                          "WHERE competitor_id=? AND ean=?", (cid, ean)).fetchone()
+        sample = json.loads(job["sample"])
+        sample["page"]["availability"] = "unknown"
+        con.execute("UPDATE monitor_jobs SET eligible=0,detail='unknown',sample=? WHERE id=?",
+                    (json.dumps(sample), job["id"]))
+        if job["last_offer_id"]:
+            con.execute("UPDATE offers SET availability='unknown' WHERE id=?", (job["last_offer_id"],))
+        pair = con.execute("""SELECT id,state,checked_at FROM price_continuity_pairs
+            WHERE continuity_id=? AND competitor_id=? AND ean=?""",
+                           (continuity_id, cid, ean)).fetchone()
+        refresh = con.execute("SELECT status,finished_at FROM manual_review_refreshes WHERE id=?",
+                              (task,)).fetchone()
+
+    preview = preview_manual_reviews(store.database_path, request_ids=[task], now=clock())
+    item = preview["requests"][0]
+    assert item["action"] == "reconcile", item
+    assert item["continuity_pair_state"] == "review"
+    assert not item["monitor_eligible"]
+    assert "unknown" in item["reason"].lower()
+    assert item["evidence"]["receipt_ids"]
+    assert pair["state"] == "review"
+    assert refresh["status"] == "done"
+
+    applied = apply_manual_reviews(
+        store.database_path, request_ids=[task], actor="operator", note="Reconciliar lectura vigente",
+        build_commit="f" * 40, approved=True, now=clock())
+    assert applied["changed"] == [task]
+    with store._connect() as con:
+        reconciled = con.execute("""SELECT state,checked_at,next_check_at,defer_reason
+            FROM price_continuity_pairs WHERE id=?""", (pair["id"],)).fetchone()
+        check = con.execute("""SELECT state,category,requests,http_commercial,next_check_at,defer_reason,receipt
+            FROM price_continuity_checks WHERE continuity_id=? AND competitor_id=? AND ean=?
+            ORDER BY id DESC LIMIT 1""", (continuity_id, cid, ean)).fetchone()
+        current_refresh = con.execute("SELECT status,finished_at FROM manual_review_refreshes WHERE id=?",
+                                      (task,)).fetchone()
+        current_job = con.execute("SELECT eligible,last_offer_id FROM monitor_jobs WHERE id=?",
+                                  (job["id"],)).fetchone()
+        pair_audit = con.execute("""SELECT previous,current FROM access_audit
+            WHERE scope='price_continuity_pair' AND scope_id=?
+              AND action='reconcile_manual_review_sample'""", (str(pair["id"]),)).fetchone()
+        check_count = con.execute("""SELECT COUNT(*) FROM price_continuity_checks
+            WHERE continuity_id=? AND competitor_id=? AND ean=? AND category='reused'""",
+                                  (continuity_id, cid, ean)).fetchone()[0]
+        availability = (con.execute("SELECT availability FROM offers WHERE id=?",
+                                    (current_job["last_offer_id"],)).fetchone()[0]
+                        if current_job["last_offer_id"] else None)
+    receipt = json.loads(check["receipt"])
+    assert reconciled["state"] == check["state"] == "pending"
+    valid_until = datetime.fromisoformat(job["valid_until"])
+    assert datetime.fromisoformat(reconciled["next_check_at"]) == valid_until
+    assert datetime.fromisoformat(check["next_check_at"]) == valid_until
+    assert "unknown" in reconciled["defer_reason"].lower()
+    assert check["category"] == "reused" and check["requests"] == check["http_commercial"] == 0
+    assert receipt["source"] == "manual_review_refresh"
+    assert receipt["request_id"] == task and receipt["sample_digest"] == item["evidence"]["sample_digest"]
+    assert receipt["receipt_ids"] == item["evidence"]["receipt_ids"]
+    assert check_count == 1
+    assert pair_audit
+    assert json.loads(pair_audit["previous"])["state"] == "review"
+    assert json.loads(pair_audit["current"])["check_id"] > 0
+    assert current_refresh["status"] == refresh["status"]
+    assert current_refresh["finished_at"] == refresh["finished_at"]
+    assert not current_job["eligible"] and availability in (None, "unknown")
+    assert len(site.calls) == calls_after_read
+
+    repeated = preview_manual_reviews(store.database_path, request_ids=[task], now=clock())["requests"][0]
+    assert repeated["category"] == "already_resolved", repeated
+    assert apply_manual_reviews(
+        store.database_path, request_ids=[task], actor="operator", note="Repetición idempotente",
+        build_commit="f" * 40, approved=True, now=clock())["changed"] == []
+    assert len(site.calls) == calls_after_read
+    with store._connect() as con:
+        assert con.execute("""SELECT COUNT(*) FROM access_audit
+            WHERE scope='price_continuity_pair' AND scope_id=?
+              AND action='reconcile_manual_review_sample'""", (str(pair["id"]),)).fetchone()[0] == 1
+    clock.advance(seconds=5)
+    with store._connect() as con, con:
+        con.execute("""UPDATE price_continuity_pairs SET state='review',checked_at=?,defer_reason='Check posterior'
+            WHERE id=?""", (clock().isoformat(), pair["id"]))
+    stale = preview_manual_reviews(store.database_path, request_ids=[task], now=clock())["requests"][0]
+    assert stale["category"] == "excluded"
+    assert stale["action"] != "reconcile"
+    assert "no es anterior" in stale["reason"].lower()
+
+
+def test_done_manual_read_without_offer_validity_cannot_reconcile_review_pair(expanded_review):
+    service, store, clock, cid, ean, url, site, monitor, task = expanded_review
+    continuity_id = service.report()["id"]
+    with store._connect() as con, con:
+        con.execute("""UPDATE price_continuity_pairs SET state='review',checked_at=?,next_check_at=NULL
+            WHERE continuity_id=? AND competitor_id=? AND ean=?""",
+                    ((clock() - timedelta(days=1)).isoformat(), continuity_id, cid, ean))
+
+    assert monitor.review_refresh_tick()["processed"] == 1
+    with store._connect() as con, con:
+        job = con.execute("SELECT id,sample FROM monitor_jobs WHERE competitor_id=? AND ean=?",
+                          (cid, ean)).fetchone()
+        sample = json.loads(job["sample"])
+        sample["page"]["price"] = None
+        config = con.execute("""SELECT w.*,c.name,c.url AS site_url,c.domain,c.market,c.currency
+            FROM competitor_web_config w JOIN competitors c ON c.id=w.competitor_id
+            WHERE w.competitor_id=?""", (cid,)).fetchone()
+        sample["gap"] = comparability_gap(ProductPage(**sample["page"]), dict(config))
+        con.execute("""UPDATE monitor_jobs SET sample=?,valid_until=NULL,last_ok_at=NULL,
+            eligible=0,detail=? WHERE id=?""",
+                    (json.dumps(sample), sample["gap"], job["id"]))
+
+    item = preview_manual_reviews(store.database_path, request_ids=[task], now=clock())["requests"][0]
+    assert item["action"] != "reconcile"
+    assert item["category"] == "excluded"
+    assert "vigencia futura" in item["reason"].lower()
+
+
 def test_pending_legacy_request_reuses_original_locate_event_approval(expanded_review):
     _, store, clock, cid, ean, url, site, monitor, task = expanded_review
     published_ean = _gtin("123456789012")
@@ -121,6 +248,14 @@ def test_pending_legacy_request_reuses_original_locate_event_approval(expanded_r
     assert result["changed"] == [task]
     assert monitor.review_refresh_tick()["processed"] == 1
     assert site.calls.count(url) == before_calls + 1
+    reconciled = apply_manual_reviews(
+        store.database_path,
+        request_ids=[task],
+        actor="operator",
+        note="Reconciliar la lectura con continuidad",
+        build_commit="f" * 40, approved=True, now=clock())
+    assert reconciled["changed"] == [task]
+    assert reconciled["reconciled_pairs"]
     assert apply_manual_reviews(
         store.database_path,
         request_ids=[task],

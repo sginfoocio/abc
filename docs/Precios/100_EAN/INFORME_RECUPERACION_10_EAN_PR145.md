@@ -1,4 +1,4 @@
-# Informe de recuperación de diez EAN — PR #145
+# Informe de recuperación y cobertura de 100 EAN — PR #145
 
 ## Alcance y corte de evidencia
 
@@ -384,3 +384,177 @@ sustituye ninguno de los diez.
   la imagen por ser un evento de PR. El informe actualiza documentación
   únicamente, por lo que no se repitió CI manualmente. PR #145 sigue abierta/en
   borrador, sin merge ni despliegue.
+
+## Reconciliación de cobertura y recuperación — 2026-11-22 15:22 UTC
+
+### Corte actual y evolución conocida
+
+Instantánea de solo lectura obtenida desde el entorno local el **2026-11-22
+15:22:03 UTC** (heartbeat `15:21:58Z`). El manifiesto congelado confirma **100
+EAN × 14 competidores = 1.400 pares**, 100 productos vigilados, 14 competidores
+activos y continuidad `id=1` activa, sin pausa, parada ni error. Los pares están
+en `792 pending`, `162 restricted` y `446 review`; la próxima sincronización
+figura para `23:27:27Z`.
+
+En el mismo corte y con los mismos 1.400 pares, el dashboard y el monitor cuentan
+**89/100 EAN y 181 pares comparables**, y sus conjuntos exactos coinciden (0 EAN
+solo en dashboard y 0 solo en monitor). Es una reconciliación de la diferencia
+actual, no una prueba retrospectiva de que las métricas históricas usaran el mismo
+criterio. El corte anterior del **22/11 12:24 UTC** registraba dashboard 73/100 y
+monitor 70/100: no hay allí una exportación de ambos conjuntos que permita
+atribuir los tres EAN. La igualdad actual no explica retroactivamente esa
+diferencia histórica.
+
+Se conserva el **93/100 comunicado por Rubén** como referencia, pero no se halló
+una instantánea fechada que incluya el conjunto de EAN, las ofertas, sus fechas
+de lectura/vencimiento y los IDs de solicitud, aprobación, trabajo y recibo. Por
+ello no se inventa una lista de entradas/salidas desde 93 ni se equipara ese corte
+con el de 10:30 UTC. Entre el corte documentado de 10:30 y esta instantánea sí se
+pueden identificar dos cambios concretos, de efecto neto cero: `0805289126577`
+entra por la oferta Optical H #655, y `0889652429687` sale cuando Edel #733 vence
+(la muestra posterior #792 tiene disponibilidad `unknown`). Estos dos casos no
+fechan ni reconstruyen el corte 93.
+
+La cifra actual es la **métrica operativa** de dashboard/monitor, no una auditoría
+manual de todas las ofertas. En particular, ambos incluyen `0805289126577` por
+la oferta #655 (109,85 EUR, EAN publicado exacto, variante `57108062601561` y
+disponibilidad `available`); su muestra/recepción tiene `page.market` y
+`market_source` vacíos aunque la oferta registrada indique ES. Hasta reconciliar
+esa contradicción, no se certifica independientemente el contexto España para
+esa comparación.
+
+### Competidores comparables por EAN
+
+Los valores siguientes son el número de pares que el dashboard y monitor
+coincidentes contaron en esa instantánea. `0` significa que no hay comparación
+operativa vigente según esos criterios; `located` en la tabla de pendientes más
+abajo solo describe el inventario local de rutas, no disponibilidad actual ni
+búsqueda en vivo. En cada fila se indica el número de competidores comparables,
+no el número de URLs candidatas.
+
+| EAN | N | EAN | N | EAN | N | EAN | N |
+|---|---:|---|---:|---|---:|---|---:|
+| `0805289126577` | 1 | `0805289126584` | 2 | `0805289126591` | 0 | `0843023181451` | 0 |
+| `0889214029614` | 2 | `0889214042422` | 0 | `0889214095985` | 1 | `0889214257314` | 1 |
+| `0889214281791` | 3 | `0889214319371` | 1 | `0889214402530` | 6 | `0889214402547` | 1 |
+| `0889214403315` | 1 | `0889214403407` | 1 | `0889214519788` | 1 | `0889214520418` | 2 |
+| `0889214558619` | 1 | `0889214558626` | 1 | `0889214558633` | 1 | `0889214586650` | 0 |
+| `0889214599834` | 0 | `0889214602701` | 1 | `0889214602718` | 2 | `0889214625595` | 2 |
+| `0889214625601` | 1 | `0889214625625` | 2 | `0889214625984` | 0 | `0889214625991` | 1 |
+| `0889214635310` | 1 | `0889214642387` | 1 | `0889214643322` | 2 | `0889214669742` | 0 |
+| `0889214684080` | 2 | `0889214684097` | 2 | `0889214685209` | 2 | `0889214685216` | 1 |
+| `0889214686305` | 2 | `0889214686374` | 1 | `0889652359700` | 2 | `0889652429687` | 0 |
+| `0889652429717` | 1 | `0889652468983` | 1 | `0889652494821` | 2 | `0889652494838` | 2 |
+| `0889652498751` | 1 | `0889652498768` | 2 | `0889652498782` | 1 | `0889652543574` | 1 |
+| `0889652630922` | 2 | `0889652637075` | 3 | `0889652650838` | 2 | `0889652651774` | 1 |
+| `0889652675602` | 1 | `8056262010730` | 1 | `8056262087244` | 3 | `8056262142585` | 1 |
+| `8056262145609` | 2 | `8056262145708` | 2 | `8056262268902` | 1 | `8056262349915` | 4 |
+| `8056262397619` | 4 | `8056262397718` | 5 | `8056262397824` | 3 | `8056262398043` | 2 |
+| `8056262407660` | 3 | `8056262407691` | 0 | `8056262410929` | 3 | `8056262412336` | 2 |
+| `8056262412367` | 3 | `8056262413210` | 2 | `8056262504314` | 5 | `8056262510421` | 2 |
+| `8056262543429` | 2 | `8056262577486` | 1 | `8056262577493` | 2 | `8056262580899` | 1 |
+| `8056262600078` | 1 | `8056262665237` | 3 | `8056262665244` | 3 | `8056262833902` | 1 |
+| `8056266001833` | 1 | `8056597418478` | 2 | `8056597435581` | 1 | `8056597437523` | 4 |
+| `8056597669016` | 3 | `8056597669023` | 3 | `8056597669047` | 2 | `8056597671927` | 2 |
+| `8056597684446` | 1 | `8056597875219` | 4 | `8056597875226` | 2 | `8056597875349` | 0 |
+| `8056597877329` | 2 | `8056597886918` | 4 | `8056597886932` | 0 | `8056597886956` | 3 |
+| `8056597981361` | 4 | `8056597989060` | 4 | `8056597989275` | 3 | `8056597989299` | 3 |
+
+Distribución: 11 EAN con 0 competidores, 35 con 1, 30 con 2, 14 con 3, 7 con 4,
+2 con 5 y 1 con 6; suma 181 pares.
+
+### EAN sin comparación vigente: rutas revisadas y siguiente paso
+
+Se inspeccionó el inventario local de los **14 slots de competidor para cada
+EAN**. `URLs localizadas` es el número de fichas/rutas registradas en ese
+inventario; las filas sin resultado no prueban ausencia de producto. No se lanzó
+una búsqueda manual en los 14 sitios ni HTTP nuevo en esta comprobación. Las
+capturas `available` antiguas y los resultados `unknown` se mantienen separados
+de las ofertas comparables actuales.
+
+| EAN / URLs localizadas | Fuentes, URL y último resultado conservado | Bloqueo actual | Siguiente acción concreta |
+|---|---|---|---|
+| `0843023181451` — 2/14 | Mia Burton #28, [CT0550S 001](https://miaburton.com/en/sunglasses/cartier/ct0550s-001): `pending`, 0 HTTP. Visio, [CT0550S 001](https://www.visiofactory.es/gafas-de-sol/todas-las-solares/cartier-core-range-ct0550s-001-56-18-oro.html): `available` leído 16/11, venció 17/11. | El evento histórico `review+price` #2480 no está vinculado de forma demostrable a la solicitud/URL #28; la muestra Visio publicó otro EAN. No hay oferta actual. | Tras cargar los registros de aprobación, previsualizar #28 y comprobar el vínculo de la aprobación original con su URL exacta; reutilizarla solo si el vínculo se acredita. No duplicar solicitud ni HTTP. |
+| `8056597886932` — 8/14 | Visio, [MU 52YS 7OE01T](https://www.visiofactory.es/gafas-de-sol/todas-las-solares/mu-52ys-7oe-01t-54-21.html), y Óptica Óptima, [MU 52YS](https://optica-optima.com/gafas-de-sol/miu-miu-mu-52ys-7oe01t.html): `available`, lecturas 16/11, vencidas 17/11. Bassol #218, [MU 52YS](https://www.opticabassol.com/nl-nl/products/miu-miu-0mu-52ys-7oe01t-54): `review`/identidad ambigua. Visual-Click #219, [MU 52YS](https://visual-click.com/products/miu-miu-mu-52ys-7oe01t-54): `blocked`/límite de intentos. También están localizadas [Amevista](https://www.amevista.com/es/miu-miu-0mu-52ys-7oe01t), [ConGafasDeSol](https://www.congafasdesol.com/miu-miu-mu-52ys-7oe01t.html), [Otticait](https://www.otticait.com/fr/miu-miu-mu-52ys-7oe01t) y [Blickers](https://www.blickers.com/es-es/gafas/miu-miu-mu-52ys-c54/5075722152574976/). | No hay oferta actual. #218 conserva aprobación/evento de localización; #219 no se reinicia ni se le trasladan aprobaciones. Las lecturas antiguas están caducadas. | Después del despliegue, previsualizar #218 con su aprobación y recibos; aplicar solo si la identidad exacta y los controles la declaran elegible. No reabrir #219 por límite de intentos. |
+| `8056262407691` — 5/14 | Optical H #179/#294, [MU A06S 14L09Z](https://opticalh.com/products/miu-miu-0mu-a06s-14l09z-54-17-64155): `review`, “catálogo MUA06S / ficha GAFASDESOLMIUMIUA06S”. Visio, [MU A06S](https://www.visiofactory.es/gafas-de-sol/todas-las-solares/miu-miu-mu-a06s-14l-09z-54-17-havana-honey.html), Óptica Óptima, [MU A06S](https://optica-optima.com/gafas-de-sol/miu-miu-mu-a06s-14l09z.html), y [Amevista](https://www.amevista.com/es/miu-miu-mu-a06s-14l09z): muestras `available` 16/11, vencidas 17/11. También está localizada [Otticait](https://www.otticait.com/fr/miu-miu-mu-a06s-14l09z). | Las dos solicitudes Optical H duplican ficha/trabajo; se conserva #294 como la que refiere `locate_event:2746`. No hay precio vigente; producción aún no contiene la regla acotada de normalización. | Tras desplegar el cambio, previsualizar #294, comprobar marca/modelo/color y la aprobación trazable, revalidar el par y realizar como máximo la lectura gobernada que la vista previa autorice. No enviar ambas. |
+| `8056597875349` — 6/14 | Visio, [PR 27ZS 16K08Z](https://www.visiofactory.es/gafas-de-sol/todas-las-solares/pr27zs-16k08z-54-21.html), Óptica Óptima, [Prada PR 27ZS](https://optica-optima.com/gafas-de-sol/prada-pr-27zs-16k08z.html), [Amevista](https://www.amevista.com/es/prada-0pr-27zs-16k08z), [ConGafasDeSol](https://www.congafasdesol.com/prada-pr-27zs-16k08z.html), [Domanci](https://domanci.com/es/gafas-de-sol/prada-pr-27zs-16k08z-54.html) y [Edel](https://www.edel-optics.es/PR-27ZS-16K08Z-de-Prada.html?selectedSize=1907958): lecturas `available` entre 13–16/11, todas vencidas antes de este corte. | No se encontró una solicitud/aprobación actual trazable para una ficha exacta. La evidencia caducada no se renueva por reevaluación. | Seleccionar una ficha actual y permitida, confirmar/aprobar la URL exacta por el flujo existente y solo entonces crear una solicitud gobernada; la falta de extracción no se registra como falta de producto. |
+| `0889214625984` — 5/14 | Edel #17, [FT1310 01A](https://www.edel-optics.es/FT1310-01A-de-Tom-Ford.html): muestra #705, 185,60 €, identidad y contexto comercial conservados, disponibilidad `unknown`; lectura 22/11 12:25. Mia Burton, [FT1310 01A](https://miaburton.com/en/sunglasses/tom-ford/ft1310-01a): `review`, color no confirmado. ConGafasDeSol y Domanci: `unavailable`, lecturas 21/11 vencidas 22/11. Otticait: muestra anterior `available`, vencida 19/11. | Ni precio ni botón de compra acreditan stock de la variante. El replay de #705 no prueba disponibilidad. | No repetir el replay. Capturar una sola vez, mediante ruta autorizada, evidencia de disponibilidad de la variante seleccionada o usar otro competidor localizado que la demuestre. |
+| `0889214669742` — 3/14 | Edel, [FT1360 30A](https://www.edel-optics.es/FT1360-30A-de-Tom-Ford.html): última muestra 22/11 15:36, `unknown`. Optical H, [FT1360 30A](https://opticalh.com/products/gafas-de-sol-tom-ford-ft-1360-30a-51): `HTTP 429`, vencida 22/11 13:00; el control indica no reintentar. Otticait, [FT1360 30A](https://www.otticait.com/fr/tom-ford-liam-02-ft1360-30a): `unavailable`, muestra vencida 19/11. | La ruta Edel no acredita disponibilidad; Optical H limitó la petición y no se cambia de vía para insistir; la lectura de Otticait es histórica. | Usar una ruta/competidor distinto y permitido que tenga autorización vigente. No reintentar Optical H ni llamar “no encontrado” a este resultado. |
+| `0889214042422` — 3/14 | Óptica Óptima #49, [FT5634B 001](https://optica-optima.com/gafas-graduadas/tom-ford-ft5634-b-001.html): muestra #777, 186 €, `unknown`, mercado/variante de oferta sin vínculo probado; lectura 21/11 17:27, vencida 22/11 17:27. Domanci, [FT5634B 001](https://domanci.com/es/monturas/tom-ford-ft5634-b-001-53.html): `unavailable`, vencida 22/11. Visual-Click #260 permanece bloqueada. | La muestra guardada no acredita stock ni mercado de la variante seleccionada; no se repite el replay de #777. | Examinar solo una fuente alternativa con mercado ES/EUR e inventario de variante explícitos, o programar una captura gobernada si el preview de #49 la requiere y la autoriza. |
+| `0889214586650` — 1/14 | Otticait #1337, [FT6058B 001](https://www.otticait.com/fr/tom-ford-ft6058-b-001): última muestra 18/11 `available`, vencida 19/11; contexto de mercado rechazado y máximo de intentos. Amevista, [FT6058B 001](https://www.amevista.com/es/tom-ford-ft6058-b-001), y Óptica Óptima, [FT6058B 001](https://optica-optima.com/gafas-graduadas/tom-ford-ft6058b-001.html): rutas documentadas, no lecturas vigentes. | `/fr` y el idioma no determinan mercado; la configuración ES/EUR no demuestra el contexto efectivo de la oferta. No se restablecen intentos. | Preferir una ruta alternativa permitida con aprobación y verificar el contexto real, EAN/modelo/color, precio e IVA. No forzar ES ni repetir Otticait. |
+| `0889214599834` — 2/14 | Edel #53, [FT6082B 051](https://www.edel-optics.es/FT6082-B-051-de-Tom-Ford.html): muestra #720, 172,80 €, identidad/contexto, `BackOrder`/`unknown`; muestra 22/11 15:37, válida hasta 23/11 15:37 pero no comparable. Otticait, [FT6082B 051](https://www.otticait.com/fr/tom-ford-ft6082-b-051): `unavailable`, muestra vencida 19/11. Optical H conserva la ruta [FT6082B 051](https://opticalh.com/products/tom-ford-ft6082-b-051-889214599834), sin lectura actual. | La muestra #720 no demuestra stock y no se repetirá su replay. Otticait conserva un desacuerdo de mercado; no hay otro competidor con disponibilidad actual demostrada. | Una captura gobernada nueva solo si una fuente autorizada demuestra disponibilidad de la variante y contexto ES/EUR/IVA; si no, mantener `unknown` con ese motivo y no comparar. |
+| `0805289126591` — 3/14 | Mia Burton, [RB2140 90158](https://miaburton.com/en/sunglasses/ray-ban/wayfarer-rb2140-901-58): #298 `review`/ambigua. Visio, [RB2140 90158](https://www.visiofactory.es/gafas-de-sol/todas-las-solares/rb2140-901-58-50-22.html), y [Visual-Click](https://visual-click.com/products/ray-ban-rb2140-wayfarer-901-58-50): rutas localizadas sin muestra vigente. Bassol #6, [RB2140 90158](https://www.opticabassol.com/nl-nl/products/ray-ban-rb2140-wayfarer-901-58-50), queda en revisión ambigua. Optical H #7, [RB2140 90158](https://opticalh.com/products/gafas-de-sol-ray-ban-rb2140-90158-54-18-59408), publicó `0805289126607`, distinto del solicitado. Óptica Universitaria conserva ruta documentada. | No hay comparación vigente. No se acepta la equivalencia del EAN ni se transfiere stock; `901` y `90158` permanecen distintos. | Revalidar variante de Mia/Bassol con evidencia de color y stock, o una ficha exacta de Visio/Óptica Universitaria; reusar aprobaciones existentes solo si la URL y el modelo coinciden. |
+| `0889652429687` — 7/14 | Edel, [SL 596 Dune 003](https://www.edel-optics.es/SL-596-DUNE-003-de-Saint-Laurent.html): oferta #792, última muestra 22/11 15:39, `unknown`; #733, anterior `available`, venció 22/11 12:46. Óptica Óptima, [SL 596 Dune 003](https://optica-optima.com/gafas-de-sol/saint-laurent-sl-596-dune-003.html): `available` 16/11, vencida 17/11. Amevista, [SL 596 Dune 003](https://www.amevista.com/es/saint-laurent-sl-596-dune-003): revisión “SL596DUNE / NEWWAVE”. ConGafasDeSol, [SL 596 Dune 003](https://www.congafasdesol.com/saint-laurent-sl-596-dune-003.html), Mia Burton, [SL 596 Dune 003](https://miaburton.com/en/sunglasses/saint-laurent/dune-sl-596-003), Visual-Click, [SL 596 Dune 003](https://visual-click.com/en/products/saint-laurent-sl-596-dune-003-58), y Bassol, [SL 596 Dune 003](https://www.opticabassol.com/nl-nl/products/saint-laurent-sl-596-dune-003-58), están pendientes o en revisión de identidad. | Ninguna muestra actual acredita disponibilidad. Las rutas alternativas tienen contradicción de identidad o no han sido leídas. | Elegir una ruta permitida con identidad exacta, aprobación y comprobación actual de disponibilidad/mercado; conservar #733 como histórico y no usar #792 como stock. |
+
+### Solicitudes, evidencia reutilizada y ejecución
+
+- Oferta #655 de `0805289126577`: el inventario relaciona request #1, 24 recibos
+  históricos (incluido #6402, HTTP 200), variante `57108062601561`, precio 109,85
+  EUR y la oferta. El par #1088 seguía `review`; su check #1994 era del 14/11.
+  La lectura cuenta en las métricas actuales, pero el `market` vacío del artefacto
+  impide declarar resuelta la discrepancia. No se reutilizó esa muestra como si
+  fuese una lectura nueva ni se atribuyó esta corrección al presente trabajo.
+- Se consultaron localmente, sin red, las muestras #705/#777/#720 y el inventario
+  de solicitudes/rutas. No se creó solicitud/aprobación ni recibo; **HTTP nuevo
+  iniciado por esta sesión = 0**. Los recibos HTTP previos son históricos y no se
+  suman como lecturas nuevas. La actividad independiente del monitor no se
+  atribuye a esta sesión.
+- No hubo aplicación de `price_recovery.py`, cambios SQL remotos, cambio de
+  presupuesto/fecha/intentos, reset, borrado de lock, ni pausa de vigilancia.
+  No se crearon grupos duplicados; el duplicado histórico Optical H #179/#294 se
+  conserva para resolverlo desde el flujo auditable. No se consultó MySQL ni se
+  modificó Odoo/PrestaShop.
+
+### Corrección de código pendiente de despliegue
+
+Se corrigió en esta rama un caso adicional del ciclo: una lectura manual aprobada,
+terminada, fresca y trazable podía dejar para siempre su par de continuidad en
+`review`, porque el monitor solo consume pares `pending`. La nueva acción
+`reconcile` reutiliza esa muestra **sin HTTP**, revalida el estado/fecha del par,
+registra un check de cero solicitudes y una auditoría con solicitud, digest y
+recibos, y programa la renovación no antes del vencimiento. Conserva
+`availability=unknown`; no convierte la muestra en comparable. La vista previa
+también excluye muestras sin vigencia futura verificable, incluso si la ficha no
+contiene precio.
+
+La corrección se limita a este mecanismo y a su regresión; no modifica la
+integración MySQL, el precio propio, la vigilancia en producción ni la
+disponibilidad comercial. Producción no tiene esta versión. **No se ha aplicado
+ninguna recuperación ni se ha hecho merge/despliegue.**
+
+Después de un despliegue autorizado, el procedimiento soportado por el CLI es
+primero solo lectura:
+
+```powershell
+python price_recovery.py --database $DB --manual-reviews --request-id 1
+```
+
+Solo si la vista previa muestra `action=reconcile`, una muestra aún vigente,
+aprobación única/auditada, recibos completos y ausencia de reserva incierta, se
+revalida inmediatamente y se aplica ese ID con confirmación explícita:
+
+```powershell
+python price_recovery.py --database $DB --manual-reviews --request-id 1 --apply --approved --actor "<operador>" --note "<motivo>" --commit "<SHA desplegado>"
+```
+
+Después se verifica el check/auditoría persistidos y se repite el preview para
+confirmar idempotencia. Para cualquier solicitud adicional se vuelve a previsualizar
+por ID; no se ejecuta un lote ni se envía HTTP por esta acción. Si la aprobación,
+vigencia o recibos no pasan el preview, se detiene y queda pendiente, sin crear
+una aprobación sustituta.
+
+La corrección de código aún depende de #145 y de CI/Docker del nuevo HEAD. La
+descripción de la PR se actualiza por separado solo cuando el mecanismo autenticado
+de GitHub permita editarla; no se sustituye por un comentario ni se afirma que haya
+sido editada.
+
+### Validación local
+
+- Selección por diff: `tests/test_manual_review_continuity_repro.py` — **57
+  passed**, 55,88 s; fallos 0. La ejecución focal de los dos casos de
+  reconciliación terminó además con **2 passed / 55 deselected**, 4,06 s.
+- `py_compile` de `price_recovery.py` y el test: pasó. Flake8 con los códigos
+  seleccionados por CI (`E9,F63,F7,F82,F401,F841`) y `git diff --check`: pasaron.
+- Se omitieron las suites completas de precios, masterdata, estrés y los pilotos
+  con servicios reales; no se generó HTTP. CI y Docker del nuevo SHA quedan
+  pendientes de comprobar después de actualizar la rama de #145.
