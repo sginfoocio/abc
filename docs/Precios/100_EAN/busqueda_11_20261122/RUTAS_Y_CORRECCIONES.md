@@ -298,4 +298,3 @@ Se muestra una URL prioritaria por par. El JSON conserva las alternativas y la p
 | Mia Burton | ficha_o_variante_localizada | [Abrir](https://miaburton.com/es/gafas-graduadas/tom-ford/ft6082-b-051) |
 | Otticait | ficha_o_variante_localizada | [Abrir](https://www.otticait.com/es/tom-ford-ft6082-b-051) |
 | Céline Opticien Lunetier | ficha_o_variante_localizada | [Abrir](https://www.celine-opticien-lunetier.com/products/eyeglasses-tom-ford-ft6082-b) |
-
