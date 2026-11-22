@@ -20,7 +20,8 @@ from price_recovery import apply_manual_reviews, preview_manual_reviews
 from price_saved_reevaluation import SavedSampleReevaluation
 from price_trial import PriceTrial, manifest
 from price_references import EXACT, PROBABLE, REJECTED, classify
-from price_web_extract import extract_product, select_product_variant
+from price_url_candidates import _route_11_index, candidate_plan
+from price_web_extract import extract_product, product_page_rejection, select_product_variant
 
 
 def smoke_approved_recovery(path, now):
@@ -138,6 +139,42 @@ def main():
          "title": "GAFASDESOLMIUMIUA06S 14L09Z"},
     )
     assert miu.status == EXACT
+    matrix_routes, excluded_routes, _ = _route_11_index()
+    assert len(matrix_routes) == 94 and len(excluded_routes) == 1
+    tom_ford_1310 = candidate_plan(
+        {"ean": "0889214625984", "brand": "Tom Ford", "model": "FT1310", "color": "01A",
+         "category": "All / Gafas de Sol"}, "optica-optima.com")
+    assert [item.url for item in tom_ford_1310.runnable] == [
+        "https://optica-optima.com/gafas-de-sol/tom-ford-chloe-02-ft1310-01a.html"
+    ]
+    miu_52ys = candidate_plan(
+        {"ean": "8056597886932", "brand": "Miu Miu", "model": "MU 52YS", "color": "7OE01T",
+         "category": "All / Gafas de Sol"}, "amevista.com")
+    assert [item.url for item in miu_52ys.runnable] == [
+        "https://www.amevista.com/es/miu-miu-0mu-52ys-7oe01t"
+    ]
+    rayban_901_58 = candidate_plan(
+        {"ean": "0805289126591", "brand": "Ray Ban", "model": "RB2140", "color": "901/58",
+         "category": "All / Gafas de Sol"}, "opticabassol.com")
+    assert not rayban_901_58.runnable and all(
+        item.state == "probable" for item in rayban_901_58.candidates)
+    wrong_rayban_color = candidate_plan(
+        {"ean": "0805289126591", "brand": "Ray Ban", "model": "RB2140", "color": "901",
+         "category": "All / Gafas de Sol"}, "opticabassol.com")
+    assert wrong_rayban_color.reason_code == "route_identity_conflict"
+    mua06s_redirect = candidate_plan(
+        {"ean": "8056262407691", "brand": "Miu Miu", "model": "MU A06S", "color": "14L09Z",
+         "category": "All / Gafas de Sol"}, "edel-optics.es")
+    assert not mua06s_redirect.candidates and "redirigió a categoría" in mua06s_redirect.reason
+    assert product_page_rejection(
+        "", "https://www.edel-optics.es/Gafas-de-sol-Miu-Miu.html")
+    visio_bv = classify(
+        {"ean": "0889214042422", "brand": "Tom Ford", "model": "FT5634B", "color": "001"},
+        {"url": "https://www.visiofactory.es/example", "ean_published": "889214042422",
+         "brand": "Tom Ford", "model": "FT5634-B/V", "color": "001",
+         "title": "Tom Ford FT5634-B/V 001"},
+    )
+    assert visio_bv.status == EXACT
     captures = [
         (7, "cf239f7c16c29e5d05743eef881dd34e349a76ecfb73948574aea5b0f5ffa533",
          "https://www.amevista.com/es/gucci-gg1660s-001",

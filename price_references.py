@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 import re
 from typing import Any, Iterable, Mapping
 import unicodedata
+from urllib.parse import urlparse
 
 EXACT, PROBABLE, REJECTED = "exact_match", "probable_match", "rejected"
 LEVELS = ("ean", "brand_model_color", "model_color", "normalized_variants")
@@ -27,10 +28,13 @@ _COMMERCIAL_NAMES = {
     ("RAYBAN", "RB2140"): {"WAYFARER"},
     ("TOMFORD", "FT1044"): {"BRONSON"},
     ("TOMFORD", "FT1301"): {"JOEY02"},
+    ("TOMFORD", "FT1310"): {"CHLOE02"},
+    ("TOMFORD", "FT1360"): {"LIAM02"},
     ("TOMFORD", "FT0711"): {"FAUSTO"},
 }
 _BRAND_ALIASES = {"TIFFANY": "TIFFANYCO", "TIFFANYCO": "TIFFANYCO"}
 _MIU_A06S_DESCRIPTOR = re.compile(r"(?<![A-Z0-9])GAFASDESOLMIUMIUA06S(?![A-Z0-9])", re.IGNORECASE)
+_VISIO_TOMFORD_BV = re.compile(r"(?<![A-Z0-9])(FT(?:5634|6058))-B\s*/\s*V(?![A-Z0-9])", re.IGNORECASE)
 
 
 def _ascii(value: Any) -> str:
@@ -343,6 +347,31 @@ def _normalize_miu_a06s_descriptor(product: Mapping[str, Any], candidate: Mappin
     return normalized
 
 
+def _normalize_visio_tomford_bv(product: Mapping[str, Any], candidate: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Resolve Visio's B/V label only when its published UPC identifies this exact catalogue EAN."""
+    host = (urlparse(str(candidate.get("url") or "")).hostname or "").lower().removeprefix("www.")
+    product_ean = _valid_gtin(product.get("ean"))
+    if (host != "visiofactory.es" or _brand_key(product.get("brand")) != "TOMFORD"
+            or model_key(product.get("model")) not in {"FT5634B", "FT6058B"}
+            or not product_ean or _valid_gtin(candidate.get("ean_published")) != product_ean):
+        return candidate
+    if candidate.get("brand") and _brand_key(candidate.get("brand")) != "TOMFORD":
+        return candidate
+
+    canonical_model = str(product.get("model") or "")
+    normalized = dict(candidate)
+    for field_name in ("title", "model"):
+        value = normalized.get(field_name)
+        if isinstance(value, str):
+            normalized[field_name] = _VISIO_TOMFORD_BV.sub(canonical_model, value)
+    identifiers = normalized.get("identifiers") or []
+    normalized["identifiers"] = [
+        _VISIO_TOMFORD_BV.sub(canonical_model, str(value)) if isinstance(value, str) else value
+        for value in identifiers
+    ]
+    return normalized
+
+
 def classify(product: Mapping[str, Any], candidate: Mapping[str, Any], *,
              allow_reference_match: bool = False) -> MatchResult:
     """Decide whether ``candidate`` (a competitor listing) is the catalogue ``product``.
@@ -351,6 +380,7 @@ def classify(product: Mapping[str, Any], candidate: Mapping[str, Any], *,
     Reference matching must be explicitly enabled by an approved caller; it never equates GTINs.
     """
     candidate = _normalize_miu_a06s_descriptor(product, candidate)
+    candidate = _normalize_visio_tomford_bv(product, candidate)
     own_model, own_color, own_brand = (
         model_key(product.get("model")), key(product.get("color")), _brand_key(product.get("brand")))
     title = str(candidate.get("title") or "")

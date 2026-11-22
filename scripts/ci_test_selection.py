@@ -84,6 +84,7 @@ PRICE_SOURCE_TESTS = {
         "tests/test_price_identity_regression.py",
         "tests/test_price_web_competitor_pages.py",
     ),
+    "price_url_candidates.py": ("tests/test_price_url_candidates.py",),
     "price_saved_reevaluation.py": ("tests/test_price_saved_reevaluation.py",),
     "price_recovery.py": (
         "tests/test_price_recovery.py",

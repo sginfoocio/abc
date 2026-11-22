@@ -73,6 +73,7 @@ COPY docs/PRICE_COVERAGE_MEASUREMENT_EVIDENCE.csv ./docs/
 COPY docs/Precios/100_EAN/evidencia_replay_133_20261116.zip ./docs/Precios/100_EAN/evidencia_replay_133_20261116.zip
 COPY docs/Precios/100_EAN/correcciones_29_edel_amevista_20261120/MATRIZ_100x14_ESTADO_CLOUD_20261120.csv docs/Precios/100_EAN/correcciones_29_edel_amevista_20261120/MATRIZ_RUTAS_29_EDEL_AMEVISTA_20261120.csv ./docs/Precios/100_EAN/correcciones_29_edel_amevista_20261120/
 COPY docs/Precios/busqueda_38_20261119/38-fichas-y-rutas.json ./docs/Precios/busqueda_38_20261119/
+COPY docs/Precios/100_EAN/busqueda_11_20261122/rutas_candidatas_primarias.json ./docs/Precios/100_EAN/busqueda_11_20261122/
 COPY assets ./assets
 COPY static ./static
 COPY .streamlit/config.toml ./.streamlit/config.toml

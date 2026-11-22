@@ -26,6 +26,7 @@ _AVAILABLE = {"instock", "limitedavailability"}
 _UNAVAILABLE = {"outofstock", "soldout", "discontinued"}
 _VOID = {"meta", "link", "img", "br", "hr", "input", "source", "area", "base", "col", "embed", "wbr"}
 _EDEL_SIZE_CLASS = re.compile(r"(?:^|\s)eoDetailListTileSize(\d+)(?:\s|$)")
+_EDEL_CATEGORY_PATH = re.compile(r"^/gafas-de-sol-[^/]+\.html$", re.I)
 
 
 @dataclass
@@ -74,7 +75,8 @@ class ProductPage:
 
     def candidate(self) -> dict[str, Any]:
         """The listing as seen by ``price_references.classify``."""
-        return {"brand": self.brand, "model": self.model, "color": self.color, "caliber": self.caliber,
+        return {"url": self.url, "brand": self.brand, "model": self.model,
+                "color": self.color, "caliber": self.caliber,
                 "group_reference": self.group_reference,
                 "ean_published": self.ean_published, "title": self.title,
                 "ean_published_raw": self.ean_published_raw,
@@ -1006,6 +1008,9 @@ def product_page_rejection(html: str, url: str) -> str:
     if (parsed_url.hostname or "").lower().removeprefix("www.") == "optica-optima.com" \
             and parsed_url.path.rstrip("/") in {"/gafas-de-sol", "/gafas-graduadas"}:
         return "no_product: ruta de categoría de Óptica Óptima, no ficha de producto"
+    if (parsed_url.hostname or "").lower().removeprefix("www.") == "edel-optics.es" \
+            and _EDEL_CATEGORY_PATH.fullmatch(parsed_url.path):
+        return "no_product: categoría Edel-Optics, no ficha de producto"
     nodes = []
     for block in _LD_JSON.findall(html):
         try:

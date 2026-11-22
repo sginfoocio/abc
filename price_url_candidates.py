@@ -409,6 +409,12 @@ ROUTE_EVIDENCE_PATH = (
 )
 ROUTE_EVIDENCE_SOURCE = "docs/Precios/busqueda_38_20261119/38-fichas-y-rutas.json"
 ROUTE_EVIDENCE_DATE = "2026-11-19"
+ROUTE_11_EVIDENCE_PATH = (
+    Path(__file__).resolve().parent / "docs" / "Precios" / "100_EAN" / "busqueda_11_20261122"
+    / "rutas_candidatas_primarias.json"
+)
+ROUTE_11_EVIDENCE_SOURCE = "docs/Precios/100_EAN/busqueda_11_20261122/rutas_candidatas_primarias.json"
+ROUTE_11_EVIDENCE_DATE = "2026-11-22"
 _SHOP_LABELS = {
     key("Óptica Óptima"): "optima",
     key("Óptica Bassol"): "bassol",
@@ -423,6 +429,7 @@ _SHOP_LABELS = {
     key("ConGafasDeSol"): "congafas",
     key("Céline Opticien Lunetier"): "celine",
     key("Visio Factory"): "visio",
+    key("Otticait"): "otticait",
     key("Otticait Eyewear"): "otticait",
 }
 _NON_SPANISH_LOCALES = {
@@ -527,6 +534,132 @@ def _route_examples() -> tuple[Example, ...]:
 
 ROUTE_EXAMPLES = _route_examples()
 ALL_EXAMPLES = ALL_EXAMPLES + ROUTE_EXAMPLES
+
+
+@lru_cache(maxsize=1)
+def _route_11_index() -> tuple[dict, dict, dict]:
+    payload = json.loads(ROUTE_11_EVIDENCE_PATH.read_text(encoding="utf-8"))
+    expected_scope = {"eans": 11, "competitors": 14, "manifest_pairs": 1400,
+                      "research_pairs": 154, "localized_primary_route_pairs": 94}
+    if (payload.get("research_date") != ROUTE_11_EVIDENCE_DATE
+            or payload.get("scope") != expected_scope
+            or not re.fullmatch(r"[a-f0-9]{64}", str(payload.get("source_archive_sha256") or ""))):
+        raise ValueError(f"{ROUTE_11_EVIDENCE_SOURCE} no cumple el contrato del paquete 11×14.")
+
+    shop_by_id = {}
+    for competitor in payload.get("competitors", []):
+        shop = _SHOP_LABELS.get(key(competitor.get("name")))
+        if not competitor.get("id") or not shop or competitor["id"] in shop_by_id:
+            raise ValueError(f"Competidor incoherente en {ROUTE_11_EVIDENCE_SOURCE}.")
+        shop_by_id[competitor["id"]] = shop
+    if len(shop_by_id) != 14 or len(set(shop_by_id.values())) != 14:
+        raise ValueError(f"Se esperaban 14 competidores únicos en {ROUTE_11_EVIDENCE_SOURCE}.")
+
+    route_index = {}
+    for route in payload.get("routes", []):
+        ean = normalize_gtin(route.get("ean"))
+        url = str(route.get("url") or "")
+        parsed = urlparse(url)
+        shop = shop_by_id.get(route.get("competitor_id"))
+        if (ean != route.get("ean") or not shop or parsed.scheme != "https"
+                or DOMAINS.get((parsed.hostname or "").lower().removeprefix("www.")) != shop):
+            raise ValueError(f"Ruta fuera de identidad/competidor en {ROUTE_11_EVIDENCE_SOURCE}: {url}")
+        if any(route.get(name) is not False for name in (
+                "current_comparable_verified", "identity_verified_for_current_read", "market_currently_verified")):
+            raise ValueError(f"Una ruta documental figura como verificada en {ROUTE_11_EVIDENCE_SOURCE}: {url}")
+        if {"price", "observed_price_eur", "availability", "currency", "own_price_user"} & route.keys():
+            raise ValueError(f"El índice de rutas no puede contener precios ni disponibilidad: {url}")
+        pair = (ean, route["competitor_id"])
+        if pair in route_index:
+            raise ValueError(f"Par duplicado en {ROUTE_11_EVIDENCE_SOURCE}: {pair}")
+        route_index[pair] = route
+    if len(route_index) != 94:
+        raise ValueError(f"Se esperaban 94 pares con ruta primaria en {ROUTE_11_EVIDENCE_SOURCE}.")
+
+    excluded_index = {}
+    for route in payload.get("excluded_routes", []):
+        ean = normalize_gtin(route.get("ean"))
+        pair = (ean, route.get("competitor_id"))
+        if (ean != route.get("ean") or route.get("evidence") != "redirect_to_catalogue"
+                or pair in excluded_index or route.get("final_url") == route.get("url")):
+            raise ValueError(f"Ruta rechazada incoherente en {ROUTE_11_EVIDENCE_SOURCE}.")
+        excluded_index[pair] = route
+    if len(excluded_index) != 1:
+        raise ValueError(f"Se esperaba una redirección descartada en {ROUTE_11_EVIDENCE_SOURCE}.")
+
+    competitor_id_by_shop = {shop: competitor_id for competitor_id, shop in shop_by_id.items()}
+    return route_index, excluded_index, competitor_id_by_shop
+
+
+def _route_11_candidate(product: dict, shop: str, attributes: dict) -> tuple[UrlCandidate | None, str]:
+    routes, _, competitor_ids = _route_11_index()
+    try:
+        ean = normalize_gtin(product.get("ean"))
+    except ValueError:
+        return None, ""
+    route = routes.get((ean, competitor_ids.get(shop)))
+    if route is None:
+        return None, ""
+    identity = key(f"{product.get('brand', '')} {product.get('model', '')} {product.get('color', '')}")
+    if identity != key(route["model"]):
+        return None, (f"La identidad actual del catálogo contradice la ruta 11×14 para {ean}; "
+                      "se requiere revisar marca, modelo completo y color antes de consultar.")
+
+    url = route["url"]
+    url_market, _ = route_market_hint(url)
+    market_hint = route.get("market_route_hint", "")
+    foreign_or_ambiguous_route = (
+        url_market == "non_ES"
+        or route.get("evidence") == "indexed_legacy_foreign"
+        or market_hint in {"otro_idioma_o_mercado_por_resolver", "ruta_raiz_contexto_por_verificar"}
+    )
+    reason = ("Ruta extranjera, antigua o de mercado no resuelto; no consultar ni inferir una ruta ES."
+              if foreign_or_ambiguous_route else "")
+    route_evidence = {
+        "evidence": route.get("evidence", ""),
+        "source_ref": route.get("source_ref", ""),
+        "source_crawl": route.get("source_crawl", ""),
+        "market_route_hint": market_hint,
+        "notes": route.get("notes", ""),
+        "source_date": ROUTE_11_EVIDENCE_DATE,
+        "current_comparable_verified": False,
+    }
+    used = dict(attributes)
+    used.update({
+        "route_evidence": json.dumps(route_evidence, ensure_ascii=False, sort_keys=True),
+        "route_evidence_id": f"11x14:{ean}:{route['competitor_id']}",
+        "route_evidence_source": ROUTE_11_EVIDENCE_SOURCE,
+        "route_evidence_url": url,
+        "route_market_hint": market_hint,
+        "current_comparable_verified": "false",
+    })
+    return UrlCandidate(
+        url, "matrix_primary_route_11x14", used,
+        [value for value in (f"11x14:{ean}:{route['competitor_id']}", route.get("source_ref", "")) if value],
+        origin=ROUTE_11_EVIDENCE_SOURCE,
+        state="probable" if foreign_or_ambiguous_route else "pending_verification",
+        reason=reason,
+        review_date=ROUTE_11_EVIDENCE_DATE,
+        review_base="",
+    ), ""
+
+
+def _route_11_rejection_reason(product: dict, shop: str, url: str) -> str:
+    routes, excluded, competitor_ids = _route_11_index()
+    del routes
+    try:
+        ean = normalize_gtin(product.get("ean"))
+    except ValueError:
+        return ""
+    rejection = excluded.get((ean, competitor_ids.get(shop)))
+    if rejection is None:
+        return ""
+    identity = key(f"{product.get('brand', '')} {product.get('model', '')} {product.get('color', '')}")
+    if identity != key(rejection["model"]) or not _same_documented_page(url, rejection["url"]):
+        return ""
+    return (f"Ruta descartada: redirigió a categoría ({rejection['final_url']}); "
+            "no reutilizar su contenido ni generar de nuevo la misma URL.")
+
 
 CATALOG_DISCOVERY_PLANS = {
     "optima": {
@@ -818,21 +951,36 @@ def _candidate_plan(product: dict, domain: str) -> CandidatePlan:
         attributes["dimension_source"] = str(product["measurement_source"])
     examples = [example for example in ALL_EXAMPLES if example.shop == shop]
     candidates: dict[str, UrlCandidate] = {}
+    matrix_candidate, matrix_conflict = _route_11_candidate(product, shop, attributes)
+    has_exact_legacy_route = False
     for example in examples:
         if example.source_ean and example.source_ean != ean:
             continue
+        if _route_11_rejection_reason(product, shop, example.url):
+            continue
         if not example.source_ean and shop == "amevista" and not urlparse(example.url).path.startswith("/es/"):
             continue
+        exact_ean_model_alias = False
         if example.source_ean:
-            source_model = model_key(example.model)
-            target_model = model_key(product["model"])
-            same_model = source_model == target_model or source_model in target_model or target_model in source_model
+            same_model = key(example.model) == key(product["model"])
+            if resolution.evidence and example.source_ean == ean:
+                evidence_model = model_key(resolution.evidence["modelo"])
+                example_model = model_key(example.model)
+                exact_ean_model_alias = (
+                    key(product["brand"]) == key(resolution.evidence["marca"])
+                    and key(product["color"]) == key(resolution.evidence["color"])
+                    and model_key(product["model"]) == evidence_model
+                    and bool(example_model)
+                    and evidence_model.startswith(example_model)
+                )
+                same_model = same_model or exact_ean_model_alias
             if key(example.brand) != brand or not same_model or key(example.color) != color:
                 return CandidatePlan(
                     reason_code="route_identity_conflict",
                     reason=(f"La ruta documental asociada al EAN {ean} contradice marca, modelo o color "
                             "del catálogo; requiere revisión antes de consultarla."),
                 )
+            has_exact_legacy_route = True
         elif (key(example.brand), model_key(example.model), example.category) != (brand, model, category):
             continue
         if not example.source_ean and example.color and key(example.color) != color:
@@ -856,6 +1004,10 @@ def _candidate_plan(product: dict, domain: str) -> CandidatePlan:
         if gtins and gtins != {ean}:
             reasons.append("GTIN documentados contradictorios o distintos del objetivo: requiere revisión")
         used = dict(attributes)
+        if exact_ean_model_alias:
+            used["source_ean_model_alias"] = (
+                f"{example.model} -> {product['model']} (exact-EAN measurement evidence)"
+            )
         if documentary_attributes:
             used["route_evidence"] = json.dumps(documentary_attributes, ensure_ascii=False, sort_keys=True)
             used["route_evidence_source"] = example.source
@@ -927,13 +1079,55 @@ def _candidate_plan(product: dict, domain: str) -> CandidatePlan:
             origin=example.source, state="probable" if reason else "pending_verification", reason=reason,
             review_date=example.review_date, review_base=example.review_base)
 
+    if matrix_conflict and not has_exact_legacy_route:
+        return CandidatePlan(reason_code="route_identity_conflict", reason=matrix_conflict)
+    matrix_can_replace_market_blocked = bool(
+        matrix_candidate
+        and matrix_candidate.state == "pending_verification"
+        and candidates
+        and all(
+            candidate.state == "probable"
+            and (
+                candidate.reason.startswith("Ruta con locale explícito")
+                or (
+                    (route_metadata := json.loads(candidate.attributes.get("route_evidence", "{}"))).get(
+                        "route_market_hint"
+                    ) == "non_ES"
+                    and candidate.reason == route_metadata.get("route_market_note")
+                )
+            )
+            for candidate in candidates.values()
+        )
+    )
+    if matrix_candidate and (not candidates or matrix_can_replace_market_blocked):
+        if candidates:
+            matrix_candidate.attributes["alternate_documented_routes"] = json.dumps(
+                [
+                    {"url": candidate.url, "evidence": candidate.evidence, "reason": candidate.reason}
+                    for candidate in candidates.values()
+                ],
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        candidates = {matrix_candidate.url: matrix_candidate}
+
     if candidates:
         foreign_route_only = all(
             candidate.state == "probable"
-            and (route_metadata := json.loads(candidate.attributes.get("route_evidence", "{}"))).get(
-                "route_market_hint"
-            ) == "non_ES"
-            and candidate.reason == route_metadata.get("route_market_note")
+            and (
+                (route_metadata := json.loads(candidate.attributes.get("route_evidence", "{}"))).get(
+                    "market_route_hint"
+                )
+                or route_metadata.get("route_market_hint")
+            ) in {
+                "non_ES",
+                "otro_idioma_o_mercado_por_resolver",
+                "ruta_raiz_contexto_por_verificar",
+            }
+            and candidate.reason == (
+                route_metadata.get("route_market_note")
+                or "Ruta extranjera, antigua o de mercado no resuelto; no consultar ni inferir una ruta ES."
+            )
             for candidate in candidates.values()
         )
     else:
@@ -1109,6 +1303,8 @@ def _candidate_plan(product: dict, domain: str) -> CandidatePlan:
              "amevista": "https://www.amevista.com", "otticait": "https://www.otticait.com",
              "edel": "https://www.edel-optics.es"}
     url = roots[shop] + path
+    if rejection := _route_11_rejection_reason(product, shop, url):
+        return CandidatePlan(reason_code="needs_authorized_discovery", reason=rejection)
     # An observed URL already supplies its precise locale/handle; do not generate locale alternatives.
     if not any(candidate.runnable for candidate in candidates.values()):
         if shop == "amevista" and brand == "GUCCI":

@@ -6,7 +6,7 @@ import json
 import pytest
 
 from price_references import PROBABLE, caliber_from_code, classify, extract_lens
-from price_web_extract import extract_product, select_product_variant
+from price_web_extract import extract_product, product_page_rejection, select_product_variant
 
 FIXTURES = Path(__file__).parent / "fixtures" / "web_pages"
 PR27 = {"ean": "8056597875349", "brand": "Prada", "model": "PR 27ZS", "color": "16K08Z", "caliber": "54-21"}
@@ -280,6 +280,19 @@ def test_edel_redirect_trace_is_preserved_and_changed_final_url_is_rejected():
     assert page.url_trace["selected_variant_url"] == selected_url
     assert _accepted_edel_resolution_reason(page, url, product) == (
         "la URL final no coincide con la ruta aceptada")
+
+
+def test_edel_category_route_is_rejected_even_with_product_metadata():
+    url = "https://www.edel-optics.es/Gafas-de-sol-Miu-Miu.html"
+    html = ('<script type="application/ld+json">' + json.dumps({
+        "@type": "Product", "url": url, "name": "Miu Miu MU A06S 14L09Z",
+        "offers": {"@type": "Offer", "price": "250", "priceCurrency": "EUR"},
+    }) + "</script>")
+
+    rejection = product_page_rejection(html, url)
+
+    assert rejection == "no_product: categoría Edel-Optics, no ficha de producto"
+    assert not product_page_rejection("", "https://www.edel-optics.es/MU-A06S-14L09Z-de-Miu-Miu.html")
 
 
 def test_edel_selected_variant_uses_common_model_color_price_and_its_own_stock():

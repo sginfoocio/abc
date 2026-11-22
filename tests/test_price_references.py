@@ -109,6 +109,10 @@ def test_tom_ford_commercial_names_are_scoped_to_their_complete_model():
          {"brand": "Tom Ford", "model": "Bronson", "title": "Tom Ford FT1044 01V Bronson"}),
         ({"ean": "0889214625625", "brand": "Tom Ford", "model": "FT1301", "color": "52A"},
          {"brand": "Tom Ford", "model": "Joey-02", "title": "Tom Ford Joey-02 FT1301 52A"}),
+        ({"ean": "0889214625984", "brand": "Tom Ford", "model": "FT1310", "color": "01A"},
+         {"brand": "Tom Ford", "model": "Chloe 02", "title": "Tom Ford Chloe 02 FT1310 01A"}),
+        ({"ean": "0889214669742", "brand": "Tom Ford", "model": "FT1360", "color": "30A"},
+         {"brand": "Tom Ford", "model": "Liam 02", "title": "Tom Ford Liam 02 FT1360 30A"}),
     )
     for product, candidate in cases:
         result = refs.classify(product, candidate)
@@ -119,6 +123,28 @@ def test_tom_ford_commercial_names_are_scoped_to_their_complete_model():
         {"brand": "Tom Ford", "model": "Joey-02", "title": "Tom Ford Joey-02 FT1310 52E"},
     )
     assert unrelated.status != refs.EXACT
+
+
+def test_visio_tom_ford_b_v_alias_requires_exact_published_ean_and_color():
+    cases = (
+        ({"ean": "0889214042422", "brand": "Tom Ford", "model": "FT5634B", "color": "001"},
+         "889214042422", "FT5634-B/V"),
+        ({"ean": "0889214586650", "brand": "Tom Ford", "model": "FT6058B", "color": "001"},
+         "889214586650", "FT6058-B/V"),
+    )
+    for product, upc, published_model in cases:
+        candidate = {
+            "url": "https://www.visiofactory.es/example",
+            "ean_published": upc,
+            "brand": "Tom Ford",
+            "model": published_model,
+            "color": product["color"],
+            "title": f"Tom Ford {published_model} {product['color']}",
+        }
+        assert refs.classify(product, candidate).status == refs.EXACT
+        assert refs.classify(product, {**candidate, "url": "https://other.example/example"}).status != refs.EXACT
+        assert refs.classify(product, {**candidate, "ean_published": "0889214000001"}).status != refs.EXACT
+        assert refs.classify(product, {**candidate, "color": "999"}).status != refs.EXACT
 
 
 def test_gucci_logotipo_descriptor_requires_exact_ean_group_title_and_color():

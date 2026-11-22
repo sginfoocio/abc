@@ -570,3 +570,104 @@ los EAN pendientes, la corrección y sus límites. No se sustituyó por un comen
   con servicios reales; no se generó HTTP. CI y Docker de la corrección están
   comprobados en el commit de código indicado arriba; el commit posterior es
   documentación únicamente.
+
+## Paquete de búsqueda 11×14 — 2026-11-22
+
+Se conservó el [ZIP de origen](./paquete_11x14_20261122.zip), SHA-256
+`7012f0ecfb554cd213c1620b61335ff2a59a0f27be3e5d38857f4b1aa476ca9d`, junto con
+la [matriz original](./busqueda_11_20261122/matriz_11x14.json), sus
+[rutas y correcciones](./busqueda_11_20261122/RUTAS_Y_CORRECCIONES.md) y el
+[índice de 94 rutas primarias](./busqueda_11_20261122/rutas_candidatas_primarias.json).
+La regresión añadida compara los 154 pares únicos del paquete con la matriz
+canónica: los 154 son pares del conjunto intacto de 100 EAN × 14 competidores
+(1.400 pares). No se añadieron ni quitaron productos, competidores o pares.
+Para reproducir el cruce se normalizan tres identificadores de origen contra el
+CSV canónico, comprobando que sus dominios coinciden con la configuración de
+competidores:
+`miaburton-com` → `mia-burton-com`,
+`opticauniversitaria-es` → `optica-universitaria-es` y
+`otticait-com` → `otticait-eyewear-com`. En Otticait el nombre canónico difiere
+(`Otticait Eyewear`), pero ambos registros configuran el host `otticait.com`;
+el test valida el dominio y que los 154 pares sigan dentro de la matriz de 1.400.
+
+La matriz documenta **94 pares con ruta primaria localizada, 12 con candidata
+solo documental, 2 con pista de catálogo, 1 redirección a categoría descartada
+y 45 sin ruta en ese índice**. Una ruta localizada no acredita una página
+accesible hoy, identidad exacta, aprobación, mercado, IVA, precio, stock ni
+comparabilidad. Los 45 sin ruta tampoco acreditan ausencia de producto. Los
+enlaces de la tabla son ejemplos del índice documental fechado el 22/11; las
+otras rutas y los motivos por competidor están en el JSON íntegro.
+
+| EAN / modelo-color | Ruta primaria / candidata localizada | Solo documental | Catálogo | Redirección descartada | Sin ruta | Ejemplo documentado y bloqueo/acción |
+|---|---:|---:|---:|---:|---:|---|
+| `0843023181451` Cartier CT0550S 001 | 4 | 0 | 0 | 0 | 10 | [Visio Factory](https://www.visiofactory.es/gafas-de-sol/todas-las-solares/cartier-core-range-ct0550s-001-56-18-oro.html). Revalidar la aprobación original de Mia Burton #28; la muestra histórica Visio publicó otro EAN y no prueba identidad ni vigencia. |
+| `8056597886932` Miu Miu MU 52YS 7OE01T | 10 | 2 | 0 | 0 | 2 | [Óptica Óptima](https://optica-optima.com/gafas-de-sol/miu-miu-mu-52ys-7oe01t.html?SubmitCurrency=1&id_currency=22). Lecturas anteriores caducadas; previsualizar la solicitud/aprobación existente antes de cualquier captura. |
+| `8056262407691` Miu Miu MU A06S 14L09Z | 10 | 1 | 0 | 1 | 2 | [Óptica Óptima](https://optica-optima.com/gafas-de-sol/miu-miu-mu-a06s-14l09z.html?SubmitCurrency=1&id_currency=1). La ruta Edel que redirigió a categoría se excluye; #179/#294 no se duplican y la normalización de Optical H requiere confirmar marca, modelo y color. |
+| `8056597875349` Prada PR 27ZS 16K08Z | 10 | 3 | 1 | 0 | 0 | [Óptica Óptima](https://optica-optima.com/gafas-de-sol/prada-pr-27zs-16k08z.html?SubmitCurrency=1&id_currency=38). La pista de catálogo de Mia Burton no es ficha; no consta aprobación actual para una URL exacta. |
+| `0805289126591` Ray-Ban RB2140 901/58 | 11 | 0 | 1 | 0 | 2 | [Óptica Óptima](https://optica-optima.com/gafas-de-sol/ray-ban-rb2140-901-58-original-wayfarer.html). La pista de catálogo necesita enlace a variante; mantener `901/58` separado de `901` y no transferir stock. |
+| `0889652429687` Saint Laurent SL 596 DUNE 003 | 9 | 0 | 0 | 0 | 5 | [Óptica Óptima](https://optica-optima.com/gafas-de-sol/saint-laurent-sl-596-dune-003.html). Resolver identidad/variante y disponibilidad; `DUNE` no se equipara a `DUNE OPT`. |
+| `0889214625984` Tom Ford FT1310 01A | 9 | 2 | 0 | 0 | 3 | [Óptica Óptima](https://optica-optima.com/gafas-de-sol/tom-ford-chloe-02-ft1310-01a.html). La muestra #705 mantiene `availability=unknown`; obtener evidencia actual de disponibilidad de esa variante o usar otra ruta autorizada. |
+| `0889214669742` Tom Ford FT1360 30A | 8 | 0 | 0 | 0 | 6 | [Óptica Óptima](https://optica-optima.com/gafas-de-sol/tom-ford-liam-02-ft1360-30a.html). Buscar una lectura permitida por la ruta existente; no repetir Optical H tras su 429 ni tratar una lectura antigua como actual. |
+| `0889214042422` Tom Ford FT5634-B 001 | 7 | 3 | 0 | 0 | 4 | [Óptica Óptima](https://optica-optima.com/gafas-graduadas/tom-ford-ft5634-b-001.html). La muestra #777 tiene precio/contexto/disponibilidad contradictorios; no elegir el importe más bajo ni asumir stock. |
+| `0889214586650` Tom Ford FT6058-B 001 | 7 | 1 | 0 | 0 | 6 | [Amevista ES](https://www.amevista.com/es/tom-ford-ft6058-b-001). La ruta de Otticait conserva conflicto de mercado y límite de intentos; verificar contexto real en la alternativa sin forzar ES. |
+| `0889214599834` Tom Ford FT6082-B 051 | 9 | 0 | 0 | 0 | 5 | [Amevista US](https://www.amevista.com/us/tom-ford-ft6082-b-051). Esta ruta es explícitamente `/us`, no una oferta comparable en España; buscar una alternativa ES autorizada. La muestra #720 conserva disponibilidad desconocida. |
+
+### Estado operativo y procedimiento pendiente
+
+La última línea base viva documentada antes de incorporar este paquete es la del
+**22/11 15:22 UTC: 89/100 EAN y 181 pares**, con los mismos conjuntos en dashboard
+y monitor. Esta actualización documental no vuelve a medir Cloud: **89/100 no
+se presenta como cobertura actual**. El corte de las 12:24 UTC dio 73/100 en
+dashboard y 70/100 en monitor, sin exportación de conjuntos que atribuya los tres
+EAN de diferencia; la coincidencia posterior de 89/89 no reconcilia ese corte
+retroactivamente. El **93/100 comunicado por Rubén** sigue sin una instantánea
+fechada que enlace EAN/oferta, vigencia, solicitud, aprobación, trabajo y recibo;
+por tanto no se reconstruyen entradas o pérdidas ni se reutilizan lecturas
+caducadas para afirmar recuperación.
+
+El índice añadido es una fuente de candidatas del localizador existente, no una
+cola de 154 URLs ni un scraper paralelo. Después de que esta versión esté
+desplegada por el proceso autorizado:
+
+1. Leer en modo solo lectura el manifiesto y estado vivos de continuidad,
+   solicitudes, aprobaciones, reservas y recibos. Revalidar que cada par no
+   tenga trabajo equivalente pendiente/en curso/resuelto y que robots, pausa,
+   presupuesto compartido, `Retry-After`, lease y próxima fecha permitan actuar.
+2. Ejecutar la previsualización existente del localizador para el EAN y
+   competidor exactos. Confirmar identidad de marca/modelo/color y aprobación
+   original; inspeccionar las rutas alternativas del JSON solo como evidencia,
+   no como nuevas solicitudes automáticas. Resolver una contradicción antes de
+   preparar lectura.
+3. Reutilizar una muestra vigente y enlazada a recibos si su evidencia basta.
+   Si no, permitir como máximo una solicitud lógica gobernada para el par/URL/
+   versión de aprobación, por el trabajador ya existente. Ante reserva incierta,
+   reconciliar antes de reintentar. No insistir en 429, CAPTCHA o bloqueo.
+4. Verificar la captura sanitizada (URL solicitada/final, canonical, variante,
+   producto/oferta, EAN publicado, disponibilidad, mercado, moneda, IVA, fecha,
+   SHA y recibo); comparar solo si la evidencia supera los controles actuales.
+   Si no acredita disponibilidad o contexto ES/EUR/IVA, guardar el motivo exacto
+   y dejar el par sin comparación.
+5. Reconciliar estado persistido, idempotencia, duplicados históricos y avance
+   real de la vigilancia. Repetir para los demás pares solo tras revalidar el
+   estado vivo; no alterar presupuestos, intentos, locks, precios propios ni
+   integración MySQL.
+
+Al incorporar este paquete no se enviaron HTTP a competidores, no se crearon
+solicitudes/aprobaciones/recibos ni se aplicó una recuperación; tampoco se pausó
+la vigilancia o se consultó MySQL. La cobertura comercial y las solicitudes
+siguen pendientes de comprobación en un runtime local autorizado. No hubo merge
+ni despliegue.
+
+### Validación local de la integración
+
+- Selección por el diff funcional: 10 archivos de pruebas, **491 passed, 3
+  skipped, 0 failed en 47,54 s**. Los tres skips son controles POSIX/root no
+  aplicables en Windows; el conjunto incluyó la regresión del cruce 154/1.400.
+- Cinco pruebas focalizadas de rutas 11×14, redirección Edel y matriz canónica:
+  **5 passed en 1,57 s**. `py_compile` y `git diff --check` pasaron.
+- Flake8 con los códigos de CI pasó en los archivos modificados, aislando el
+  `F841` previo de `tests/test_price_url_candidates.py` (línea asignada al
+  commit del 20/11; no forma parte de este cambio).
+- Docker no está instalado en este equipo; no se ejecutó el smoke de contenedor
+  con UID/GID 1037:100. El check Docker/CI para el commit actualizado queda
+  pendiente y no se atribuyen a este SHA los resultados anteriores.
