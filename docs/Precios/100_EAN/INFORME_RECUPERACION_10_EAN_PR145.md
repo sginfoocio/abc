@@ -543,10 +543,10 @@ por ID; no se ejecuta un lote ni se envía HTTP por esta acción. Si la aprobaci
 vigencia o recibos no pasan el preview, se detiene y queda pendiente, sin crear
 una aprobación sustituta.
 
-La corrección de código aún depende de #145 y de CI/Docker del nuevo HEAD. La
-descripción de la PR se actualiza por separado solo cuando el mecanismo autenticado
-de GitHub permita editarla; no se sustituye por un comentario ni se afirma que haya
-sido editada.
+La descripción de #145 se actualizó por la vía autenticada para resumir este corte,
+los EAN pendientes, la corrección y sus límites. No se sustituyó por un comentario.
+En el primer sondeo del nuevo HEAD, GitHub todavía no había registrado jobs: el
+estado era `pending` con cero checks, así que **CI/Docker aún no se acredita**.
 
 ### Validación local
 
