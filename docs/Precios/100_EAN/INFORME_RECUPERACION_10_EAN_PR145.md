@@ -207,3 +207,106 @@ recibos ni deben presentarse como una nueva lectura de cada par a las 21:23.
   esta sesión también solicita iniciar sesión, por lo que no se pudo editar el
   cuerpo de #145 desde la interfaz; no se sustituyó esa actualización por un
   comentario. No hubo merge ni despliegue.
+
+## Reconciliación Cloud tras acceso SSH — 2026-11-22 (10:30:10–10:30:17 UTC)
+
+Esta sección **sustituye los estados de acceso bloqueado de 21/11** para la
+reconciliación de competidores. No sustituye evidencia anterior ni cambia precios.
+El corte se obtuvo desde el contenedor existente con identidad SSH explícita,
+`IdentitiesOnly=yes`, `BatchMode=yes` y `StrictHostKeyChecking=yes`; consultas de
+solo lectura sobre la base existente. No se llamó a tiendas ni a endpoints no
+documentados.
+
+### Línea base viva y vigilancia
+
+- **Cobertura a las 10:30:10–10:30:17 UTC: 89/100 EAN**. Los 11 no comparables
+  fueron `0843023181451`, `8056597886932`, `8056262407691`, `8056597875349`,
+  `0889214625984`, `0889214042422`, `0889214599834`, `0805289126577`,
+  `0805289126591`, `0889214586650` y `0889214669742`. El último es externo a
+  esta recuperación. Ninguno de los diez objetivos entraba en la comparación.
+- **Alcance intacto:** 100 productos activos × 14 competidores activos = 1.400
+  parejas; continuidad `id=1`, `active`, sin pausa, parada ni error. Heartbeat
+  `2026-11-22T10:30:09.687Z`; próxima sincronización `22:27:27.053Z`. Los estados
+  eran 442 `review`, 162 `restricted`, 795 `pending` y 1 `running`.
+- Heartbeat no equivale a avance real: hubo 106 comprobaciones en la última hora,
+  12 `checked_now` y 94 `not_executed`. La última lectura real acabó
+  `09:48:44.655Z` para Mia Burton × `8056597989275`, fuera de los diez. La pareja
+  `running` en este corte era Optical H × `0889214686374`, fuera del alcance,
+  aplazada por HTTP 429; no se intervino.
+- El comparador tenía 177 ofertas comparables y 133 caducadas en el conjunto.
+  Continuidad: 2.790 recibos HTTP únicos confirmados y 0 sin confirmar. Estas
+  cifras globales no convierten una lectura histórica de los diez casos en oferta
+  vigente.
+
+### Reconciliación por EAN y rutas con mayor evidencia
+
+| EAN | Ruta/URL prioritaria documentada | Solicitud, aprobación y recibos actuales | Exclusión comprobada y resultado |
+|---|---|---|---|
+| `0843023181451` Cartier CT0550S 001 | Mia Burton #28: `https://miaburton.com/en/sunglasses/cartier/ct0550s-001`; Visio Factory: `https://www.visiofactory.es/gafas-de-sol/todas-las-solares/cartier-core-range-ct0550s-001-56-18-oro.html` | #28 `pending`, 0 intentos/HTTP/recibos. Existe evento histórico `review+price` #2480, pero la vista previa no lo enlaza como aprobación (`approval_ref` vacío). | La vista previa actual excluye #28 porque la identidad aceptada no se puede acreditar. La muestra histórica de Visio publicó EAN `7630047879029`, distinto del solicitado; no prueba equivalencia. No se reprogramó ni se creó solicitud: falta el vínculo auditable de aprobación para esta URL/EAN exacta, y la ficha Visio tiene conflicto de EAN. |
+| `8056597886932` Miu Miu MU 52YS 7OE01T | Bassol #218/#70: `https://www.opticabassol.com/nl-nl/products/miu-miu-0mu-52ys-7oe01t-54`; Visual-Click #219/#71: `https://visual-click.com/products/miu-miu-mu-52ys-7oe01t-54`. Visio/Óptica Óptima tienen solo lecturas anteriores. | Bassol #218 enlaza `locate_event:2670`, 9 recibos/37 intentos, pero es un error histórico no cubierto por la recuperación desplegada; #70 tiene 1 recibo sin aprobación enlazada. Visual-Click #219 está `blocked` (15 recibos/61 intentos); #71 tiene 1 recibo sin aprobación. | El preview excluye por error histórico no cubierto y por estado `blocked`, no por falta de una URL. Las lecturas antiguas de Visio/Óptica Óptima caducaron. Sin reintento, reset ni HTTP nuevo; las identidades y autorizaciones de las filas duplicadas no se mezclan. |
+| `8056262407691` Miu Miu MU A06S 14L09Z | Optical H #179/#294: `https://opticalh.com/products/miu-miu-0mu-a06s-14l09z-54-17-64155`; Óptica Óptima histórica: `https://optica-optima.com/gafas-de-sol/miu-miu-mu-a06s-14l09z.html` | Optical H #294 enlaza `locate_event:2746`; #179 no tiene aprobación enlazada. Cada solicitud conserva 1 recibo. Ambas están `error`. | El error guardado es `Distinto modelo: catálogo MUA06S, ficha GAFASDESOLMIUMIUA06S`; el preview desplegado excluye el error histórico por falta de regla conocida. La regla acotada `miu-a06s-merged-descriptor` está en el código de #145, pero no en producción (`4453b635…`). Acción pendiente de ese código: desplegar por el proceso autorizado y volver a previsualizar/revalidar antes de aplicar. Ningún HTTP nuevo. |
+| `8056597875349` Prada PR 27ZS 16K08Z | Edel: `https://www.edel-optics.es/PR-27ZS-16K08Z-de-Prada.html?selectedSize=1907958`; Visio Factory: `https://www.visiofactory.es/gafas-de-sol/todas-las-solares/pr27zs-16k08z-54-21.html` | No hay solicitud manual ni aprobación identificada para estas rutas en el inventario vivo; no hay recibos que reutilizar. | Los pares conservan, respectivamente, reserva interrumpida con instrucción de no repetir una reserva incierta y estado heredado del piloto. Las muestras son históricas/caducadas. No se fabricó aprobación ni nueva solicitud: falta reconciliar la reserva de Edel y acreditar una autorización vigente para una URL exacta. |
+| `0889214625984` Tom Ford FT1310 01A | Edel #17: `https://www.edel-optics.es/FT1310-01A-de-Tom-Ford.html`; Mia #290: `https://miaburton.com/en/sunglasses/tom-ford/ft1310-01a` | #17 `done`, recibos 3526/5909; muestra #705, 185,60 €, EAN exacto, ES/EUR/IVA incluido, producto y oferta enlazados. Mia #290 enlaza `locate_event:2742`, recibo 4035; #18 es registro previo duplicado, recibo 3527. | #17 conserva `schema.org/BackOrder`, por tanto `availability=unknown`, aunque la muestra siga dentro de su ventana de vigencia en el corte. #290 se excluye por error histórico no cubierto. El precio no basta para stock ni comparación. Sin captura nueva; muestra y recibos reutilizados solo para reevaluación offline. |
+| `0889214042422` Tom Ford FT5634B 001 | Óptica Óptima #49: `https://optica-optima.com/gafas-graduadas/tom-ford-ft5634-b-001.html`; Visual-Click #260: `https://visual-click.com/products/tom-ford-ft5634-b-001-53` | #49 `done`, recibos 3558/5102/5103/6163/6164; muestra #777, 186,00 €. #260 está `blocked` (7 recibos); #50 es registro previo duplicado (recibo 3559). | En #49 el EAN y el IVA están acreditados, pero la evidencia de stock es `PreOrder` (`unknown`), el mercado está vacío y la oferta no está acotada a una variante. No se declara comparable ni se infiere disponibilidad del precio. No se repitió HTTP. |
+| `0889214599834` Tom Ford FT6082B 051 | Edel #53: `https://www.edel-optics.es/FT6082-B-051-de-Tom-Ford.html`; Optical H documentada: `https://opticalh.com/products/tom-ford-ft6082-b-051-889214599834` | #53 `done`, recibos 3562/5931; muestra #720, 172,80 €, EAN exacto, ES/EUR/IVA incluido, producto/oferta enlazados. | La muestra #720 conserva `BackOrder`, así que `availability=unknown`; el precio no es comparable sin evidencia de stock. La ruta Optical H no tiene una solicitud aprobada que se pueda reutilizar. No se convirtió `unknown` en disponible ni se emitió HTTP. |
+| `0805289126577` Ray-Ban RB2140 901 | Optical H #1: `https://opticalh.com/products/gafas-de-sol-ray-ban-wayfarer-rb2140-901-50-22-61980`; Bassol #297/#196: `https://www.opticabassol.com/nl-nl/products/ray-ban-rb2140-wayfarer-901-50`; Visio #4: `https://www.visiofactory.es/gafas-de-sol/todas-las-solares/rb2140-901l-54-18.html` | #1 seguía `deferred` por HTTP 429: 752 intentos, 18 peticiones, 18 recibos; el último recibido es **6293 (HTTP 429, 10:23:49.158Z)**, generado automáticamente por el trabajador. #297 enlaza `access_audit:341` pero está en `error` por regla histórica no cubierta (11 recibos/12 intentos); #196 es duplicado anterior (recibo 3693). #4 está diferida, sin HTTP ni recibos, por identidad no acreditada. | No se cambió presupuesto ni fecha. A las 10:30 #1 seguía diferida y no había un resultado posterior a 6293; no se reenvió la petición al vencer su `retry_at`. Las lecturas antiguas de 901 caducaron. No se confunde 901 con 90158 ni se transfiere stock. |
+| `0805289126591` Ray-Ban RB2140 90158 | Mia #298/#5: `https://miaburton.com/en/sunglasses/ray-ban/wayfarer-rb2140-901-58`; Óptica Universitaria documentada: `https://www.opticauniversitaria.es/gafas-de-sol/ray-ban/wayfarer/ray-ban-wayfarer-rb-2140-54-901-58/176253.html`; Optical H #7: `https://opticalh.com/products/gafas-de-sol-ray-ban-rb2140-90158-54-18-59408` | Mia #298 enlaza `access_audit:342`, pero su error histórico no está cubierto (recibo 5046); #5 es duplicado anterior (3699). Bassol #6 conserva identidad no acreditable (3515). Optical H #7 tiene un recibo (3516). | Optical H publicó `0805289126607`, no el EAN solicitado: no hay equivalencia ni traslado de stock. Óptica Universitaria sigue en revisión por `Marca no confirmado: catálogo RAYBAN, ficha desconocido`; su URL no autoriza consulta. Sin recuperación; se mantienen colores 901 y 90158 separados. |
+| `0889214586650` Tom Ford FT6058B 001 | Otticait: `https://www.otticait.com/fr/tom-ford-ft6058-b-001`; Amevista documental: `https://www.amevista.com/es/tom-ford-ft6058-b-001`; Óptica Óptima documental: `https://optica-optima.com/gafas-graduadas/tom-ford-ft6058b-001.html` | No hay solicitud manual ni aprobación auditada que programar. La pareja de continuidad Otticait #1337 está en `review`, con `Máximo de intentos alcanzado: requiere revisión`; último trabajo 19/11. | La muestra anterior de 132,30 € está caducada; carece de mercado/`market_source`, EAN y variante/modelo/color vinculados. Aunque el competidor figura configurado ES, `sales_market` no está verificado; `/fr` no acredita por sí solo ni FR ni ES. Las rutas alternativas son documentales, no ofertas verificadas. No se forzó mercado ni se consultó otra vez. |
+
+### Acciones, recibos, duplicados y límites
+
+- Previsualización viva: global **0 recuperables, 85 ya resueltos, 213 excluidos**.
+  Para estos diez: **0 recuperables, 3 ya resueltos (#17/#49/#53), 19 excluidos**.
+  Acción propuesta: reuse=0, requeue=0, already-queued=0. Los tres `done` se
+  excluyen de nuevas lecturas porque no necesitan otra consulta; sus ofertas
+  actuales no son comparables por disponibilidad `unknown`.
+- En las solicitudes existentes de los diez hay **81 referencias a recibos,
+  todas distintas**; no hay receipt ID duplicado. Se observaron 29 HTTP 200 y
+  52 HTTP 429. El único HTTP posterior atribuible al trabajador durante esta
+  revisión es el 429 **#6293 de la solicitud #1**; **HTTP iniciado por esta
+  revisión: 0**. No hubo reservas nuevas, solicitudes creadas/reprogramadas,
+  aprobaciones aplicadas ni recuperaciones.
+- Se verificaron siete grupos de solicitudes duplicadas **preexistentes**:
+  #70/#218 (Bassol, MU 52YS), #71/#219 (Visual-Click, MU 52YS), #179/#294
+  (Optical H, MU A06S), #18/#290 (Mia Burton, FT1310), #50/#260 (Visual-Click,
+  FT5634B), #196/#297 (Bassol, RB2140 901) y #5/#298 (Mia Burton, RB2140 90158).
+  No se añadió ninguna solicitud ni recibo; no se afirma que el histórico esté
+  libre de duplicados.
+- Para auditoría, recibos guardados por ID de solicitud (listas completas del
+  inventario a las 10:30 UTC): #1 `[3513,3514,5095,5096,6150,6152,6153,6154,6155,6156,6157,6158,6159,6160,6161,6162,6279,6293]`;
+  #4 `[]`; #5 `[3699]`; #6 `[3515]`; #7 `[3516]`; #17 `[3526,5909]`;
+  #18 `[3527]`; #28 `[]`; #49 `[3558,5102,5103,6163,6164]`; #50 `[3559]`;
+  #53 `[3562,5931]`; #70 `[3578]`; #71 `[3579]`; #179 `[3676]`;
+  #196 `[3693]`; #218 `[4112,4135,4182,4203,4275,4299,4308,4387,4415]`;
+  #219 `[4010,4074,4087,4204,4265,4276,4309,4388,4416,4675,4698,4720,4734,4740,4784]`;
+  #260 `[4014,4064,4114,4183,4225,4236,4340]`; #290 `[4035]`;
+  #294 `[4039]`; #297 `[5243,5253,5286,5298,5310,5323,5336,5456,5466,5469,6258]`;
+  #298 `[5046]`.
+- No se detuvo ni reinició el trabajador, no se borraron bloqueos, no se
+  cambiaron intentos, presupuestos, fechas, aprobaciones ni estados mediante SQL.
+  No se consultó MySQL ni se modificó el precio propio. No hubo merge ni
+  despliegue. Producción seguía en `abcd-control`, revisión
+  `4453b635ff35e0858748af4be11639f038986432`; la regla MUA06S aún no está
+  desplegada.
+
+### Código, CI/Docker y PR
+
+- #145 estaba abierta/en borrador en el HEAD `55e8521d613e5cd202a29f27e55afd80c9b0fb0e`
+  al obtener la línea base; el cambio de código vigente para esta recuperación
+  es `a0c8c6b7abc9038db1fb08c8e066da5f16a785bd`. No se modificó código en esta
+  reconciliación; por ser solo evidencia/documentación no se repitieron tests ni
+  CI manualmente.
+- CI del commit de código: run `45009150798` seguía `in_progress`; el job `tests`
+  permanecía en “Select and run offline tests” desde `09:47:02Z`. Docker depende
+  de ese job y **no está verificado** para este código. El run `45009326841` del
+  HEAD documental `55e8521` estaba `pending` sin jobs; los checks combinados del
+  HEAD seguían `pending`. No se afirma CI ni Docker aprobado para el HEAD actual.
+- El navegador GitHub de esta sesión mostró **Sign in** en #145 y no ofrece
+  controles de edición autenticados. Por eso este informe sí se actualiza en la
+  misma rama de #145, pero **el cuerpo de la PR no se pudo editar**; no se
+  sustituyó por un comentario ni se afirma que su descripción esté al día.
+- La comprobación de cuenta/permisos/conexión MySQL permanece separada y sin
+  consultar. La vigilancia de competidores permanece activa; los casos que
+  requieren el código MUA06S quedan pendientes de despliegue autorizado y
+  posterior previsualización, y los demás no se forzaron porque faltan las
+  condiciones exactas descritas arriba.
