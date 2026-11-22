@@ -299,4 +299,3 @@ Se muestra una URL prioritaria por par. El JSON conserva las alternativas y la p
 | Otticait | ficha_o_variante_localizada | [Abrir](https://www.otticait.com/es/tom-ford-ft6082-b-051) |
 | Céline Opticien Lunetier | ficha_o_variante_localizada | [Abrir](https://www.celine-opticien-lunetier.com/products/eyeglasses-tom-ford-ft6082-b) |
 
-
