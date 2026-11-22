@@ -70,6 +70,7 @@ def test_production_deploy_is_only_triggered_by_a_successful_push_run_on_main():
     (["app_exports.py"], {"test_app_exports.py"}, {ROOT_TESTS[0]}),
     (["image_repository.py"], {"test_repository_multi_export.py"}, {ROOT_TESTS[0]}),
     (["db_config.py"], {"tests"}, set(ROOT_TESTS)),
+    (["pytest.ini"], {"test_ci_stacked_prs.py", "test_price_monitor.py"}, set()),
     (["requirements.txt"], {"test_dockerfile_provider_modules.py", "test_prestashop_prices.py",
                             "test_vytria_price_sync.py"}, set()),
     (["Dockerfile"], {"test_dockerfile_provider_modules.py"}, set()),
@@ -109,6 +110,7 @@ def test_price_module_selects_direct_regressions_instead_of_entire_price_suite()
 @pytest.mark.parametrize(("source", "expected"), [
     ("price_monitor.py", {
         "tests/test_manual_review_continuity_repro.py",
+        "tests/test_price_monitor.py",
         "tests/test_price_recovery.py",
         "tests/test_price_review_fixes.py",
         "tests/test_price_review_refresh.py",
@@ -128,7 +130,6 @@ def test_price_dependencies_select_focused_regressions(source, expected):
     targets, reasons = select([source], inventory)
     assert set(targets) == expected
     assert "tests/test_price_watch.py" not in targets
-    assert "tests/test_price_monitor.py" not in targets
     assert reasons == [f"price dependencies: {source}"]
 
 

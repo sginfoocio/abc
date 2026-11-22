@@ -93,6 +93,14 @@ def smoke_saved_sample_preview(directory):
     evidence = Path(directory) / "saved-sample.json"
     evidence.write_text(json.dumps({"cases": [case]}), encoding="utf-8")
     store = PriceComparatorStore(Path(directory) / "saved-sample.sqlite3")
+    store.seed_defaults()
+    with store._connect() as con, con:
+        con.execute("""INSERT INTO products(
+            ean,original_ean,brand,model,color,caliber,commercial_name,updated_at
+        ) VALUES(?,?,?,?,?,?,?,?)""", (
+            case["ean"], case["ean"], "Ray-Ban", "RB2140", "901", "50-22", "RB2140",
+            (now - timedelta(days=1)).isoformat(),
+        ))
     result = SavedSampleReevaluation(store, evidence, clock=lambda: now).preview(1)
     assert result["category"] == "contradiction" and result["current_market"] == "FR"
 

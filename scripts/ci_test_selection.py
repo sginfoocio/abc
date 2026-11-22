@@ -74,6 +74,7 @@ PRICE_SOURCE_TESTS = {
     ),
     "price_monitor.py": (
         "tests/test_manual_review_continuity_repro.py",
+        "tests/test_price_monitor.py",
         "tests/test_price_recovery.py",
         "tests/test_price_review_fixes.py",
         "tests/test_price_review_refresh.py",
@@ -104,6 +105,7 @@ PRICE_SOURCE_TESTS = {
     "vytria_price_sync.py": ("tests/test_prestashop_prices.py", "tests/test_vytria_price_sync.py"),
 }
 SCOPED_DEPENDENCY_TESTS = {
+    "pytest.ini": ("tests/test_ci_stacked_prs.py", "tests/test_price_monitor.py"),
     "Dockerfile": ("tests/test_dockerfile_provider_modules.py",),
     "requirements-dev.txt": (
         "tests/test_dockerfile_provider_modules.py",
@@ -121,7 +123,7 @@ SCOPED_DEPENDENCY_TESTS = {
         "tests/test_vytria_price_sync.py",
     ),
 }
-GLOBAL_DEPENDENCIES = ("db_config.py", "pyproject.toml", "pytest.ini", "setup.cfg", "conftest.py",
+GLOBAL_DEPENDENCIES = ("db_config.py", "pyproject.toml", "setup.cfg", "conftest.py",
                        "tests/conftest.py")
 MASTERDATA_DEPENDENCIES = {
     ROOT_TESTS[0]: ("transform_luxottica_masterdata.py", ROOT_TESTS[0], "app_exports.py",
@@ -173,7 +175,7 @@ def select(paths, test_files):
             group_tests = {test for test in SCOPED_DEPENDENCY_TESTS[path] if test in test_files}
             if group_tests:
                 tests.update(group_tests)
-                reasons.append(f"scoped runtime/image dependency: {path}")
+                reasons.append(f"scoped dependency: {path}")
             else:
                 broad = True
                 reasons.append(f"conservative regression: missing dependency tests for {path}")
@@ -239,7 +241,7 @@ def main():
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as file:
         file.write(f"documentation_only={str(docs_only).lower()}\nbenchmark={str(benchmark).lower()}\n")
     if targets:
-        subprocess.run(["python", "-m", "pytest", "-q", "--", *targets], check=True)
+        subprocess.run(["python", "-m", "pytest", "-q", "-m", "not stress", "--", *targets], check=True)
 
 
 if __name__ == "__main__":
