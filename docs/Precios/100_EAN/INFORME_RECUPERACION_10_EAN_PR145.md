@@ -165,3 +165,45 @@ recibos ni deben presentarse como una nueva lectura de cada par a las 21:23.
   `edab5a5a1424dd9a5a755e32718b31888430220c`; esta adición es solo evidencia
   operativa. No se repitieron CI ni Docker manualmente. Sin merge, despliegue ni
   activación.
+
+## Corrección de aprobación histórica y bloqueo de acceso — 2026-11-22 09:47 UTC
+
+- **El estado vivo de Cloud no pudo actualizarse.** Al volver a la pestaña
+  `https://cloud.diagonaleyewear.net/comparador-precios`, la interfaz mostró
+  «Acceso restringido» y el formulario de inicio de sesión. No se descargaron
+  informes ni se consultaron solicitudes, aprobaciones, recibos o continuidad.
+  El último dato comprobado sigue siendo el corte histórico del 21/11 a las
+  21:23 Madrid (90/100), no una medida actual. La cobertura, heartbeat, cola y
+  estado de cada uno de los diez EAN en 22/11 quedan **sin verificar**; la tabla
+  anterior no debe interpretarse como reconciliación actual. En particular, no
+  se confirmó la aprobación ni la causa de espera de Cartier × Mia Burton #28.
+- **Corrección de código en #145, commit `a0c8c6b7abc9038db1fb08c8e066da5f16a785bd`:**
+  la reconstrucción de aprobaciones legadas puede usar un evento original
+  `review+price` verificable también cuando la solicitud sigue pendiente, si no
+  existe auditoría directa. La comprobación de identidad compara instantes
+  normalizados (no cadenas con distinta precisión) y conserva las validaciones
+  de identidad, producto anterior a la solicitud, URL, actor, motivo, evento y
+  unicidad. No crea una aprobación para eventos ausentes o ambiguos ni rejuvenece
+  una lectura histórica.
+- **Regresión offline:** solicitud pendiente sin auditoría directa ni snapshot,
+  aprobación trazada al evento original, preview con 0 HTTP, procesamiento por
+  el monitor de la solicitud existente y segunda aplicación sin cambios ni
+  HTTP duplicado. Los seis tests focalizados pasaron en **8,68 s**; `ruff
+  --select F`, `py_compile` y `git diff --check` pasaron. No se ejecutó una
+  lectura comercial ni una recuperación de producción.
+- **Operaciones del 22/11:** HTTP nuevo 0; solicitudes creadas o reprogramadas
+  0; aprobaciones aplicadas 0; recuperaciones 0; duplicados 0; cambios de
+  presupuesto, intentos o vigilancia 0. No se puede afirmar que alguno de los
+  diez EAN se haya resuelto, esté en cola o tenga una oferta comparable vigente
+  sin la exportación autenticada y la comprobación por ID.
+- La ejecución CI del SHA exacto `a0c8c6b7abc9038db1fb08c8e066da5f16a785bd`
+  (`45009150798`) seguía en curso a las 09:46 UTC. El workflow de PR debe
+  completar tests y build/smoke de Docker con red desactivada y sin publicar la
+  imagen; el run visible solo tenía iniciado el trabajo de tests. No se ejecutó
+  ni se autorizó despliegue. MySQL y SSH no se consultaron y siguen fuera de
+  este trabajo.
+- Para completar la reconciliación operativa se requiere restaurar el acceso
+  autenticado a Cloud en la pestaña compartida. La página de GitHub abierta en
+  esta sesión también solicita iniciar sesión, por lo que no se pudo editar el
+  cuerpo de #145 desde la interfaz; no se sustituyó esa actualización por un
+  comentario. No hubo merge ni despliegue.
