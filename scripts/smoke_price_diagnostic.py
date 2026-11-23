@@ -254,6 +254,15 @@ def main():
         assert metadata["artifact_kind"] == "sanitizado_parcial_jsonld"
         assert metadata["sanitization_version"] == 3 and metadata["unscoped_eans"] == ["889652429687"]
         assert b"Offer" in artifact and b"variant=1" in artifact and b"sensitive" not in artifact
+        mia_url = "https://miaburton.com/example"
+        text = ('<html><script type="application/ld+json">{"@type":"Product","name":"Fixture"}'
+                '</script><div>EAN: 8056597875226</div><div>BARCODE: 9053810072392</div></html>')
+        fetched = SimpleNamespace(content=text.encode(), text=text, url=mia_url, requested_url=mia_url,
+                                  redirects=[], status=200)
+        mia_metadata, mia_artifact = sanitise(fetched, 2 * 1024 * 1024)
+        assert mia_metadata["unscoped_eans"] == ["8056597875226"]
+        assert mia_metadata["unscoped_barcodes"] == ["9053810072392"]
+        assert b"9053810072392" not in mia_artifact
         node["offers"] = {"@type": "Offer", "price": "120", "priceCurrency": "EUR",
                           "eligibleCustomerType": "private member",
                           "shippingDetails": {"@type": "OfferShippingDetails",

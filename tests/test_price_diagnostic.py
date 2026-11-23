@@ -20,6 +20,8 @@ def test_real_mia_capture_retains_shipping_market_without_unrelated_html():
     assert replay.price == original.price
     assert b"BARCODE" not in artifact
     assert metadata["unscoped_eans"] == ["8056597875226"]
+    assert metadata["unscoped_barcodes"] == ["9053810072392"]
+    assert not replay.ean_published
 
 
 def test_observed_edel_microdata_can_be_retained_as_partial_evidence():
@@ -111,7 +113,28 @@ def test_sanitisation_keeps_unscoped_upc_without_treating_barcode_as_ean():
             '</script><div>UPC: 889652429687</div><div>BARCODE: 9053810072392</div></html>')
     metadata, artifact = sanitise(Fetched(url, 200, text.encode(), url, []), 1024 * 1024)
     assert metadata["unscoped_eans"] == ["889652429687"]
+    assert metadata["unscoped_barcodes"] == []
     assert b"889652429687" not in artifact and b"9053810072392" not in artifact
+
+
+def test_mia_barcodes_remain_distinct_and_unscoped():
+    url = "https://miaburton.com/example"
+    text = ('<html><script type="application/ld+json">{"@type":"Product","name":"Example"}'
+            '</script><div>EAN: 8056597875226</div><div>BARCODE: 9053810072392</div>'
+            '<div>BARCODE: 9053810072393</div></html>')
+    metadata, artifact = sanitise(Fetched(url, 200, text.encode(), url, []), 1024 * 1024)
+    assert metadata["unscoped_eans"] == ["8056597875226"]
+    assert metadata["unscoped_barcodes"] == ["9053810072392", "9053810072393"]
+    assert b"9053810072392" not in artifact and b"9053810072393" not in artifact
+
+
+def test_mia_rejects_excess_unscoped_barcodes():
+    url = "https://miaburton.com/example"
+    text = ('<html><script type="application/ld+json">{"@type":"Product","name":"Example"}'
+            '</script>' + ''.join(f'<div>BARCODE: {number:013d}</div>' for number in range(33))
+            + '</html>')
+    with pytest.raises(EvidenceError, match="Demasiados identificadores BARCODE"):
+        sanitise(Fetched(url, 200, text.encode(), url, []), 1024 * 1024)
 
 
 def test_sanitisation_preserves_restrictions_and_conflicting_tax_without_private_values():

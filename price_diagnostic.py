@@ -42,6 +42,8 @@ _UNSCOPED_EAN = re.compile(
     r"(?:\bEAN(?:/GTIN)?\b|\bGTIN(?:-?13)?\b|\bUPC\b|c[oó]digo\s+de\s+barras)\s*:?\s*"
     r"(?:<[^>]{0,200}>\s*){0,4}:?\s*(\d{12,13})(?!\d)"
     r"|\bdata-ean=[\"'](\d{12,13})[\"']", re.I)
+_MIA_BARCODE = re.compile(
+    r"\bBARCODE\b\s*:?\s*(?:<[^>]{0,200}>\s*){0,4}:?\s*(\d{12,13})(?!\d)", re.I)
 _EDEL_MICRODATA_PROPERTIES = {
     "name", "brand", "model", "color", "sku", "gtin12", "gtin13", "url", "offers", "price",
     "priceCurrency", "availability", "valueAddedTaxIncluded", "priceSpecification", "priceType",
@@ -245,6 +247,11 @@ def sanitise(fetched, max_bytes):
     unscoped_eans = sorted({match.group(1) or match.group(2) for match in _UNSCOPED_EAN.finditer(fetched.text)})
     if len(unscoped_eans) > 32:
         raise EvidenceError("Demasiados identificadores EAN sin vincular")
+    unscoped_barcodes = (sorted(set(_MIA_BARCODE.findall(fetched.text)))
+                         if (urlsplit(fetched.url).hostname or "").lower().removeprefix("www.")
+                         == "miaburton.com" else [])
+    if len(unscoped_barcodes) > 32:
+        raise EvidenceError("Demasiados identificadores BARCODE sin vincular")
     if len(artifact) > max_bytes:
         raise EvidenceError("Artefacto sanitizado demasiado grande")
     redirects = [{"url": safe_url(r["url"]), "status": r["status"],
@@ -252,6 +259,7 @@ def sanitise(fetched, max_bytes):
     metadata = {
         "artifact_kind": artifact_kind, "requested_url": safe_url(fetched.requested_url),
         "sanitization_version": sanitization_version, "unscoped_eans": unscoped_eans,
+        "unscoped_barcodes": unscoped_barcodes,
         "final_url": safe_url(fetched.url), "canonical_urls": list(dict.fromkeys(canonical)),
         "redirects": redirects, "http_status": fetched.status, "received_bytes": len(body),
         "received_sha256": hashlib.sha256(body).hexdigest(),

@@ -180,6 +180,8 @@ Aceptar confirma únicamente la identidad revisada; no acredita oferta, precio, 
 
 El diagnóstico de Edel sin JSON-LD puede conservar microdatos parciales sanitizados si el extractor vincula inequívocamente producto, oferta y selección y la reconstrucción conserva sus resultados. No es el HTML original ni una observación vigente: su reevaluación sigue siendo evidencia insuficiente para confirmar identidad o comparabilidad. Se rechazan restricciones de microdatos no conservables en lugar de omitirlas.
 
+En Mia Burton, los valores de 12 o 13 dígitos etiquetados `BARCODE` se conservan por separado como identificadores sin vincular; no se interpretan como EAN ni como evidencia de producto o variante. Su presencia no demuestra equivalencia ni resuelve contradicciones de identidad.
+
 En continuidad, cada lectura manual usa el contexto del único par autorizado y comprueba el manifiesto de
 100 EAN y 14 competidores, el estado activo, la decisión y la URL exacta. No sigue redirecciones a otra URL
 ni admite una variante extraída con URL distinta. La reserva histórica del piloto no se elimina ni se
