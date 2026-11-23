@@ -706,15 +706,35 @@ def test_sanitized_diagnostic_artifact_is_replayed_without_becoming_an_observati
     assert item["evidence"]["artifact_evaluations"][0]["result"] == "exact_identity"
     assert item["status"] == "error"
     assert site.calls == []
-    del metadata["sanitization_version"]
+
+    extra_html = html + '<section class="related-products"><div>EAN: 8056597875226</div></section>'
+    incomplete, extra_artifact = sanitise(Fetched(url, 200, extra_html.encode(), url, []), 1024 * 1024)
+    incomplete["captured_at"] = metadata["captured_at"]
+    incomplete["status"] = "captured"
     with store._connect() as con, con:
-        con.execute("UPDATE price_diagnostic_requests SET result=? WHERE ean=? AND url=?",
-                    (json.dumps(metadata), ean, url))
-    legacy = preview_manual_reviews(
+        con.execute("UPDATE price_diagnostic_requests SET result=?,artifact=? WHERE ean=? AND url=?",
+                    (json.dumps(incomplete), extra_artifact, ean, url))
+    preview = preview_manual_reviews(
         store.database_path, request_ids=[task], now=clock() + timedelta(seconds=2))
-    evaluation = legacy["requests"][0]["evidence"]["artifact_evaluations"][0]
+    evaluation = preview["requests"][0]["evidence"]["artifact_evaluations"][0]
+    assert incomplete["unscoped_eans"] == ["8056597875226"]
     assert evaluation["result"] == "insufficient_evidence"
-    assert "sanitización anterior" in evaluation["reason"]
+    assert "EAN" in evaluation["reason"]
+    assert site.calls == []
+
+    for version in (None, 2):
+        if version is None:
+            metadata.pop("sanitization_version", None)
+        else:
+            metadata["sanitization_version"] = version
+        with store._connect() as con, con:
+            con.execute("UPDATE price_diagnostic_requests SET result=?,artifact=? WHERE ean=? AND url=?",
+                        (json.dumps(metadata), artifact, ean, url))
+        legacy = preview_manual_reviews(
+            store.database_path, request_ids=[task], now=clock() + timedelta(seconds=2))
+        evaluation = legacy["requests"][0]["evidence"]["artifact_evaluations"][0]
+        assert evaluation["result"] == "insufficient_evidence"
+        assert "sanitización anterior" in evaluation["reason"]
     assert site.calls == []
 
 

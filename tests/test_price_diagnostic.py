@@ -14,11 +14,21 @@ def test_real_mia_capture_retains_shipping_market_without_unrelated_html():
     url = "https://miaburton.com/es/gafas-de-sol/prada/pr-26zs-16k08z"
     content = (Path(__file__).parent / "fixtures" / "web_pages" / "mia_burton.html").read_bytes()
     original = extract_product(content.decode("utf-8"), url)
-    _, artifact = sanitise(Fetched(url, 200, content, url, []), 2 * 1024 * 1024)
+    metadata, artifact = sanitise(Fetched(url, 200, content, url, []), 2 * 1024 * 1024)
     replay = extract_product(artifact.decode("utf-8"), url)
     assert original.market == replay.market == "ES"
     assert replay.price == original.price
     assert b"BARCODE" not in artifact
+    assert metadata["unscoped_eans"] == ["8056597875226"]
+
+
+def test_sanitisation_keeps_unscoped_upc_without_treating_barcode_as_ean():
+    url = "https://shop.example/product"
+    text = ('<html><script type="application/ld+json">{"@type":"Product","name":"Example"}'
+            '</script><div>UPC: 889652429687</div><div>BARCODE: 9053810072392</div></html>')
+    metadata, artifact = sanitise(Fetched(url, 200, text.encode(), url, []), 1024 * 1024)
+    assert metadata["unscoped_eans"] == ["889652429687"]
+    assert b"889652429687" not in artifact and b"9053810072392" not in artifact
 
 
 def test_sanitisation_preserves_restrictions_and_conflicting_tax_without_private_values():

@@ -242,12 +242,13 @@ def main():
                 "offers": {"@type": "Offer", "url": url + "?variant=1",
                            "price": "120", "priceCurrency": "EUR"}}
         text = ('<html><head><script type="application/ld+json">' + json.dumps(node)
-                + '</script></head><body><input name="csrf" value="sensitive"></body></html>')
+                + '</script></head><body><input name="csrf" value="sensitive">'
+                  '<div>UPC: 889652429687</div></body></html>')
         fetched = SimpleNamespace(content=text.encode(), text=text, url=url, requested_url=url,
                                   redirects=[], status=200)
         metadata, artifact = sanitise(fetched, 2 * 1024 * 1024)
         assert metadata["artifact_kind"] == "sanitizado_parcial_jsonld"
-        assert metadata["sanitization_version"] == 2
+        assert metadata["sanitization_version"] == 3 and metadata["unscoped_eans"] == ["889652429687"]
         assert b"Offer" in artifact and b"variant=1" in artifact and b"sensitive" not in artifact
         node["offers"] = {"@type": "Offer", "price": "120", "priceCurrency": "EUR",
                           "eligibleCustomerType": "private member",

@@ -858,12 +858,18 @@ def _reevaluate_saved_artifacts(con, task, now, recovery_rule):
             "stock_conflict": page.stock_conflict,
             "reason": (conflicts[0] if specific_conflict else edel_reason),
         })
-        if kind == "sanitized_jsonld" and metadata.get("sanitization_version") != 2:
+        if kind == "sanitized_jsonld" and (
+                metadata.get("sanitization_version") != 3 or not isinstance(metadata.get("unscoped_eans"), list)):
             if item["result"] == "exact_identity":
                 item["result"] = "insufficient_evidence"
-            item["commercial_gap"] = "Artefacto anterior: puede omitir restricciones, mercado o IVA"
+            item["commercial_gap"] = "Artefacto anterior: puede omitir identidad o contexto comercial"
             if not item["reason"]:
-                item["reason"] = "La sanitización anterior no conserva todo el contexto comercial"
+                item["reason"] = "La sanitización anterior no conserva toda la evidencia necesaria"
+        elif kind == "sanitized_jsonld" and metadata["unscoped_eans"]:
+            item["unscoped_eans"] = metadata["unscoped_eans"]
+            if item["result"] == "exact_identity":
+                item["result"] = "insufficient_evidence"
+                item["reason"] = "Hay EAN o UPC sin vincular al producto en el contenido original"
         if not item["reason"] and not exact:
             item["reason"] = ("La relación Product/Offer o la selección de variante es ambigua"
                               if page.ambiguous or page.offer_binding_unresolved

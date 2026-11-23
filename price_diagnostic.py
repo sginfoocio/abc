@@ -36,6 +36,10 @@ _ALLOWED_TYPES = {"Product", "ProductGroup", "Offer", "AggregateOffer", "Brand",
 _SECRET = re.compile(r"(?i)(?:[\w.+-]+@[\w.-]+\.[a-z]{2,}|bearer\s+\S+|"
                      r"(?:password|passwd|secret|token|session|cookie|csrf|authorization|api[_-]?key)\s*[:=])")
 _URL_SECRET = re.compile(r"(?i)password|passwd|secret|token|session|cookie|csrf|authorization|api[_-]?key")
+_UNSCOPED_EAN = re.compile(
+    r"(?:\bEAN(?:/GTIN)?\b|\bGTIN(?:-?13)?\b|\bUPC\b|c[oó]digo\s+de\s+barras)\s*:?\s*"
+    r"(?:<[^>]{0,200}>\s*){0,4}:?\s*(\d{12,13})(?!\d)"
+    r"|\bdata-ean=[\"'](\d{12,13})[\"']", re.I)
 
 
 class EvidenceError(ValueError):
@@ -150,6 +154,9 @@ def sanitise(fetched, max_bytes):
     if not _has_product_or_offer(records):
         raise EvidenceError("Sin estructura Product/Offer conservable")
     canonical = [safe_url(urljoin(fetched.url, href)) for href in collector.canonicals]
+    unscoped_eans = sorted({match.group(1) or match.group(2) for match in _UNSCOPED_EAN.finditer(fetched.text)})
+    if len(unscoped_eans) > 32:
+        raise EvidenceError("Demasiados identificadores EAN sin vincular")
     artifact = ("<!doctype html><html><head><script type=\"application/ld+json\">"
                 + serialised + "</script></head><body></body></html>").encode("utf-8")
     if len(artifact) > max_bytes:
@@ -158,7 +165,7 @@ def sanitise(fetched, max_bytes):
                   "location": safe_url(r["location"])} for r in fetched.redirects]
     metadata = {
         "artifact_kind": "sanitizado_parcial_jsonld", "requested_url": safe_url(fetched.requested_url),
-        "sanitization_version": 2,
+        "sanitization_version": 3, "unscoped_eans": unscoped_eans,
         "final_url": safe_url(fetched.url), "canonical_urls": list(dict.fromkeys(canonical)),
         "redirects": redirects, "http_status": fetched.status, "received_bytes": len(body),
         "received_sha256": hashlib.sha256(body).hexdigest(),
