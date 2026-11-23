@@ -688,6 +688,7 @@ def test_sanitized_diagnostic_artifact_is_replayed_without_becoming_an_observati
     metadata, artifact = sanitise(Fetched(url, 200, html.encode(), url, []), 1024 * 1024)
     metadata["captured_at"] = (clock() + timedelta(seconds=1)).isoformat()
     metadata["status"] = "captured"
+    metadata["canonical_urls"] = ["https://shop.example/other-variant"]
     with store._connect() as con, con:
         continuity_id = con.execute(
             "SELECT id FROM price_continuity ORDER BY id DESC LIMIT 1").fetchone()["id"]
@@ -704,7 +705,69 @@ def test_sanitized_diagnostic_artifact_is_replayed_without_becoming_an_observati
     assert item["action"] == "recover_corrected_error"
     assert item["evidence"]["artifact_evaluations"][0]["source"] == "sanitized_jsonld"
     assert item["evidence"]["artifact_evaluations"][0]["result"] == "exact_identity"
+    assert item["evidence"]["artifact_evaluations"][0]["canonical_urls"] == ["https://shop.example/other-variant"]
     assert item["status"] == "error"
+    assert site.calls == []
+
+    invalid = {**metadata, "canonical_urls": "not a list"}
+    with store._connect() as con, con:
+        con.execute("UPDATE price_diagnostic_requests SET result=? WHERE ean=? AND url=?",
+                    (json.dumps(invalid), ean, url))
+    preview = preview_manual_reviews(
+        store.database_path, request_ids=[task], now=clock() + timedelta(seconds=2))
+    evaluation = preview["requests"][0]["evidence"]["artifact_evaluations"][0]
+    assert evaluation["result"] == "insufficient_evidence" and "canonical" in evaluation["reason"]
+    assert site.calls == []
+
+    extra_html = html + '<section class="related-products"><div>EAN: 8056597875226</div></section>'
+    incomplete, extra_artifact = sanitise(Fetched(url, 200, extra_html.encode(), url, []), 1024 * 1024)
+    incomplete["captured_at"] = metadata["captured_at"]
+    incomplete["status"] = "captured"
+    with store._connect() as con, con:
+        con.execute("UPDATE price_diagnostic_requests SET result=?,artifact=? WHERE ean=? AND url=?",
+                    (json.dumps(incomplete), extra_artifact, ean, url))
+    preview = preview_manual_reviews(
+        store.database_path, request_ids=[task], now=clock() + timedelta(seconds=2))
+    evaluation = preview["requests"][0]["evidence"]["artifact_evaluations"][0]
+    assert incomplete["unscoped_eans"] == ["8056597875226"]
+    assert evaluation["result"] == "insufficient_evidence"
+    assert "EAN" in evaluation["reason"]
+    assert site.calls == []
+
+    partial = {**metadata, "artifact_kind": "sanitizado_parcial_microdatos", "sanitization_version": 4}
+    with store._connect() as con, con:
+        con.execute("UPDATE price_diagnostic_requests SET result=?,artifact=? WHERE ean=? AND url=?",
+                    (json.dumps(partial), artifact, ean, url))
+    preview = preview_manual_reviews(
+        store.database_path, request_ids=[task], now=clock() + timedelta(seconds=2))
+    evaluation = preview["requests"][0]["evidence"]["artifact_evaluations"][0]
+    assert evaluation["source"] == "sanitized_microdata"
+    assert evaluation["result"] == "insufficient_evidence" and "parcial" in evaluation["reason"]
+    assert not evaluation["offer_comparable"] and site.calls == []
+
+    partial["sanitization_version"] = 3
+    with store._connect() as con, con:
+        con.execute("UPDATE price_diagnostic_requests SET result=? WHERE ean=? AND url=?",
+                    (json.dumps(partial), ean, url))
+    preview = preview_manual_reviews(
+        store.database_path, request_ids=[task], now=clock() + timedelta(seconds=2))
+    evaluation = preview["requests"][0]["evidence"]["artifact_evaluations"][0]
+    assert evaluation["source"] == "sanitized_microdata"
+    assert evaluation["result"] == "insufficient_evidence"
+
+    for version in (None, 2):
+        if version is None:
+            metadata.pop("sanitization_version", None)
+        else:
+            metadata["sanitization_version"] = version
+        with store._connect() as con, con:
+            con.execute("UPDATE price_diagnostic_requests SET result=?,artifact=? WHERE ean=? AND url=?",
+                        (json.dumps(metadata), artifact, ean, url))
+        legacy = preview_manual_reviews(
+            store.database_path, request_ids=[task], now=clock() + timedelta(seconds=2))
+        evaluation = legacy["requests"][0]["evidence"]["artifact_evaluations"][0]
+        assert evaluation["result"] == "insufficient_evidence"
+        assert "sanitización anterior" in evaluation["reason"]
     assert site.calls == []
 
 

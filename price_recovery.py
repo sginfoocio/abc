@@ -775,7 +775,9 @@ def _reevaluate_saved_artifacts(con, task, now, recovery_rule):
             metadata = json.loads(row["result"])
         except (TypeError, json.JSONDecodeError):
             continue
-        artifacts.append(("sanitized_jsonld", row["id"], metadata, row["artifact"]))
+        kind = ("sanitized_microdata" if metadata.get("artifact_kind") == "sanitizado_parcial_microdatos"
+                else "sanitized_jsonld")
+        artifacts.append((kind, row["id"], metadata, row["artifact"]))
 
     results = []
     for kind, artifact_id, metadata, encoded in artifacts:
@@ -789,6 +791,13 @@ def _reevaluate_saved_artifacts(con, task, now, recovery_rule):
             "result": "insufficient_evidence",
             "reason": "",
         }
+        canonical_urls = metadata.get("canonical_urls")
+        if canonical_urls is not None and (
+                not isinstance(canonical_urls, list) or not all(isinstance(url, str) for url in canonical_urls)):
+            item["reason"] = "Metadatos de URL canonical inválidos"
+            results.append(item)
+            continue
+        item["canonical_urls"] = canonical_urls
         if requested_url != task["url"] or final_url != task["url"]:
             item["reason"] = "La URL solicitada o final no coincide exactamente con la aprobada"
             results.append(item)
@@ -858,6 +867,23 @@ def _reevaluate_saved_artifacts(con, task, now, recovery_rule):
             "stock_conflict": page.stock_conflict,
             "reason": (conflicts[0] if specific_conflict else edel_reason),
         })
+        if kind == "sanitized_microdata" or (kind == "sanitized_jsonld" and (
+                metadata.get("sanitization_version") != 3 or not isinstance(metadata.get("unscoped_eans"), list))):
+            if item["result"] == "exact_identity":
+                item["result"] = "insufficient_evidence"
+            partial_microdata = metadata.get("artifact_kind") == "sanitizado_parcial_microdatos"
+            item["commercial_gap"] = ("Artefacto parcial: puede omitir identidad o contexto comercial"
+                                      if partial_microdata else
+                                      "Artefacto anterior: puede omitir identidad o contexto comercial")
+            if not item["reason"]:
+                item["reason"] = ("La sanitización parcial de microdatos no conserva toda la evidencia necesaria"
+                                  if partial_microdata else
+                                  "La sanitización anterior no conserva toda la evidencia necesaria")
+        elif kind == "sanitized_jsonld" and metadata["unscoped_eans"]:
+            item["unscoped_eans"] = metadata["unscoped_eans"]
+            if item["result"] == "exact_identity":
+                item["result"] = "insufficient_evidence"
+                item["reason"] = "Hay EAN o UPC sin vincular al producto en el contenido original"
         if not item["reason"] and not exact:
             item["reason"] = ("La relación Product/Offer o la selección de variante es ambigua"
                               if page.ambiguous or page.offer_binding_unresolved

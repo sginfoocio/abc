@@ -72,6 +72,10 @@ def smoke_approved_recovery(path, now):
         assert con.execute("SELECT COUNT(*) FROM manual_review_refreshes").fetchone()[0] == 1
         assert con.execute("SELECT COUNT(*) FROM access_requests").fetchone()[0] == 0
         assert con.execute("SELECT COUNT(*) FROM access_audit WHERE action='recover_approved_identity'").fetchone()[0] == 1
+    deadline = (now + timedelta(days=2)).replace(microsecond=now.microsecond // 1000 * 1000)
+    access.report_block("competitor", cid, "http_429", retry_after=deadline)
+    after_one_day = AccessControl(store, clock=lambda: now + timedelta(days=1, seconds=1)).check(cid, "ficha")
+    assert after_one_day.code == "blocked_wait" and after_one_day.retry_at == deadline
 
 
 def smoke_saved_sample_preview(directory):
@@ -242,12 +246,64 @@ def main():
                 "offers": {"@type": "Offer", "url": url + "?variant=1",
                            "price": "120", "priceCurrency": "EUR"}}
         text = ('<html><head><script type="application/ld+json">' + json.dumps(node)
-                + '</script></head><body><input name="csrf" value="sensitive"></body></html>')
+                + '</script></head><body><input name="csrf" value="sensitive">'
+                  '<div>UPC: 889652429687</div></body></html>')
         fetched = SimpleNamespace(content=text.encode(), text=text, url=url, requested_url=url,
                                   redirects=[], status=200)
         metadata, artifact = sanitise(fetched, 2 * 1024 * 1024)
         assert metadata["artifact_kind"] == "sanitizado_parcial_jsonld"
+        assert metadata["sanitization_version"] == 3 and metadata["unscoped_eans"] == ["889652429687"]
         assert b"Offer" in artifact and b"variant=1" in artifact and b"sensitive" not in artifact
+        mia_url = "https://miaburton.com/example"
+        text = ('<html><script type="application/ld+json">{"@type":"Product","name":"Fixture"}'
+                '</script><div>EAN: 8056597875226</div><div>BARCODE: 9053810072392</div></html>')
+        fetched = SimpleNamespace(content=text.encode(), text=text, url=mia_url, requested_url=mia_url,
+                                  redirects=[], status=200)
+        mia_metadata, mia_artifact = sanitise(fetched, 2 * 1024 * 1024)
+        assert mia_metadata["unscoped_eans"] == ["8056597875226"]
+        assert mia_metadata["unscoped_barcodes"] == ["9053810072392"]
+        assert b"9053810072392" not in mia_artifact
+        mia_graph = {"@graph": [
+            {"@type": "WebPage", "url": mia_url, "mainEntity": {"@id": "#selected"}},
+            {"@type": "ProductGroup", "hasVariant": [
+                {"@type": "Product", "@id": "#selected", "color": "003",
+                 "offers": {"@type": "Offer", "url": mia_url, "price": "223", "priceCurrency": "EUR",
+                            "availability": "https://schema.org/OutOfStock"}}]},
+        ]}
+        text = '<html><script type="application/ld+json">' + json.dumps(mia_graph) + '</script></html>'
+        fetched = SimpleNamespace(content=text.encode(), text=text, url=mia_url, requested_url=mia_url,
+                                  redirects=[], status=200)
+        _, mia_artifact = sanitise(fetched, 2 * 1024 * 1024)
+        mia_page = extract_product(mia_artifact.decode(), mia_url)
+        assert mia_page and (mia_page.color, mia_page.variant_id, mia_page.availability) == (
+            "003", "selected", "unavailable")
+        node["offers"] = {"@type": "Offer", "price": "120", "priceCurrency": "EUR",
+                          "eligibleCustomerType": "private member",
+                          "shippingDetails": {"@type": "OfferShippingDetails",
+                                              "shippingDestination": {"@type": "DefinedRegion",
+                                                                      "addressCountry": "FR"}}}
+        text = '<html><script type="application/ld+json">' + json.dumps(node) + '</script></html>'
+        fetched = SimpleNamespace(content=text.encode(), text=text, url=url, requested_url=url,
+                                  redirects=[], status=200)
+        _, sanitized = sanitise(fetched, 2 * 1024 * 1024)
+        replay = extract_product(sanitized.decode(), url)
+        assert replay and replay.price is None and b"private member" not in sanitized
+        del node["offers"]["eligibleCustomerType"]
+        text = '<html><script type="application/ld+json">' + json.dumps(node) + '</script></html>'
+        fetched = SimpleNamespace(content=text.encode(), text=text, url=url, requested_url=url,
+                                  redirects=[], status=200)
+        _, sanitized = sanitise(fetched, 2 * 1024 * 1024)
+        replay = extract_product(sanitized.decode(), url)
+        assert replay and replay.market == "FR"
+        edel_url = "https://www.edel-optics.es/PR-27ZS-16K08Z-de-Prada.html?selectedSize=1907958"
+        content = (fixture_dir / "edel_optics.html").read_bytes()
+        fetched = SimpleNamespace(content=content, text=content.decode(), url=edel_url,
+                                  requested_url=edel_url, redirects=[], status=200)
+        metadata, sanitized = sanitise(fetched, 2 * 1024 * 1024)
+        edel = extract_product(sanitized.decode(), edel_url)
+        assert metadata["artifact_kind"] == "sanitizado_parcial_microdatos"
+        assert edel and (edel.ean_published, edel.price, edel.availability) == (
+            "8056597875349", 243.5, "available")
         artifact = partial_pages["opticalh-sanitizado.html"]
         artifact_metadata = {"artifact_kind": "sanitizado_parcial_jsonld",
                              "artifact_sha256": hashlib.sha256(artifact).hexdigest()}

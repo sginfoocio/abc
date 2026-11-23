@@ -53,7 +53,11 @@ _ADDED_COLUMNS = {
     "pilot_budgets": {"last_http_at": "REAL"},
     "price_pilot": {"last_error": "TEXT NOT NULL DEFAULT ''"},
     "price_trial_pairs": {"next_check_at": "TEXT", "defer_reason": "TEXT NOT NULL DEFAULT ''"},
-    "price_diagnostic_requests": {"retry_of": "INTEGER REFERENCES price_diagnostic_requests(id)"},
+    "price_diagnostic_requests": {
+        "retry_of": "INTEGER REFERENCES price_diagnostic_requests(id)",
+        "retry_reason": "TEXT NOT NULL DEFAULT ''",
+        "capture_version": "TEXT NOT NULL DEFAULT ''",
+    },
     "locate_events": {"metadata": "TEXT NOT NULL DEFAULT '{}'"},
     "offers": {"ean_published": "TEXT NOT NULL DEFAULT ''", "model_code": "TEXT NOT NULL DEFAULT ''",
                "color_code": "TEXT NOT NULL DEFAULT ''", "caliber": "TEXT NOT NULL DEFAULT ''",
@@ -870,6 +874,8 @@ class PriceComparatorStore:
                         actor TEXT NOT NULL,
                         note TEXT NOT NULL,
                         build_commit TEXT NOT NULL,
+                        retry_reason TEXT NOT NULL DEFAULT '',
+                        capture_version TEXT NOT NULL DEFAULT '',
                         status TEXT NOT NULL DEFAULT 'pending',
                         reason TEXT NOT NULL DEFAULT '',
                         created_at TEXT NOT NULL,
@@ -881,7 +887,7 @@ class PriceComparatorStore:
                     );
                     CREATE UNIQUE INDEX IF NOT EXISTS idx_price_diagnostic_active
                         ON price_diagnostic_requests(continuity_id,competitor_id,ean,url)
-                        WHERE status NOT IN ('expired','rejected');
+                        WHERE status IN ('pending','running','deferred');
                     CREATE TABLE IF NOT EXISTS price_robots_cache (
                         origin TEXT NOT NULL,
                         agent TEXT NOT NULL,
@@ -1042,11 +1048,11 @@ class PriceComparatorStore:
                     SELECT refresh_id,'legacy:' || sampled_at,sampled_at,sample_digest
                     FROM manual_review_recorded_samples""")
                 index = connection.execute("SELECT sql FROM sqlite_master WHERE name='idx_price_diagnostic_active'").fetchone()
-                if index and "status!='expired'" in index["sql"]:
+                if index and "where status in ('pending','running','deferred')" not in index["sql"].lower():
                     connection.execute("DROP INDEX idx_price_diagnostic_active")
                 connection.execute("""CREATE UNIQUE INDEX IF NOT EXISTS idx_price_diagnostic_active
                     ON price_diagnostic_requests(continuity_id,competitor_id,ean,url)
-                    WHERE status NOT IN ('expired','rejected')""")
+                    WHERE status IN ('pending','running','deferred')""")
                 connection.execute("""CREATE UNIQUE INDEX IF NOT EXISTS idx_price_diagnostic_retry
                     ON price_diagnostic_requests(retry_of) WHERE retry_of IS NOT NULL""")
                 connection.commit()

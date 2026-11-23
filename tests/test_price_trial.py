@@ -823,6 +823,41 @@ def _privacy_rejected_diagnostic(trial, monkeypatch):
     return service, store, clock, cid, ean, url, site, request, kwargs, original
 
 
+def _legacy_captured_diagnostic(trial):
+    service, store, clock, cid, ean, url, site = _diagnostic_review(trial)
+    graph = {"@context": "https://schema.org", "@graph": [
+        {"@type": "ProductGroup", "@id": url + "#group", "name": "Gucci GG1660S",
+         "hasVariant": {"@id": url + "#variant"}},
+        {"@type": "Product", "@id": url + "#variant", "name": "Gucci GG1660S",
+         "gtin13": ean, "offers": {"@id": url + "#offer"}},
+        {"@type": "Offer", "@id": url + "#offer", "price": "120", "priceCurrency": "EUR",
+         "availability": "https://schema.org/InStock"},
+    ]}
+    site.pages[url] = ('<html><head><script type="application/ld+json">' + json.dumps(graph)
+                       + '</script></head><body></body></html>')
+    kwargs = {"actor": "operator", "note": "La captura no acredita la variante seleccionada",
+              "build_commit": "a" * 40, "approved": True}
+    request = service.request_diagnostic(cid, ean, url, **kwargs)
+    service.diagnostic_tick()
+    with store._connect() as con:
+        original = dict(con.execute("SELECT * FROM price_diagnostic_requests WHERE id=?",
+                                    (request["id"],)).fetchone())
+        result = json.loads(original["result"])
+        audit = con.execute("""SELECT id FROM access_audit WHERE action='capture_diagnostic_html'
+            AND json_extract(current,'$.queue_id')=?""", (request["id"],)).fetchone()
+    assert original["status"] == "captured" and original["artifact"] and audit
+    result.pop("capture_version")
+    with store._connect() as con, con:
+        con.execute("""UPDATE price_diagnostic_requests SET capture_version='',result=? WHERE id=?""",
+                    (json.dumps(result, ensure_ascii=False), request["id"]))
+        con.execute("UPDATE access_audit SET current=? WHERE id=?",
+                    (json.dumps(result, ensure_ascii=False), audit["id"]))
+    with store._connect() as con:
+        original = dict(con.execute("SELECT * FROM price_diagnostic_requests WHERE id=?",
+                                    (request["id"],)).fetchone())
+    return service, store, clock, cid, ean, url, site, request, kwargs, original
+
+
 def test_diagnostic_explicit_retry_for_proven_pilot_refusal_without_http(trial, monkeypatch):
     from price_pilot import PilotError
 
@@ -887,6 +922,92 @@ def test_diagnostic_privacy_retry_preserves_original_and_runs_once(trial, monkey
         service.diagnostic_artifact(retry["id"])
     fresh = service.request_diagnostic(cid, ean, url, **kwargs)
     assert fresh["status"] == "pending" and fresh["id"] != retry["id"]
+
+
+def test_diagnostic_retry_for_captured_artifact_requires_new_version_and_preserves_history(trial):
+    from price_diagnostic import CAPTURE_VERSION
+    from price_trial import DIAGNOSTIC_RETRY_CAPTURE_UPDATE
+
+    service, store, _, cid, ean, url, site, request, kwargs, original = _legacy_captured_diagnostic(trial)
+    assert service.request_diagnostic(cid, ean, url, **kwargs)["id"] == request["id"]
+    with store._connect() as con, con:
+        con.execute("DROP INDEX idx_price_diagnostic_active")
+        con.execute("""CREATE UNIQUE INDEX idx_price_diagnostic_active
+            ON price_diagnostic_requests(continuity_id,competitor_id,ean,url)
+            WHERE status NOT IN ('expired','rejected')""")
+    PriceComparatorStore(store.database_path)
+    with store._connect() as con:
+        index_sql = con.execute("SELECT sql FROM sqlite_master WHERE name='idx_price_diagnostic_active'").fetchone()[0]
+    assert "status IN ('pending','running','deferred')" in index_sql
+
+    retry_kwargs = {"actor": "operator", "note": "Captura anterior sin variante explicita",
+                    "build_commit": "b" * 40, "approved": True,
+                    "retry_reason": DIAGNOSTIC_RETRY_CAPTURE_UPDATE}
+    before = _commercial_snapshot(store)
+    retry = service.retry_diagnostic(request["id"], **retry_kwargs)
+    assert retry["retry_of"] == request["id"] and retry["status"] == "pending"
+    assert retry["retry_reason"] == DIAGNOSTIC_RETRY_CAPTURE_UPDATE
+    assert retry["capture_version"] == CAPTURE_VERSION
+    assert service.retry_diagnostic(request["id"], **retry_kwargs)["id"] == retry["id"]
+    service.diagnostic_tick()
+    with store._connect() as con:
+        parent = dict(con.execute("SELECT * FROM price_diagnostic_requests WHERE id=?",
+                                  (request["id"],)).fetchone())
+        child = dict(con.execute("SELECT * FROM price_diagnostic_requests WHERE id=?",
+                                 (retry["id"],)).fetchone())
+        audit = con.execute("""SELECT current FROM access_audit WHERE action='retry_diagnostic'
+            AND previous=? ORDER BY id DESC LIMIT 1""", (str(request["id"]),)).fetchone()
+        assert con.execute("SELECT COUNT(*) FROM price_diagnostic_requests WHERE retry_of=?",
+                           (request["id"],)).fetchone()[0] == 1
+    assert parent == original
+    assert child["status"] == "captured" and child["retry_reason"] == DIAGNOSTIC_RETRY_CAPTURE_UPDATE
+    assert child["capture_version"] == CAPTURE_VERSION
+    assert json.loads(child["result"])["capture_version"] == CAPTURE_VERSION
+    assert json.loads(audit["current"])["capture_version"] == CAPTURE_VERSION
+    assert _commercial_snapshot(store) == before
+    assert site.calls.count(url) == 2
+
+
+@pytest.mark.parametrize("blocked", ["same_build", "access", "budget", "active", "later_receipt", "expired"])
+def test_diagnostic_captured_retry_revalidates_version_access_and_concurrency(trial, blocked):
+    from price_trial import DIAGNOSTIC_RETRY_CAPTURE_UPDATE
+
+    service, store, clock, cid, ean, url, _, request, _, original = _legacy_captured_diagnostic(trial)
+    build_commit = "a" * 40 if blocked == "same_build" else "b" * 40
+    if blocked == "access":
+        with store._connect() as con, con:
+            con.execute("UPDATE competitor_web_config SET access_status='blocked' WHERE competitor_id=?", (cid,))
+    elif blocked == "budget":
+        with store._connect() as con, con:
+            con.execute("UPDATE access_budgets SET daily_limit=1 WHERE scope='competitor' AND scope_id=?", (cid,))
+            con.execute("""INSERT INTO access_requests(scope,scope_id,competitor_id,method,purpose,ean,url,reserved_at)
+                VALUES('competitor',?,?,'ficha','other','another-ean','',?)""",
+                        (cid, cid, clock().isoformat()))
+    elif blocked == "active":
+        with store._connect() as con, con:
+            con.execute("""INSERT INTO price_diagnostic_requests
+                (continuity_id,competitor_id,ean,url,actor,note,build_commit,status,created_at)
+                VALUES(?,?,?,?,?,?,'c','pending',?)""",
+                        (original["continuity_id"], cid, ean, url + "-other", "operator", "active",
+                         clock().isoformat()))
+    elif blocked == "later_receipt":
+        clock.advance(seconds=1)
+        with store._connect() as con, con:
+            con.execute("""INSERT INTO access_requests(scope,scope_id,competitor_id,method,purpose,ean,url,reserved_at)
+                VALUES('competitor',?,?,'ficha','other',?,?,?)""",
+                        (cid, cid, ean, url, clock().isoformat()))
+    elif blocked == "expired":
+        clock.advance(days=8)
+    with pytest.raises(ValueError):
+        service.retry_diagnostic(
+            request["id"], actor="operator", note="Revalidar evidencia", build_commit=build_commit,
+            approved=True, retry_reason=DIAGNOSTIC_RETRY_CAPTURE_UPDATE,
+        )
+    with store._connect() as con:
+        assert dict(con.execute("SELECT * FROM price_diagnostic_requests WHERE id=?",
+                                (request["id"],)).fetchone()) == original
+        assert con.execute("SELECT COUNT(*) FROM price_diagnostic_requests WHERE retry_of=?",
+                           (request["id"],)).fetchone()[0] == 0
 
 
 def test_diagnostic_retry_is_idempotent_under_concurrent_submissions(trial, monkeypatch):

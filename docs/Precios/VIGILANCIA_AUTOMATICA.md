@@ -77,7 +77,7 @@ Cada petición, incluida la de `robots.txt`, se **reserva antes de lanzarla** de
 
 `GovernedFetcher` envuelve el `WebFetcher` existente:
 
-- **HTTP 429:** se abre una incidencia que espera el plazo de `Retry-After`. Si no viene esa cabecera, espera 1 h, con un máximo de 24 h. Pasado el plazo, se reanuda sola.
+- **HTTP 429:** se abre una incidencia que espera todo el plazo de `Retry-After`, aunque supere 24 h. Si no viene esa cabecera, espera 1 h. Si el plazo numérico no es representable, permanece bloqueada y requiere revisión; se registra una advertencia. Pasado el plazo, se reanuda sola.
 - **HTTP 401, 403 y 407, y CAPTCHA:** se abre una incidencia que **requiere una decisión humana**, con responsable y nota. Hasta entonces, se suspenden todos los trabajos de ese competidor.
 - Las incidencias abiertas no se duplican.
 - No se intenta evadir ninguna protección.
@@ -177,6 +177,12 @@ La confirmación individual («Confirmar ficha y actualizar precio») o múltipl
 El trabajador persistente existente recoge primero las solicitudes manuales en cada ciclo, también entre ciclos diarios, y las procesa con `PriceMonitor.run` y los mismos bloqueos, permisos, robots, pausas, reservas y presupuestos compartidos. El bloqueo global de continuidad solo protege la comprobación y reserva; cada par conserva su exclusión mutua durante la lectura, incluso mientras se libera el bloqueo global para HTTP. Si otro trabajador tiene reservado el mismo par, la solicitud queda aplazada 30 segundos, sin consumir intentos comerciales y con la hora del siguiente intento visible. La repetición usa el mismo ID; no crea otra solicitud.
 
 Aceptar confirma únicamente la identidad revisada; no acredita oferta, precio, stock ni comparabilidad. La lectura conserva el comportamiento comercial normal: identidad sin contradicciones, precio válido, moneda/mercado e IVA configurados, disponibilidad y vigencia. Antes de HTTP se reutiliza una lectura guardada solo si la URL y la identidad son compatibles, su fecha y vigencia están acreditadas y la política comercial vigente sigue coincidiendo. La reevaluación local conserva la fecha original. Si falta una lectura utilizable, el mismo trabajo prioritario la obtiene por el monitor gobernado. Si la lectura falla, la aceptación permanece con su motivo pendiente; si descubre una contradicción de identidad, no registra esa oferta comparable y la ficha vuelve a revisión. No se modifican frecuencias generales ni se reprograman otros pares.
+
+El diagnóstico de Edel sin JSON-LD puede conservar microdatos parciales sanitizados si el extractor vincula inequívocamente producto, oferta y selección y la reconstrucción conserva sus resultados. No es el HTML original ni una observación vigente: su reevaluación sigue siendo evidencia insuficiente para confirmar identidad o comparabilidad. Se rechazan restricciones de microdatos no conservables en lugar de omitirlas.
+
+En Mia Burton, los valores de 12 o 13 dígitos etiquetados `BARCODE` se conservan por separado como identificadores sin vincular; no se interpretan como EAN ni como evidencia de producto o variante. Su presencia no demuestra equivalencia ni resuelve contradicciones de identidad.
+
+Si una ficha Mia publica un `WebPage.mainEntity` que identifica inequívocamente una variante de `ProductGroup`, el diagnóstico conserva únicamente la relación, el código de color y los campos comerciales permitidos; rechaza la sanitización si altera la selección o la oferta. La variante debe tener una única oferta coherente con la URL solicitada y sin contradicciones de SKU o EAN. La URL canónica se conserva como procedencia, no como selección; el stock del EAN y la vigencia requieren evidencia independiente. Esta estructura es un contrato admitido, no una afirmación de que estuviera presente en las capturas parciales anteriores.
 
 En continuidad, cada lectura manual usa el contexto del único par autorizado y comprueba el manifiesto de
 100 EAN y 14 competidores, el estado activo, la decisión y la URL exacta. No sigue redirecciones a otra URL
@@ -561,6 +567,8 @@ Prueba real preparada para **Visio Factory, Edel-Optics, Amevista y Óptica Ópt
 - **ConGafasDeSol y Domanci siguen restringidos** hasta contar con autorización documentada de los métodos y rutas. No se han realizado consultas reales desde esta entrega.
 
 Pruebas automatizadas: `tests/test_price_monitor.py` incluye **500 EAN × dos competidores simulados** (1.000 combinaciones), localización/confirmación, precios, cambios, alertas, caída y recuperación, ausencia de nuevas búsquedas, presupuestos y protecciones. Incluye además migración desde esquema de fase 3, recibos tras caída entre importación/cierre, URL compartida por calibres, caducidad, umbral exacto e interfaz sin HTTP.
+
+La regresión rápida del localizador cubre la recuperación tras una interrupción con dos productos. La prueba sintética de escala de 500 EAN se conserva fuera del CI rápido y se ejecuta expresamente con `python -m pytest -m stress tests/test_price_locator.py`.
 
 ## Orden de integración de las PR
 

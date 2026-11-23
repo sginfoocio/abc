@@ -252,6 +252,34 @@ def test_governed_fetcher_suspends_on_429_and_does_not_retry(env):
     assert site.calls.count("https://eur.example/p") == 1
 
 
+@pytest.mark.parametrize("header", ["172800", "Thu, 05 Nov 2026 08:00:00 GMT"])
+def test_governed_fetcher_honors_retry_after_longer_than_a_day(env, header):
+    store, access, clock, cid = env
+    _authorize(access, cid, "ficha")
+    site = Site({"https://eur.example/p": (429, {"Retry-After": header}, b"")})
+    with pytest.raises(ConnectorBlocked):
+        _fetcher(access, cid, site, clock).get("https://eur.example/p")
+    expected = clock.now + timedelta(days=2)
+    assert pd.Timestamp(access.incidents().iloc[0]["retry_after"]) == pd.Timestamp(expected)
+    clock.advance(hours=25)
+    with pytest.raises(AccessDenied):
+        access.reserve(cid, "ficha", purpose="monitor")
+    assert site.calls.count("https://eur.example/p") == 1
+    clock.advance(hours=23, seconds=1)
+    assert access.check(cid, "ficha").allowed
+
+
+def test_unrepresentable_retry_after_keeps_competitor_blocked(env, caplog):
+    _, access, clock, cid = env
+    _authorize(access, cid, "ficha")
+    site = Site({"https://eur.example/p": (429, {"Retry-After": "9" * 100}, b"")})
+    with pytest.raises(ConnectorBlocked):
+        _fetcher(access, cid, site, clock).get("https://eur.example/p")
+    decision = access.check(cid, "ficha")
+    assert decision.code == "blocked_wait" and decision.retry_at.year == 9999
+    assert "fuera del rango representable" in caplog.text
+
+
 def test_governed_fetcher_records_captcha_and_never_bypasses_it(env):
     store, access, clock, cid = env
     _authorize(access, cid, "ficha")

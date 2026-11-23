@@ -153,6 +153,7 @@ def _catalogue_500(site):
     return rows
 
 
+@pytest.mark.stress
 def test_500_watched_eans_are_discovered_confirmed_and_recovered_after_interruption(tmp_path):
     site = Site()
     store, access, locator, clock, cid = _env(tmp_path, site)
@@ -213,6 +214,37 @@ def test_500_watched_eans_are_discovered_confirmed_and_recovered_after_interrupt
     calls = len(site.calls)
     locator.enqueue()
     assert locator.run([cid], max_jobs=10_000).processed == 0
+    assert len(site.calls) == calls
+
+
+def test_discovery_recovers_interrupted_job_without_duplicate_requests(tmp_path):
+    site = Site()
+    store, _, locator, clock, cid = _env(tmp_path, site)
+    rows = [(_gtin("840000000001"), "Alpha", "AL1000", "001", ""),
+            (_gtin("840000000002"), "Alpha", "AL1000", "002", "")]
+    for ean, brand, model, color, _ in rows:
+        site.product(brand, model, color, gtin=ean)
+    site.product("Alpha", "AL1000", "99Z")
+    watched = _watch(store, rows)
+    assert watched.queued == len(rows) * len(store.competitors())
+    assert locator.enqueue()["created"] == 0
+
+    site.crash_after = 3
+    with pytest.raises(Crash):
+        locator.run([cid], max_jobs=100)
+    assert (_jobs(store, cid)["state"] == "running").sum() == 1
+    site.crash_after = None
+    clock.advance(seconds=LEASE.total_seconds() + 1)
+    locator.run([cid], max_jobs=100)
+
+    assert set(_jobs(store, cid)["state"]) == {"done"}
+    urls = _urls(store, cid)
+    assert set(urls["ean"]) == {row[0] for row in rows}
+    assert set(urls["status"]) == {"verified"}
+    assert not urls["url"].str.contains("-99z-").any()
+    calls = len(site.calls)
+    assert locator.enqueue()["created"] == 0
+    assert locator.run([cid], max_jobs=100).processed == 0
     assert len(site.calls) == calls
 
 
