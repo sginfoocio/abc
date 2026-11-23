@@ -9,6 +9,7 @@ import provider_odoo_orders as po
 from image_repository import ImageRepository
 from marcolin_images import MarcolinConnector, DEFAULTS
 from provider_images import ProviderService, ProviderStore
+from provider_order_policy import set_order_start_date
 from provider_support import EANS, photo
 
 BAD_EAN = "8400000000999"
@@ -55,6 +56,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("IMAGE_REPOSITORY_STATE_ROOT", str(tmp_path / "r"))
     monkeypatch.setenv("IMAGE_REPOSITORY_ROOT", str(tmp_path / "i"))
     root = tmp_path / "s"
+    set_order_start_date(root, date(2026, 9, 1), actor="test")
     service = ProviderService(ProviderStore(root), repo, DEFAULTS)
     return MarcolinConnector(service), repo, root
 
@@ -126,7 +128,8 @@ def test_preview_statuses_images_and_duplicates(env):
     connector.plan_eans([EANS[0]])  # already has a live request
     preview = po.demand_preview(odoo_fixture(), connector, root, *RANGE)
     by = {(r["EAN"], r["Pedido"]): r for r in preview["rows"]}
-    assert by[(EANS[1], "P00001")]["Imágenes"] == po.IMAGES_PARTIAL and by[(EANS[1], "P00001")]["Estado"] == po.ELIGIBLE
+    assert by[(EANS[1], "P00001")]["Imágenes"] == po.IMAGES_PARTIAL
+    assert by[(EANS[1], "P00001")]["Estado"] == po.PARTIAL
     assert by[(EANS[2], "P00002")]["Imágenes"] == po.IMAGES_COMPLETE and by[(EANS[2], "P00002")]["Estado"] == po.COMPLETE
     assert by[(EANS[0], "P00002")]["Estado"] == po.DUPLICATE or by[(EANS[0], "P00001")]["Estado"] == po.DUPLICATE
     reviews = [r for r in preview["rows"] if r["Estado"] == po.REVIEW]
@@ -135,14 +138,13 @@ def test_preview_statuses_images_and_duplicates(env):
     assert sum(1 for r in preview["rows"] if r["EAN"] == EANS[0] and r["Estado"] == po.DUPLICATE) >= 1
 
 
-def test_pilot_proposal_prefers_missing_then_partial_recent_first_and_caps_at_ten(env):
+def test_pilot_proposal_uses_only_absent_eans_and_caps_at_ten(env):
     connector, repo, root = env
     po.save_link(root, "marcolin", [573], reviewer="ana")
     repo.save(EANS[1], "a.png", photo(), provider="kering", origin="t", view="frontal")
     preview = po.demand_preview(odoo_fixture(), connector, root, *RANGE)
     picks = po.pick_pilot(preview["rows"], size=50)
-    assert picks[-1] == EANS[1]  # partial last
-    assert set(picks) == {EANS[0], EANS[1], EANS[2]} and len(po.pick_pilot(preview["rows"], 2)) == 2
+    assert picks == [EANS[2], EANS[0]]
     many = [{"EAN": f"{i}", "Estado": po.ELIGIBLE, "Imágenes": po.IMAGES_NONE, "Fecha": "2026-09-01"} for i in range(30)]
     assert len(po.pick_pilot(many, 99)) == 10
 
@@ -150,13 +152,14 @@ def test_pilot_proposal_prefers_missing_then_partial_recent_first_and_caps_at_te
 def test_create_requests_only_planner_only_eligible_no_portal_and_logged(env):
     connector, repo, root = env
     po.save_link(root, "marcolin", [573], reviewer="ana")
+    repo.save(EANS[1], "a.png", photo(), provider="kering", origin="t", view="frontal")
     preview = po.demand_preview(odoo_fixture(), connector, root, *RANGE)
     result = po.create_requests(connector, root, preview["rows"], [EANS[0], EANS[1], BAD_EAN, EANS[3]], approved_by="ana")
-    assert result["not_eligible"] == [BAD_EAN, EANS[3]]  # invalid and cancelled-order EANs cannot be forced in
+    assert result["not_eligible"] == [EANS[1], BAD_EAN, EANS[3]]
     requests = connector.service.store.list_requests("marcolin")
     assert len(requests) == 1 and requests[0]["state"] == "ready" and requests[0]["remote_id"] is None
     log = [json.loads(l) for l in (root / po.SELECTION_LOG).read_text(encoding="utf-8").splitlines()]
-    assert log[0]["approved_by"] == "ana" and {e["ean"] for e in log[0]["eans"]} == {EANS[0], EANS[1]}
+    assert log[0]["approved_by"] == "ana" and {e["ean"] for e in log[0]["eans"]} == {EANS[0]}
     again = po.create_requests(connector, root, preview["rows"], [EANS[0]], approved_by="ana")
     assert again["created"] == [] and len(connector.service.store.list_requests("marcolin")) == 1
     with pytest.raises(ValueError):

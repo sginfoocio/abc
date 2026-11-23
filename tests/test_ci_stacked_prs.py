@@ -74,6 +74,15 @@ def test_production_deploy_is_only_triggered_by_a_successful_push_run_on_main():
     (["transform_luxottica_masterdata.py"], {"test_provider_odoo_orders.py"}, {ROOT_TESTS[0]}),
     (["validate_masterdata_odoo_dryrun.py"], {"test_app_exports.py"}, {ROOT_TESTS[1]}),
     (["app_exports.py"], {"test_app_exports.py"}, {ROOT_TESTS[0]}),
+    (["app_enhanced.py"], {
+        "test_app_exports.py", "test_auth_session.py", "test_ci_stacked_prs.py",
+        "test_provider_images_ui.py", "test_provider_order_panel.py",
+        "test_provider_order_policy.py", "test_provider_odoo_orders.py",
+    }, set()),
+    (["provider_order_policy.py"], {
+        "test_app_exports.py", "test_provider_odoo_orders.py",
+        "test_provider_order_panel.py", "test_provider_order_policy.py",
+    }, set()),
     (["image_repository.py"], {"test_repository_multi_export.py"}, {ROOT_TESTS[0]}),
     (["db_config.py"], {"tests"}, set(ROOT_TESTS)),
     (["pytest.ini"], {"test_ci_stacked_prs.py", "test_price_monitor.py"}, set()),
@@ -159,6 +168,13 @@ def test_vytria_dependency_selection_avoids_the_full_price_suite():
     assert "tests/test_price_watch.py" not in targets
     assert "tests/test_price_monitor.py" not in targets
     assert len(targets) < sum(path.startswith("tests/test_price") for path in inventory)
+
+
+def test_direct_test_change_runs_only_that_test():
+    inventory = {p.relative_to(ROOT).as_posix() for p in (ROOT / "tests").rglob("test_*.py")}
+    targets, reasons = select(["tests/test_provider_order_panel.py"], inventory)
+    assert targets == ["tests/test_provider_order_panel.py"]
+    assert reasons == ["direct test: tests/test_provider_order_panel.py"]
 
 
 def test_stacked_pr_and_multi_commit_push_use_different_bases(tmp_path):

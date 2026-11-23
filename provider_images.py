@@ -47,7 +47,7 @@ TRANSITIONS = {
     NEEDS_REVIEW: {READY, PENDING, AVAILABLE, IMPORTED, PARTIAL, FAILED, CANCELLED},
     IMPORTED: set(), PARTIAL: set(), FAILED: set(), CANCELLED: set(),
 }
-PROVIDERS = ("marcolin", "nuorder", "safilo")
+PROVIDERS = ("marcolin", "nuorder", "safilo", "luxottica")
 VALID_VIEWS = {*IMAGE_CLASSIFICATIONS, "unknown"}
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 MANIFEST_NAMES = {"manifest.csv", "manifest.json", "metadata.csv", "metadata.json"}
@@ -299,6 +299,12 @@ CREATE TABLE IF NOT EXISTS request_odoo_items(
   product TEXT NOT NULL DEFAULT '', supplier TEXT NOT NULL DEFAULT '', order_name TEXT NOT NULL DEFAULT '',
   order_date TEXT NOT NULL DEFAULT '', status TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '',
   PRIMARY KEY(request_id, ean));
+CREATE TABLE IF NOT EXISTS request_odoo_lines(
+  request_id INTEGER NOT NULL REFERENCES requests(id), source_key TEXT NOT NULL, line_id TEXT NOT NULL DEFAULT '',
+  product_id TEXT NOT NULL DEFAULT '', ean TEXT NOT NULL, sku TEXT NOT NULL DEFAULT '',
+  product TEXT NOT NULL DEFAULT '', quantity TEXT NOT NULL DEFAULT '', supplier TEXT NOT NULL DEFAULT '',
+  order_name TEXT NOT NULL DEFAULT '', order_date TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY(request_id, source_key));
 CREATE TABLE IF NOT EXISTS events(
   id INTEGER PRIMARY KEY, request_id INTEGER, at REAL NOT NULL, from_state TEXT, to_state TEXT, detail TEXT);
 CREATE TABLE IF NOT EXISTS review_items(
@@ -482,6 +488,26 @@ class ProviderStore:
               str(item.get("date") or ""), str(item.get("status") or "pending"),
               str(item.get("reason") or "")) for item in items],
         )
+        for item in items:
+            for index, line in enumerate(item.get("lines") or ()):
+                source_key = str(line.get("line_id") or line.get("id") or f"line-{index}")
+                connection.execute(
+                    "INSERT OR REPLACE INTO request_odoo_lines"
+                    "(request_id,source_key,line_id,product_id,ean,sku,product,quantity,supplier,order_name,order_date) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    (request_id, source_key, str(line.get("line_id") or line.get("id") or ""),
+                     str(line.get("product_id") or ""), str(line.get("ean") or item["ean"]),
+                     str(line.get("sku") or item.get("sku") or ""),
+                     str(line.get("product") or item.get("product") or ""),
+                     str(line.get("quantity") or ""), str(item.get("supplier") or ""),
+                     str(item.get("order") or ""), str(item.get("date") or "")),
+                )
+
+    def odoo_lines(self, request_id: int) -> list[dict]:
+        with closing(self.connect()) as connection:
+            return [dict(row) for row in connection.execute(
+                "SELECT line_id,product_id,ean,sku,product,quantity,supplier,order_name,order_date "
+                "FROM request_odoo_lines WHERE request_id=? ORDER BY source_key", (request_id,))]
 
     def odoo_items(self, request_id: int) -> list[dict]:
         with closing(self.connect()) as connection:
@@ -578,6 +604,14 @@ class ProviderStore:
                 SELECT ?, i.ean, i.sku, i.product, i.supplier, i.order_name, i.order_date, i.status, i.reason
                 FROM request_odoo_items i JOIN request_eans e ON e.request_id=? AND e.ean=i.ean
                 WHERE i.request_id=?
+            """, (rid, rid, request_id))
+            connection.execute("""
+                INSERT INTO request_odoo_lines
+                SELECT ?, l.source_key, l.line_id, l.product_id, l.ean, l.sku, l.product, l.quantity,
+                       l.supplier, l.order_name, l.order_date
+                FROM request_odoo_lines l JOIN request_eans e
+                  ON e.request_id=? AND e.ean_key=substr('00000000000000' || l.ean, -14)
+                WHERE l.request_id=?
             """, (rid, rid, request_id))
             detail = f"reintento de {request_id}" + (f" · preparado por {reviewer}" if manual_codes is not None else "")
             self._event(connection, rid, None, READY, detail)
@@ -921,3 +955,8 @@ class ProviderConnector:
 
     def request_lock(self, request_id: int):
         return FileLock(self.service.store.root / f".request-{int(request_id)}.lock", timeout=0)
+
+
+class LuxotticaConnector(ProviderConnector):
+    default_mode = "manual"
+    list_separator = "\n"

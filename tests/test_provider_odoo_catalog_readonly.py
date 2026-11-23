@@ -1,5 +1,6 @@
 """#75: the Odoo preview reads image coverage from the existing catalog without initialising it."""
 import sqlite3
+from datetime import date
 
 import pytest
 
@@ -7,6 +8,7 @@ import provider_odoo_orders as po
 from image_repository import ImageRepository
 from marcolin_images import DEFAULTS, MarcolinConnector
 from provider_images import ProviderService, ProviderStore
+from provider_order_policy import set_order_start_date
 from provider_support import EANS, make_ean, photo
 from test_provider_odoo_orders import RANGE, odoo_fixture
 
@@ -27,6 +29,7 @@ def blank(tmp_path, monkeypatch):
 
     service = ProviderService(ProviderStore(tmp_path / "s"), NoRepo(), DEFAULTS)
     po.save_link(tmp_path / "s", "marcolin", [573], reviewer="ana")
+    set_order_start_date(tmp_path / "s", date(2026, 8, 1), actor="test")
     return MarcolinConnector(service), tmp_path / "s", tmp_path
 
 
@@ -35,7 +38,7 @@ def test_missing_catalog_creates_nothing_and_is_unknown_not_absent(blank):
     preview = po.demand_preview(odoo_fixture(), connector, root, *RANGE)
     assert not (base / "r").exists() and not (base / "i").exists()
     assert preview["catalog"]["status"] == "inaccesible"
-    states = {r["Imágenes"] for r in preview["rows"] if r["Estado"] == po.ELIGIBLE}
+    states = {r["Imágenes"] for r in preview["rows"] if r["EAN"] in EANS and r["Estado"] == po.REVIEW}
     assert states == {po.IMAGES_UNKNOWN}
     assert po.pick_pilot(preview["rows"]) == []  # unknown coverage is never proposed as "without images"
 
@@ -57,15 +60,17 @@ def test_existing_catalog_is_read_without_modification_and_declares_basis(tmp_pa
     monkeypatch.setattr(ImageRepository, "__init__", lambda *a, **k: pytest.fail("ImageRepository constructed"))
     service = ProviderService(ProviderStore(tmp_path / "s"), object(), DEFAULTS)
     po.save_link(tmp_path / "s", "marcolin", [573], reviewer="ana")
+    set_order_start_date(tmp_path / "s", date(2026, 8, 1), actor="test")
     connector = MarcolinConnector(service)
     before = tree(tmp_path / "r"), (tmp_path / "r" / ".catalog.sqlite3").read_bytes()
     preview = po.demand_preview(odoo_fixture(), connector, tmp_path / "s", *RANGE)
     assert (tree(tmp_path / "r"), (tmp_path / "r" / ".catalog.sqlite3").read_bytes()) == before
-    by = {r["EAN"]: r for r in preview["rows"] if r["Estado"] == po.ELIGIBLE}
-    assert by[EANS[1]]["Imágenes"] == po.IMAGES_PARTIAL
-    assert by[EANS[0]]["Imágenes"] == po.IMAGES_NONE
-    assert all("metadatos" in r["Base"] for r in by.values())
-    assert po.pick_pilot(preview["rows"])[-1] == EANS[1]
+    partial = next(r for r in preview["rows"] if r["EAN"] == EANS[1] and r["Estado"] == po.PARTIAL)
+    absent = next(r for r in preview["rows"] if r["EAN"] == EANS[0] and r["Estado"] == po.ELIGIBLE)
+    assert partial["Imágenes"] == po.IMAGES_PARTIAL
+    assert absent["Imágenes"] == po.IMAGES_NONE
+    assert "archivos verificados" in absent["Base"]
+    assert set(po.pick_pilot(preview["rows"])) == {EANS[0], EANS[2]}
 
 
 def test_catalog_with_records_but_no_valid_views_is_distinct_from_no_records(tmp_path, monkeypatch):
@@ -84,7 +89,7 @@ def test_upc12_and_ean13_forms_are_one_product_in_the_preview():
     lines = [po.OrderLine(upc, "R1", "p", "s", "O1", 1, "2026-09-02"),
              po.OrderLine("0" + upc, "R1", "p", "s", "O2", 2, "2026-09-01")]
     preview = po.build_preview(lines, {})
-    assert [r["Estado"] for r in preview["rows"]] == [po.ELIGIBLE, po.DUPLICATE]
+    assert [r["Estado"] for r in preview["rows"]] == [po.REVIEW, po.DUPLICATE]
     assert preview["rows"][0]["EAN"] == upc  # the literal code is preserved
     live = po.build_preview(lines[:1], {}, live_keys=frozenset({po.ean_key("0" + upc)}))
     assert live["rows"][0]["Motivo"] == "solicitud en curso"

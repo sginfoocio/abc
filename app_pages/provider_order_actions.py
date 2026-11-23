@@ -12,20 +12,21 @@ from filelock import Timeout
 from sqlalchemy.exc import SQLAlchemyError
 
 from app_pages.provider_order_snapshot import (
-    COMPLETE, PROVIDERS, associations, history_date, image_evidence, open_existing,
+    COMPLETE, PARTIAL, PROVIDERS, associations, history_date, image_evidence, open_existing,
 )
 from cloud_dashboard import read_journal
 import image_repository
 from kering_images import ConfigStore, data_root as kering_root
 from kering_images_ui import create_portal, service as kering_service
 from kering_jobs import prepare_selection
-from provider_images import FAILED, PARTIAL, VALID_VIEWS, RequestStateError, ean_key, ean_valid
+from provider_images import FAILED, PARTIAL as REQUEST_PARTIAL, VALID_VIEWS, RequestStateError, ean_key, ean_valid
 from provider_images_ui import STATE_LABELS, build_connector, data_root
 from provider_odoo_orders import OdooUnavailable, read_purchase_page
+from provider_order_policy import OrderPolicyUnavailable, get_order_start_date
 from repository_catalog_readonly import DEFAULT_REQUIRED_VIEWS
 from repository_storage import state_root
 
-ASSISTED = {"marcolin", "safilo", "nuorder"}
+ASSISTED = {"luxottica", "marcolin", "safilo", "nuorder"}
 IMPORTABLE = {"ready", "submitted", "pending", "available", "downloaded", "needs_review"}
 ERRORS = (OSError, ValueError, RuntimeError, KeyError, sqlite3.Error, SQLAlchemyError, OdooUnavailable, Timeout,
           InvalidToken, RequestStateError)
@@ -45,6 +46,7 @@ def eligible_lines(order):
         key = ean_key(code) if ean_valid(code) else None
         reason = ("Identidad no acreditada" if not key or line["barcode_conflict"] else
                   "Vistas completas" if report and report["status"] == COMPLETE else
+                  "Cobertura parcial; requiere revisión" if report and report["status"] == PARTIAL else
                   "Cobertura no comprobada" if report is None or report["incomplete"] else
                   "Requiere revisión" if any("Revisión abierta" in s for s in line.get("issues", [])) else
                   "Sin SKU confirmado" if order["provider"] in ASSISTED and not line["sku"] else
@@ -62,6 +64,10 @@ def identity(order):
 
 def line_identity(line):
     return line["id"], line["product_id"], line["ean"], line["sku"], line["quantity"]
+
+
+def _order_date(order):
+    return date.fromisoformat(str(order.get("date") or order["date_order"][:10]))
 
 
 def reload_order(engine_factory, order):
@@ -86,17 +92,26 @@ def revalidate(engine_factory, order, selected, root, *, keep_order=False):
     scoped = {**current, "lines": chosen}
     evidence, notice = image_evidence([scoped], state_root(root) / ".catalog.sqlite3", root)
     if notice or any((report := evidence.get(ean_key(line["ean"]))) is None or report["incomplete"]
-                     or report["status"] == COMPLETE for line in chosen):
+                     or report["status"] in {COMPLETE, PARTIAL} for line in chosen):
         raise ValueError("La cobertura ha cambiado o no se pudo comprobar; actualice la consulta.")
     return {**current, "selected_line_ids": [line["id"] for line in chosen]} if keep_order else scoped
 
 
 def prepare_assisted(order, reviewer):
+    if _order_date(order) < get_order_start_date(data_root()):
+        raise ValueError("Pedido anterior al inicio común de selección.")
     connector = build_connector(order["provider"])
-    items = {line["ean"]: {
-        "ean": line["ean"], "sku": line["sku"], "product": line["product"], "supplier": order["supplier"],
-        "order": order["name"], "date": order["date_order"][:10], "status": "confirmed",
-    } for line in order["lines"]}
+    items = {}
+    for line in order["lines"]:
+        item = items.setdefault(line["ean"], {
+            "ean": line["ean"], "sku": line["sku"], "product": line["product"],
+            "supplier": order["supplier"], "order": order["name"],
+            "date": order["date_order"][:10], "status": "confirmed", "lines": [],
+        })
+        item["lines"].append({
+            "line_id": line["id"], "product_id": line["product_id"], "ean": line["ean"],
+            "sku": line["sku"], "product": line["product"], "quantity": line["quantity"],
+        })
     return connector.service.store.plan(connector.service.settings, items, mode="manual",
                                         order_evidence=items, reviewer=reviewer)
 
@@ -245,6 +260,12 @@ def _assisted_request(order, request, engine_factory, root, allowed):
         reviews = [dict(row) for row in db.execute(
             "SELECT id, name, record_id, ean FROM review_items WHERE request_id=? AND status='open' "
             "ORDER BY id LIMIT 50", (rid,))]
+        has_line_evidence = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='request_odoo_lines'"
+        ).fetchone()
+        line_evidence = ([dict(row) for row in db.execute(
+            "SELECT line_id,product_id,ean,sku,product,quantity FROM request_odoo_lines "
+            "WHERE request_id=? ORDER BY source_key", (rid,))] if has_line_evidence else [])
     st.text(f"Solicitud {rid} · {STATE_LABELS.get(request['state'], request['state'])} · "
             f"{len(request['codes'])} referencias")
     st.code(", ".join(request["codes"]), language="text")
@@ -252,6 +273,9 @@ def _assisted_request(order, request, engine_factory, root, allowed):
         st.dataframe([{"Fecha": history_date(event["at"]),
                        "Estado": STATE_LABELS.get(event["to_state"], event["to_state"])}
                       for event in events], hide_index=True)
+    if line_evidence:
+        st.caption("Pedido, línea, variante, referencia y EAN de origen")
+        st.dataframe(line_evidence, hide_index=True)
     if request["last_error"]:
         st.warning("La solicitud registra una incidencia; consulte sus eventos.")
 
@@ -286,7 +310,7 @@ def _assisted_request(order, request, engine_factory, root, allowed):
 
         _confirm(f"zip_confirm_{rid}", "Importar ZIP", import_zip,
                  lambda: st.file_uploader("ZIP descargado del portal", type=["zip"]))
-    if request["state"] in {FAILED, PARTIAL} and request["mode"] == "manual" and not request["remote_id"]:
+    if request["state"] in {FAILED, REQUEST_PARTIAL} and request["mode"] == "manual" and not request["remote_id"]:
         selected = {line_identity(line) for key, line in allowed.items() if key in
                     {ean_key(code) for code in request["codes"]}}
         if selected:
@@ -344,11 +368,32 @@ def _render_actions(order, root, engine_factory, key):
     provider = order["provider"]
     if provider == "luxottica":
         _luxottica()
-        return
-    if (provider not in ASSISTED | {"kering"} or order["state"] not in {"purchase", "done"}
-            or order["order_identity_conflict"] or order["line_count"] != len(order["lines"])):
+    order_lines = order.get("lines", [])
+    if (provider not in ASSISTED | {"kering"} or order.get("state") not in {"purchase", "done"}
+            or order.get("order_identity_conflict") or order.get("line_count") != len(order_lines)):
         st.info("No hay acciones para pedidos incompletos, no confirmados o de identidad ambigua.")
         return
+    try:
+        order_start = get_order_start_date(data_root())
+    except OrderPolicyUnavailable as error:
+        st.error(str(error))
+        return
+    if _order_date(order) < order_start:
+        kering_pilot = False
+        if provider == "kering":
+            try:
+                config = ConfigStore(kering_root()).load()
+                kering_pilot = (
+                    config.get("test_mode") is True
+                    and config.get("auto_enabled") is False
+                    and order["id"] in config.get("test_order_ids", [])
+                    and _order_date(order) >= date.fromisoformat(config["cutoff_date"])
+                )
+            except (OSError, InvalidToken, TypeError, ValueError):
+                kering_pilot = False
+        if not kering_pilot:
+            st.info(f"Pedido anterior al inicio común de selección ({order_start.isoformat()}); solo lectura.")
+            return
     st.caption(f"{PROVIDERS[provider]} · pedido {order['name']}")
     allowed, omitted = eligible_lines(order)
     chosen = st.multiselect("Referencias pendientes", list(allowed), format_func=lambda code: allowed[code]["ean"],

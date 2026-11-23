@@ -107,7 +107,66 @@ PRICE_SOURCE_TESTS = {
 }
 SCOPED_DEPENDENCY_TESTS = {
     "pytest.ini": ("tests/test_ci_stacked_prs.py", "tests/test_price_monitor.py"),
+    "app_enhanced.py": (
+        "tests/test_app_exports.py",
+        "tests/test_auth_session.py",
+        "tests/test_ci_stacked_prs.py",
+        "tests/test_provider_images_ui.py",
+        "tests/test_provider_order_panel.py",
+        "tests/test_provider_order_policy.py",
+        "tests/test_provider_odoo_orders.py",
+    ),
+    "app_exports.py": (
+        "tests/test_app_exports.py",
+        "tests/test_image_library.py",
+        "tests/test_provider_images.py",
+        "tests/test_provider_odoo_orders.py",
+        "tests/test_provider_order_policy.py",
+    ),
+    "app_pages/provider_order_actions.py": (
+        "tests/test_provider_order_panel.py",
+        "tests/test_provider_order_policy.py",
+        "tests/test_provider_odoo_orders.py",
+    ),
+    "app_pages/provider_orders_page.py": (
+        "tests/test_image_library.py",
+        "tests/test_provider_images_ui.py",
+        "tests/test_provider_order_panel.py",
+    ),
     "Dockerfile": ("tests/test_dockerfile_provider_modules.py",),
+    "kering_images.py": ("tests/test_kering_images.py",),
+    "provider_images.py": (
+        "tests/test_app_exports.py",
+        "tests/test_image_library.py",
+        "tests/test_provider_data_root.py",
+        "tests/test_provider_identity.py",
+        "tests/test_provider_images.py",
+        "tests/test_provider_odoo_catalog_readonly.py",
+        "tests/test_provider_odoo_orders.py",
+        "tests/test_provider_order_panel.py",
+        "tests/test_provider_order_policy.py",
+        "tests/test_repository_storage.py",
+    ),
+    "provider_images_ui.py": (
+        "tests/test_app_exports.py",
+        "tests/test_provider_images_ui.py",
+        "tests/test_provider_order_panel.py",
+    ),
+    "provider_odoo_orders.py": (
+        "tests/test_provider_data_root.py",
+        "tests/test_provider_identity.py",
+        "tests/test_provider_odoo_catalog_readonly.py",
+        "tests/test_provider_odoo_orders.py",
+        "tests/test_provider_order_panel.py",
+        "tests/test_provider_order_policy.py",
+    ),
+    "provider_order_policy.py": (
+        "tests/test_app_exports.py",
+        "tests/test_provider_odoo_orders.py",
+        "tests/test_provider_order_panel.py",
+        "tests/test_provider_order_policy.py",
+    ),
+    "scripts/ci_test_selection.py": ("tests/test_ci_stacked_prs.py",),
     "docs/Precios/100_EAN/busqueda_11_20261122/matriz_11x14.json": (
         "tests/test_price_url_candidates.py",
     ),
@@ -186,13 +245,21 @@ def select(paths, test_files):
             group_tests = {test for test in SCOPED_DEPENDENCY_TESTS[path] if test in test_files}
             if group_tests:
                 tests.update(group_tests)
+                roots = {test for test, inputs in MASTERDATA_DEPENDENCIES.items() if path in inputs}
+                tests.update(roots)
                 reasons.append(f"scoped dependency: {path}")
+                if roots:
+                    reasons.append(f"masterdata dependency: {path}")
             else:
                 broad = True
                 reasons.append(f"conservative regression: missing dependency tests for {path}")
             continue
         if matches(path, GLOBAL_DEPENDENCIES):
             return ["tests", *ROOT_TESTS], [f"shared dependency or test configuration: {path}"]
+        if path in test_files:
+            tests.add(path)
+            reasons.append(f"direct test: {path}")
+            continue
         groups = [name for name, (source, suite) in RULES.items() if matches(path, (*source, *suite))]
         covered = False
         for name in groups:

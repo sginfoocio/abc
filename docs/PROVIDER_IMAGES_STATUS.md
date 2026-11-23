@@ -95,6 +95,25 @@ Secundario y de solo lectura (`SET TRANSACTION READ ONLY`, timeout de sentencia,
    contacta con ningún portal. Cada selección se anota en `provider_odoo_selections.jsonl` (aprobador, pedido, referencia).
 5. Odoo solo prueba el origen del EAN: la imagen descargada sigue necesitando manifiesto, metadatos o revisión.
 
+### MASTERDATA y pedidos Luxottica (cambio local)
+
+- La vista previa MASTERDATA usa el catálogo y el árbol de imágenes existentes en modo de solo lectura.
+  Solo se preparan EAN válidos sin registros ni archivos de imagen. Cobertura completa/parcial,
+  archivos sin catalogar, solicitudes activas o cobertura no verificable se excluyen o bloquean.
+- Tras confirmación, las solicitudes manuales se guardan en el mismo `provider_requests.sqlite`
+  que usan los demás conectores; la identidad UPC/EAN deduplica solicitudes activas entre MASTERDATA
+  y Odoo. Los lotes TXT/manifiesto, de hasta 250 EAN, no contactan con Luxottica.
+- Desde pedidos Odoo solo son elegibles los EAN sin registros de imagen. Las líneas parciales o con
+  cobertura desconocida no se proponen. La asociación con el pedido conserva evidencia por línea;
+  recibos Graph globales no se atribuyen a pedidos por coincidencia de EAN.
+- La fecha común inicial de pedidos es `2026-11-01`, persistida en `provider_order_policy.sqlite`
+  dentro de `PROVIDER_DATA_ROOT`. Los cambios quedan auditados y no inician reprocesamientos.
+  Kering conserva una excepción limitada a los pedidos piloto explícitamente permitidos.
+- La preparación, la política de fecha y la restauración de sesión recordada tienen pruebas offline.
+  El login recordado requiere `AUTH_COOKIE_SECRET` de al menos 32 caracteres y persistencia del
+  almacén de revocaciones. La validación real de F5, Odoo, Graph, NAS y el portal sigue pendiente
+  de autorización y evidencia local; no declarar operativo el monitor por la existencia del código.
+
 ### Contrato Odoo contrastado (17/11/2026)
 
 La auditoría real confirmó que `product_supplierinfo.name` enlaza con `res_partner.id`; no existe

@@ -1,6 +1,8 @@
 import random
 from dataclasses import replace
 
+from datetime import date
+
 import pytest
 from streamlit.testing.v1 import AppTest
 
@@ -132,7 +134,10 @@ def _odoo_page():
 
 def _run_odoo_page(monkeypatch, tmp_path, down=False, link=True):
     import provider_odoo_orders as po
+    from provider_order_policy import set_order_start_date
+
     monkeypatch.setenv("PROVIDER_DATA_ROOT", str(tmp_path))
+    set_order_start_date(tmp_path, date(2026, 9, 1), actor="test")
     if link:
         po.save_link(tmp_path, "marcolin", [573], reviewer="ana")
     app = AppTest.from_function(_odoo_page)

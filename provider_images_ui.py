@@ -18,7 +18,8 @@ import nuorder_images
 import safilo_images
 from image_repository import IMAGE_CLASSIFICATIONS, ImageRepository
 from provider_images import (
-    FAILED, NEEDS_REVIEW, PARTIAL, PROVIDERS, ProviderService, ProviderStore, load_settings,
+    FAILED, NEEDS_REVIEW, PARTIAL, PROVIDERS, LuxotticaConnector, ProviderService, ProviderSettings,
+    ProviderStore, load_settings,
     parse_ean_file, parse_ean_text,
 )
 
@@ -51,13 +52,9 @@ STATE_LABELS = {
 def data_root() -> Path:
     """Persistent request store. Explicit PROVIDER_DATA_ROOT wins; otherwise it sits next to the Kering state
     (KERING_DATA_ROOT, on the persistent volume in every environment), never inside the image filesystem."""
-    explicit = os.getenv("PROVIDER_DATA_ROOT")
-    if explicit:
-        return Path(explicit)
-    kering = os.getenv("KERING_DATA_ROOT")
-    if kering:
-        return Path(kering).parent / "providers"
-    return Path(__file__).parent / "masterdata_data" / "providers"
+    from provider_order_policy import provider_data_root
+
+    return provider_data_root()
 
 
 class LazyRepository:
@@ -79,6 +76,10 @@ class LazyRepository:
 
 def build_connector(provider: str, engine=None, *, root: Path | None = None, repository=None):
     root = root or data_root()
+    if provider == "luxottica":
+        settings = ProviderSettings(provider, max_eans_per_request=250)
+        service = ProviderService(ProviderStore(root), repository or LazyRepository(), settings)
+        return LuxotticaConnector(service, engine)
     module = MODULES[provider]
     settings = load_settings(provider, root, module.DEFAULTS)
     if provider == "safilo":

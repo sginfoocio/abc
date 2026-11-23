@@ -3,11 +3,17 @@ from __future__ import annotations
 from datetime import datetime
 from io import BytesIO
 import json
+import os
 from pathlib import Path
+import sqlite3
+import stat
 
 import pandas as pd
 
-from image_repository import ImageRepository
+from image_repository import repository_root
+from provider_images import ProviderSettings, ProviderStore, ean_key, ean_valid, normalize_eans
+from provider_order_policy import provider_data_root
+from repository_catalog_readonly import catalog_coverage, code_variants
 
 
 def load_masterdata_file(file_source) -> pd.DataFrame:
@@ -128,9 +134,10 @@ def extract_luxoptica_products(dataframe: pd.DataFrame) -> list[dict[str, str]]:
     products: list[dict[str, str]] = []
     for _, row in dataframe.iterrows():
         ean = clean_ean(row["Barcode"])
-        if not ean or ean in seen:
+        key = ean_key(ean) if ean_valid(ean) else ean
+        if not ean or key in seen:
             continue
-        seen.add(ean)
+        seen.add(key)
         products.append(
             {
                 "ean": ean,
@@ -145,8 +152,159 @@ def extract_clean_eans(dataframe: pd.DataFrame) -> list[str]:
     return [product["ean"] for product in extract_luxoptica_products(dataframe)]
 
 
-def _chunk_list(items: list[dict[str, str]], chunk_size: int) -> list[list[dict[str, str]]]:
-    return [items[index : index + chunk_size] for index in range(0, len(items), chunk_size)]
+def _live_luxottica_keys(request_root: Path) -> set[str]:
+    request_root = Path(request_root)
+    try:
+        root_stat = request_root.stat()
+    except FileNotFoundError:
+        return set()
+    except OSError as error:
+        raise ValueError("No se puede consultar el almacén de solicitudes.") from error
+    if not stat.S_ISDIR(root_stat.st_mode) or not os.access(request_root, os.R_OK | os.X_OK):
+        raise ValueError("No se puede consultar el almacén de solicitudes.")
+    path = request_root / "provider_requests.sqlite"
+    try:
+        path_stat = path.stat()
+    except FileNotFoundError:
+        return set()
+    except OSError as error:
+        raise ValueError("No se puede consultar el almacén de solicitudes.") from error
+    if not stat.S_ISREG(path_stat.st_mode):
+        raise ValueError("La ruta del almacén de solicitudes no es un archivo.")
+    try:
+        with sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5) as connection:
+            connection.execute("PRAGMA query_only=ON")
+            exists = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='request_eans'"
+            ).fetchone()
+            if not exists:
+                raise ValueError("El almacén de solicitudes no contiene request_eans.")
+            rows = connection.execute(
+                "SELECT ean FROM request_eans WHERE provider='luxottica' AND live=1"
+            ).fetchall()
+    except sqlite3.Error as error:
+        raise ValueError("No se pudo consultar el estado de solicitudes Luxottica.") from error
+    return {ean_key(row[0]) for row in rows}
+
+
+def _legacy_luxottica_keys(output_dir: Path) -> set[str]:
+    output_dir = Path(output_dir)
+    try:
+        output_stat = output_dir.stat()
+    except FileNotFoundError:
+        return set()
+    except OSError as error:
+        raise ValueError("No se puede revisar el historial de lotes Luxottica.") from error
+    if not stat.S_ISDIR(output_stat.st_mode) or not os.access(output_dir, os.R_OK | os.X_OK):
+        raise ValueError("No se puede revisar el historial de lotes Luxottica.")
+    keys = set()
+    try:
+        with os.scandir(output_dir) as entries:
+            paths = []
+            for entry in entries:
+                if not entry.name.startswith("upc-products-images-request-") or not entry.name.endswith(".txt"):
+                    continue
+                if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+                    raise ValueError("El historial de lotes contiene una ruta no verificable.")
+                paths.append(Path(entry.path))
+    except OSError as error:
+        raise ValueError("No se pudo revisar el historial de lotes Luxottica.") from error
+    for path in paths:
+        try:
+            values = path.read_text(encoding="utf-8-sig").splitlines()
+        except OSError as error:
+            raise ValueError("No se pudo revisar un lote Luxottica anterior.") from error
+        valid, _ = normalize_eans(values)
+        keys.update(ean_key(ean) for ean in valid)
+    return keys
+
+
+def _unindexed_image_exists(root: Path, ean: str) -> bool:
+    for form in code_variants(ean):
+        folder = root / form
+        try:
+            folder_stat = folder.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise ValueError("No se pudo verificar si hay imágenes sin registrar.") from error
+        if stat.S_ISLNK(folder_stat.st_mode) or not stat.S_ISDIR(folder_stat.st_mode):
+            return True
+        pending = [folder]
+        try:
+            while pending:
+                current = pending.pop()
+                with os.scandir(current) as entries:
+                    for entry in entries:
+                        if entry.is_symlink():
+                            return True
+                        if entry.is_dir(follow_symlinks=False):
+                            pending.append(Path(entry.path))
+                        elif entry.is_file(follow_symlinks=False) and Path(entry.name).suffix.lower() in {
+                            ".jpg", ".jpeg", ".png", ".webp",
+                        }:
+                            return True
+        except OSError as error:
+            raise ValueError("No se pudo verificar si hay imágenes sin registrar.") from error
+    return False
+
+
+def preview_luxoptica_request_products(
+    dataframe: pd.DataFrame,
+    *,
+    request_root: Path | None = None,
+    image_root: Path | None = None,
+    catalog: Path | None = None,
+    output_dir: Path | None = None,
+) -> dict:
+    """Read-only selection preview; only verified, truly absent products can be proposed."""
+    products = extract_luxoptica_products(dataframe)
+    root = Path(image_root) if image_root is not None else repository_root()
+    request_root = Path(request_root) if request_root is not None else provider_data_root()
+    output_dir = Path(output_dir) if output_dir is not None else Path(__file__).resolve().parent / "docs" / "Luxoptica"
+    valid, invalid = normalize_eans(product["ean"] for product in products)
+    product_by_key = {ean_key(product["ean"]): product for product in products if ean_valid(product["ean"])}
+
+    if not root.is_dir() or not os.access(root, os.R_OK | os.X_OK):
+        report = {"catalog": {"status": "inaccesible", "blocker": "raiz_imagenes_no_disponible"},
+                  "coverage": {}}
+    else:
+        report = catalog_coverage(
+            valid, catalog=catalog, required_views=("frontal", "lateral", "perspectiva"),
+            image_root=root, verify_files=True,
+        )
+    live = _live_luxottica_keys(request_root) | _legacy_luxottica_keys(output_dir)
+    rows = []
+    for ean in invalid:
+        rows.append({"EAN": ean, "Modelo": "", "Color": "", "Estado": "EAN inválido",
+                     "Motivo": "Código inválido o ambiguo"})
+    for ean in valid:
+        product = product_by_key[ean_key(ean)]
+        coverage = report["coverage"].get(ean)
+        if report["catalog"]["status"] != "consultado" or coverage is None:
+            state, reason = "Bloqueado", "Catálogo o cobertura no disponibles"
+        elif ean_key(ean) in live:
+            state, reason = "Solicitud pendiente", "Ya existe una solicitud Luxottica vigente"
+        elif coverage["label"] == "completas":
+            state, reason = "Con imágenes", "Vistas técnicas completas y archivos verificados"
+        elif coverage["label"] == "parciales":
+            state, reason = "Parcial", "No se solicita automáticamente una cobertura parcial"
+        elif coverage["label"] == "sin_registros" and not _unindexed_image_exists(root, ean):
+            state, reason = "Ausente", "Sin registros ni archivos de imagen en el repositorio"
+        elif coverage["label"] == "sin_registros":
+            state, reason = "Revisión", "Hay archivos de imagen no registrados en el catálogo"
+        else:
+            state, reason = "Revisión", "Hay registros sin vistas válidas o verificables"
+        rows.append({"EAN": ean, "Modelo": product["modelo"], "Color": product["color"],
+                     "Estado": state, "Motivo": reason})
+    return {
+        "rows": rows,
+        "candidates": [row["EAN"] for row in rows if row["Estado"] == "Ausente"],
+        "catalog": report["catalog"],
+        "summary": {state: sum(row["Estado"] == state for row in rows)
+                    for state in ("Ausente", "Con imágenes", "Parcial", "Solicitud pendiente",
+                                  "Revisión", "Bloqueado", "EAN inválido")},
+    }
 
 
 def generate_luxoptica_request_files(
@@ -154,29 +312,45 @@ def generate_luxoptica_request_files(
     output_dir: Path,
     batch_size: int = 250,
     max_total_eans: int | None = None,
+    *,
+    request_root: Path | None = None,
+    image_root: Path | None = None,
+    catalog: Path | None = None,
 ) -> list[Path]:
-    """Generate the TXT batches and JSON manifests for Luxottica image requests."""
-    products = extract_luxoptica_products(dataframe)
-    repository = ImageRepository()
-    products = [
-        product for product in products
-        if repository.pending_views(product["ean"], ("frontal", "lateral", "perspectiva"))
-    ]
+    """Persist only absent, verified EANs in the shared request store and export manual TXT lots."""
+    if not 1 <= int(batch_size) <= 250:
+        raise ValueError("El lote Luxottica debe contener entre 1 y 250 EAN.")
+    request_root = Path(request_root) if request_root is not None else provider_data_root()
+    preview = preview_luxoptica_request_products(
+        dataframe, request_root=request_root, image_root=image_root, catalog=catalog, output_dir=output_dir,
+    )
+    if preview["catalog"]["status"] != "consultado":
+        raise ValueError("No se pueden preparar solicitudes: el catálogo no está disponible.")
+    eligible = set(preview["candidates"])
+    products = [product for product in extract_luxoptica_products(dataframe) if product["ean"] in eligible]
     if max_total_eans is not None and max_total_eans > 0:
         products = products[:max_total_eans]
     if not products:
         return []
 
+    output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    settings = ProviderSettings("luxottica", max_eans_per_request=batch_size)
+    store = ProviderStore(request_root)
+    planned = store.plan(settings, [product["ean"] for product in products], mode="manual")
+    if planned["invalid"]:
+        raise ValueError("La lista cambió durante la preparación; revise los EAN inválidos.")
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     generated_files: list[Path] = []
-    for index, batch in enumerate(_chunk_list(products, batch_size), start=1):
+    products_by_key = {ean_key(product["ean"]): product for product in products}
+    for index, request_id in enumerate(planned["created"], start=1):
+        batch = [products_by_key[ean_key(item["ean"])] for item in store.get(request_id)["eans"]]
         file_name = f"upc-products-images-request-{timestamp}-lote-{index:03d}.txt"
         file_path = output_dir / file_name
         file_path.write_text("\n".join(product["ean"] for product in batch) + "\n", encoding="utf-8")
         manifest_path = file_path.with_suffix(".manifest.json")
         manifest_path.write_text(
-            json.dumps({"products": batch}, ensure_ascii=False, indent=2),
+            json.dumps({"request_id": request_id, "products": batch}, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
         generated_files.append(file_path)

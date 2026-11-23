@@ -1,135 +1,69 @@
-# Automatizacion Solicitud de Imagenes Luxoptica
+# Solicitud de imágenes Luxottica
 
-## Cambio de almacenamiento por EAN
+> **Estado operativo:** la preparación de solicitudes es manual y requiere validación/autorización antes de cualquier envío o descarga real. El monitor Graph puede existir en Cloud, pero su estado actual no se ha verificado. No uses instrucciones históricas de subida automática, tareas horarias ni rutas por fecha.
 
-Las rutas por fecha/lote de las secciones siguientes son historicas.
-Las fotografias nuevas y las galerias usan `IMAGE_REPOSITORY_ROOT/<EAN>`.
-Los ZIP recibidos se conservan en `.incoming`, separados del catalogo.
-`M365_DOWNLOAD_ROOT` ya no selecciona una raiz de fotografias distinta.
-Antes del corte, seguir el [plan de migracion](../IMAGE_REPOSITORY.md).
+## Almacenamiento canónico
 
-## Objetivo
-Automatizar el flujo completo desde MASTERDATA hasta la recepcion y descarga de imagenes de producto por lotes.
+Las imágenes canónicas se guardan por EAN en `IMAGE_REPOSITORY_ROOT/<EAN>`. Los ZIP recibidos
+se conservan en `.incoming`, separados del catálogo. `M365_DOWNLOAD_ROOT` no selecciona una
+raíz de fotografías distinta. Antes de cualquier migración, seguir el [plan del repositorio](../IMAGE_REPOSITORY.md).
 
-## Estado actual implementado
+## Preparación desde MASTERDATA
 
-### 1) Transformacion MASTERDATA
-- Se transforma el fichero de origen en la app.
-- Se normalizan EAN en la columna Barcode.
+1. Transformar el fichero de origen y revisar sus advertencias.
+2. Abrir **Solicitud de imágenes (Luxottica)** y revisar la vista previa.
+3. La vista previa consulta el catálogo y los archivos existentes en modo de solo lectura.
+   Solo propone EAN válidos sin registros ni archivos de imagen.
+4. No son elegibles los EAN con cobertura completa o parcial, solicitud activa, imágenes no
+   catalogadas, cobertura no verificable o cualquier estado de revisión. Si el catálogo, el
+   almacén compartido o el historial de lotes no se puede consultar, la preparación se bloquea.
+5. Tras confirmación, se registra una solicitud manual en el almacén compartido y se crean
+   archivos TXT/manifiesto locales. El lote tiene como máximo 250 EAN.
 
-### 2) Generacion de lotes para Luxoptica
-- En la pantalla de Masterdata existe la seccion:
-  - Solicitud de imagenes (Luxoptica)
-- Se generan archivos .txt en docs/Luxoptica con:
-  - 1 EAN por linea
-  - Sin prefijo es.
-  - Maximo 250 EAN por archivo
-- Formato de nombre:
-  - upc-products-images-request-YYYYMMDD_HHMMSS-lote-XXX.txt
+La app no inicia sesión ni envía solicitudes al portal. Los archivos TXT y su estado local no
+son evidencia de envío remoto, recepción ni entrega de imágenes.
 
-### 3) Envio en portal Luxoptica
-- El flujo operativo actual (ya probado):
-  - Login
-  - Servicios -> Recursos digitales -> Imagenes de producto
-  - Cargar archivo
-  - Seleccionar Todas las vistas
-  - Enviar solicitud
-  - Especificar email de recepcion: **images@diagonaleyewear.com**
+## Pedidos Odoo y duplicados
 
-### 4) Control de progreso en app
-- Por cada lote generado:
-  - Boton Descargar lote
-  - Boton Marcar como procesado
-- Se muestra:
-  - progreso N/total
-  - mensaje final cuando todos los lotes estan procesados
+MASTERDATA y Odoo comparten el almacén de solicitudes y la identidad UPC/EAN, para no crear
+dos solicitudes activas del mismo producto desde orígenes distintos. Desde pedidos Odoo solo
+se proponen EAN sin registros de imagen; la cobertura parcial o desconocida requiere revisión.
+La fecha común inicial es `2026-11-01`, configurable desde la administración con registro de
+cambios. Cambiarla no reprocesa pedidos. Los pedidos piloto Kering explícitamente permitidos
+mantienen su excepción acotada.
 
-## Regla de negocio de lotes
-- Cada archivo = una solicitud.
-- Los lotes se suben uno por uno.
-- Tamaño maximo por lote: 250 EAN.
+## Envío manual autorizado
 
-## Estructura de carpetas
-- Plantillas y lotes:
-  - docs/Luxoptica/
-- Ejemplo de plantilla:
-  - docs/Luxoptica/upc-products-images-template.txt
+Una persona autorizada revisa el lote y lo envía manualmente conforme al procedimiento vigente
+del portal. No se debe automatizar la carga ni reenviar una solicitud con resultado remoto ambiguo.
+La marca de envío en la app solo registra la acción declarada por el operador; debe conservarse
+por separado la evidencia autorizada del portal.
 
-## Siguiente fase (pendiente): lectura automática de buzón y descarga con Microsoft 365
+## Recepción y Graph
 
-### Objetivo de la fase
-Leer correos de respuesta de Luxoptica y descargar automáticamente enlaces/adjuntos de imágenes.
+El código de Graph/monitor es independiente del envío de solicitudes. Su presencia en el
+repositorio o un contenedor iniciado no demuestra que la configuración, el buzón, OAuth o las
+descargas funcionen actualmente. Verifica el runtime, los recibos, los errores y los permisos
+siguiendo la [validación local de Cloud](../CLOUD_LOCAL_VALIDATION.md). No ejecutes pruebas de
+Graph ni descargues correo real sin autorización específica.
 
-### 📋 Documentación de Configuración
-- **[CONFIGURACION_GRAPH_API.md](CONFIGURACION_GRAPH_API.md)** - Guía detallada de registro en Azure AD
-- **[CHECKLIST_GRAPH_CONFIG.md](CHECKLIST_GRAPH_CONFIG.md)** - Pasos rápidos (paso a paso)
+Los scripts y listas de configuración existentes son referencias técnicas, no una autorización
+para registrar aplicaciones, conceder permisos, crear tareas programadas o modificar servicios.
+No guardes credenciales, correos ni imágenes de producción en Git.
 
-### Estado Técnico
-- ✅ Script `graph_mail_downloader.py` implementado
-- ✅ Integración en `app_enhanced.py` lista
-- ⏳ Pendiente: Registrar app en Azure AD y obtener credenciales
+## Checklist por lote autorizado
 
-## Decisiones cerradas (2026-07-31)
-- Se registrara una app exclusiva en un tenant dedicado para este flujo.
-- Se descargaran adjuntos de correo (las imagenes) como canal principal.
-- Carpeta destino aprobada: `docs/Luxoptica/descargas/AAAA-MM-DD/lote-XXX/`.
+- [ ] Catálogo, archivos, almacén de solicitudes e historial accesibles y verificados.
+- [ ] EAN sin imágenes y sin solicitud activa; parciales y excepciones excluidos.
+- [ ] Selección revisada por operador autorizado (máximo 250 EAN).
+- [ ] Autorización específica registrada antes de enviar al portal.
+- [ ] Evidencia de envío y respuesta conservada fuera de Git.
+- [ ] Importación validada en almacenamiento aislado antes de cualquier escritura real.
 
-### Arquitectura propuesta
-1. App registra metadatos de solicitud por lote:
-   - nombre de archivo
-   - timestamp de envio
-   - email destino
-   - estado
-2. Proceso backend consulta Microsoft Graph API:
-   - buscar correos de Luxoptica
-   - filtrar por asunto/remitente/ventana temporal
-3. Extraer adjuntos de correo (imagenes).
-4. Descargar y guardar en carpeta local por lote.
-5. Marcar lote como completado en estado interno.
+## Autenticación de la aplicación
 
-### Requisitos tecnicos para Microsoft 365
-- Aplicacion registrada en Azure AD (Entra ID).
-- Credenciales OAuth2 (client_id, tenant_id, client_secret o certificado).
-- Permisos Graph recomendados:
-  - Mail.Read
-  - Mail.ReadWrite (si se van a etiquetar/mover correos)
-  - User.Read (opcional para validacion de identidad del token)
-- Buzon objetivo:
-  - images@diagonaleyewear.com (SharedMailbox dedicado para recepción de imágenes)
-
-### Modo de autenticacion propuesto
-- `client_credentials` para proceso backend no interactivo.
-- Consentimiento de administrador en el tenant exclusivo.
-
-### Seguridad
-- No guardar tokens en codigo.
-- Guardar secretos en .env o gestor seguro.
-- Rotacion de secretos y auditoria de accesos.
-
-## Flujo objetivo end-to-end
-1. Transformar MASTERDATA.
-2. Generar lotes de 250 EAN.
-3. Enviar solicitudes en Luxoptica (manual asistido o automatizado).
-4. Recibir correos de Luxoptica.
-5. Descargar imagenes automaticamente con Graph.
-6. Marcar lote completado y registrar evidencia.
-
-## Checklist operativo actual
-- [ ] Transformacion ejecutada
-- [ ] Lotes generados
-- [ ] Lotes subidos (uno por uno)
-- [ ] Todas las vistas seleccionadas
-- [ ] Solicitud enviada a Luxoptica
-- [ ] Email especificado: images@diagonaleyewear.com
-- [ ] Lotes marcados como procesados en app
-
-## Checklist próximo sprint (M365 token)
-- [x] Alta app en Entra ID ✅ (Completado)
-- [x] Permisos Graph concedidos ✅ (Completado)
-- [x] Permisos en mailbox compartido ✅ (Completado)
-- [x] Token flow implementado ✅ (Ya en código)
-- [x] Lectura de buzón implementada ✅ (Ya en código)
-- [x] Descarga de adjuntos implementada ✅ (Ya en código)
-- [x] Trazabilidad por lote implementada ✅ (Ya en código)
-
-**Estado:** ✅ **CONFIGURACIÓN LISTA PARA PRODUCCIÓN**
+La sesión recordada requiere `AUTH_COOKIE_SECRET` de al menos 32 caracteres y un almacén
+persistente para la revocación de sesiones. Las pruebas offline verifican la restauración de la
+cookie tras recrear la app. La persistencia real tras F5 depende de la configuración efectiva
+de Cloud y sigue pendiente de comprobación autorizada; si falta el secreto, la opción **Recordarme**
+se deshabilita y el login solo dura en la sesión actual.
