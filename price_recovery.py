@@ -775,7 +775,9 @@ def _reevaluate_saved_artifacts(con, task, now, recovery_rule):
             metadata = json.loads(row["result"])
         except (TypeError, json.JSONDecodeError):
             continue
-        artifacts.append(("sanitized_jsonld", row["id"], metadata, row["artifact"]))
+        kind = ("sanitized_microdata" if metadata.get("artifact_kind") == "sanitizado_parcial_microdatos"
+                else "sanitized_jsonld")
+        artifacts.append((kind, row["id"], metadata, row["artifact"]))
 
     results = []
     for kind, artifact_id, metadata, encoded in artifacts:
@@ -865,8 +867,8 @@ def _reevaluate_saved_artifacts(con, task, now, recovery_rule):
             "stock_conflict": page.stock_conflict,
             "reason": (conflicts[0] if specific_conflict else edel_reason),
         })
-        if kind == "sanitized_jsonld" and (
-                metadata.get("sanitization_version") != 3 or not isinstance(metadata.get("unscoped_eans"), list)):
+        if kind == "sanitized_microdata" or (kind == "sanitized_jsonld" and (
+                metadata.get("sanitization_version") != 3 or not isinstance(metadata.get("unscoped_eans"), list))):
             if item["result"] == "exact_identity":
                 item["result"] = "insufficient_evidence"
             partial_microdata = metadata.get("artifact_kind") == "sanitizado_parcial_microdatos"
