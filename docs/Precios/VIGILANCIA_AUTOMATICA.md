@@ -77,7 +77,7 @@ Cada petición, incluida la de `robots.txt`, se **reserva antes de lanzarla** de
 
 `GovernedFetcher` envuelve el `WebFetcher` existente:
 
-- **HTTP 429:** se abre una incidencia que espera el plazo de `Retry-After`. Si no viene esa cabecera, espera 1 h, con un máximo de 24 h. Pasado el plazo, se reanuda sola.
+- **HTTP 429:** se abre una incidencia que espera todo el plazo de `Retry-After`, aunque supere 24 h. Si no viene esa cabecera, espera 1 h. Si el plazo numérico no es representable, permanece bloqueada y requiere revisión; se registra una advertencia. Pasado el plazo, se reanuda sola.
 - **HTTP 401, 403 y 407, y CAPTCHA:** se abre una incidencia que **requiere una decisión humana**, con responsable y nota. Hasta entonces, se suspenden todos los trabajos de ese competidor.
 - Las incidencias abiertas no se duplican.
 - No se intenta evadir ninguna protección.

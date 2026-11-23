@@ -72,6 +72,10 @@ def smoke_approved_recovery(path, now):
         assert con.execute("SELECT COUNT(*) FROM manual_review_refreshes").fetchone()[0] == 1
         assert con.execute("SELECT COUNT(*) FROM access_requests").fetchone()[0] == 0
         assert con.execute("SELECT COUNT(*) FROM access_audit WHERE action='recover_approved_identity'").fetchone()[0] == 1
+    deadline = (now + timedelta(days=2)).replace(microsecond=now.microsecond // 1000 * 1000)
+    access.report_block("competitor", cid, "http_429", retry_after=deadline)
+    after_one_day = AccessControl(store, clock=lambda: now + timedelta(days=1, seconds=1)).check(cid, "ficha")
+    assert after_one_day.code == "blocked_wait" and after_one_day.retry_at == deadline
 
 
 def smoke_saved_sample_preview(directory):
