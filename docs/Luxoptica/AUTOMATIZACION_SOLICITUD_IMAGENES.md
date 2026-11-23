@@ -34,6 +34,16 @@ La fecha común inicial es `2026-11-01`, configurable desde la administración c
 cambios. Cambiarla no reprocesa pedidos. Los pedidos piloto Kering explícitamente permitidos
 mantienen su excepción acotada.
 
+Al preparar desde Masterdata se registra el nombre del archivo y la posición de la fila en la
+tabla transformada, junto con el código literal y su identidad. Si el mismo código aparece en un
+pedido confirmado, la preparación del pedido puede añadir su evidencia a la solicitud activa
+sin cambiar su estado ni reenviarla. En sentido inverso, un administrador puede confirmar
+«Asociar Masterdata a solicitudes existentes» tras revisar la vista previa. La asociación exige
+modelo, color y calibre coincidentes y una variante de pedido acreditada; si faltan datos o hay
+contradicciones queda para revisión. Los registros históricos sin identidad suficiente no se
+atribuyen por coincidencia de EAN. Los orígenes, fecha de registro y revisor pueden consultarse
+en el detalle administrativo de la solicitud. Una vista previa no escribe.
+
 ## Envío manual autorizado
 
 Una persona autorizada revisa el lote y lo envía manualmente conforme al procedimiento vigente

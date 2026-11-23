@@ -428,6 +428,29 @@ def test_confirmed_action_rereads_odoo_and_stops_if_coverage_is_now_complete(eng
         actions.revalidate(lambda: engine, order, selected, root)
 
 
+def test_luxottica_revalidation_preserves_equivalent_duplicate_lines(engine, tmp_path, monkeypatch):
+    order = read_purchase_page(engine, LINKS, ("kering",), START, END)[0][0]
+    line = {**order["lines"][0], "ean": "123456789012", "barcode_conflict": False}
+    sibling = {**line, "id": 102, "ean": "0123456789012"}
+    order.update(provider="luxottica", lines=[line, sibling])
+    monkeypatch.setattr(actions, "reload_order", lambda *_: order)
+    monkeypatch.setattr(actions, "image_evidence", lambda *_: (
+        {actions.ean_key(line["ean"]): {"incomplete": False, "status": "Sin imágenes"}}, None))
+    monkeypatch.setattr(actions, "data_root", lambda: tmp_path)
+    connector = build_connector("luxottica", root=tmp_path)
+    monkeypatch.setattr(actions, "build_connector", lambda _: connector)
+    scoped = actions.revalidate(None, order, {actions.line_identity(line)}, tmp_path)
+    result = actions.prepare_assisted(scoped, "admin")
+    rid, = result["created"]
+    assert {e["evidence"]["line_id"] for e in connector.service.store.source_evidence(rid)} == {line["id"], 102}
+    assert {e["evidence"]["ean"] for e in connector.service.store.source_evidence(rid)} == {
+        "123456789012", "0123456789012",
+    }
+    sibling["product_id"] = line["product_id"] + 1
+    with pytest.raises(ValueError, match="identidad contradictoria"):
+        actions.revalidate(None, order, {actions.line_identity(line)}, tmp_path)
+
+
 def test_partial_order_coverage_is_omitted_from_assisted_actions(engine):
     order = read_purchase_page(engine, LINKS, ("kering",), START, END)[0][0]
     order["provider"] = "luxottica"

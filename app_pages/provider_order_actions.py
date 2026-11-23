@@ -89,6 +89,15 @@ def revalidate(engine_factory, order, selected, root, *, keep_order=False):
                                              if not line["barcode_conflict"]}:
         raise ValueError("Las referencias han cambiado; vuelva a consultar el pedido.")
     chosen = [line for line in current["lines"] if line_identity(line) in selected]
+    if current["provider"] == "luxottica" and not keep_order:
+        selected_keys = {ean_key(line["ean"]) for line in chosen}
+        chosen = [line for line in current["lines"]
+                  if ean_valid(line["ean"]) and ean_key(line["ean"]) in selected_keys]
+        for key in selected_keys:
+            lines = [line for line in chosen if ean_key(line["ean"]) == key]
+            if (any(line["barcode_conflict"] for line in lines)
+                    or len({(line["product_id"], line["sku"]) for line in lines}) != 1):
+                raise ValueError("Las líneas del mismo EAN tienen identidad contradictoria; requieren revisión.")
     scoped = {**current, "lines": chosen}
     evidence, notice = image_evidence([scoped], state_root(root) / ".catalog.sqlite3", root)
     if notice or any((report := evidence.get(ean_key(line["ean"]))) is None or report["incomplete"]
@@ -102,15 +111,21 @@ def prepare_assisted(order, reviewer):
         raise ValueError("Pedido anterior al inicio común de selección.")
     connector = build_connector(order["provider"])
     items = {}
+    codes = {}
     for line in order["lines"]:
-        item = items.setdefault(line["ean"], {
+        code = line["ean"]
+        if order["provider"] == "luxottica":
+            code = codes.setdefault(ean_key(code), code)
+        item = items.setdefault(code, {
             "ean": line["ean"], "sku": line["sku"], "product": line["product"],
-            "supplier": order["supplier"], "order": order["name"],
+            "supplier": order["supplier"], "order": order["name"], "order_id": order["id"],
             "date": order["date_order"][:10], "status": "confirmed", "lines": [],
         })
         item["lines"].append({
             "line_id": line["id"], "product_id": line["product_id"], "ean": line["ean"],
             "sku": line["sku"], "product": line["product"], "quantity": line["quantity"],
+            "model": line.get("model", ""), "color": line.get("color", ""),
+            "caliber": line.get("caliber", ""), "barcode_conflict": line["barcode_conflict"],
         })
     return connector.service.store.plan(connector.service.settings, items, mode="manual",
                                         order_evidence=items, reviewer=reviewer)
@@ -412,6 +427,11 @@ def _render_actions(order, root, engine_factory, key):
                 result = prepare_assisted(revalidate(engine_factory, order, selected, root), reviewer)
                 st.success(f"Solicitudes nuevas: {result['created'] or 'ninguna'}; "
                            f"omitidas por duplicado: {len(result['already_live']) + len(result['already_prepared'])}.")
+                if result.get("linked_evidence"):
+                    st.info(f"Evidencia de pedido asociada: {len(result['linked_evidence'])}.")
+                if result.get("identity_review"):
+                    st.warning("No se vinculó evidencia por identidad insuficiente o contradictoria: "
+                               + ", ".join(result["identity_review"]))
 
             _confirm(f"plan_{order['id']}_{selection}", "Preparar procesamiento", plan)
         elif provider == "kering":

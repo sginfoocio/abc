@@ -305,6 +305,10 @@ CREATE TABLE IF NOT EXISTS request_odoo_lines(
   product TEXT NOT NULL DEFAULT '', quantity TEXT NOT NULL DEFAULT '', supplier TEXT NOT NULL DEFAULT '',
   order_name TEXT NOT NULL DEFAULT '', order_date TEXT NOT NULL DEFAULT '',
   PRIMARY KEY(request_id, source_key));
+CREATE TABLE IF NOT EXISTS request_source_evidence(
+  request_id INTEGER NOT NULL REFERENCES requests(id), source TEXT NOT NULL,
+  evidence_hash TEXT NOT NULL, evidence TEXT NOT NULL, recorded_at REAL NOT NULL,
+  reviewer TEXT NOT NULL DEFAULT '', PRIMARY KEY(request_id, source, evidence_hash));
 CREATE TABLE IF NOT EXISTS events(
   id INTEGER PRIMARY KEY, request_id INTEGER, at REAL NOT NULL, from_state TEXT, to_state TEXT, detail TEXT);
 CREATE TABLE IF NOT EXISTS review_items(
@@ -399,18 +403,44 @@ class ProviderStore:
                            (request_id, self.clock(), from_state, to_state, str(detail)[:500]))
 
     def plan(self, settings: ProviderSettings, eans, *, mode: str = "portal", order_evidence=None,
-             reviewer: str = "") -> dict:
+             masterdata_evidence=None, reviewer: str = "") -> dict:
         """Create ready requests for EANs with no live request; never duplicates pending ones."""
         valid, invalid = normalize_eans(eans)
         created, skipped, previous = [], [], []
         if order_evidence is not None and (not reviewer.strip() or set(valid) != set(order_evidence)):
             raise ValueError("Falta evidencia del pedido o del administrador")
+        if masterdata_evidence is not None and set(valid) != set(masterdata_evidence):
+            raise ValueError("Falta evidencia de Masterdata")
+        linked, review = [], []
         with closing(self.connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             live = {r[0] for r in connection.execute(
                 "SELECT ean_key FROM request_eans WHERE provider=? AND live=1", (settings.provider,))}
             fresh = [e for e in valid if ean_key(e) not in live]
             skipped = [e for e in valid if ean_key(e) in live]
+            if settings.provider == "luxottica" and order_evidence is not None:
+                for ean in skipped:
+                    row = connection.execute(
+                        "SELECT request_id FROM request_eans WHERE provider=? AND ean_key=? AND live=1",
+                        (settings.provider, ean_key(ean)),
+                    ).fetchone()
+                    evidence = order_evidence[ean]
+                    if (ean_valid(str(evidence.get("ean") or ""))
+                            and ean_key(evidence["ean"]) == ean_key(ean)
+                            and self._link_order_evidence(connection, row["request_id"], evidence, reviewer)):
+                        linked.append(ean)
+                    else:
+                        review.append(ean)
+            if settings.provider == "luxottica" and masterdata_evidence is not None:
+                for ean in skipped:
+                    row = connection.execute(
+                        "SELECT request_id FROM request_eans WHERE provider=? AND ean_key=? AND live=1",
+                        (settings.provider, ean_key(ean)),
+                    ).fetchone()
+                    if not self._link_masterdata_evidence(
+                        connection, row["request_id"], ean, masterdata_evidence[ean], reviewer
+                    ):
+                        raise ValueError(f"Solicitud concurrente con identidad insuficiente: {ean}; requiere revisión.")
             if order_evidence is not None:
                 for ean in fresh:
                     item = order_evidence[ean]
@@ -435,6 +465,19 @@ class ProviderStore:
                     [(rid, settings.provider, e) for e in chunk])
                 if order_evidence is not None:
                     self._write_odoo_items(connection, rid, [order_evidence[e] for e in chunk])
+                    if settings.provider == "luxottica":
+                        for ean in chunk:
+                            item = order_evidence[ean]
+                            for line in item.get("lines") or ():
+                                self._write_source(connection, rid, "odoo", {
+                                    **line, "order_id": item.get("order_id"), "order": item.get("order"),
+                                    "supplier": item.get("supplier"), "date": item.get("date"),
+                                    "status": item.get("status"),
+                                }, reviewer)
+                if masterdata_evidence is not None:
+                    for ean in chunk:
+                        for item in masterdata_evidence[ean]:
+                            self._write_source(connection, rid, "masterdata", item, reviewer)
                 detail = f"{len(chunk)} EAN"
                 if order_evidence is not None:
                     detail += f" · preparado por {reviewer}"
@@ -444,7 +487,138 @@ class ProviderStore:
         result = {"created": created, "already_live": skipped, "invalid": invalid}
         if order_evidence is not None:
             result["already_prepared"] = previous
+            if settings.provider == "luxottica":
+                result["linked_evidence"] = linked
+                result["identity_review"] = review
         return result
+
+    def _write_source(self, connection, request_id, source, evidence, reviewer):
+        payload = json.dumps(evidence, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        fingerprint = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        connection.execute(
+            "INSERT OR IGNORE INTO request_source_evidence"
+            "(request_id,source,evidence_hash,evidence,recorded_at,reviewer) VALUES(?,?,?,?,?,?)",
+            (request_id, source, fingerprint, payload, self.clock(), reviewer),
+        )
+
+    def _link_order_evidence(self, connection, request_id, item, reviewer):
+        ean = str(item.get("ean") or "")
+        lines = item.get("lines") or []
+        if (item.get("status") != "confirmed" or not ean_valid(ean) or not item.get("order_id")
+                or not item.get("order") or not item.get("supplier") or not item.get("date") or not lines):
+            return False
+        identities = [json.loads(row[0]) for row in connection.execute(
+            "SELECT evidence FROM request_source_evidence WHERE request_id=? AND source='masterdata'",
+            (request_id,),
+        )]
+        identities = [entry for entry in identities if ean_valid(entry.get("ean", ""))
+                      and ean_key(entry["ean"]) == ean_key(ean)]
+        if not identities:
+            return False
+        if (len({str(line.get("product_id") or "") for line in lines}) != 1
+                or len({str(line.get("sku") or "").strip().casefold() for line in lines}) != 1):
+            return False
+        for line in lines:
+            if (not line.get("line_id") or not line.get("product_id") or not line.get("sku")
+                    or line.get("barcode_conflict") is not False or not ean_valid(str(line.get("ean") or ""))
+                    or ean_key(line["ean"]) != ean_key(ean)):
+                return False
+            for entry in identities:
+                if not self._same_source_identity(entry, line):
+                    return False
+        existing = [json.loads(row[0]) for row in connection.execute(
+            "SELECT evidence FROM request_source_evidence WHERE request_id=? AND source='odoo'",
+            (request_id,),
+        )]
+        for line in lines:
+            for entry in existing:
+                if (ean_valid(str(entry.get("ean") or "")) and ean_key(entry["ean"]) == ean_key(ean)
+                        and (str(entry.get("product_id")) != str(line["product_id"])
+                             or str(entry.get("sku") or "").strip().casefold()
+                             != str(line["sku"]).strip().casefold()
+                             or not self._same_source_identity(entry, line))):
+                    return False
+        for line in lines:
+            self._write_source(connection, request_id, "odoo", {
+                **line, "order_id": item["order_id"], "order": item["order"],
+                "supplier": item["supplier"], "date": item["date"], "status": "confirmed",
+            }, reviewer)
+        return True
+
+    @staticmethod
+    def _same_source_identity(first, second):
+        def normalized(value):
+            return str(value or "").strip().casefold()
+
+        return all(normalized(first.get(field)) and
+                   normalized(first[field]) == normalized(second.get(field))
+                   for field in ("model", "color", "caliber"))
+
+    def link_masterdata(self, evidence: dict, *, reviewer: str) -> dict:
+        """Attach explicitly confirmed Masterdata evidence only to an identity-verified live request."""
+        if not str(reviewer).strip():
+            raise ValueError("Falta el revisor de Masterdata")
+        linked, review = [], []
+        with closing(self.connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for ean, entries in evidence.items():
+                if not ean_valid(ean) or not entries or any(
+                    not ean_valid(str(item.get("ean") or "")) or ean_key(item["ean"]) != ean_key(ean)
+                    for item in entries
+                ):
+                    raise ValueError("Evidencia Masterdata inválida")
+                row = connection.execute(
+                    "SELECT request_id FROM request_eans WHERE provider='luxottica' AND ean_key=? AND live=1",
+                    (ean_key(ean),),
+                ).fetchone()
+                if row is None or not self._link_masterdata_evidence(
+                    connection, row["request_id"], ean, entries, reviewer
+                ):
+                    review.append(ean)
+                    continue
+                linked.append(ean)
+            connection.execute("COMMIT")
+        return {"linked_evidence": linked, "identity_review": review}
+
+    def _link_masterdata_evidence(self, connection, request_id, ean, entries, reviewer):
+        if not entries or any(not ean_valid(str(entry.get("ean") or ""))
+                              or ean_key(entry["ean"]) != ean_key(ean) for entry in entries):
+            return False
+        rows = [(row["source"], json.loads(row["evidence"])) for row in connection.execute(
+            "SELECT source,evidence FROM request_source_evidence WHERE request_id=?", (request_id,)
+        )]
+        previous = [item for source, item in rows if source == "masterdata"
+                    and ean_valid(str(item.get("ean") or "")) and ean_key(item["ean"]) == ean_key(ean)]
+        matching = [item for source, item in rows if source == "odoo"
+                    and ean_valid(str(item.get("ean") or "")) and ean_key(item["ean"]) == ean_key(ean)]
+        if matching:
+            products = {str(item.get("product_id") or "") for item in matching}
+            skus = {str(item.get("sku") or "").strip().casefold() for item in matching}
+            if ("" in products or len(products) != 1 or "" in skus or len(skus) != 1
+                    or any(item.get("barcode_conflict") is not False or not item.get("line_id")
+                           or not item.get("order_id") or item.get("status") != "confirmed" for item in matching)):
+                return False
+        references = matching or previous
+        if not references or any(entry not in previous and
+                                 any(not self._same_source_identity(entry, item) for item in references)
+                                 for entry in entries):
+            return False
+        if matching and any(not self._same_source_identity(entry, item)
+                            for entry in previous for item in matching):
+            return False
+        for entry in entries:
+            self._write_source(connection, request_id, "masterdata", entry, reviewer)
+        return True
+
+    def source_evidence(self, request_id: int) -> list[dict]:
+        with closing(self.connect()) as connection:
+            return [
+                {"source": row["source"], "evidence": json.loads(row["evidence"]),
+                 "recorded_at": row["recorded_at"], "reviewer": row["reviewer"]}
+                for row in connection.execute(
+                    "SELECT source,evidence,recorded_at,reviewer FROM request_source_evidence "
+                    "WHERE request_id=? ORDER BY recorded_at,source,evidence_hash", (request_id,))
+            ]
 
     def live_eans(self, provider: str) -> set[str]:
         with closing(self.connect()) as connection:
@@ -612,6 +786,13 @@ class ProviderStore:
                 FROM request_odoo_lines l JOIN request_eans e
                   ON e.request_id=? AND e.ean_key=substr('00000000000000' || l.ean, -14)
                 WHERE l.request_id=?
+            """, (rid, rid, request_id))
+            connection.execute("""
+                INSERT INTO request_source_evidence
+                SELECT ?, s.source, s.evidence_hash, s.evidence, s.recorded_at, s.reviewer
+                FROM request_source_evidence s JOIN request_eans e
+                  ON e.request_id=? AND e.ean_key=substr('00000000000000' || json_extract(s.evidence, '$.ean'), -14)
+                WHERE s.request_id=?
             """, (rid, rid, request_id))
             detail = f"reintento de {request_id}" + (f" · preparado por {reviewer}" if manual_codes is not None else "")
             self._event(connection, rid, None, READY, detail)

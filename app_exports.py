@@ -168,6 +168,23 @@ def _ambiguous_luxoptica_keys(dataframe: pd.DataFrame) -> set[str]:
     return {key for key, fields in identities.items() if any(len(values) > 1 for values in fields.values())}
 
 
+def _masterdata_evidence(dataframe: pd.DataFrame, products: list[dict], source_name: str) -> dict:
+    by_key = {ean_key(product["ean"]): product["ean"] for product in products}
+    evidence = {product["ean"]: [] for product in products}
+    for position, (_, row) in enumerate(dataframe.iterrows(), start=2):
+        ean = clean_ean(row["Barcode"])
+        if not ean_valid(ean) or ean_key(ean) not in by_key:
+            continue
+        fields = {}
+        for column, field in (("Marca", "brand"), ("Modelo", "model"), ("Color", "color"), ("Calibre", "caliber")):
+            value = row.get(column, "")
+            fields[field] = str(value).strip() if pd.notna(value) else ""
+        evidence[by_key[ean_key(ean)]].append({
+            "ean": ean, "source_file": source_name, "row": position, **fields,
+        })
+    return evidence
+
+
 def _live_luxottica_keys(request_root: Path) -> set[str]:
     request_root = Path(request_root)
     try:
@@ -326,6 +343,27 @@ def preview_luxoptica_request_products(
     }
 
 
+def link_luxoptica_masterdata(
+    dataframe: pd.DataFrame, *, reviewer: str, source_name: str,
+    request_root: Path, image_root: Path | None = None, catalog: Path | None = None,
+    output_dir: Path | None = None,
+) -> dict:
+    preview = preview_luxoptica_request_products(
+        dataframe, request_root=request_root, image_root=image_root, catalog=catalog, output_dir=output_dir,
+    )
+    if preview["catalog"]["status"] != "consultado":
+        raise ValueError("No se puede asociar evidencia: el catálogo no está disponible.")
+    ambiguous = _ambiguous_luxoptica_keys(dataframe)
+    pending = {ean_key(row["EAN"]) for row in preview["rows"]
+               if row["Estado"] == "Solicitud pendiente" and ean_key(row["EAN"]) not in ambiguous}
+    products = [product for product in extract_luxoptica_products(dataframe)
+                if ean_valid(product["ean"]) and ean_key(product["ean"]) in pending]
+    if not products:
+        return {"linked_evidence": [], "identity_review": []}
+    store = ProviderStore(request_root)
+    return store.link_masterdata(_masterdata_evidence(dataframe, products, source_name), reviewer=reviewer)
+
+
 def generate_luxoptica_request_files(
     dataframe: pd.DataFrame,
     output_dir: Path,
@@ -335,6 +373,8 @@ def generate_luxoptica_request_files(
     request_root: Path | None = None,
     image_root: Path | None = None,
     catalog: Path | None = None,
+    source_name: str = "Masterdata",
+    reviewer: str = "",
 ) -> list[Path]:
     """Persist only absent, verified EANs in the shared request store and export manual TXT lots."""
     if not 1 <= int(batch_size) <= 250:
@@ -356,7 +396,10 @@ def generate_luxoptica_request_files(
     output_dir.mkdir(parents=True, exist_ok=True)
     settings = ProviderSettings("luxottica", max_eans_per_request=batch_size)
     store = ProviderStore(request_root)
-    planned = store.plan(settings, [product["ean"] for product in products], mode="manual")
+    planned = store.plan(
+        settings, [product["ean"] for product in products], mode="manual",
+        masterdata_evidence=_masterdata_evidence(dataframe, products, source_name), reviewer=reviewer,
+    )
     if planned["invalid"]:
         raise ValueError("La lista cambió durante la preparación; revise los EAN inválidos.")
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

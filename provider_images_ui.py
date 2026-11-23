@@ -6,8 +6,9 @@ operator downloaded manually, reconciles ambiguous requests and resolves review 
 """
 from __future__ import annotations
 
+import json
 import os
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import streamlit as st
@@ -173,6 +174,16 @@ def _request_actions(connector, rows, engine_factory) -> None:
         st.info("Preparada localmente. Este estado no confirma que la solicitud se haya enviado al proveedor.")
     st.code(connector.export_ean_list(selected), language="text")
     st.caption(export_caption(connector))
+    if service.settings.provider == "luxottica":
+        evidence = store.source_evidence(selected)
+        if evidence:
+            with st.expander("Evidencia de origen de la solicitud"):
+                st.dataframe([{
+                    "Origen": row["source"],
+                    "Registrado (UTC)": datetime.fromtimestamp(row["recorded_at"], timezone.utc).isoformat(),
+                    "Revisor": row["reviewer"],
+                    "Datos": json.dumps(row["evidence"], ensure_ascii=False, sort_keys=True),
+                } for row in evidence], use_container_width=True, hide_index=True)
     if connector.service.settings.provider == "marcolin":
         if st.button("Exportar Excel para Marcolin", key=f"prov_marcolin_xlsx_{selected}"):
             try:

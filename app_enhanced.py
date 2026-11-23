@@ -69,6 +69,7 @@ from app_exports import (
     extract_clean_eans as _extract_clean_eans,
     extract_luxoptica_products,
     generate_luxoptica_request_files,
+    link_luxoptica_masterdata,
     load_masterdata_file,
     normalize_result_export_schema,
     preview_luxoptica_request_products,
@@ -1575,6 +1576,7 @@ def render_master_page(master_page: str | None = None) -> None:
                     candidate_limit = 50 if preview_test_50 else None
                     st.session_state["luxoptica_selection_preview"] = {
                         "products": extract_luxoptica_products(export_df),
+                        "identity": export_df.to_json(orient="split"),
                         "candidate_limit": candidate_limit,
                         "report": selection_preview,
                     }
@@ -1592,7 +1594,8 @@ def render_master_page(master_page: str | None = None) -> None:
                 if limit and len(selection_preview["candidates"]) > limit:
                     st.caption(f"Se prepararán como máximo los primeros {limit} EAN ausentes.")
                 current_products = extract_luxoptica_products(export_df)
-                if current_products != preview_state["products"]:
+                if (current_products != preview_state["products"]
+                        or export_df.to_json(orient="split") != preview_state.get("identity")):
                     st.warning("La transformación ha cambiado. Genere una nueva vista previa.")
                 elif selection_preview["catalog"]["status"] != "consultado":
                     st.error("Catálogo inaccesible: la propuesta está bloqueada, no equivale a imágenes ausentes.")
@@ -1604,6 +1607,8 @@ def render_master_page(master_page: str | None = None) -> None:
                             batch_size=250,
                             max_total_eans=limit,
                             request_root=_provider_images_data_root(),
+                            source_name=Path(source_name).name,
+                            reviewer=st.session_state.get("auth_user", ""),
                         )
                     except (OSError, ValueError, RuntimeError) as error:
                         st.error(f"No se pudieron preparar los lotes: {error}")
@@ -1619,6 +1624,24 @@ def render_master_page(master_page: str | None = None) -> None:
                             st.info("Los EAN ya tienen solicitudes vigentes o dejaron de ser elegibles.")
                 elif not proposed:
                     st.info("No hay EAN ausentes y sin solicitud vigente para preparar.")
+                if (current_products == preview_state["products"]
+                        and export_df.to_json(orient="split") == preview_state.get("identity")
+                        and selection_preview["catalog"]["status"] == "consultado"
+                        and selection_preview["summary"]["Solicitud pendiente"]
+                        and st.session_state.get("auth_role") == "admin"):
+                    if st.button("Confirmar asociación Masterdata a solicitudes existentes",
+                                 key="luxoptica_link_masterdata"):
+                        try:
+                            linked = link_luxoptica_masterdata(
+                                export_df, reviewer=st.session_state.get("auth_user", ""),
+                                source_name=Path(source_name).name, request_root=_provider_images_data_root(),
+                                output_dir=luxoptica_dir,
+                            )
+                        except (OSError, ValueError, RuntimeError) as error:
+                            st.error(f"No se pudo asociar la evidencia: {error}")
+                        else:
+                            st.info(f"Identidades vinculadas: {len(linked['linked_evidence'])}; "
+                                    f"requieren revisión: {len(linked['identity_review'])}.")
 
             generated_files_raw = st.session_state.get("luxoptica_generated_files", [])
             if generated_files_raw:
