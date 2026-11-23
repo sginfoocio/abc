@@ -15,7 +15,9 @@ raíz de fotografías distinta. Antes de cualquier migración, seguir el [plan d
 3. La vista previa consulta el catálogo y los archivos existentes en modo de solo lectura.
    Solo propone EAN válidos sin registros ni archivos de imagen.
 4. No son elegibles los EAN con cobertura completa o parcial, solicitud activa, imágenes no
-   catalogadas, cobertura no verificable o cualquier estado de revisión. Si el catálogo, el
+   catalogadas, cobertura no verificable o cualquier estado de revisión. Las filas con el mismo
+   EAN o UPC equivalente y datos contradictorios de marca, modelo, color o calibre requieren
+   revisión. Si el catálogo, el
    almacén compartido o el historial de lotes no se puede consultar, la preparación se bloquea.
 5. Tras confirmación, se registra una solicitud manual en el almacén compartido y se crean
    archivos TXT/manifiesto locales. El lote tiene como máximo 250 EAN.

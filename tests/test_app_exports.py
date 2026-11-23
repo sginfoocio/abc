@@ -117,6 +117,42 @@ def test_request_files_only_include_absent_eans_and_skip_partial_or_live(tmp_pat
     assert len(store.live_keys("luxottica")) == 2
 
 
+@pytest.mark.parametrize("field", ["Marca", "Modelo", "Color", "Calibre"])
+def test_contradictory_equivalent_codes_require_review(tmp_path, monkeypatch, field) -> None:
+    image_root = tmp_path / "images"
+    _catalog(monkeypatch, image_root, {})
+    source = pd.DataFrame([
+        {"Barcode": "123456789012", "Marca": "Brand", "Modelo": "Model A", "Color": "01", "Calibre": "50"},
+        {"Barcode": "0123456789012", "Marca": "Brand", "Modelo": "Model A", "Color": "01", "Calibre": "50"},
+    ])
+    source.loc[1, field] = "different"
+
+    preview = preview_luxoptica_request_products(
+        source, request_root=tmp_path / "requests", image_root=image_root, output_dir=tmp_path / "lots",
+    )
+
+    assert preview["candidates"] == []
+    assert preview["rows"][0]["Estado"] == "Revisión"
+    assert generate_luxoptica_request_files(
+        source, tmp_path / "lots", request_root=tmp_path / "requests", image_root=image_root,
+    ) == []
+
+
+def test_matching_equivalent_codes_remain_eligible(tmp_path, monkeypatch) -> None:
+    image_root = tmp_path / "images"
+    _catalog(monkeypatch, image_root, {})
+    source = pd.DataFrame([
+        {"Barcode": "123456789012", "Modelo": "Model A", "Color": "01"},
+        {"Barcode": "0123456789012", "Modelo": " model a ", "Color": "01"},
+    ])
+
+    preview = preview_luxoptica_request_products(
+        source, request_root=tmp_path / "requests", image_root=image_root, output_dir=tmp_path / "lots",
+    )
+
+    assert preview["candidates"] == ["123456789012"]
+
+
 def test_catalog_failure_and_unindexed_images_never_become_candidates(tmp_path, monkeypatch) -> None:
     image_root = tmp_path / "images"
     image_root.mkdir()

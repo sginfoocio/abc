@@ -152,6 +152,22 @@ def extract_clean_eans(dataframe: pd.DataFrame) -> list[str]:
     return [product["ean"] for product in extract_luxoptica_products(dataframe)]
 
 
+def _ambiguous_luxoptica_keys(dataframe: pd.DataFrame) -> set[str]:
+    if "Barcode" not in dataframe.columns:
+        return set()
+    identities: dict[str, dict[str, set[str]]] = {}
+    for _, row in dataframe.iterrows():
+        ean = clean_ean(row["Barcode"])
+        if not ean_valid(ean):
+            continue
+        fields = identities.setdefault(ean_key(ean), {})
+        for field in ("Marca", "Modelo", "Color", "Calibre"):
+            value = row.get(field, "")
+            if pd.notna(value) and str(value).strip():
+                fields.setdefault(field, set()).add(str(value).strip().casefold())
+    return {key for key, fields in identities.items() if any(len(values) > 1 for values in fields.values())}
+
+
 def _live_luxottica_keys(request_root: Path) -> set[str]:
     request_root = Path(request_root)
     try:
@@ -264,6 +280,7 @@ def preview_luxoptica_request_products(
     output_dir = Path(output_dir) if output_dir is not None else Path(__file__).resolve().parent / "docs" / "Luxoptica"
     valid, invalid = normalize_eans(product["ean"] for product in products)
     product_by_key = {ean_key(product["ean"]): product for product in products if ean_valid(product["ean"])}
+    ambiguous = _ambiguous_luxoptica_keys(dataframe)
 
     if not root.is_dir() or not os.access(root, os.R_OK | os.X_OK):
         report = {"catalog": {"status": "inaccesible", "blocker": "raiz_imagenes_no_disponible"},
@@ -285,6 +302,8 @@ def preview_luxoptica_request_products(
             state, reason = "Bloqueado", "Catálogo o cobertura no disponibles"
         elif ean_key(ean) in live:
             state, reason = "Solicitud pendiente", "Ya existe una solicitud Luxottica vigente"
+        elif ean_key(ean) in ambiguous:
+            state, reason = "Revisión", "Identidad contradictoria para el mismo EAN"
         elif coverage["label"] == "completas":
             state, reason = "Con imágenes", "Vistas técnicas completas y archivos verificados"
         elif coverage["label"] == "parciales":
