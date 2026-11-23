@@ -115,6 +115,7 @@ def test_price_module_selects_direct_regressions_instead_of_entire_price_suite()
 
 @pytest.mark.parametrize(("source", "expected"), [
     ("price_url_candidates.py", {"tests/test_price_url_candidates.py"}),
+    ("price_trial.py", {"tests/test_price_trial.py"}),
     ("price_access.py", {
         "tests/test_price_access.py", "tests/test_price_locator.py", "tests/test_price_pilot.py",
         "tests/test_price_point_check.py", "tests/test_price_review_refresh.py", "tests/test_price_trial.py",
@@ -167,11 +168,11 @@ def test_vytria_dependency_selection_avoids_the_full_price_suite():
         "tests/test_prestashop_prices.py",
         "tests/test_price_comparator.py",
         "tests/test_price_analytics.py",
+        "tests/test_price_watch.py",
         "tests/test_vytria_price_sync.py",
         "tests/test_dockerfile_provider_modules.py",
     } <= set(targets)
     assert "tests/test_app_exports.py" not in targets
-    assert "tests/test_price_watch.py" not in targets
     assert "tests/test_price_monitor.py" not in targets
     assert len(targets) < sum(path.startswith("tests/test_price") for path in inventory)
 

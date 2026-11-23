@@ -35,14 +35,21 @@ esas capturas, no fichas verificadas ni ofertas actuales.
 | Mia Burton, solicitud 4 | Tres ofertas describen medidas distintas y comparten 174 EUR, pero la captura no publica EAN ni el código de color `901`; `black` y el sufijo de URL no resuelven esa identidad. | El extractor conserva el precio común como dato candidato solo si las ofertas concuerdan; las medidas distintas dejan disponibilidad `unknown`. Con la captura conservada la identidad queda `probable`, no se inventa EAN ni se atribuye stock individual. El precio no pasa a oferta comparable mientras falte acreditar marca, modelo y color contra el catálogo. |
 | Bassol, solicitud 1 | La solicitud original se rechazó antes de HTTP por privacidad. El envío ordinario devuelve el mismo rechazo y no crea un intento nuevo. | Se añade `retry_of` para un reintento explícito, con un hijo auditable y el registro original intacto. Bajo los bloqueos compartidos se comprueban manifiesto, estado/aplazamientos, candidata documentada, recibos y reservas atribuibles al intento anterior y posteriores aplicables, privacidad, cuota, permisos, bloqueo y presupuesto. El trabajador vuelve a comprobar privacidad y controles de ruta/agente antes de HTTP. El texto `901-32-50` ya no se interpreta como calibre `32-50`; no se acepta el EAN por URL o por una captura. |
 
-El reintento solo es elegible para el rechazo de privacidad acreditado cuyo
-resultado y auditoría coinciden y no tiene peticiones ni reservas atribuibles
-o inciertas. Consumo, permisos denegados, bloqueos, candidatas modificadas,
-incertidumbre o un hijo ya existente impiden crear otro intento. El doble envío
-devuelve el mismo hijo; ni el estado ni las fechas originales se reescriben.
-La interfaz distingue `reintentable (sujeto a comprobación)`, `pendiente`,
-`ejecutando`, `capturado`, `rechazado` y `caducado`, y expone responsable,
-motivo, fecha y commit.
+El reintento previo a HTTP sigue siendo elegible solo para un rechazo acreditado
+cuyo resultado y auditoría coinciden y no tiene peticiones ni reservas
+atribuibles o inciertas. Además, una captura completada con artefacto
+insuficiente puede reintentarse únicamente si ese artefacto sigue conservado,
+su hash, auditoría y recibos coinciden, y tanto la versión del capturador como
+el commit son distintos. La interfaz exige seleccionar la captura y registrar
+un motivo; el hijo persiste `retry_of`, `retry_reason`, `capture_version` y
+`build_commit`. Se comprueban de nuevo permisos, presupuesto, candidata,
+bloqueos, reservas y recibos, así como la ausencia de otra captura reciente o
+activa. No se modifica la caducidad ni ningún otro dato del original. Consumo,
+permisos denegados, bloqueos, candidatas modificadas, incertidumbre, artefactos
+caducados o un hijo ya existente impiden crear otro intento. El doble envío
+devuelve el mismo hijo; la solicitud ordinaria conserva su idempotencia. La
+versión del contrato actual de selección Mia es
+`mia-explicit-main-entity-v1`.
 
 La extracción heurística de medidas en texto libre no elimina secuencias
 numéricas que no haya reconocido como calibre: así un sufijo de color no
@@ -101,6 +108,21 @@ programar; tampoco se repiten los 182 cierres históricos.
    acreditados podrá un operador valorar la comparación. Esta PR no activa esa
    acción.
 
+### Captura anterior con evidencia insuficiente
+
+1. Abrir la captura conservada, revisar su artefacto sanitizado y confirmar qué
+   evidencia necesaria falta. La retención por sí sola no acredita suficiencia.
+2. Solo después de que un capturador actualizado esté desplegado, seleccionar
+   el ID y la versión anteriores y la candidata correspondiente, introducir el motivo
+   concreto y responsable, confirmar la consulta y pulsar **Reintentar captura
+   con capturador actualizado**.
+3. Confirmar que el hijo conserva el vínculo, motivo, versión y commit; revisar
+   recibos y artefacto. El original y su fecha de caducidad deben permanecer
+   intactos. El reintento no acepta identidad, mercado, stock ni precio.
+4. Si el control encuentra otra petición, reserva, captura o bloqueo, no volver
+   a enviarlo. Si la página sigue sin publicar la evidencia explícita necesaria,
+   mantener el par en revisión y no crear una oferta comparable.
+
 ## Validación
 
 Las regresiones usan los bytes conservados en el paquete seleccionado y
@@ -117,6 +139,14 @@ encontró dos regresiones ahora corregidas y cubiertas por esos tests dirigidos;
 la tercera fue una prueba de validación fotográfica Kering, reproducida también
 en el `HEAD` sin modificar de esta rama. CI completo y build/smoke Docker sobre
 el HEAD final siguen pendientes.
+
+La extensión del reintento de capturas se comprobó offline sin HTTP: ciclo de
+diagnósticos **49 tests**, sanitización y selección explícita **29**, Mia/
+variantes **3**, render supervisado de UI **1** y selección de CI **8**. Incluye
+migración del índice activo, recibos/auditoría, preservación del original,
+idempotencia, cambio de versión, permisos, presupuesto, expiración y bloqueo de
+concurrencia. Estas pruebas no son capturas comerciales. El CI y Docker del
+nuevo HEAD deben pasar antes de cualquier integración o despliegue.
 
 El smoke de Docker carga el paquete parcial dentro del contenedor, comprueba la
 identidad de las tres capturas, usa el usuario real UID 1037, verifica SQLite

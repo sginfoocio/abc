@@ -1667,6 +1667,8 @@ def _render_continuity_capture(service, frozen: dict, *, active: bool = True) ->
 
     from filelock import Timeout
     from build_info import load_build_info
+    from price_diagnostic import CAPTURE_VERSION
+    from price_trial import DIAGNOSTIC_RETRY_CAPTURE_UPDATE
 
     with st.expander("Captura supervisada de un par"):
         st.caption("Procesa solo un par pendiente y vencido con ficha ya verificada, usando el trabajador y "
@@ -1747,22 +1749,47 @@ def _render_continuity_capture(service, frozen: dict, *, active: bool = True) ->
         url = st.selectbox("URL documentada o ficha aceptada", candidates, key="diagnostic_url")
         info = load_build_info()
         retryable = [r for r in results if r["id"] in retryable_ids and r["url"] == url]
+        captured_retryable = [r for r in results if r["status"] == "captured" and r["available"]
+                              and r["url"] == url and r["capture_version"] != CAPTURE_VERSION]
         with st.form("diagnostic_capture_form"):
             actor = st.text_input("Responsable", value="")
             note = st.text_input("Motivo del diagnóstico")
             approved = st.checkbox("Autorizo una consulta diagnóstica gobernada")
+            if captured_retryable:
+                previous_capture = st.selectbox(
+                    "Captura anterior con evidencia insuficiente",
+                    captured_retryable,
+                    format_func=lambda r: (f"{r['id']} · {r['finished_at']} · "
+                                           f"{r['capture_version'] or 'capturador anterior sin versión'}"),
+                    key="diagnostic_capture_retry",
+                )
+            else:
+                previous_capture = None
             submitted = st.form_submit_button("Solicitar evidencia diagnóstica",
                                               disabled=not info["build"].startswith("actions-"))
             retried = st.form_submit_button("Reintentar rechazo previo a HTTP",
                                             disabled=not retryable or not info["build"].startswith("actions-"))
-        if submitted or retried:
+            retried_capture = st.form_submit_button(
+                "Reintentar captura con capturador actualizado",
+                disabled=not captured_retryable or not info["build"].startswith("actions-"),
+            )
+        if submitted or retried or retried_capture:
             try:
-                if retried:
+                if retried_capture:
+                    if not previous_capture:
+                        raise ValueError("Seleccione la captura anterior que se va a revisar")
+                    saved = service.retry_diagnostic(
+                        previous_capture["id"], actor=actor, note=note, build_commit=info["commit"],
+                        approved=approved, retry_reason=DIAGNOSTIC_RETRY_CAPTURE_UPDATE,
+                    )
+                elif retried:
                     saved = service.retry_diagnostic(retryable[0]["id"], actor=actor, note=note,
                                                      build_commit=info["commit"], approved=approved)
-                else:
+                elif submitted:
                     saved = service.request_diagnostic(
                         cid, ean, url, actor=actor, note=note, build_commit=info["commit"], approved=approved)
+                else:
+                    raise ValueError("No se seleccionó una acción diagnóstica")
                 labels = {"pending": "pendiente", "running": "ejecutando", "deferred": "aplazada",
                           "captured": "capturado", "rejected": "rechazado", "expired": "caducado"}
                 label = labels.get(saved["status"], saved["status"])

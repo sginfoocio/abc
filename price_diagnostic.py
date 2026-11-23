@@ -19,6 +19,7 @@ from price_web_extract import _Collector, _LD_JSON, _from_json_ld, _is_type, _no
 DEFAULT_BODY_LIMIT = 2 * 1024 * 1024
 DEFAULT_QUOTA = 100 * 1024 * 1024
 DEFAULT_RETENTION_DAYS = 7
+CAPTURE_VERSION = "mia-explicit-main-entity-v1"
 _SAFE_KEYS = {
     "@context", "@graph", "@id", "@type", "name", "brand", "model", "color", "sku", "mpn",
     "gtin", "gtin8", "gtin12", "gtin13", "gtin14", "ean", "url", "offers", "price",
@@ -280,7 +281,8 @@ def sanitise(fetched, max_bytes):
     redirects = [{"url": safe_url(r["url"]), "status": r["status"],
                   "location": safe_url(r["location"])} for r in fetched.redirects]
     metadata = {
-        "artifact_kind": artifact_kind, "requested_url": safe_url(fetched.requested_url),
+        "artifact_kind": artifact_kind, "capture_version": CAPTURE_VERSION,
+        "requested_url": safe_url(fetched.requested_url),
         "sanitization_version": sanitization_version, "unscoped_eans": unscoped_eans,
         "unscoped_barcodes": unscoped_barcodes,
         "final_url": safe_url(fetched.url), "canonical_urls": list(dict.fromkeys(canonical)),
