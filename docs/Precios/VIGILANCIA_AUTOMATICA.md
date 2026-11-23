@@ -562,6 +562,8 @@ Prueba real preparada para **Visio Factory, Edel-Optics, Amevista y Óptica Ópt
 
 Pruebas automatizadas: `tests/test_price_monitor.py` incluye **500 EAN × dos competidores simulados** (1.000 combinaciones), localización/confirmación, precios, cambios, alertas, caída y recuperación, ausencia de nuevas búsquedas, presupuestos y protecciones. Incluye además migración desde esquema de fase 3, recibos tras caída entre importación/cierre, URL compartida por calibres, caducidad, umbral exacto e interfaz sin HTTP.
 
+La regresión rápida del localizador cubre la recuperación tras una interrupción con dos productos. La prueba sintética de escala de 500 EAN se conserva fuera del CI rápido y se ejecuta expresamente con `python -m pytest -m stress tests/test_price_locator.py`.
+
 ## Orden de integración de las PR
 
 Estado comprobado el 3-11-2026 con `git merge-tree` sobre `origin`:
