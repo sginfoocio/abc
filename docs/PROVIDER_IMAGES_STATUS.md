@@ -1,8 +1,8 @@
 # Proveedores de imágenes: matriz de estado (#59)
 
-Diseño y auditoría: PR #69 (`docs/PROVIDER_INTEGRATIONS_59.md`). Este documento refleja lo **implementado y probado
-offline** (portales y Odoo simulados). No se ha accedido a ningún portal, no se ha descargado nada real, no hay
-credenciales en el repositorio y los schedulers siguen desactivados.
+Diseño y auditoría: PR #69 (`docs/PROVIDER_INTEGRATIONS_59.md`). La matriz de esta sección refleja pruebas
+**offline** con portales y Odoo simulados; no acredita el estado de los servicios en producción.
+Verifica el runtime y los recibos por separado según la guía de validación local Cloud.
 
 ## Decisión: Cloud es independiente de Odoo
 
@@ -89,8 +89,9 @@ Secundario y de solo lectura (`SET TRANSACTION READ ONLY`, timeout de sentencia,
    procede de metadatos del catálogo (por defecto, archivos no verificados) o de archivos verificados. Un UPC-12 y su
    EAN-13 con cero inicial cuentan como el mismo producto (se conserva el código original). Duplicado = repetido o con
    solicitud en curso.
-4. **Lote piloto**: «Proponer lote piloto» preselecciona 5–10 EAN elegibles (primero sin imágenes, luego parciales, pedidos
-   recientes); el usuario ajusta la tabla, marca «Apruebo la selección definitiva» y pulsa «Crear solicitudes…».
+4. **Lote piloto**: «Proponer lote piloto» preselecciona hasta 10 EAN elegibles sin registros de imágenes,
+   con pedidos recientes primero; los parciales quedan en revisión. El usuario ajusta la tabla, marca
+   «Apruebo la selección definitiva» y pulsa «Crear solicitudes…».
    Solo se planifican EAN *Elegibles* de la vista previa (da igual lo marcado), mediante `plan_eans` del núcleo; no se
    contacta con ningún portal. Cada selección se anota en `provider_odoo_selections.jsonl` (aprobador, pedido, referencia).
 5. Odoo solo prueba el origen del EAN: la imagen descargada sigue necesitando manifiesto, metadatos o revisión.
@@ -111,8 +112,8 @@ Secundario y de solo lectura (`SET TRANSACTION READ ONLY`, timeout de sentencia,
   Kering conserva una excepción limitada a los pedidos piloto explícitamente permitidos.
 - La preparación, la política de fecha y la restauración de sesión recordada tienen pruebas offline.
   El login recordado requiere `AUTH_COOKIE_SECRET` de al menos 32 caracteres y persistencia del
-  almacén de revocaciones. La validación real de F5, Odoo, Graph, NAS y el portal sigue pendiente
-  de autorización y evidencia local; no declarar operativo el monitor por la existencia del código.
+  almacén de revocaciones. Consulta la evidencia local del SHA para distinguir las pruebas reales
+  realizadas de las pendientes; no declarar operativo el monitor por la existencia del código.
 
 ### Contrato Odoo contrastado (17/11/2026)
 
