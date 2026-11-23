@@ -249,7 +249,8 @@ def sanitise(fetched, max_bytes):
         if (urlsplit(fetched.url).hostname or "").lower().removeprefix("www.") == "miaburton.com":
             mia_selection |= any(_is_type(node, "WebPage") and node.get("mainEntity") is not None
                                  for node in _nodes(data))
-        records.append(_clean(data, fetched.url))
+        clean = _clean(data, fetched.url)
+        records.extend(clean if isinstance(clean, list) else [clean])
     serialised = json.dumps(records, ensure_ascii=True, separators=(",", ":")).replace("<", "\\u003c")
     if not _has_product_or_offer(records):
         collector, artifact = _sanitise_edel_microdata(fetched.text, fetched.url)

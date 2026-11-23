@@ -168,7 +168,8 @@ def test_synthetic_mia_descriptive_color_and_canonical_do_not_select_variant(
 @pytest.mark.parametrize(("model", "color", "stock"), [
     ("CT0550S", "001", "OutOfStock"), ("SL 596 DUNE", "003", "InStock"),
 ])
-def test_synthetic_mia_explicit_main_entity_survives_sanitisation(model, color, stock):
+@pytest.mark.parametrize("top_level_array", [False, True])
+def test_synthetic_mia_explicit_main_entity_survives_sanitisation(model, color, stock, top_level_array):
     from price_references import EXACT, classify
     from price_web_extract import extract_product, select_product_variant
 
@@ -191,7 +192,7 @@ def test_synthetic_mia_explicit_main_entity_survives_sanitisation(model, color, 
         {"@type": "Person", "name": "Private Customer"},
     ]}
     text = ('<html><head><link rel="canonical" href="' + url + '-001">'
-            '<script type="application/ld+json">' + json.dumps(graph)
+            '<script type="application/ld+json">' + json.dumps([graph] if top_level_array else graph)
             + '</script></head><body>customer@example.com</body></html>')
     fetched = Fetched(url, 200, text.encode(), url, [])
     metadata, artifact = sanitise(fetched, 2 * 1024 * 1024)
@@ -208,9 +209,27 @@ def test_synthetic_mia_explicit_main_entity_survives_sanitisation(model, color, 
     assert not scoped.ean_published and not scoped.market
 
 
+def test_sanitisation_can_replay_sanitised_jsonld_array():
+    from price_web_extract import extract_product
+
+    url = "https://miaburton.com/en/example"
+    product = {"@type": "Product", "name": "Cartier CT0550S",
+               "offers": {"@type": "Offer", "price": "1100", "priceCurrency": "EUR",
+                          "availability": "https://schema.org/OutOfStock"}}
+    html = ('<html><script type="application/ld+json">' + json.dumps(product) +
+            '</script></html>').encode()
+    _, first = sanitise(Fetched(url, 200, html, url, []), 2 * 1024 * 1024)
+    _, second = sanitise(Fetched(url, 200, first, url, []), 2 * 1024 * 1024)
+    original, replay = extract_product(first.decode(), url), extract_product(second.decode(), url)
+    assert replay is not None
+    assert (replay.price, replay.currency, replay.availability) == (
+        original.price, original.currency, original.availability)
+
+
 @pytest.mark.parametrize("conflict", ["missing", "two", "other_offer", "other_ean", "missing_color",
                                       "group_color", "duplicate_id"])
-def test_synthetic_mia_main_entity_conflicts_remain_ambiguous(conflict):
+@pytest.mark.parametrize("top_level_array", [False, True])
+def test_synthetic_mia_main_entity_conflicts_remain_ambiguous(conflict, top_level_array):
     from price_web_extract import extract_product
 
     url = "https://miaburton.com/en/example"
@@ -235,7 +254,8 @@ def test_synthetic_mia_main_entity_conflicts_remain_ambiguous(conflict):
     if conflict == "duplicate_id":
         nodes.append({"@type": "Product", "@id": "#selected", "color": "001"})
     graph = {"@graph": nodes}
-    text = '<html><script type="application/ld+json">' + json.dumps(graph) + '</script></html>'
+    text = ('<html><script type="application/ld+json">' +
+            json.dumps([graph] if top_level_array else graph) + '</script></html>')
     metadata, artifact = sanitise(Fetched(url, 200, text.encode(), url, []), 2 * 1024 * 1024)
     for source in (text, artifact.decode()):
         page = extract_product(source, url)

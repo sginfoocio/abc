@@ -25,6 +25,9 @@ Fuentes verificadas:
 Los HTML del paquete son reconstrucciones sanitizadas parciales de JSON-LD,
 no respuestas completas originales. Los valores que siguen son evidencia de
 esas capturas, no fichas verificadas ni ofertas actuales.
+La sanitización conserva los registros JSON-LD tanto si llegan como objetos
+como si llegan en una lista; volver a sanitizar un artefacto no renueva su fecha
+ni recupera los campos que no se conservaron.
 
 ## Causas y correcciones
 
