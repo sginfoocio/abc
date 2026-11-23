@@ -10,11 +10,11 @@ from dataclasses import dataclass, field, replace
 from html.parser import HTMLParser
 import json
 import re
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 from price_comparator import normalize_gtin
-from price_references import (caliber_from_code, compare_calibers, extract_caliber, extract_lens,
+from price_references import (EXACT, caliber_from_code, classify, compare_calibers, extract_caliber, extract_lens,
                               normalize_caliber, parse_reference)
 
 _LD_JSON = re.compile(r"<script[^>]+type=[\"']application/ld\+json[\"'][^>]*>(.*?)</script>", re.I | re.S)
@@ -26,6 +26,7 @@ _AVAILABLE = {"instock", "limitedavailability"}
 _UNAVAILABLE = {"outofstock", "soldout", "discontinued"}
 _VOID = {"meta", "link", "img", "br", "hr", "input", "source", "area", "base", "col", "embed", "wbr"}
 _EDEL_SIZE_CLASS = re.compile(r"(?:^|\s)eoDetailListTileSize(\d+)(?:\s|$)")
+_EDEL_CATEGORY_PATH = re.compile(r"^/gafas-de-sol-[^/]+\.html$", re.I)
 
 
 @dataclass
@@ -74,7 +75,8 @@ class ProductPage:
 
     def candidate(self) -> dict[str, Any]:
         """The listing as seen by ``price_references.classify``."""
-        return {"brand": self.brand, "model": self.model, "color": self.color, "caliber": self.caliber,
+        return {"url": self.url, "brand": self.brand, "model": self.model,
+                "color": self.color, "caliber": self.caliber,
                 "group_reference": self.group_reference,
                 "ean_published": self.ean_published, "title": self.title,
                 "ean_published_raw": self.ean_published_raw,
@@ -114,6 +116,38 @@ def availability_of(value: Any) -> str:
     if token in _UNAVAILABLE:
         return "unavailable"
     return "unknown"
+
+
+def scope_availability_to_ean(page: ProductPage, requested_ean: Any, *,
+                               product: Mapping[str, Any] | None = None) -> ProductPage:
+    """Keep reference-price matching separate from evidence for the requested variant's stock."""
+    if not page.ean_published:
+        match = classify(product, page.candidate()) if product else None
+        product_caliber = normalize_caliber(product.get("caliber")) if product else ""
+        listing_caliber = normalize_caliber(page.caliber)
+        direct_product_offer = (page.offer_binding_source == "product_offer"
+                                and not page.variant_scoped and not page.structured_variants)
+        selected_variant_offer = (page.offer_binding_source == "variant_url" and page.variant_scoped
+                                  and bool(page.variant_id) and bool(page.url_trace.get("selected_variant_url")))
+        if (match is None or match.status != EXACT or match.basis != "reference"
+                or not product_caliber or listing_caliber != product_caliber
+                or page.ambiguous or page.offer_binding_unresolved or page.stock_conflict
+                or not (direct_product_offer or selected_variant_offer)):
+            page.availability = "unknown"
+            note = "Disponibilidad no atribuida: falta vínculo verificable entre la variante y la ficha"
+            if note not in page.notes:
+                page.notes.append(note)
+        return page
+    try:
+        same_ean = normalize_gtin(page.ean_published) == normalize_gtin(requested_ean)
+    except (TypeError, ValueError):
+        same_ean = False
+    if not same_ean:
+        page.availability = "unknown"
+        note = "Disponibilidad no atribuida al EAN solicitado: el EAN publicado es distinto o no válido"
+        if note not in page.notes:
+            page.notes.append(note)
+    return page
 
 
 def _truthy(value: Any) -> bool | None:
@@ -557,21 +591,13 @@ def select_product_variant(page: ProductPage | None, product: dict[str, Any]) ->
     published_caliber = normalize_caliber(selected.caliber)
     if selected_from_group and target_caliber and published_caliber \
             and compare_calibers(target_caliber, published_caliber) == "different":
-        common_price = bool(record["shared_offer"]) and not selected.ambiguous and selected.price is not None
-        selected.ambiguous = True
-        selected.offer_binding_unresolved = False
-        selected.ean_published = ""
-        if not common_price:
-            selected.price = None
-            selected.currency = ""
         selected.availability = "unknown"
         selected.stock_conflict = True
-        selected.notes.append("El calibre de la variante estructurada contradice el producto objetivo")
-        if common_price:
-            selected.notes.append("Precio común del grupo conservado solo como evidencia; stock e identidad requieren revisión")
+        selected.notes.append(
+            "El calibre difiere: se conserva el precio del modelo/color y se desconoce el stock de la variante")
     elif selected_from_group:
         selected.notes.append("Variante ProductGroup vinculada por EAN normalizado, no por orden de listas")
-    return selected
+    return scope_availability_to_ean(selected, product.get("ean"), product=product)
 
 
 class _EdelSelectedRadios(HTMLParser):
@@ -986,6 +1012,9 @@ def product_page_rejection(html: str, url: str) -> str:
     if (parsed_url.hostname or "").lower().removeprefix("www.") == "optica-optima.com" \
             and parsed_url.path.rstrip("/") in {"/gafas-de-sol", "/gafas-graduadas"}:
         return "no_product: ruta de categoría de Óptica Óptima, no ficha de producto"
+    if (parsed_url.hostname or "").lower().removeprefix("www.") == "edel-optics.es" \
+            and _EDEL_CATEGORY_PATH.fullmatch(parsed_url.path):
+        return "no_product: categoría Edel-Optics, no ficha de producto"
     nodes = []
     for block in _LD_JSON.findall(html):
         try:

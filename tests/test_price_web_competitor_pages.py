@@ -6,7 +6,7 @@ import json
 import pytest
 
 from price_references import PROBABLE, caliber_from_code, classify, extract_lens
-from price_web_extract import extract_product, select_product_variant
+from price_web_extract import extract_product, product_page_rejection, select_product_variant
 
 FIXTURES = Path(__file__).parent / "fixtures" / "web_pages"
 PR27 = {"ean": "8056597875349", "brand": "Prada", "model": "PR 27ZS", "color": "16K08Z", "caliber": "54-21"}
@@ -159,9 +159,11 @@ def test_edel_selected_radio_resolves_variant_id_and_scopes_offer_facts():
     assert any("Product Id 1907958 resuelto" in note for note in page.notes)
 
 
-def test_edel_internal_selection_requires_radio_offer_and_exact_gtin():
+def test_edel_internal_selection_requires_radio_offer_and_valid_gtin():
     from dataclasses import replace
     from price_monitor import _accepted_edel_resolution
+    from price_web_extract import scope_availability_to_ean
+    from tests.test_price_locator import _gtin
 
     product = {"ean": "8056597875349", "brand": "Prada", "model": "PR 27ZS", "color": "16K08Z"}
     url = "https://www.edel-optics.es/PR-27ZS-16K08Z-de-Prada.html"
@@ -170,7 +172,19 @@ def test_edel_internal_selection_requires_radio_offer_and_exact_gtin():
             '<script type="application/ld+json">' + json.dumps(node) + '</script>')
     page = extract_product(html, url, url_trace={"candidate_url": url})
     assert _accepted_edel_resolution(page, url, product)
-    assert not _accepted_edel_resolution(page, url, {**product, "ean": "8056597875226"})
+    other_ean = replace(page, ean_published=_gtin("123456789012"))
+    assert _accepted_edel_resolution(other_ean, url, product)
+    assert classify(product, other_ean.candidate()).status != "exact_match"
+    assert classify(product, other_ean.candidate(), allow_reference_match=True).status == "exact_match"
+    scope_availability_to_ean(other_ean, product["ean"])
+    assert other_ean.availability == "unknown"
+    missing_ean = replace(page, ean_published="")
+    scope_availability_to_ean(missing_ean, product["ean"])
+    assert missing_ean.availability == "unknown"
+    assert classify(product, missing_ean.candidate()).status == "exact_match"
+    assert _accepted_edel_resolution(missing_ean, url, product)
+    invalid_ean = replace(page, ean_published="not-a-gtin")
+    assert not _accepted_edel_resolution(invalid_ean, url, product)
     assert not _accepted_edel_resolution(replace(page, ambiguous=True), url, product)
     assert not _accepted_edel_resolution(
         replace(page, url_trace={**page.url_trace, "offer_variant_url": url + "?selectedSize=1907959"}),
@@ -270,6 +284,19 @@ def test_edel_redirect_trace_is_preserved_and_changed_final_url_is_rejected():
     assert page.url_trace["selected_variant_url"] == selected_url
     assert _accepted_edel_resolution_reason(page, url, product) == (
         "la URL final no coincide con la ruta aceptada")
+
+
+def test_edel_category_route_is_rejected_even_with_product_metadata():
+    url = "https://www.edel-optics.es/Gafas-de-sol-Miu-Miu.html"
+    html = ('<script type="application/ld+json">' + json.dumps({
+        "@type": "Product", "url": url, "name": "Miu Miu MU A06S 14L09Z",
+        "offers": {"@type": "Offer", "price": "250", "priceCurrency": "EUR"},
+    }) + "</script>")
+
+    rejection = product_page_rejection(html, url)
+
+    assert rejection == "no_product: categoría Edel-Optics, no ficha de producto"
+    assert not product_page_rejection("", "https://www.edel-optics.es/MU-A06S-14L09Z-de-Miu-Miu.html")
 
 
 def test_edel_selected_variant_uses_common_model_color_price_and_its_own_stock():
@@ -452,7 +479,7 @@ def test_shared_amevista_product_group_binds_upc_size_price_and_stock_by_ean(ean
     assert any("no por orden de listas" in note for note in page.notes)
 
 
-def test_shared_product_group_keeps_ean_size_contradiction_ambiguous():
+def test_shared_product_group_keeps_common_price_but_not_conflicting_variant_stock():
     base = "https://www.amevista.com/es/ray-ban-rb2140-901-wayfarer"
     html = '<script type="application/ld+json">' + json.dumps({
         "@context": "https://schema.org", "@type": "ProductGroup", "url": base,
@@ -474,9 +501,14 @@ def test_shared_product_group_keeps_ean_size_contradiction_ambiguous():
         "color": "901", "caliber": "54-18",
     })
 
-    assert page is not None and page.ambiguous
-    assert page.ean_published == "" and page.price is None and page.availability == "unknown"
-    assert any("calibre" in note for note in page.notes)
+    assert page is not None and not page.ambiguous
+    assert page.ean_published == "0805289126577" and page.price == 99.6
+    assert page.availability == "unknown" and page.stock_conflict
+    assert classify({
+        "ean": "0805289126577", "brand": "Ray-Ban", "model": "RB2140",
+        "color": "901", "caliber": "54-18",
+    }, page.candidate()).status == "exact_match"
+    assert any("calibre difiere" in note.lower() for note in page.notes)
 
 
 @pytest.mark.parametrize(("model", "color", "ean", "size", "price"), [

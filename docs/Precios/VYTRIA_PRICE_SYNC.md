@@ -1,6 +1,204 @@
 # Sincronización del PVP Vytria desde Odoo
 
-Sustituye la importación manual de precios propios del comparador. Integración **solo de lectura**:
+## Precio final público de PrestaShop (preparación, deshabilitada por defecto)
+
+La tarifa 59 sigue siendo la referencia efectiva de Odoo. PrestaShop puede aplicar
+ofertas posteriores a esa tarifa: son diferencias comerciales, no errores de Odoo.
+Cuando se habilita el lector, solo para la intersección del manifiesto existente de
+100 EAN con los vigilados activos y autorizados por la ejecución, se compara el
+resultado vigente del cálculo MySQL. Una lectura fallida o caducada conserva el
+último resultado y su fecha real, pero no se compara ni se sustituye por Odoo.
+Sin habilitación y sin lectura anterior, la operativa existente no cambia.
+Administración y ficha muestran por separado el Precio Odoo, el Precio final
+Vytria, la oferta/descuento aplicado, el origen y la fecha de actualización.
+La ficha marca además el estado de vigencia; un precio anterior puede quedar
+visible como referencia histórica, pero no se usa en la comparación.
+
+**Contraste público (2026-11-20):** un GET sin sesión autenticada a la
+[ficha Prada PR 17WS 2AU8C1](https://www.vytria.com/es/pr-17ws-2au8c1.html)
+mostró EAN `8056597435581`, calibre 49, país `ES` (6), moneda `EUR` (1),
+tienda `Vytria` (1) y `is_logged=false`. La ficha publicó **232,05 €**,
+también en `product:price:amount`, y mostró **273,00 €** como precio anterior.
+El producto público indicado es `498`; el `68` del selector es un valor de
+atributo, no el ID de la combinación.
+El importe público no se usa como semilla, ni esta URL se usa como lector automático.
+
+**Contraste MySQL (2026-11-20):** MariaDB 11.8.10, esquema de PrestaShop
+8.2.1 (`PS_VERSION_DB`), prefijo `ps_`, una tienda activa (Vytria, ID 1).
+El grupo anónimo es **Visitante (1)**, no Invitado (2); muestra IVA y no tiene
+reducción de grupo. País 6, moneda 1, cliente y carrito 0, una unidad,
+geografía fiscal española por dirección de entrega. Para este artículo el
+grupo fiscal 63 aplica el 21 % a España, sin restricciones de estado o código
+postal. La combinación `9367` (calibre 49) repite el EAN del producto `498`,
+con impacto de precio cero. Las 8 unidades observadas en stock se comprueban
+por separado; la oferta no impone un límite de unidades.
+
+`427094` es `id_specific_price`, no ID de producto, combinación ni regla de
+catálogo. Se aplica a la combinación `9367`, España/EUR, cualquier tienda,
+grupo o cliente, sin carrito, mínimo 1, vigencia abierta. Su precio fijo
+`225.619800` es **sin IVA y antes** de la reducción porcentual de `0.15`.
+También era elegible la regla de catálogo global 35 (fila `8593775`), con
+15 % pero sin precio fijo. Según [PrestaShop 8.2.1](https://github.com/PrestaShop/PrestaShop/blob/8.2.1/classes/SpecificPrice.php),
+la combinación exacta se ordena antes que la genérica; no se acumulan.
+No hay prioridad particular para 498; la configuración general ordena
+grupo, moneda, país y tienda después del cliente. El recálculo de contraste
+da `225.619800 × 1.21 = 273.00` y `225.619800 × 1.21 × 0.85 = 232.05`,
+redondeados a céntimos; coincide con la ficha. Esto no sustituye al motor nativo.
+
+Auditoría de los mismos 100 GTIN en tienda 1: 56 aparecen en la combinación y
+en su propio producto, 2 solo en combinación, 37 solo en un producto sin
+combinaciones y 5 no tienen coincidencia en las columnas auditadas. La
+repetición bajo el mismo producto no es ambigua cuando hay una sola
+combinación exacta; nunca se elige entre varios productos o varios calibres
+con el mismo GTIN.
+
+**Antes de habilitar:** el login MySQL de la auditoría cifra la conexión
+pero todavía tiene permisos de escritura; no se debe usar en el contenedor
+hasta retirarlos y verificar los permisos efectivos del mismo login.
+La auditoría se ejecutó vía SSH exclusivamente en transacciones `READ ONLY`.
+El lector por lotes no necesita vista, rutina ni API. Abre una conexión,
+verifica los permisos, y lee en una instantánea `REPEATABLE READ`, `READ ONLY`.
+Reconstruye la selección de una única oferta, el impacto del calibre, impuestos
+y reducción con `Decimal`. Para el grupo visitante excluye precios de clientes,
+carritos y descuentos que requieren más de una unidad. Rechaza empates, IVA
+territorial/compuesto, ecotasa y configuraciones o módulos no soportados.
+
+1. Verificar los overrides PHP desplegados y los módulos `altautofiller`
+   (`actionPresentProduct`) y `revolutpayment` (`displayProductPriceBlock`).
+   Los contrastes de ficha no prueban su comportamiento para todo el catálogo.
+   Solo tras confirmar su efecto, establecer `PRESTASHOP_PRICE_CODE_AUDITED=1`.
+2. Confirmar con el administrador si `ps_user_vytria_lect` se comparte con
+   otros procesos antes de cambiar sus permisos. Si no depende de la escritura,
+   retirar los privilegios sobrantes en la entrada exacta `usuario@host`
+   devuelta por `CURRENT_USER()`, dejando `SELECT` solo sobre las tablas
+   que consulta el lector: `product[_shop]`,
+   `product_attribute[_shop]`, `manufacturer`, `shop`, `shop_group`, `stock_available`, `country`, `currency`, `group`,
+   `configuration`, `hook`, `hook_module`, `module`, `group_reduction`,
+   `tax_rule`, `tax`, `specific_price` y `specific_price_priority` (prefijo real).
+   Comprobar `SHOW GRANTS`, `APPLICABLE_ROLES` y `ENABLED_ROLES`; no validar
+   los permisos intentando escribir. El lector rechaza concesiones de roles,
+   permisos adicionales y permisos delegables.
+3. Inyectar por el gestor de secretos aprobado en el entorno del proceso
+   `PRESTASHOP_MYSQL_HOST`, `_PORT` (3306 si se omite), `_DATABASE`, `_USER`,
+   `_PASSWORD` y `_PREFIX`. No montar ni copiar el perfil MySQL del usuario SSH.
+   Aquí los nombres abreviados comparten el prefijo `PRESTASHOP_MYSQL`.
+   El modo predeterminado `PRESTASHOP_MYSQL_SSL_MODE=VERIFY_IDENTITY` exige
+   `PRESTASHOP_MYSQL_SSL_CA` (ruta a la CA) y un nombre de servidor verificable.
+   Sin CA y nombre verificables, configurar explícitamente `REQUIRED` (TLS
+   obligatorio, **sin validar la identidad del servidor**). No hay degradación
+   a texto claro. El lector comprueba `Ssl_cipher` antes de consultar precios.
+   Desde el entorno del lector, comprobar `SELECT CURRENT_USER(), DATABASE()`
+   y `SHOW SESSION STATUS LIKE 'Ssl_cipher'` por separado del smoke sin red.
+   Configurar los IDs
+   confirmados `PRESTASHOP_PRICE_SHOP_ID`, `_GROUP_ID`, `_COUNTRY_ID`,
+   `_CURRENCY_ID` (prefijo `PRESTASHOP_PRICE`). Solo después de validar la
+   instalación y obtener aprobación, `PRESTASHOP_PRICE_ENABLED=1`.
+
+**Resultado medido (cálculo v3):** 13 consultas de lote, 1,61 s por SSH
+(incluye lecturas y cálculo; no es una medición del contenedor). Se calcularon
+100 precios: 95 por código de barras (43 activos con stock y 52 inactivos
+sin stock) y 5 mediante referencia explícita de marca/modelo/color.
+Se conservan los controles
+de visibilidad de precio y de cantidad mínima.
+Los 5 enlaces de referencia no son coincidencias de EAN. Se contrastaron
+7 de los exactos con el escaparate ES/EUR: Prada
+`8056597435581` 232,05 €, `0805289126584` 99 €, `0805289126591` 164 €,
+`0889214635310` 222 €, `0889214669742` 312 €, `0889652429717` 201,60 € y
+`0889652468983` 123 €. Los otros 93 importes son cálculos, no contrastes públicos.
+Los resultados son evidencia de auditoría, no una sincronización de producción.
+
+La instantánea conserva base, impacto, tipo/importe de reducción, regla,
+contexto, IVA, redondeo, versión del cálculo y vigencia. El resultado vence
+como máximo a las 24 horas o al siguiente cambio de oferta conocido. No se
+transfiere disponibilidad entre calibres. Para una referencia de precio con
+marca, modelo completo y color auditados, el calibre no cambia el precio ni se
+exige conocerlo para aceptar la referencia; las diferencias o incidencias de
+otras combinaciones se muestran aparte y no invalidan esa referencia.
+Actividad y stock se muestran por separado y no condicionan el precio propio
+ni crean puntos en su histórico.
+«Con stock» significa cantidad positiva en la fila de la combinación exacta;
+ni eso ni el precio calculado acreditan que pueda comprarse. Si falta una fila
+de stock inequívoca en el ámbito de tienda o grupo, el stock queda sin verificar.
+
+### Referencias de precio por marca/modelo/color
+
+Se acreditó la coincidencia del modelo completo y código de color del
+catálogo vigilado con el fabricante, referencia, nombre y características
+Modelo/Color de cada ficha MySQL. No se acreditó que la divergencia de
+código se deba al calibre, ni que ambos códigos sean la misma variante.
+
+| EAN solicitado | Marca, modelo y color | Código original | Producto/combinación | Precio con IVA | Oferta / IVA |
+|---|---|---|---|---:|---|
+| `0889214095985` | Tom Ford FT0751N 01A | `889214095978` | 949/11091 | 189,00 € | 487154 / 21 % |
+| `8056262600078` | Miu Miu MU 01YV 14L1O1 | `8056262600085` | 7917/8481 | 208,00 € | 387339 / 10 % |
+| `8056262833902` | Ray-Ban RB4472 13592 | `8056262833919` | 9404/sin combinación | 82,00 € | Sin oferta / 21 % |
+| `8056597669016` | Miu Miu MU 04UV 1AB1O1 | `8056262667484` | 9090/13347 | 256,00 € | 594137 / 10 % |
+| `8056597669023` | Miu Miu MU 04UV VAU1O1 | `8056262667491` | 1615/13343 | 224,00 € | 593897 / 10 % |
+
+El lector solo usa estas correspondencias explícitas si no hay coincidencia
+del código solicitado. Revalida el código original, los IDs, la pertenencia a
+la tienda, la marca y la referencia completa. Si la ficha cambia, hay varias
+identidades o no se puede descartar un precio distinto en otra combinación,
+deja el caso pendiente. No traslada actividad ni stock al EAN consultado.
+
+### Consultas de identidad exacta (auditoría)
+
+Se buscaron coincidencias exactas en `ps_product` y `ps_product_attribute`
+(`ean13`, `upc`, `reference`), además de `ps_stock` y
+`ps_supply_order_detail` (`ean13`, `upc`). Los cinco EAN sin coincidencia
+son `0889214095985`, `8056262600078`, `8056262833902`,
+`8056597669016` y `8056597669023`. Tres casos con IDs de referencia
+**de Odoo**, no de PrestaShop:
+
+| EAN | Variante Odoo | Plantilla Odoo | Formas a probar |
+|---|---:|---:|---|
+| `0889214095985` | 49928 | 48684 | `0889214095985`, `889214095985` |
+| `8056262600078` | 90270 | 83941 | `8056262600078` |
+| `8056597669016` | 56714 | 55254 | `8056597669016` |
+
+Ejecutar con parámetros de texto. En los GTIN sin UPC equivalente se repite
+el EAN como segundo parámetro. Los `LEFT JOIN` permiten distinguir una fila
+global de una que realmente está vinculada a la tienda:
+
+```sql
+SELECT p.id_product, p.ean13, p.upc, p.reference, p.price AS global_price,
+       ps.id_shop, ps.price, ps.active, ps.show_price, ps.minimal_quantity
+FROM ps_product p
+LEFT JOIN ps_product_shop ps ON ps.id_product=p.id_product AND ps.id_shop=%s
+WHERE p.ean13 IN (%s,%s) OR p.upc IN (%s,%s) OR p.reference IN (%s,%s);
+
+SELECT a.id_product, a.id_product_attribute, a.ean13, a.upc, a.reference,
+       ats.id_shop, ats.price AS impact_ex_tax, ats.minimal_quantity,
+       ps.price AS shop_price, ps.active, ps.show_price
+FROM ps_product_attribute a
+LEFT JOIN ps_product_attribute_shop ats
+  ON ats.id_product_attribute=a.id_product_attribute AND ats.id_shop=%s
+LEFT JOIN ps_product_shop ps ON ps.id_product=a.id_product AND ps.id_shop=%s
+WHERE a.ean13 IN (%s,%s) OR a.upc IN (%s,%s) OR a.reference IN (%s,%s);
+```
+
+Parámetros: tienda `1` (dos veces en la segunda consulta), seguida de las
+dos formas repetidas para cada campo. Una vez identificados `id_product` e
+`id_product_attribute`, el cálculo toma `ps_product_shop.price` y el impacto
+`ps_product_attribute_shop.price`; consulta `ps_specific_price` y
+`ps_specific_price_priority` para la regla elegida, y `ps_tax_rule`/`ps_tax`
+para el IVA. El importe específico, si sustituye la base, viene de
+`ps_specific_price.price`. Falta la tabla o clave de correspondencia para
+los cinco EAN anteriores; tampoco hubo coincidencias para sus variantes o
+plantillas Odoo en `ps_cc_co_equivalenciaproductos.id_odoo` ni en
+`ps_cc_co_equivalenciacombinaciones.id_odoo`. Los enlaces de precio de la tabla
+anterior no sustituyen esa identidad exacta.
+
+En SQLite, `prestashop_prices` guarda la última lectura, vencimiento, último
+intento e incidencia; `prestashop_price_history` guarda cambios de precio,
+oferta o contexto. Las reconfirmaciones solo actualizan las fechas del estado
+vigente. Ambas tablas se vinculan por EAN a `vytria_prices` y al histórico
+existente de Odoo; no alteran dicha tarifa ni la identidad/disponibilidad del
+comparador. La sección de administración distingue las dos fuentes.
+
+## Referencia Odoo y operativa anterior
+
+La integración Odoo sustituye la importación manual de precios propios. Es **solo de lectura**:
 no se modifica nada en Odoo ni en PrestaShop.
 
 ## Fuente del precio

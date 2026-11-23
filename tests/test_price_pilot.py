@@ -500,17 +500,30 @@ def test_registered_business_tax_does_not_require_per_page_pretax(pilot):
     assert page["tax_policy_evidence"]
 
 
-def test_reference_match_without_published_ean_remains_comparable_in_pilot(pilot):
+def test_approved_reference_match_without_published_ean_can_compare_exact_variant(pilot):
     service, store, search, site, cid, _ = pilot
     known(pilot, gtin=None)
     service.enable()
     service.run(search=search)
     frame, _ = service.results()
     row = frame.loc[(frame.ean == REQUIRED_EANS[0]) & (frame.competitor_id == cid)].iloc[0]
-    validation = json.loads(row.observation)["validation"]
+    observation = json.loads(row.observation)
+    validation = observation["validation"]
+    assert row.priced == 1
     assert row.comparable == 1
     assert validation["verified_ean"] is False
     assert validation["listing"]["colors"] == ["16K08Z"]
+    assert observation["page"]["availability"] == "available"
+    with store._connect() as connection:
+        approval = connection.execute("""SELECT status FROM competitor_product_urls
+            WHERE competitor_id=? AND ean=? AND url=?""",
+                                      (cid, REQUIRED_EANS[0], observation["url"])).fetchone()
+        offer = connection.execute("""SELECT match_status,match_basis,ean_published,availability
+            FROM offers WHERE competitor_id=? AND ean=? ORDER BY id DESC LIMIT 1""",
+                                   (cid, REQUIRED_EANS[0])).fetchone()
+    assert approval and approval["status"] == "verified"
+    assert offer and offer["match_status"] == "exact_match" and offer["match_basis"] == "reference"
+    assert offer["ean_published"] == "" and offer["availability"] == "available"
 
 
 @pytest.mark.parametrize("status,body", [(403, ""), (429, ""), (200, "<html>captcha</html>")])

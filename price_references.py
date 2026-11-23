@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 import re
 from typing import Any, Iterable, Mapping
 import unicodedata
+from urllib.parse import urlparse
 
 EXACT, PROBABLE, REJECTED = "exact_match", "probable_match", "rejected"
 LEVELS = ("ean", "brand_model_color", "model_color", "normalized_variants")
@@ -27,9 +28,13 @@ _COMMERCIAL_NAMES = {
     ("RAYBAN", "RB2140"): {"WAYFARER"},
     ("TOMFORD", "FT1044"): {"BRONSON"},
     ("TOMFORD", "FT1301"): {"JOEY02"},
+    ("TOMFORD", "FT1310"): {"CHLOE02"},
+    ("TOMFORD", "FT1360"): {"LIAM02"},
     ("TOMFORD", "FT0711"): {"FAUSTO"},
 }
 _BRAND_ALIASES = {"TIFFANY": "TIFFANYCO", "TIFFANYCO": "TIFFANYCO"}
+_MIU_A06S_DESCRIPTOR = re.compile(r"(?<![A-Z0-9])GAFASDESOLMIUMIUA06S(?![A-Z0-9])", re.IGNORECASE)
+_VISIO_TOMFORD_BV = re.compile(r"(?<![A-Z0-9])(FT(?:5634|6058))-B\s*/\s*V(?![A-Z0-9])", re.IGNORECASE)
 
 
 def _ascii(value: Any) -> str:
@@ -311,11 +316,71 @@ def _valid_gtin(value: Any) -> str:
         return ""
 
 
-def classify(product: Mapping[str, Any], candidate: Mapping[str, Any]) -> MatchResult:
+def _normalize_miu_a06s_descriptor(product: Mapping[str, Any], candidate: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Normalize Optical H's merged descriptor only with the exact catalogue color and brand."""
+    identity = (_valid_gtin(product.get("ean")), _brand_key(product.get("brand")),
+                model_key(product.get("model")), key(product.get("color")))
+    if identity != ("8056262407691", "MIUMIU", "MUA06S", "14L09Z"):
+        return candidate
+    if _brand_key(candidate.get("brand")) != "MIUMIU":
+        return candidate
+
+    identifiers = candidate.get("identifiers") or []
+    texts = [candidate.get("title"), candidate.get("model"), *identifiers]
+    has_descriptor = any(_MIU_A06S_DESCRIPTOR.search(str(text or "")) for text in texts)
+    has_color = (key(candidate.get("color")) == "14L09Z"
+                 or any(key(token) == "14L09Z" for text in texts for token in tokens(text)))
+    if not has_descriptor or not has_color:
+        return candidate
+
+    canonical_model = str(product.get("model") or "")
+    normalized = dict(candidate)
+    title = normalized.get("title")
+    if isinstance(title, str):
+        normalized["title"] = _MIU_A06S_DESCRIPTOR.sub(f"Miu Miu {canonical_model}", title)
+    model = normalized.get("model")
+    if isinstance(model, str):
+        normalized["model"] = _MIU_A06S_DESCRIPTOR.sub(canonical_model, model)
+    normalized["identifiers"] = [
+        _MIU_A06S_DESCRIPTOR.sub(f"Miu Miu {canonical_model}", str(value))
+        if isinstance(value, str) else value for value in identifiers]
+    return normalized
+
+
+def _normalize_visio_tomford_bv(product: Mapping[str, Any], candidate: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Resolve Visio's B/V label only when its published UPC identifies this exact catalogue EAN."""
+    host = (urlparse(str(candidate.get("url") or "")).hostname or "").lower().removeprefix("www.")
+    product_ean = _valid_gtin(product.get("ean"))
+    if (host != "visiofactory.es" or _brand_key(product.get("brand")) != "TOMFORD"
+            or model_key(product.get("model")) not in {"FT5634B", "FT6058B"}
+            or not product_ean or _valid_gtin(candidate.get("ean_published")) != product_ean):
+        return candidate
+    if candidate.get("brand") and _brand_key(candidate.get("brand")) != "TOMFORD":
+        return candidate
+
+    canonical_model = str(product.get("model") or "")
+    normalized = dict(candidate)
+    for field_name in ("title", "model"):
+        value = normalized.get(field_name)
+        if isinstance(value, str):
+            normalized[field_name] = _VISIO_TOMFORD_BV.sub(canonical_model, value)
+    identifiers = normalized.get("identifiers") or []
+    normalized["identifiers"] = [
+        _VISIO_TOMFORD_BV.sub(canonical_model, str(value)) if isinstance(value, str) else value
+        for value in identifiers
+    ]
+    return normalized
+
+
+def classify(product: Mapping[str, Any], candidate: Mapping[str, Any], *,
+             allow_reference_match: bool = False) -> MatchResult:
     """Decide whether ``candidate`` (a competitor listing) is the catalogue ``product``.
 
     candidate keys (all optional): ean_published, brand, model, color, caliber, title.
+    Reference matching must be explicitly enabled by an approved caller; it never equates GTINs.
     """
+    candidate = _normalize_miu_a06s_descriptor(product, candidate)
+    candidate = _normalize_visio_tomford_bv(product, candidate)
     own_model, own_color, own_brand = (
         model_key(product.get("model")), key(product.get("color")), _brand_key(product.get("brand")))
     title = str(candidate.get("title") or "")
@@ -414,8 +479,11 @@ def classify(product: Mapping[str, Any], candidate: Mapping[str, Any]) -> MatchR
             reasons.append(f"{name} no confirmado: catálogo {expected or 'desconocido'}, "
                            f"ficha {', '.join(sorted(found)) or 'desconocido'}")
     if ean and ean != _valid_gtin(product.get("ean")):
-        reasons.insert(0, f"EAN publicado distinto: {ean}; revisión manual obligatoria")
-        return result(REJECTED if contradictions else PROBABLE)
+        if not allow_reference_match:
+            reasons.insert(0, f"EAN publicado distinto: {ean}; revisión manual obligatoria")
+            return result(REJECTED if contradictions else PROBABLE)
+        observations.append(
+            f"EAN publicado distinto ({ean}); precio identificado por marca, modelo y color, sin equivalencia de EAN")
     if contradictions:
         return result(PROBABLE if verified_ean else REJECTED)
     if ambiguous:

@@ -353,7 +353,11 @@ def _manual_review_rows(con, path, now):
             j.previous_sample AS monitor_previous_sample,
             w.active AS watch_active,c.active AS competitor_active,
             c.domain AS competitor_domain,
+            p.id AS continuity_pair_id,
             p.state AS continuity_pair_state,
+            p.checked_at AS continuity_checked_at,
+            p.next_check_at AS continuity_next_check_at,
+            p.defer_reason AS continuity_defer_reason,
             EXISTS(SELECT 1 FROM manual_review_identity i WHERE i.refresh_id=r.id) AS identity_captured,
             EXISTS(SELECT 1 FROM manual_review_recovery_grants g
                    WHERE g.refresh_id=r.id AND g.continuity_id=?)
@@ -370,6 +374,7 @@ def _manual_review_rows(con, path, now):
         task = dict(record)
         cid, ean = task["competitor_id"], task["ean"]
         category, action, reason = "excluded", "", ""
+        reconcile_reason = ""
         related_request_id = None
         error_rule = ""
         identity = None
@@ -497,7 +502,39 @@ def _manual_review_rows(con, path, now):
                             "Lectura caducada; la vigilancia renovará el precio con la aprobación vigente")
                 elif not policy_reason:
                     if task["status"] == "done":
-                        category, reason = "already_resolved", "Lectura vigente y compatible de la misma ficha"
+                        pair_state = task["continuity_pair_state"]
+                        if pair_state == "review":
+                            sample_at = _time(task["monitor_sampled_at"])
+                            checked_at = (_time(task["continuity_checked_at"])
+                                          if task["continuity_checked_at"] else None)
+                            authorized = evidence["approval_audits"] == 1 or task["recovery_granted"]
+                            traceable = (bool(evidence["sample_digest"])
+                                         and evidence["completed_receipt_count"] > 0
+                                         and not evidence["unresolved_reservation"])
+                            if not authorized:
+                                reason = "La lectura vigente carece de una aprobación o concesión auditada"
+                            elif checked_at and sample_at <= checked_at:
+                                reason = "El último check de continuidad no es anterior a la muestra manual"
+                            elif not traceable:
+                                reason = "La muestra manual no tiene recibo final trazable"
+                            elif (not task["monitor_valid_until"]
+                                  or _time(task["monitor_valid_until"]) <= now):
+                                reason = "La muestra manual no acredita vigencia futura para programar renovación"
+                            else:
+                                category, action = "recoverable", "reconcile"
+                                status = ("trabajo del monitor elegible" if task["monitor_eligible"]
+                                          else f"no comparable: {task['monitor_detail'] or 'disponibilidad no acreditada'}")
+                                reconcile_reason = (
+                                    f"Muestra manual vigente reutilizable; {status}; reconciliar el par sin HTTP "
+                                    f"y renovarlo no antes de {task['monitor_valid_until']}")
+                        elif pair_state == "pending":
+                            category, reason = (
+                                "already_resolved", "Lectura vigente; el par ya está en la cola de renovación")
+                        elif pair_state == "running":
+                            category, action, reason = (
+                                "recoverable", "already_queued", "Lectura de continuidad en curso; no se duplica")
+                        else:
+                            reason = f"Restricción del par: {pair_state}"
                     else:
                         category, action, reason = (
                             "recoverable", "local_reevaluation",
@@ -559,14 +596,14 @@ def _manual_review_rows(con, path, now):
                     reason = f"Fecha futura de la solicitud: {task['retry_at']}"
                 else:
                     reason = job_deferral(job, now, point_check=True, monitoring=True)
-            if not reason:
+            if not reason and action != "reconcile":
                 with service.execution(0, cid, ean, program="continuity", program_id=continuity_id):
                     decision = access.check(cid, "ficha")
                 if not decision.allowed:
                     reason = decision.message
                     if decision.retry_at:
                         reason += f" hasta {decision.retry_at.isoformat()}"
-            if not reason:
+            if not reason and action != "reconcile":
                 parsed = urlsplit(task["url"])
                 origin = f"{parsed.scheme}://{parsed.netloc}"
                 robots = con.execute("""SELECT status,rules_text,expires_at FROM price_robots_cache
@@ -576,13 +613,16 @@ def _manual_review_rows(con, path, now):
                         reason = "robots.txt vigente prohíbe esta ruta"
             if not reason:
                 if action != "recover_corrected_error":
-                    category = "recoverable"
-                    action = ("requeue" if task["status"] == "deferred" else
-                              "authorize" if not task["identity_captured"] and not task["recovery_granted"]
-                              else "already_queued")
-                    reason = ("Aplazamiento de reserva acreditado" if action == "requeue"
-                              else "Solicitud pendiente; requiere autorización auditada" if action == "authorize"
-                              else "Solicitud pendiente; ya está en la cola")
+                    if action == "reconcile":
+                        category, reason = "recoverable", reconcile_reason
+                    else:
+                        category = "recoverable"
+                        action = ("requeue" if task["status"] == "deferred" else
+                                  "authorize" if not task["identity_captured"] and not task["recovery_granted"]
+                                  else "already_queued")
+                        reason = ("Aplazamiento de reserva acreditado" if action == "requeue"
+                                  else "Solicitud pendiente; requiere autorización auditada" if action == "authorize"
+                                  else "Solicitud pendiente; ya está en la cola")
         result.append({"id": task["id"], "ean": ean, "competitor_id": cid, "url": task["url"],
                        "category": category, "action": action, "reason": reason,
                        "status": task["status"], "requested_at": task["requested_at"],
@@ -590,6 +630,15 @@ def _manual_review_rows(con, path, now):
                        "http_requests": task["http_requests"],
                        "sampled_at": task["monitor_sampled_at"], "detail": task["detail"],
                        "monitor_detail": task["monitor_detail"], "monitor_state": task["monitor_state"],
+                       "monitor_job_id": task["monitor_job_id"], "monitor_eligible": bool(task["monitor_eligible"]),
+                       "monitor_valid_until": task["monitor_valid_until"],
+                       "monitor_not_before": task["monitor_not_before"],
+                       "continuity_pair_id": task["continuity_pair_id"],
+                       "continuity_pair_state": task["continuity_pair_state"],
+                       "continuity_checked_at": task["continuity_checked_at"],
+                       "continuity_next_check_at": task["continuity_next_check_at"],
+                       "continuity_defer_reason": task["continuity_defer_reason"],
+                       "recovery_granted": bool(task["recovery_granted"]),
                        "approval_id": evidence["approval_id"], "approval_audits": evidence["approval_audits"],
                        "identity_valid": identity_ok,
                        "recovery_rule": error_rule,
@@ -649,6 +698,11 @@ def _corrected_error_rule(task, identity):
     domain = (identity.get("domain") or "").lower().removeprefix("www.")
     brand = _BRAND_ALIASES.get(key(identity.get("brand")), key(identity.get("brand")))
     model = model_key(identity.get("model"))
+    if (domain == "opticalh.com" and detail ==
+            "Distinto modelo: catálogo MUA06S, ficha GAFASDESOLMIUMIUA06S"
+            and identity.get("ean") == "8056262407691" and brand == "MIUMIU"
+            and model == "MUA06S" and key(identity.get("color")) == "14L09Z"):
+        return "miu-a06s-merged-descriptor"
     if domain == "edel-optics.es" and detail == "La variante extraída no corresponde a la URL aceptada":
         return "edel-selected-variant-url"
     if domain != "amevista.com":
@@ -770,7 +824,7 @@ def _reevaluate_saved_artifacts(con, task, now, recovery_rule):
             results.append(item)
             continue
         page = select_product_variant(page, product)
-        match = classify(product, page.candidate())
+        match = classify(product, page.candidate(), allow_reference_match=True)
         edel_reason = ""
         if ((config.get("domain") or "").lower().removeprefix("www.") == "edel-optics.es"
                 and page.url != task["url"]):
@@ -818,6 +872,8 @@ def _known_recovery_alias_reason(reason, recovery_rule):
         "tomford-joey02-ft1301": r"Distinto modelo: catálogo FT1301, ficha JOEY02(?:\s+FT1301)?",
         "tiffany-brand-alias": r"Distinto marca: catálogo TIFFANYCO, ficha TIFFANY",
         "gucci-logotipo-gg": r"Distinto modelo: catálogo GG(?:1660S|1680S), ficha LOGOTIPOGG",
+        "miu-a06s-merged-descriptor":
+            r"Distinto modelo: catálogo MUA06S, ficha GAFASDESOLMIUMIUA06S",
     }
     pattern = allowed.get(recovery_rule)
     return bool(pattern and re.fullmatch(pattern, reason.strip(), re.IGNORECASE))
@@ -851,7 +907,7 @@ def _manual_review_evidence(con, task):
                             (task.get("requested_at"), audit_scope)).fetchall()
     approval_source = "access_audit" if len(approvals) == 1 else ""
     approval_ref = f"access_audit:{approvals[0]['id']}" if len(approvals) == 1 else ""
-    if not approvals and task.get("status") == "error":
+    if not approvals:
         from price_monitor import _review_identity, _review_identity_valid
 
         identity = _review_identity(con, task)
@@ -1086,6 +1142,7 @@ def preview_manual_reviews(database, *, now=None, request_ids=None, approval_ids
         approvals = [row for row in approvals if query in str(row.get("reason") or "").casefold()]
     action_counts = {
         "reuse": sum(row["action"] == "local_reevaluation" for row in rows),
+        "reconcile": sum(row["action"] == "reconcile" for row in rows),
         "requeue": sum(row["action"] in {"requeue", "recover_corrected_error"} for row in rows),
         "already_queued": sum(row["action"] == "already_queued" for row in rows),
         "excluded": sum(row["category"] == "excluded" for row in rows),
@@ -1185,6 +1242,7 @@ def apply_manual_reviews(database, *, actor, note, build_commit, approved=False,
                 raise ValueError("Hay IDs de solicitud inexistentes")
             changed = []
             linked = []
+            reconciled_pairs = []
             for item in rows:
                 if item["id"] not in selected:
                     continue
@@ -1246,6 +1304,65 @@ def apply_manual_reviews(database, *, actor, note, build_commit, approved=False,
                                  recovery_evidence["approval_ref"], recovery_evidence["identity_digest"],
                                  recovery_evidence["evidence_digest"], item["detail"], actor.strip(),
                                  note.strip(), build_commit, now.isoformat()))
+                if item["action"] == "reconcile":
+                    pair_id = item["continuity_pair_id"]
+                    pair_before = con.execute(
+                        "SELECT * FROM price_continuity_pairs WHERE id=? AND continuity_id=?",
+                        (pair_id, continuity_id)).fetchone()
+                    if (not pair_before or pair_before["state"] != "review"
+                            or pair_before["checked_at"] != item["continuity_checked_at"]
+                            or pair_before["next_check_at"] != item["continuity_next_check_at"]):
+                        raise ValueError("El par cambió durante la reconciliación; vuelva a previsualizar")
+                    if not item["monitor_valid_until"] or not item["evidence"]["sample_digest"]:
+                        raise ValueError("La muestra no tiene vigencia o huella verificable")
+                    next_check = _time(item["monitor_valid_until"])
+                    for restriction in (item["continuity_next_check_at"], item["monitor_not_before"]):
+                        if restriction and _time(restriction) > next_check:
+                            next_check = _time(restriction)
+                    next_check_at = next_check.isoformat()
+                    sample_at = _time(item["sampled_at"]).isoformat()
+                    current_detail = (
+                        f"Lectura manual reutilizada; renovación no antes de {next_check_at}. "
+                        f"Estado de disponibilidad: {item['monitor_detail'] or 'desconocido'}")
+                    receipt = {
+                        "source": "manual_review_refresh",
+                        "request_id": item["id"],
+                        "monitor_job_id": item["monitor_job_id"],
+                        "sampled_at": item["sampled_at"],
+                        "valid_until": item["monitor_valid_until"],
+                        "monitor_eligible": item["monitor_eligible"],
+                        "monitor_detail": item["monitor_detail"],
+                        "sample_digest": item["evidence"]["sample_digest"],
+                        "receipt_ids": item["evidence"]["receipt_ids"],
+                    }
+                    check_id = con.execute("""INSERT INTO price_continuity_checks(
+                        continuity_id,competitor_id,ean,started_at,finished_at,state,category,requests,
+                        http_commercial,http_robots,unconfirmed_http,next_check_at,defer_reason,receipt
+                    ) VALUES(?,?,?,?,?,'pending','reused',0,0,0,0,?,?,?)""",
+                                           (continuity_id, item["competitor_id"], item["ean"], sample_at,
+                                            now.isoformat(), next_check_at, current_detail,
+                                            json.dumps(receipt, ensure_ascii=False))).lastrowid
+                    updated = con.execute("""UPDATE price_continuity_pairs
+                        SET state='pending',next_check_at=?,defer_reason=?,checked_at=?
+                        WHERE id=? AND continuity_id=? AND state='review'
+                          AND checked_at IS ? AND next_check_at IS ?""",
+                                          (next_check_at, current_detail, now.isoformat(), pair_id,
+                                           continuity_id, item["continuity_checked_at"],
+                                           item["continuity_next_check_at"]))
+                    if updated.rowcount != 1:
+                        raise ValueError("El par cambió durante la reconciliación; vuelva a previsualizar")
+                    con.execute("""INSERT INTO access_audit(scope,scope_id,action,previous,current,actor,note,at)
+                        VALUES('price_continuity_pair',?,'reconcile_manual_review_sample',?,?,?,?,?)""",
+                                (str(pair_id), json.dumps(dict(pair_before), ensure_ascii=False),
+                                 json.dumps({"state": "pending", "checked_at": now.isoformat(),
+                                             "next_check_at": next_check_at, "check_id": check_id,
+                                             "receipt": receipt}, ensure_ascii=False),
+                                 actor.strip(), json.dumps({"reason": note.strip(), "build_commit": build_commit},
+                                                           ensure_ascii=False), now.isoformat()))
+                    reconciled_pairs.append({"request_id": item["id"], "continuity_pair_id": pair_id,
+                                             "check_id": check_id, "next_check_at": next_check_at})
+                    changed.append(item["id"])
+                    continue
                 if item["action"] == "requeue":
                     status, detail = "pending", "Recuperación auditada de reserva; pendiente de lectura gobernada"
                     finished = before["finished_at"]
@@ -1294,14 +1411,16 @@ def apply_manual_reviews(database, *, actor, note, build_commit, approved=False,
                 con.execute("""INSERT INTO access_audit(scope,scope_id,action,previous,current,actor,note,at)
                     VALUES('price_continuity',?,'recover_manual_review_batch','',?,?,?,?)""",
                             (str(continuity_id), json.dumps({"counts": _manual_summary(rows), "changed": changed,
-                                                            "linked": linked, "selected": sorted(selected),
+                                                            "linked": linked, "reconciled_pairs": reconciled_pairs,
+                                                            "selected": sorted(selected),
                                                             "approval_results": approval_results}, ensure_ascii=False),
                              actor.strip(), json.dumps({"reason": note.strip(), "build_commit": build_commit,
                                                        "rules_version": MANUAL_ERROR_RECOVERY_RULES},
                                                       ensure_ascii=False), now.isoformat()))
             con.commit()
     return {"counts": _manual_summary(rows), "classifications": _classification_summary(rows),
-            "requests": rows, "changed": changed, "linked": linked, "approval_results": approval_results}
+            "requests": rows, "changed": changed, "linked": linked, "reconciled_pairs": reconciled_pairs,
+            "approval_results": approval_results}
 
 
 def main(argv=None):

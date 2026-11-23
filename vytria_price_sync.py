@@ -28,6 +28,7 @@ from sqlalchemy import bindparam, create_engine, event, text
 from sqlalchemy.engine import URL, Engine
 from sqlalchemy.exc import InterfaceError, OperationalError
 
+import prestashop_prices
 from price_comparator import PriceComparatorStore, iso_datetimes, normalize_gtin, vytria_price_states
 
 
@@ -130,6 +131,7 @@ class SyncResult:
     unchanged: int = 0
     issues: int = 0
     error: str = ""
+    prestashop: dict[str, int] | None = None
 
 
 class PriceReader(Protocol):
@@ -506,7 +508,10 @@ class VytriaPriceSync:
                     return None
                 # Bound validity to one day even if a legacy sync has a longer configured interval.
                 interval = min(self.interval, timedelta(hours=24))
-                if (not last or last["status"] != "running") and all(
+                with self.store._connect() as con:
+                    native_due = prestashop_prices.enabled() and prestashop_prices.due(
+                        con, prestashop_prices.watched_scope(con), now, interval)
+                if not native_due and (not last or last["status"] != "running") and all(
                        r["synced_at"] and not r["stale_since"] and r["validation_status"] == VALIDATED and
                        timedelta(0) <= now - datetime.fromisoformat(r["synced_at"]) < interval for r in rows):
                     return None
@@ -562,6 +567,8 @@ class VytriaPriceSync:
                         SELECT ean FROM watch_products WHERE active=1)""",
                                        [(self._at(), ean) for ean in eans])
         self._finish(result)
+        if prestashop_prices.enabled() and eans:
+            result.prestashop = prestashop_prices.refresh(self.store._connect, eans, self._now)
         return result
 
     def _fetch_with_retries(self, eans: list[str]) -> list[OdooProduct]:

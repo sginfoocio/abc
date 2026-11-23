@@ -209,7 +209,7 @@ def test_incompatible_market_is_rejected_by_the_importer(tmp_path):
 
 
 # --- identification ----------------------------------------------------------------------------
-def test_wrong_colour_is_rejected_but_wrong_caliber_does_not_change_identity(tmp_path):
+def test_wrong_colour_is_rejected_and_wrong_caliber_price_does_not_transfer_stock(tmp_path):
     site = FakeSite()
     store, search = make_search(tmp_path, site)
     cid = competitor_id(store)
@@ -223,9 +223,16 @@ def test_wrong_colour_is_rejected_but_wrong_caliber_does_not_change_identity(tmp
     _open_access(search, cid)
     outcome = search.locate(ean, cid)
     assert outcome.state == "exact" and outcome.url == other_caliber
-    search.record(outcome)
+    assert search.record(outcome) == ""
+    with store._connect() as connection:
+        stored = connection.execute("""SELECT price,match_status,match_basis,ean_published,caliber,availability
+            FROM offers WHERE ean=? AND competitor_id=? ORDER BY id DESC LIMIT 1""", (ean, cid)).fetchone()
+    assert stored is not None
+    assert stored["price"] == 210 and stored["match_status"] == "exact_match"
+    assert stored["match_basis"] == "reference" and stored["ean_published"] == ""
+    assert stored["caliber"] == "57-21" and stored["availability"] == "unknown"
     summary, _ = store.dashboard(30)
-    assert summary.set_index("ean").loc[ean, "competitor_min_eur"] == 210
+    assert pd.isna(summary.set_index("ean").loc[ean, "competitor_min_eur"])
 
 
 def test_exact_by_model_color_caliber_without_published_ean(tmp_path):

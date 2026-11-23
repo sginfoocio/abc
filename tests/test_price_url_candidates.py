@@ -1,21 +1,25 @@
 """Documentary URL checks and explicitly SYNTHETIC shop responses. No captured HTML or live HTTP."""
 from dataclasses import asdict
 import csv
+import hashlib
 import json
 import sqlite3
 from io import StringIO
 from pathlib import Path
 from urllib.parse import urlparse
+from zipfile import ZipFile
 
 import pytest
 import requests
 from streamlit.testing.v1 import AppTest
 
+from competitor_requirements import COMPETITORS
 from price_batch import WatchBatch, batch_pairs_export
 from price_comparator import PriceComparatorStore, normalize_gtin
 from price_monitor import PriceMonitor
 from price_url_candidates import (
-    EXAMPLES, ROUTE_EXAMPLES, candidate_plan, resolve_product_attributes, route_market_hint,
+    EXAMPLES, ROUTE_EXAMPLES, _route_11_index, candidate_plan,
+    resolve_product_attributes, route_market_hint,
 )
 from tests.test_price_locator import Site, _env, _jobs, _urls, _watch
 from tests.web_fixtures import page
@@ -76,7 +80,22 @@ def test_38_product_routes_are_scoped_documentary_candidates_only():
             product["model"] = resolution.evidence["modelo"]
             assert not resolve_product_attributes(product).conflict
         plan = candidate_plan(product, urlparse(example.url).netloc)
-        candidate = next(candidate for candidate in plan.candidates if example.id in candidate.evidence)
+        candidate = next(
+            (candidate for candidate in plan.candidates if example.id in candidate.evidence),
+            None,
+        )
+        if candidate is None:
+            candidate = next(
+                candidate for candidate in plan.candidates
+                if candidate.rule == "matrix_primary_route_11x14"
+                and any(
+                    example.id in alternate["evidence"]
+                    for alternate in json.loads(
+                        candidate.attributes["alternate_documented_routes"]
+                    )
+                )
+            )
+            continue
         assert example.id in candidate.evidence
         assert candidate.state in {"pending_verification", "probable"}
         assert candidate.attributes["route_evidence_id"] == example.id
@@ -138,6 +157,160 @@ def test_documented_routes_preserve_market_variants_and_conflicting_numeric_refe
     assert mia_route.state == "pending_verification"
 
 
+def test_11x14_primary_routes_are_scoped_candidates_not_verified_offers():
+    routes, excluded, _ = _route_11_index()
+    assert len(routes) == 94 and len(excluded) == 1
+    cases = (
+        ({"ean": "0889214625984", "brand": "Tom Ford", "model": "FT1310", "color": "01A",
+          "category": "All / Gafas de Sol"}, "optica-optima.com",
+         "https://optica-optima.com/gafas-de-sol/tom-ford-chloe-02-ft1310-01a.html"),
+        ({"ean": "0889214669742", "brand": "Tom Ford", "model": "FT1360", "color": "30A",
+          "category": "All / Gafas de Sol"}, "optica-optima.com",
+         "https://optica-optima.com/gafas-de-sol/tom-ford-liam-02-ft1360-30a.html"),
+        ({"ean": "8056597886932", "brand": "Miu Miu", "model": "MU 52YS", "color": "7OE01T",
+          "category": "All / Gafas de Sol"}, "amevista.com",
+         "https://www.amevista.com/es/miu-miu-0mu-52ys-7oe01t"),
+    )
+    for product, domain, expected_url in cases:
+        plan = candidate_plan(product, domain)
+        assert [candidate.url for candidate in plan.runnable] == [expected_url]
+        candidate = plan.runnable[0]
+        assert candidate.rule == "matrix_primary_route_11x14"
+        assert candidate.attributes["current_comparable_verified"] == "false"
+        assert not {"price", "availability", "currency", "stock"} & candidate.attributes.keys()
+        evidence = json.loads(candidate.attributes["route_evidence"])
+        assert evidence["current_comparable_verified"] is False
+
+
+def test_all_11x14_primary_routes_reach_the_locator_with_provenance():
+    root = Path(__file__).resolve().parents[1]
+    evidence_directory = root / "docs" / "Precios" / "100_EAN" / "busqueda_11_20261122"
+    matrix = json.loads((evidence_directory / "matriz_11x14.json").read_text(encoding="utf-8"))
+    route_index = json.loads(
+        (evidence_directory / "rutas_candidatas_primarias.json").read_text(encoding="utf-8")
+    )
+    source_pairs = {
+        (pair["ean"], pair["competitor_id"]): (pair, next(
+            route for route in pair["routes"] if route.get("url") == pair["primary_url"]
+        ))
+        for pair in matrix["pairs"]
+        if pair.get("primary_url")
+    }
+    brand_names = ("Saint Laurent", "Miu Miu", "Ray-Ban", "Tom Ford", "Cartier", "Prada")
+    products = {}
+    for row in matrix["per_model"]:
+        full_name = row["model"]
+        brand = next(name for name in brand_names if full_name.startswith(name + " "))
+        model, color = full_name[len(brand):].strip().rsplit(" ", 1)
+        products[row["ean"]] = {
+            "ean": row["ean"], "brand": brand, "model": model, "color": color,
+            "category": "All / Gafas de Sol",
+        }
+
+    assert len(route_index["routes"]) == 94
+    for route in route_index["routes"]:
+        pair, source_route = source_pairs[(route["ean"], route["competitor_id"])]
+        assert route["url"] == pair["primary_url"]
+        assert route["model"] == pair["model"]
+        assert route["source_crawl_age"] == source_route.get("source_crawl_age", "")
+        for field in (
+            "evidence", "market_route_hint", "notes", "current_comparable_verified",
+            "identity_verified_for_current_read", "market_currently_verified",
+        ):
+            assert (route.get(field) or None) == (source_route.get(field) or None)
+        plan = candidate_plan(products[route["ean"]], urlparse(route["url"]).netloc)
+        candidates = [candidate for candidate in plan.candidates if candidate.url == route["url"]]
+        assert candidates, (route["ean"], route["competitor_id"], route["url"], plan.reason)
+        candidate = candidates[0]
+        route_id = f"11x14:{route['ean']}:{route['competitor_id']}"
+        additional = json.loads(candidate.attributes.get("additional_route_evidence", "[]"))
+        represented_ids = set(candidate.evidence)
+        represented_ids.update(item["route_id"] for item in additional)
+        assert route_id in represented_ids
+        if candidate.attributes.get("route_evidence_id") == route_id:
+            route_evidence = json.loads(candidate.attributes["route_evidence"])
+        else:
+            route_evidence = next(item["evidence"] for item in additional if item["route_id"] == route_id)
+        assert route_evidence["source_crawl_age"] == route["source_crawl_age"]
+        assert candidate.state in {"pending_verification", "probable"}
+        assert not {"price", "availability", "currency", "stock"} & candidate.attributes.keys()
+        assert candidate.attributes.get("current_comparable_verified") != "true"
+        if route["ean"] == "0889652429687" and route["competitor_id"] == "visual-click-com":
+            assert plan.reason_code == "route_identity_conflict"
+            assert candidate.state == "probable" and not candidate.runnable
+            assert "ruta heredada" in candidate.reason
+            conflicts = json.loads(candidate.attributes["legacy_identity_conflicts"])
+            assert conflicts and all(
+                {"id", "url", "source", "review_date", "source_ean", "brand", "model", "color"}
+                <= conflict.keys()
+                for conflict in conflicts
+            )
+
+
+def test_11x14_pairs_are_a_subset_of_the_canonical_1400_pair_matrix():
+    root = Path(__file__).resolve().parents[1]
+    evidence_directory = root / "docs/Precios/100_EAN/busqueda_11_20261122"
+    evidence = json.loads(
+        (evidence_directory / "matriz_11x14.json").read_text(encoding="utf-8")
+    )
+    route_index = json.loads(
+        (evidence_directory / "rutas_candidatas_primarias.json").read_text(encoding="utf-8")
+    )
+    archive_path = root / "docs/Precios/100_EAN/paquete_11x14_20261122.zip"
+    archive_bytes = archive_path.read_bytes()
+    matrix_bytes = (evidence_directory / "matriz_11x14.json").read_bytes()
+    assert hashlib.sha256(archive_bytes).hexdigest() == route_index["source_archive_sha256"]
+    with ZipFile(archive_path) as archive:
+        assert archive.testzip() is None
+        assert archive.read(route_index["source_entry"]) == matrix_bytes
+
+    source_to_manifest_id = {
+        "miaburton-com": "mia-burton-com",
+        "opticauniversitaria-es": "optica-universitaria-es",
+        "otticait-com": "otticait-eyewear-com",
+    }
+    evidence_pairs = {
+        (pair["ean"], source_to_manifest_id.get(pair["competitor_id"], pair["competitor_id"]))
+        for pair in evidence["pairs"]
+    }
+    with (root / "docs/Precios/100_EAN/MATRIZ_100_EAN_14_COMPETIDORES.csv").open(
+        encoding="utf-8-sig", newline=""
+    ) as stream:
+        manifest_rows = list(csv.DictReader(stream, delimiter=";"))
+    manifest_pairs = {(row["ean"], row["competitor_id"]) for row in manifest_rows}
+    manifest_names = {row["competitor_id"]: row["competitor"] for row in manifest_rows}
+    source_competitors = {row["id"]: row for row in evidence["competitors"]}
+    requirements_by_name = dict(COMPETITORS)
+
+    assert len(evidence_pairs) == 154
+    assert len(manifest_pairs) == 1400
+    assert len({competitor_id for _, competitor_id in evidence_pairs}) == 14
+    assert all(
+        urlparse(requirements_by_name[manifest_names[manifest_id]]).hostname.removeprefix("www.")
+        == source_competitors[source_id]["domain"].removeprefix("www.")
+        for source_id, manifest_id in source_to_manifest_id.items()
+    )
+    assert evidence_pairs <= manifest_pairs
+
+
+def test_11x14_preserves_foreign_market_and_exact_rayban_color():
+    product = {"ean": "0805289126591", "brand": "Ray Ban", "model": "RB2140", "color": "901/58",
+               "category": "All / Gafas de Sol"}
+    foreign = candidate_plan(product, "opticabassol.com")
+    assert len(foreign.candidates) == 1 and not foreign.runnable
+    assert "-901-58-" in foreign.candidates[0].url
+    wrong_color = candidate_plan({**product, "color": "901"}, "opticabassol.com")
+    assert wrong_color.reason_code == "route_identity_conflict" and not wrong_color.candidates
+
+
+def test_edel_catalogue_redirect_is_not_recreated_as_a_product_candidate():
+    product = {"ean": "8056262407691", "brand": "Miu Miu", "model": "MU A06S", "color": "14L09Z",
+               "category": "All / Gafas de Sol"}
+    plan = candidate_plan(product, "edel-optics.es")
+    assert not plan.candidates and plan.reason_code == "needs_authorized_discovery"
+    assert "redirigió a categoría" in plan.reason
+
+
 def test_38_pair_matrix_keeps_exact_scope_and_does_not_claim_live_offers():
     from scripts.generate_38_coverage_matrix import build_rows
 
@@ -172,7 +345,7 @@ def test_38_pair_matrix_keeps_exact_scope_and_does_not_claim_live_offers():
 
 
 @pytest.mark.parametrize("shop,product,expected", [
-    ("optima", PRADA, "/gafas-de-sol/prada-pr-27zs-16k08z.html"),
+    ("optima", ROUTE_PRADA, "/gafas-de-sol/prada-pr-27zs-16k08z.html"),
     ("optima", FORD, "/gafas-graduadas/tom-ford-ft5634-b-001.html"),
     ("otticait", FORD, "/tom-ford-ft5634-b-001"),
     ("bassol", {**ROUTE_PRADA, "color": "16K08A", "caliber": "54-21"},
@@ -189,8 +362,13 @@ def test_bounded_generation_and_specific_aliases(shop, product, expected):
     assert provenance["evidence"] and provenance["rule"]
     assert provenance["attributes"]["ean"] == normalize_gtin(product["ean"])
     assert provenance["attributes"]["color"] == product["color"]
-    assert provenance["review_date"] == "2026-11-04"
-    assert provenance["origin"].endswith("Evidencias_47.csv")
+    expected_review_date = "2026-11-22" if provenance["rule"] == "matrix_primary_route_11x14" else "2026-11-04"
+    assert provenance["review_date"] == expected_review_date
+    expected_source = (
+        "rutas_candidatas_primarias.json" if provenance["rule"] == "matrix_primary_route_11x14"
+        else "Evidencias_47.csv"
+    )
+    assert provenance["origin"].endswith(expected_source)
 
 
 @pytest.mark.parametrize("shop", ["bassol", "visual", "visio"])
@@ -441,7 +619,7 @@ def test_aliases_do_not_expand_to_other_products():
     ]
     conflict = plan_for({**tiffany, "model": "TF3105D"}, "amevista")
     assert conflict.reason_code == "route_identity_conflict" and not conflict.candidates
-    unknown = plan_for({**FORD, "model": "FT5737B", "color": "045"}, "optima")
+    unknown = plan_for({**FORD, "ean": ROUTE_PRADA["ean"], "model": "FT5737B", "color": "045"}, "optima")
     assert urls(unknown)[0].endswith("ft5737b-045.html")  # no universal "-B" rewrite
 
 
@@ -462,10 +640,9 @@ def test_amevista_historical_ft0711_route_blocks_a_conflicting_ean():
     plan = plan_for({**FORD, "brand": "Tom Ford", "model": "FT0711", "color": "01A",
                      "category": "All / Gafas de Sol"}, "amevista")
 
-    assert len(plan.candidates) == 1
-    assert not plan.runnable
-    assert plan.candidates[0].url.endswith("-fausto")
-    assert "GTIN" in plan.candidates[0].reason
+    assert plan.reason_code == "route_identity_conflict"
+    assert not plan.candidates and not plan.runnable
+    assert "identidad actual del catálogo contradice la ruta 11×14" in plan.reason
 
 
 @pytest.mark.parametrize("brand,category", [
@@ -792,7 +969,10 @@ def test_commercial_names_and_dune_opt_remain_distinct():
            "color": "VAU1O1", "category": "montura"}
     assert "/regard-mu-01xv-vau1o1" in urls(plan_for(miu, "mia"))[0]
     dune = {**PRADA, "ean": "889652429687", "brand": "Saint Laurent", "model": "SL 596 DUNE", "color": "003"}
-    assert "/dune-sl-596-003" in urls(plan_for(dune, "mia"))[0]
+    dune_plan = plan_for(dune, "mia")
+    dune_candidate = next(candidate for candidate in dune_plan.candidates if "/dune-sl-596-003" in candidate.url)
+    assert dune_candidate.state == "probable" and not dune_candidate.runnable
+    assert "mercado no resuelto" in dune_candidate.reason
     assert not plan_for({**dune, "model": "SL 596 DUNE OPT"}, "mia").runnable
     assert not plan_for({**miu, "model": "MU 01YV"}, "mia").runnable
     fausto = {**PRADA, "ean": "889214029614", "brand": "Tom Ford", "model": "FT0711", "color": "01A"}
@@ -844,7 +1024,9 @@ def test_parent_handles_and_historical_urls_are_pending_not_product_absence():
             assert any("PRADA-65ZS.html" in candidate.url and not candidate.runnable for candidate in plan.candidates)
         assert plan.reason_code == "needs_authorized_discovery"
     celine = plan_for(PRADA, "celine")
-    assert len(celine.candidates) == 1 and not celine.runnable and "variante" in celine.reason
+    assert len(celine.candidates) == 1 and celine.runnable
+    evidence = json.loads(celine.runnable[0].attributes["route_evidence"])
+    assert "seleccionar y vincular variante" in evidence["notes"]
     chloe = {**PRADA, "ean": "889652543574", "brand": "Chloe", "model": "CH0289S", "color": "003"}
     domanci = plan_for(chloe, "domanci")
     assert len(domanci.candidates) == 1 and not domanci.runnable
@@ -919,7 +1101,11 @@ def test_preview_is_read_only_and_later_authorized_run_preserves_provenance(tmp_
     with store._connect() as con:
         row = con.execute("SELECT candidate_evidence FROM discovery_index WHERE url=?", (url,)).fetchone()
         evidence = json.loads(row[0])[PRADA["ean"]]
-        assert evidence["rule"] == "sample_pattern:optima" and evidence["evidence"] == ["E001"]
+        assert evidence["rule"] == "matrix_primary_route_11x14"
+        assert evidence["evidence"] == [
+            "11x14:8056597875349:optica-optima-com",
+            "turn166search5",
+        ]
         assert evidence["attributes"]["color"] == "16K08Z"
         audit = json.loads(con.execute(
             "SELECT metadata FROM locate_events ORDER BY id DESC LIMIT 1").fetchone()[0])["candidate_plan"]
@@ -1087,21 +1273,33 @@ def test_legacy_tables_get_only_additive_metadata_migrations(tmp_path):
                                           "model": "CH0289S", "color": "003"}),
     ("Céline Opticien Lunetier", "https://www.celine-opticien-lunetier.com", PRADA),
 ])
-def test_nonrunnable_documentary_plan_is_audited_without_fetching_or_linking(tmp_path, name, base, product):
+def test_documentary_candidates_do_not_link_without_a_validated_page(tmp_path, name, base, product):
     site = Site(base=base)
     store, _, locator, _, cid = _env(tmp_path, site, name=name, template=None, methods=("ficha",))
     ean = normalize_gtin(product["ean"])
     _watch(store, [(ean, product["brand"], product["model"], product["color"], "")])
     locator.run([cid])
-    assert not site.calls and _urls(store, cid).empty
+    assert _urls(store, cid).empty
     with store._connect() as con:
         metadata = json.loads(con.execute(
             "SELECT metadata FROM locate_events ORDER BY id DESC LIMIT 1").fetchone()[0])
         plan = metadata["candidate_plan"]
-        assert plan["reason_code"] == "needs_authorized_discovery"
-        assert plan["candidates"] and all(candidate["state"] == "probable" for candidate in plan["candidates"])
+        if name == "Céline Opticien Lunetier":
+            assert site.calls == [
+                base + "/robots.txt",
+                base + "/products/sunglasses-prada-symbole-pr-27zs",
+            ]
+            assert plan["candidates"] and any(
+                candidate["state"] == "pending_verification" for candidate in plan["candidates"]
+            )
+        else:
+            assert not site.calls
+            assert plan["reason_code"] == "needs_authorized_discovery"
+            assert plan["candidates"] and all(candidate["state"] == "probable" for candidate in plan["candidates"])
         assert all(candidate["attributes"]["ean"] == ean for candidate in plan["candidates"])
-        assert all(candidate["evidence"] and candidate["reason"] for candidate in plan["candidates"])
+        assert all(candidate["evidence"] for candidate in plan["candidates"])
+        if name != "Céline Opticien Lunetier":
+            assert all(candidate["reason"] for candidate in plan["candidates"])
 
 
 def test_batch_ui_shows_local_candidates_without_preparing_jobs_or_http(tmp_path, monkeypatch):
