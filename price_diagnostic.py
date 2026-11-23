@@ -22,11 +22,17 @@ _SAFE_KEYS = {
     "gtin", "gtin8", "gtin12", "gtin13", "gtin14", "ean", "url", "offers", "price",
     "priceCurrency", "availability", "itemOffered", "hasVariant", "isVariantOf", "productGroupID",
     "variesBy", "size", "additionalProperty", "propertyID", "value", "priceSpecification",
-    "priceValidUntil", "lowPrice", "highPrice", "offerCount",
+    "priceValidUntil", "lowPrice", "highPrice", "offerCount", "priceType", "valueAddedTaxIncluded",
+    "eligibleRegion", "shippingDetails", "shippingDestination", "addressCountry", "deliveryTime",
+    "handlingTime", "transitTime", "minValue", "maxValue", "unitCode",
 }
-_URL_KEYS = {"@id", "url", "@context", "availability"}
+_RESTRICTION_KEYS = {"eligibleQuantity", "eligibleCustomerType", "validForMemberTier", "eligibleTransactionVolume"}
+_COMMERCIAL_KEYS = {"offers", "eligibleRegion", "shippingDetails", "shippingDestination", "addressCountry",
+                    "deliveryTime", "handlingTime", "transitTime", "priceSpecification", "additionalProperty"}
+_URL_KEYS = {"@id", "url", "@context", "availability", "priceType"}
 _ALLOWED_TYPES = {"Product", "ProductGroup", "Offer", "AggregateOffer", "Brand",
-                  "PropertyValue", "QuantitativeValue", "PriceSpecification", "UnitPriceSpecification"}
+                  "PropertyValue", "QuantitativeValue", "PriceSpecification", "UnitPriceSpecification",
+                  "OfferShippingDetails", "DefinedRegion", "ShippingDeliveryTime", "Country"}
 _SECRET = re.compile(r"(?i)(?:[\w.+-]+@[\w.-]+\.[a-z]{2,}|bearer\s+\S+|"
                      r"(?:password|passwd|secret|token|session|cookie|csrf|authorization|api[_-]?key)\s*[:=])")
 _URL_SECRET = re.compile(r"(?i)password|passwd|secret|token|session|cookie|csrf|authorization|api[_-]?key")
@@ -90,8 +96,11 @@ def _clean(value, base, key="", depth=0):
         if types:
             types = types if isinstance(types, list) else [types]
             if not all(str(t).rsplit("/", 1)[-1].rsplit(":", 1)[-1] in _ALLOWED_TYPES for t in types):
+                if key in _COMMERCIAL_KEYS:
+                    raise EvidenceError(f"Tipo comercial no conservable: {key}")
                 return None
-        return {k: _clean(v, base, k, depth + 1) for k, v in value.items() if k in _SAFE_KEYS}
+        return {k: (v is not None if k in _RESTRICTION_KEYS else _clean(v, base, k, depth + 1))
+                for k, v in value.items() if k in _SAFE_KEYS or (k in _RESTRICTION_KEYS and v is not None)}
     if isinstance(value, list):
         return [v for item in value if (v := _clean(item, base, key, depth + 1)) is not None]
     if isinstance(value, str):
@@ -149,6 +158,7 @@ def sanitise(fetched, max_bytes):
                   "location": safe_url(r["location"])} for r in fetched.redirects]
     metadata = {
         "artifact_kind": "sanitizado_parcial_jsonld", "requested_url": safe_url(fetched.requested_url),
+        "sanitization_version": 2,
         "final_url": safe_url(fetched.url), "canonical_urls": list(dict.fromkeys(canonical)),
         "redirects": redirects, "http_status": fetched.status, "received_bytes": len(body),
         "received_sha256": hashlib.sha256(body).hexdigest(),

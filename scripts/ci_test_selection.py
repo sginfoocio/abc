@@ -72,6 +72,13 @@ PRICE_SOURCE_TESTS = {
         "tests/test_price_settings_ui.py",
         "tests/test_vytria_price_sync.py",
     ),
+    "price_diagnostic.py": (
+        "tests/test_price_diagnostic.py",
+        "tests/test_price_trial.py",
+        "tests/test_price_recovery.py",
+        "tests/test_manual_review_continuity_repro.py",
+        "tests/test_price_web_competitor_pages.py",
+    ),
     "price_monitor.py": (
         "tests/test_manual_review_continuity_repro.py",
         "tests/test_price_monitor.py",

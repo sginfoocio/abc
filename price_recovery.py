@@ -858,6 +858,12 @@ def _reevaluate_saved_artifacts(con, task, now, recovery_rule):
             "stock_conflict": page.stock_conflict,
             "reason": (conflicts[0] if specific_conflict else edel_reason),
         })
+        if kind == "sanitized_jsonld" and metadata.get("sanitization_version") != 2:
+            if item["result"] == "exact_identity":
+                item["result"] = "insufficient_evidence"
+            item["commercial_gap"] = "Artefacto anterior: puede omitir restricciones, mercado o IVA"
+            if not item["reason"]:
+                item["reason"] = "La sanitización anterior no conserva todo el contexto comercial"
         if not item["reason"] and not exact:
             item["reason"] = ("La relación Product/Offer o la selección de variante es ambigua"
                               if page.ambiguous or page.offer_binding_unresolved

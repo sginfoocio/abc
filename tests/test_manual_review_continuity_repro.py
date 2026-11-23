@@ -706,6 +706,16 @@ def test_sanitized_diagnostic_artifact_is_replayed_without_becoming_an_observati
     assert item["evidence"]["artifact_evaluations"][0]["result"] == "exact_identity"
     assert item["status"] == "error"
     assert site.calls == []
+    del metadata["sanitization_version"]
+    with store._connect() as con, con:
+        con.execute("UPDATE price_diagnostic_requests SET result=? WHERE ean=? AND url=?",
+                    (json.dumps(metadata), ean, url))
+    legacy = preview_manual_reviews(
+        store.database_path, request_ids=[task], now=clock() + timedelta(seconds=2))
+    evaluation = legacy["requests"][0]["evidence"]["artifact_evaluations"][0]
+    assert evaluation["result"] == "insufficient_evidence"
+    assert "sanitización anterior" in evaluation["reason"]
+    assert site.calls == []
 
 
 def test_approved_read_recovery_ui_previews_without_http(expanded_review):

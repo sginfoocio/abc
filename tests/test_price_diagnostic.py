@@ -8,6 +8,71 @@ from price_diagnostic import EvidenceError, has_capacity, require_private_databa
 from price_web_fetch import Fetched
 
 
+def test_real_mia_capture_retains_shipping_market_without_unrelated_html():
+    from price_web_extract import extract_product
+
+    url = "https://miaburton.com/es/gafas-de-sol/prada/pr-26zs-16k08z"
+    content = (Path(__file__).parent / "fixtures" / "web_pages" / "mia_burton.html").read_bytes()
+    original = extract_product(content.decode("utf-8"), url)
+    _, artifact = sanitise(Fetched(url, 200, content, url, []), 2 * 1024 * 1024)
+    replay = extract_product(artifact.decode("utf-8"), url)
+    assert original.market == replay.market == "ES"
+    assert replay.price == original.price
+    assert b"BARCODE" not in artifact
+
+
+def test_sanitisation_preserves_restrictions_and_conflicting_tax_without_private_values():
+    from price_web_extract import extract_product
+
+    url = "https://shop.example/product"
+    product = {"@type": "Product", "name": "Example", "offers": {
+        "@type": "Offer", "url": url, "price": "120", "priceCurrency": "EUR",
+        "availability": "https://schema.org/InStock",
+        "valueAddedTaxIncluded": False, "eligibleCustomerType": "private member",
+    }}
+    html = ('<html><script type="application/ld+json">' + json.dumps(product) + '</script></html>').encode()
+    original = extract_product(html.decode(), url)
+    _, artifact = sanitise(Fetched(url, 200, html, url, []), 2 * 1024 * 1024)
+    replay = extract_product(artifact.decode(), url)
+    assert original.price is None and replay.price is None
+    assert b"private member" not in artifact
+
+    del product["offers"]["eligibleCustomerType"]
+    html = ('<html><script type="application/ld+json">' + json.dumps(product) + '</script></html>').encode()
+    _, artifact = sanitise(Fetched(url, 200, html, url, []), 2 * 1024 * 1024)
+    assert extract_product(artifact.decode(), url).includes_tax is False
+
+
+def test_sanitisation_preserves_delivery_time_and_country_only():
+    from price_web_extract import extract_product
+
+    url = "https://shop.example/product"
+    product = {"@type": "Product", "name": "Example", "offers": {
+        "@type": "Offer", "price": "120", "priceCurrency": "EUR",
+        "availability": "https://schema.org/BackOrder",
+        "shippingDetails": {"@type": "OfferShippingDetails",
+                            "shippingDestination": {"@type": "DefinedRegion",
+                                                    "addressCountry": "FR",
+                                                    "postalCode": "private postal code"},
+                            "deliveryTime": {"@type": "ShippingDeliveryTime",
+                                             "handlingTime": {"@type": "QuantitativeValue",
+                                                              "minValue": 8, "maxValue": 15,
+                                                              "unitCode": "DAY"}}},
+    }}
+    html = ('<html><script type="application/ld+json">' + json.dumps(product) + '</script></html>').encode()
+    original = extract_product(html.decode(), url)
+    _, artifact = sanitise(Fetched(url, 200, html, url, []), 2 * 1024 * 1024)
+    replay = extract_product(artifact.decode(), url)
+    assert replay.market == original.market == "FR"
+    assert replay.delivery_evidence == original.delivery_evidence
+    assert replay.availability == original.availability == "unknown"
+    assert b"private postal code" not in artifact
+    product["offers"]["shippingDetails"]["@type"] = "UnrecognisedShipping"
+    html = ('<html><script type="application/ld+json">' + json.dumps(product) + '</script></html>').encode()
+    with pytest.raises(EvidenceError, match="Tipo comercial no conservable"):
+        sanitise(Fetched(url, 200, html, url, []), 2 * 1024 * 1024)
+
+
 def test_sanitisation_preserves_relationships_and_redacts_irrelevant_content():
     graph = {"@context": "https://schema.org", "@graph": [
         {"@type": "ProductGroup", "@id": "#g", "hasVariant": {"@id": "#v"}},

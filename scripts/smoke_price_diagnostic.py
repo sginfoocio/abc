@@ -247,7 +247,26 @@ def main():
                                   redirects=[], status=200)
         metadata, artifact = sanitise(fetched, 2 * 1024 * 1024)
         assert metadata["artifact_kind"] == "sanitizado_parcial_jsonld"
+        assert metadata["sanitization_version"] == 2
         assert b"Offer" in artifact and b"variant=1" in artifact and b"sensitive" not in artifact
+        node["offers"] = {"@type": "Offer", "price": "120", "priceCurrency": "EUR",
+                          "eligibleCustomerType": "private member",
+                          "shippingDetails": {"@type": "OfferShippingDetails",
+                                              "shippingDestination": {"@type": "DefinedRegion",
+                                                                      "addressCountry": "FR"}}}
+        text = '<html><script type="application/ld+json">' + json.dumps(node) + '</script></html>'
+        fetched = SimpleNamespace(content=text.encode(), text=text, url=url, requested_url=url,
+                                  redirects=[], status=200)
+        _, sanitized = sanitise(fetched, 2 * 1024 * 1024)
+        replay = extract_product(sanitized.decode(), url)
+        assert replay and replay.price is None and b"private member" not in sanitized
+        del node["offers"]["eligibleCustomerType"]
+        text = '<html><script type="application/ld+json">' + json.dumps(node) + '</script></html>'
+        fetched = SimpleNamespace(content=text.encode(), text=text, url=url, requested_url=url,
+                                  redirects=[], status=200)
+        _, sanitized = sanitise(fetched, 2 * 1024 * 1024)
+        replay = extract_product(sanitized.decode(), url)
+        assert replay and replay.market == "FR"
         artifact = partial_pages["opticalh-sanitizado.html"]
         artifact_metadata = {"artifact_kind": "sanitizado_parcial_jsonld",
                              "artifact_sha256": hashlib.sha256(artifact).hexdigest()}
