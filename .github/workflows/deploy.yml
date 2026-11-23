@@ -154,12 +154,17 @@ jobs:
               route_product['model'] = route_resolution.evidence['modelo']
               assert not price_url_candidates.resolve_product_attributes(route_product).conflict
           route_plan = price_url_candidates.candidate_plan(route_product, urlparse(route.url).netloc)
-          route_candidate = next(candidate for candidate in route_plan.candidates if route.id in candidate.evidence)
+          route_candidate = next(candidate for candidate in route_plan.candidates
+                                 if candidate.attributes.get('route_evidence_url') == route.url)
           assert route_candidate.state in {'pending_verification', 'probable'}
-          assert route_candidate.attributes['route_evidence_id'] == route.id
-          assert route_candidate.attributes['route_evidence_source'].startswith(
-              f'{price_url_candidates.ROUTE_EVIDENCE_SOURCE}#productos[{route.source_ean}]')
+          assert route_candidate.attributes['route_evidence_id'] in route_candidate.evidence
+          assert route_candidate.attributes['route_evidence_id'].startswith(
+              f'11x14:{route.source_ean}:')
+          assert route_candidate.attributes['route_evidence_source'] == price_url_candidates.ROUTE_11_EVIDENCE_SOURCE
+          assert route_candidate.attributes['ean'] == route.source_ean
           assert route_candidate.attributes['route_evidence_url'] == route.url
+          alternates = json.loads(route_candidate.attributes['alternate_documented_routes'])
+          assert any(route.id in item['evidence'] and item['url'] == route.url for item in alternates)
           assert not {'price', 'availability', 'currency', 'stock'} & route_candidate.attributes.keys()
           product = {'ean': '8056597875349', 'brand': 'Prada', 'model': 'PR 27ZS', 'color': '16K08Z'}
           resolved = price_url_candidates.resolve_product_attributes(product)
