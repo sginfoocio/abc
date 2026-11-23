@@ -207,10 +207,9 @@ def _accepted_edel_resolution_reason(page: ProductPage, accepted_url: str, produ
         return "la relación entre Product y Offer es ambigua"
     if page.ambiguous:
         return "el extractor marcó la ficha o la oferta como ambigua"
-    if not page.ean_published:
-        return "la variante seleccionada no publica EAN/UPC válido"
     try:
-        normalize_gtin(page.ean_published)
+        if page.ean_published:
+            normalize_gtin(page.ean_published)
         normalize_gtin(product["ean"])
     except (ValueError, KeyError):
         return "el EAN/UPC solicitado o publicado no es válido"

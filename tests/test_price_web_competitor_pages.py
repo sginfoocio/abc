@@ -181,6 +181,10 @@ def test_edel_internal_selection_requires_radio_offer_and_valid_gtin():
     missing_ean = replace(page, ean_published="")
     scope_availability_to_ean(missing_ean, product["ean"])
     assert missing_ean.availability == "unknown"
+    assert classify(product, missing_ean.candidate()).status == "exact_match"
+    assert _accepted_edel_resolution(missing_ean, url, product)
+    invalid_ean = replace(page, ean_published="not-a-gtin")
+    assert not _accepted_edel_resolution(invalid_ean, url, product)
     assert not _accepted_edel_resolution(replace(page, ambiguous=True), url, product)
     assert not _accepted_edel_resolution(
         replace(page, url_trace={**page.url_trace, "offer_variant_url": url + "?selectedSize=1907959"}),
