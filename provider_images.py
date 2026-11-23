@@ -513,7 +513,17 @@ class ProviderStore:
         )]
         identities = [entry for entry in identities if ean_valid(entry.get("ean", ""))
                       and ean_key(entry["ean"]) == ean_key(ean)]
-        if not identities:
+        existing = [json.loads(row[0]) for row in connection.execute(
+            "SELECT evidence FROM request_source_evidence WHERE request_id=? AND source='odoo'",
+            (request_id,),
+        )]
+        existing = [entry for entry in existing if ean_valid(str(entry.get("ean") or ""))
+                    and ean_key(entry["ean"]) == ean_key(ean)]
+        if not identities and not existing:
+            return False
+        if any(entry.get("status") != "confirmed" or entry.get("barcode_conflict") is not False
+               or not entry.get("order_id") or not entry.get("line_id")
+               or not entry.get("product_id") or not entry.get("sku") for entry in existing):
             return False
         if (len({str(line.get("product_id") or "") for line in lines}) != 1
                 or len({str(line.get("sku") or "").strip().casefold() for line in lines}) != 1):
@@ -526,17 +536,11 @@ class ProviderStore:
             for entry in identities:
                 if not self._same_source_identity(entry, line):
                     return False
-        existing = [json.loads(row[0]) for row in connection.execute(
-            "SELECT evidence FROM request_source_evidence WHERE request_id=? AND source='odoo'",
-            (request_id,),
-        )]
         for line in lines:
             for entry in existing:
-                if (ean_valid(str(entry.get("ean") or "")) and ean_key(entry["ean"]) == ean_key(ean)
-                        and (str(entry.get("product_id")) != str(line["product_id"])
-                             or str(entry.get("sku") or "").strip().casefold()
-                             != str(line["sku"]).strip().casefold()
-                             or not self._same_source_identity(entry, line))):
+                if (str(entry["product_id"]) != str(line["product_id"])
+                        or str(entry["sku"]).strip().casefold() != str(line["sku"]).strip().casefold()
+                        or not self._same_source_identity(entry, line)):
                     return False
         for line in lines:
             self._write_source(connection, request_id, "odoo", {

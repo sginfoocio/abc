@@ -323,6 +323,21 @@ def test_multiple_order_lines_and_orders_preserve_distinct_sources(tmp_path) -> 
     assert store.get(rid)["state"] == "ready"
 
 
+def test_second_order_can_link_to_verified_existing_order(tmp_path) -> None:
+    store = ProviderStore(tmp_path)
+    code = "123456789012"
+    line = {"line_id": 1, "product_id": 2, "ean": code, "sku": "A", "model": "A",
+            "color": "01", "caliber": "50", "barcode_conflict": False}
+    item = {"ean": code, "sku": "A", "order_id": 25, "order": "PO25", "supplier": "Luxottica",
+            "date": "2026-11-22", "status": "confirmed", "lines": [line]}
+    settings = ProviderSettings("luxottica")
+    rid, = store.plan(settings, [code], mode="manual", order_evidence={code: item}, reviewer="admin")["created"]
+    second = {**item, "order_id": 26, "order": "PO26", "lines": [{**line, "line_id": 2}]}
+    assert store.plan(settings, [code], mode="manual", order_evidence={code: second},
+                      reviewer="admin")["linked_evidence"] == [code]
+    assert {row["evidence"]["order_id"] for row in store.source_evidence(rid)} == {25, 26}
+
+
 def test_retry_copies_only_selected_ean_evidence_without_changing_original(tmp_path) -> None:
     store = ProviderStore(tmp_path)
     settings = ProviderSettings("luxottica")
