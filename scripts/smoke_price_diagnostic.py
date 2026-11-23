@@ -272,6 +272,15 @@ def main():
         _, sanitized = sanitise(fetched, 2 * 1024 * 1024)
         replay = extract_product(sanitized.decode(), url)
         assert replay and replay.market == "FR"
+        edel_url = "https://www.edel-optics.es/PR-27ZS-16K08Z-de-Prada.html?selectedSize=1907958"
+        content = (fixture_dir / "edel_optics.html").read_bytes()
+        fetched = SimpleNamespace(content=content, text=content.decode(), url=edel_url,
+                                  requested_url=edel_url, redirects=[], status=200)
+        metadata, sanitized = sanitise(fetched, 2 * 1024 * 1024)
+        edel = extract_product(sanitized.decode(), edel_url)
+        assert metadata["artifact_kind"] == "sanitizado_parcial_microdatos"
+        assert edel and (edel.ean_published, edel.price, edel.availability) == (
+            "8056597875349", 243.5, "available")
         artifact = partial_pages["opticalh-sanitizado.html"]
         artifact_metadata = {"artifact_kind": "sanitizado_parcial_jsonld",
                              "artifact_sha256": hashlib.sha256(artifact).hexdigest()}

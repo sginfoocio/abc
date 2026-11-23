@@ -178,6 +178,8 @@ El trabajador persistente existente recoge primero las solicitudes manuales en c
 
 Aceptar confirma únicamente la identidad revisada; no acredita oferta, precio, stock ni comparabilidad. La lectura conserva el comportamiento comercial normal: identidad sin contradicciones, precio válido, moneda/mercado e IVA configurados, disponibilidad y vigencia. Antes de HTTP se reutiliza una lectura guardada solo si la URL y la identidad son compatibles, su fecha y vigencia están acreditadas y la política comercial vigente sigue coincidiendo. La reevaluación local conserva la fecha original. Si falta una lectura utilizable, el mismo trabajo prioritario la obtiene por el monitor gobernado. Si la lectura falla, la aceptación permanece con su motivo pendiente; si descubre una contradicción de identidad, no registra esa oferta comparable y la ficha vuelve a revisión. No se modifican frecuencias generales ni se reprograman otros pares.
 
+El diagnóstico de Edel sin JSON-LD puede conservar microdatos parciales sanitizados si el extractor vincula inequívocamente producto, oferta y selección y la reconstrucción conserva sus resultados. No es el HTML original ni una observación vigente: su reevaluación sigue siendo evidencia insuficiente para confirmar identidad o comparabilidad. Se rechazan restricciones de microdatos no conservables en lugar de omitirlas.
+
 En continuidad, cada lectura manual usa el contexto del único par autorizado y comprueba el manifiesto de
 100 EAN y 14 competidores, el estado activo, la decisión y la URL exacta. No sigue redirecciones a otra URL
 ni admite una variante extraída con URL distinta. La reserva histórica del piloto no se elimina ni se

@@ -869,9 +869,14 @@ def _reevaluate_saved_artifacts(con, task, now, recovery_rule):
                 metadata.get("sanitization_version") != 3 or not isinstance(metadata.get("unscoped_eans"), list)):
             if item["result"] == "exact_identity":
                 item["result"] = "insufficient_evidence"
-            item["commercial_gap"] = "Artefacto anterior: puede omitir identidad o contexto comercial"
+            partial_microdata = metadata.get("artifact_kind") == "sanitizado_parcial_microdatos"
+            item["commercial_gap"] = ("Artefacto parcial: puede omitir identidad o contexto comercial"
+                                      if partial_microdata else
+                                      "Artefacto anterior: puede omitir identidad o contexto comercial")
             if not item["reason"]:
-                item["reason"] = "La sanitización anterior no conserva toda la evidencia necesaria"
+                item["reason"] = ("La sanitización parcial de microdatos no conserva toda la evidencia necesaria"
+                                  if partial_microdata else
+                                  "La sanitización anterior no conserva toda la evidencia necesaria")
         elif kind == "sanitized_jsonld" and metadata["unscoped_eans"]:
             item["unscoped_eans"] = metadata["unscoped_eans"]
             if item["result"] == "exact_identity":

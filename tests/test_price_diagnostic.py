@@ -22,6 +22,89 @@ def test_real_mia_capture_retains_shipping_market_without_unrelated_html():
     assert metadata["unscoped_eans"] == ["8056597875226"]
 
 
+def test_observed_edel_microdata_can_be_retained_as_partial_evidence():
+    from price_web_extract import extract_product
+
+    url = "https://www.edel-optics.es/PR-27ZS-16K08Z-de-Prada.html?selectedSize=1907958"
+    content = (Path(__file__).parent / "fixtures" / "web_pages" / "edel_optics.html").read_bytes()
+    original = extract_product(content.decode("utf-8"), url)
+    metadata, artifact = sanitise(Fetched(url, 200, content, url, []), 2 * 1024 * 1024)
+    replay = extract_product(artifact.decode("utf-8"), url)
+    assert metadata["artifact_kind"] == "sanitizado_parcial_microdatos"
+    assert metadata["sanitization_version"] != 3
+    assert (replay.method, replay.variant_id, replay.ean_published, replay.price, replay.availability) == (
+        original.method, original.variant_id, original.ean_published, original.price, original.availability)
+
+
+def test_unrelated_edel_offer_does_not_become_a_sanitised_product():
+    url = "https://www.edel-optics.es/example.html?selectedSize=1907958"
+    content = (b'<html><head><title>Example</title></head><body>'
+               b'<div class="eoDetailListTileSize1907958">EAN 8056597875349</div>'
+               b'<aside><div class="eoProductPrice"><span itemprop="offers" itemscope '
+               b'itemtype="https://schema.org/Offer"><meta itemprop="price" content="100">'
+               b'<link itemprop="availability" href="https://schema.org/InStock"></span></div></aside>'
+               b'</body></html>')
+    with pytest.raises(EvidenceError):
+        sanitise(Fetched(url, 200, content, url, []), 2 * 1024 * 1024)
+
+
+@pytest.mark.parametrize(("stock", "expected"), [
+    ("InStock", "available"), ("OutOfStock", "unavailable"), ("BackOrder", "unknown"),
+])
+def test_edel_microdata_keeps_selected_stock_and_drops_unrelated_text(stock, expected):
+    from dataclasses import asdict
+    from price_web_extract import extract_product
+
+    url = "https://www.edel-optics.es/example.html?selectedSize=1907958"
+    content = ('<html><head><title>Prada PR 27ZS 16K08Z</title></head><body>'
+               '<input type="radio" id="prd1907958" checked>'
+               '<div class="eoDetailListTileSize1907958">EAN 8056597875349</div>'
+               '<div class="eoProductPrice"><span itemprop="offers" itemscope '
+               'itemtype="https://schema.org/Offer">'
+               f'<link itemprop="url" href="{url}"><meta itemprop="price" content="200">'
+               '<meta itemprop="priceCurrency" content="EUR">'
+               f'<link itemprop="availability" href="https://schema.org/{stock}"></span></div>'
+               '<aside><div class="eoDetailListTileSize777">EAN 889214029614</div>'
+               '<div class="eoProductPrice"><span itemprop="offers" itemscope '
+               'itemtype="https://schema.org/Offer"><meta itemprop="price" content="50">'
+               '<link itemprop="availability" href="https://schema.org/InStock"></span></div></aside>'
+               '<div itemscope itemtype="https://schema.org/Person">'
+               '<meta itemprop="name" content="Private Customer">'
+               '<meta itemprop="telephone" content="123456789"></div>'
+               '<div>customer@example.com</div></body></html>').encode()
+    original = extract_product(content.decode(), url)
+    _, artifact = sanitise(Fetched(url, 200, content, url, []), 2 * 1024 * 1024)
+    assert asdict(extract_product(artifact.decode(), url)) == asdict(original)
+    assert original.availability == expected
+    assert b"customer@example.com" not in artifact
+    assert b"Private Customer" not in artifact and b"123456789" not in artifact
+
+
+def test_edel_microdata_rejects_restrictions_instead_of_discarding_them():
+    url = "https://www.edel-optics.es/example.html?selectedSize=1907958"
+    content = (b'<html><head><title>Prada PR 27ZS 16K08Z</title></head><body>'
+               b'<div class="eoDetailListTileSize1907958">EAN 8056597875349</div>'
+               b'<div class="eoProductPrice"><span itemprop="offers" itemscope '
+               b'itemtype="https://schema.org/Offer"><meta itemprop="price" content="100">'
+               b'<meta itemprop="priceCurrency" content="EUR">'
+               b'<meta itemprop="eligibleCustomerType" content="private tier">'
+               b'<link itemprop="availability" href="https://schema.org/InStock">'
+               b'</span></div></body></html>')
+    with pytest.raises(EvidenceError, match="Restricción"):
+        sanitise(Fetched(url, 200, content, url, []), 2 * 1024 * 1024)
+
+
+def test_edel_conflicting_radio_is_not_promoted_by_sanitisation():
+    url = "https://www.edel-optics.es/example.html?selectedSize=1907958"
+    content = (b'<html><body><input type="radio" id="prd777" checked>'
+               b'<div class="eoDetailListTileSize1907958">EAN 8056597875349</div>'
+               b'<div class="eoProductPrice"><span itemprop="offers" itemscope '
+               b'itemtype="https://schema.org/Offer"><meta itemprop="price" content="100">'
+               b'<link itemprop="availability" href="https://schema.org/InStock"></span></div></body></html>')
+    with pytest.raises(EvidenceError):
+        sanitise(Fetched(url, 200, content, url, []), 2 * 1024 * 1024)
+
+
 def test_sanitisation_keeps_unscoped_upc_without_treating_barcode_as_ean():
     url = "https://shop.example/product"
     text = ('<html><script type="application/ld+json">{"@type":"Product","name":"Example"}'

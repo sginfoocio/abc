@@ -734,6 +734,16 @@ def test_sanitized_diagnostic_artifact_is_replayed_without_becoming_an_observati
     assert "EAN" in evaluation["reason"]
     assert site.calls == []
 
+    partial = {**metadata, "artifact_kind": "sanitizado_parcial_microdatos", "sanitization_version": 4}
+    with store._connect() as con, con:
+        con.execute("UPDATE price_diagnostic_requests SET result=?,artifact=? WHERE ean=? AND url=?",
+                    (json.dumps(partial), artifact, ean, url))
+    preview = preview_manual_reviews(
+        store.database_path, request_ids=[task], now=clock() + timedelta(seconds=2))
+    evaluation = preview["requests"][0]["evidence"]["artifact_evaluations"][0]
+    assert evaluation["result"] == "insufficient_evidence" and "parcial" in evaluation["reason"]
+    assert not evaluation["offer_comparable"] and site.calls == []
+
     for version in (None, 2):
         if version is None:
             metadata.pop("sanitization_version", None)
