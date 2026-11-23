@@ -789,6 +789,13 @@ def _reevaluate_saved_artifacts(con, task, now, recovery_rule):
             "result": "insufficient_evidence",
             "reason": "",
         }
+        canonical_urls = metadata.get("canonical_urls")
+        if canonical_urls is not None and (
+                not isinstance(canonical_urls, list) or not all(isinstance(url, str) for url in canonical_urls)):
+            item["reason"] = "Metadatos de URL canonical inválidos"
+            results.append(item)
+            continue
+        item["canonical_urls"] = canonical_urls
         if requested_url != task["url"] or final_url != task["url"]:
             item["reason"] = "La URL solicitada o final no coincide exactamente con la aprobada"
             results.append(item)

@@ -688,6 +688,7 @@ def test_sanitized_diagnostic_artifact_is_replayed_without_becoming_an_observati
     metadata, artifact = sanitise(Fetched(url, 200, html.encode(), url, []), 1024 * 1024)
     metadata["captured_at"] = (clock() + timedelta(seconds=1)).isoformat()
     metadata["status"] = "captured"
+    metadata["canonical_urls"] = ["https://shop.example/other-variant"]
     with store._connect() as con, con:
         continuity_id = con.execute(
             "SELECT id FROM price_continuity ORDER BY id DESC LIMIT 1").fetchone()["id"]
@@ -704,7 +705,18 @@ def test_sanitized_diagnostic_artifact_is_replayed_without_becoming_an_observati
     assert item["action"] == "recover_corrected_error"
     assert item["evidence"]["artifact_evaluations"][0]["source"] == "sanitized_jsonld"
     assert item["evidence"]["artifact_evaluations"][0]["result"] == "exact_identity"
+    assert item["evidence"]["artifact_evaluations"][0]["canonical_urls"] == ["https://shop.example/other-variant"]
     assert item["status"] == "error"
+    assert site.calls == []
+
+    invalid = {**metadata, "canonical_urls": "not a list"}
+    with store._connect() as con, con:
+        con.execute("UPDATE price_diagnostic_requests SET result=? WHERE ean=? AND url=?",
+                    (json.dumps(invalid), ean, url))
+    preview = preview_manual_reviews(
+        store.database_path, request_ids=[task], now=clock() + timedelta(seconds=2))
+    evaluation = preview["requests"][0]["evidence"]["artifact_evaluations"][0]
+    assert evaluation["result"] == "insufficient_evidence" and "canonical" in evaluation["reason"]
     assert site.calls == []
 
     extra_html = html + '<section class="related-products"><div>EAN: 8056597875226</div></section>'
