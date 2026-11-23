@@ -14,7 +14,7 @@ import shutil
 import stat
 from urllib.parse import parse_qsl, unquote, urlencode, urljoin, urlsplit, urlunsplit
 
-from price_web_extract import _Collector, _LD_JSON, extract_product, parse_html
+from price_web_extract import _Collector, _LD_JSON, _from_json_ld, _is_type, _nodes, extract_product, parse_html
 
 DEFAULT_BODY_LIMIT = 2 * 1024 * 1024
 DEFAULT_QUOTA = 100 * 1024 * 1024
@@ -23,7 +23,7 @@ _SAFE_KEYS = {
     "@context", "@graph", "@id", "@type", "name", "brand", "model", "color", "sku", "mpn",
     "gtin", "gtin8", "gtin12", "gtin13", "gtin14", "ean", "url", "offers", "price",
     "priceCurrency", "availability", "itemOffered", "hasVariant", "isVariantOf", "productGroupID",
-    "variesBy", "size", "additionalProperty", "propertyID", "value", "priceSpecification",
+    "variesBy", "size", "mainEntity", "additionalProperty", "propertyID", "value", "priceSpecification",
     "priceValidUntil", "lowPrice", "highPrice", "offerCount", "priceType", "valueAddedTaxIncluded",
     "eligibleRegion", "shippingDetails", "shippingDestination", "addressCountry", "deliveryTime",
     "handlingTime", "transitTime", "minValue", "maxValue", "unitCode",
@@ -32,7 +32,7 @@ _RESTRICTION_KEYS = {"eligibleQuantity", "eligibleCustomerType", "validForMember
 _COMMERCIAL_KEYS = {"offers", "eligibleRegion", "shippingDetails", "shippingDestination", "addressCountry",
                     "deliveryTime", "handlingTime", "transitTime", "priceSpecification", "additionalProperty"}
 _URL_KEYS = {"@id", "url", "@context", "availability", "priceType"}
-_ALLOWED_TYPES = {"Product", "ProductGroup", "Offer", "AggregateOffer", "Brand",
+_ALLOWED_TYPES = {"Product", "ProductGroup", "WebPage", "Offer", "AggregateOffer", "Brand",
                   "PropertyValue", "QuantitativeValue", "PriceSpecification", "UnitPriceSpecification",
                   "OfferShippingDetails", "DefinedRegion", "ShippingDeliveryTime", "Country"}
 _SECRET = re.compile(r"(?i)(?:[\w.+-]+@[\w.-]+\.[a-z]{2,}|bearer\s+\S+|"
@@ -107,12 +107,22 @@ def _clean(value, base, key="", depth=0):
         raise EvidenceError("Estructura JSON-LD demasiado profunda")
     if isinstance(value, dict):
         types = value.get("@type")
+        if key == "mainEntity":
+            types = types if isinstance(types, list) else [types] if types else []
+            if any(str(t).rsplit("/", 1)[-1] != "Product" for t in types):
+                raise EvidenceError("Entidad principal no conservable")
+            return {k: _clean(v, base, k, depth + 1) for k, v in value.items() if k in {"@id", "@type"}}
         if types:
             types = types if isinstance(types, list) else [types]
             if not all(str(t).rsplit("/", 1)[-1].rsplit(":", 1)[-1] in _ALLOWED_TYPES for t in types):
                 if key in _COMMERCIAL_KEYS:
                     raise EvidenceError(f"Tipo comercial no conservable: {key}")
                 return None
+            if any(str(t).rsplit("/", 1)[-1] == "WebPage" for t in types):
+                if len(types) != 1 or any(k in value for k in _RESTRICTION_KEYS):
+                    raise EvidenceError("Página principal no conservable")
+                return {k: _clean(v, base, k, depth + 1) for k, v in value.items()
+                        if k in {"@type", "url", "mainEntity"}}
         return {k: (v is not None if k in _RESTRICTION_KEYS else _clean(v, base, k, depth + 1))
                 for k, v in value.items() if k in _SAFE_KEYS or (k in _RESTRICTION_KEYS and v is not None)}
     if isinstance(value, list):
@@ -229,11 +239,15 @@ def sanitise(fetched, max_bytes):
     collector = _Collector()
     collector.feed(fetched.text)
     records = []
+    mia_selection = False
     for block in _LD_JSON.findall(fetched.text):
         try:
             data = json.loads(block.strip(), strict=False)
         except (json.JSONDecodeError, RecursionError):
             continue
+        if (urlsplit(fetched.url).hostname or "").lower().removeprefix("www.") == "miaburton.com":
+            mia_selection |= any(_is_type(node, "WebPage") and node.get("mainEntity") is not None
+                                 for node in _nodes(data))
         records.append(_clean(data, fetched.url))
     serialised = json.dumps(records, ensure_ascii=True, separators=(",", ":")).replace("<", "\\u003c")
     if not _has_product_or_offer(records):
@@ -243,6 +257,15 @@ def sanitise(fetched, max_bytes):
         artifact = ("<!doctype html><html><head><script type=\"application/ld+json\">"
                     + serialised + "</script></head><body></body></html>").encode("utf-8")
         artifact_kind, sanitization_version = "sanitizado_parcial_jsonld", 3
+    if mia_selection:
+        original = _from_json_ld(fetched.text, fetched.url)
+        replay = _from_json_ld(artifact.decode("utf-8"), fetched.url)
+        fields = ("ambiguous", "offer_binding_unresolved", "variant_id", "variant_scoped", "title", "brand",
+                  "model", "group_reference", "identifiers", "color",
+                  "ean_published", "ean_published_raw", "price", "currency", "availability", "stock_conflict",
+                  "includes_tax", "tax_conflict", "market", "market_conflict", "offer_binding_source")
+        if not original or not replay or any(getattr(original, field) != getattr(replay, field) for field in fields):
+            raise EvidenceError("La sanitización no conserva la selección principal y su oferta")
     canonical = [safe_url(urljoin(fetched.url, href)) for href in collector.canonicals]
     unscoped_eans = sorted({match.group(1) or match.group(2) for match in _UNSCOPED_EAN.finditer(fetched.text)})
     if len(unscoped_eans) > 32:

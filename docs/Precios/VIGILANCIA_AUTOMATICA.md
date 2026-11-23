@@ -182,6 +182,8 @@ El diagnóstico de Edel sin JSON-LD puede conservar microdatos parciales sanitiz
 
 En Mia Burton, los valores de 12 o 13 dígitos etiquetados `BARCODE` se conservan por separado como identificadores sin vincular; no se interpretan como EAN ni como evidencia de producto o variante. Su presencia no demuestra equivalencia ni resuelve contradicciones de identidad.
 
+Si una ficha Mia publica un `WebPage.mainEntity` que identifica inequívocamente una variante de `ProductGroup`, el diagnóstico conserva únicamente la relación, el código de color y los campos comerciales permitidos; rechaza la sanitización si altera la selección o la oferta. La variante debe tener una única oferta coherente con la URL solicitada y sin contradicciones de SKU o EAN. La URL canónica se conserva como procedencia, no como selección; el stock del EAN y la vigencia requieren evidencia independiente. Esta estructura es un contrato admitido, no una afirmación de que estuviera presente en las capturas parciales anteriores.
+
 En continuidad, cada lectura manual usa el contexto del único par autorizado y comprueba el manifiesto de
 100 EAN y 14 competidores, el estado activo, la decisión y la URL exacta. No sigue redirecciones a otra URL
 ni admite una variante extraída con URL distinta. La reserva histórica del piloto no se elimina ni se

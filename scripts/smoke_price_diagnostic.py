@@ -263,6 +263,20 @@ def main():
         assert mia_metadata["unscoped_eans"] == ["8056597875226"]
         assert mia_metadata["unscoped_barcodes"] == ["9053810072392"]
         assert b"9053810072392" not in mia_artifact
+        mia_graph = {"@graph": [
+            {"@type": "WebPage", "url": mia_url, "mainEntity": {"@id": "#selected"}},
+            {"@type": "ProductGroup", "hasVariant": [
+                {"@type": "Product", "@id": "#selected", "color": "003",
+                 "offers": {"@type": "Offer", "url": mia_url, "price": "223", "priceCurrency": "EUR",
+                            "availability": "https://schema.org/OutOfStock"}}]},
+        ]}
+        text = '<html><script type="application/ld+json">' + json.dumps(mia_graph) + '</script></html>'
+        fetched = SimpleNamespace(content=text.encode(), text=text, url=mia_url, requested_url=mia_url,
+                                  redirects=[], status=200)
+        _, mia_artifact = sanitise(fetched, 2 * 1024 * 1024)
+        mia_page = extract_product(mia_artifact.decode(), mia_url)
+        assert mia_page and (mia_page.color, mia_page.variant_id, mia_page.availability) == (
+            "003", "selected", "unavailable")
         node["offers"] = {"@type": "Offer", "price": "120", "priceCurrency": "EUR",
                           "eligibleCustomerType": "private member",
                           "shippingDetails": {"@type": "OfferShippingDetails",

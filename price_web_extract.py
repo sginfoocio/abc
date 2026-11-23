@@ -416,14 +416,69 @@ def _color_code(value: str) -> str:
     return value if re.search(r"\d", value) else ""
 
 
+def _mia_main_entity(records: list[dict], nodes: list[dict], url: str) -> tuple[list[dict], str]:
+    if (urlparse(url).hostname or "").lower().removeprefix("www.") != "miaburton.com":
+        return [], ""
+    pages = [node for node in nodes if _is_type(node, "WebPage")
+             and isinstance(node.get("url"), str) and _url_key(urljoin(url, node["url"])) == _url_key(url)
+             and node.get("mainEntity") is not None]
+    if not pages:
+        return [], ""
+    refs = []
+    for page in pages:
+        for entity in _as_list(page["mainEntity"]):
+            ref = entity.get("@id") if isinstance(entity, dict) else None
+            if isinstance(entity, dict) and entity.get("@type") and not _is_type(entity, "Product"):
+                return [], "La entidad principal no es un Product"
+            resolved = urljoin(url, ref) if isinstance(ref, str) else ""
+            parsed = urlparse(resolved)
+            if (_url_key(resolved) != _url_key(url)
+                    or not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", parsed.fragment)):
+                return [], "La selección principal no identifica una variante verificable"
+            refs.append(parsed.fragment)
+    if len(set(refs)) != 1:
+        return [], "La selección principal contiene variantes contradictorias"
+    ref = refs[0]
+    matches = [record for record in records if isinstance(record["product"].get("@id"), str)
+               and _url_key(urljoin(url, record["product"]["@id"])) == _url_key(url)
+               and urlparse(urljoin(url, record["product"]["@id"])).fragment == ref]
+    if len(matches) != 1 or not matches[0].get("from_group"):
+        return [], "La selección principal no corresponde a una única variante estructurada"
+    node = matches[0]["product"]
+    offers = _as_list(node.get("offers"))
+    variant_url = matches[0].get("variant_url")
+    variant_color = matches[0].get("variant_color")
+    group_color = _color_code(_name(matches[0].get("group_color")))
+    if (not isinstance(variant_color, str) or not _color_code(variant_color)
+            or (group_color and re.sub(r"[^A-Z0-9]", "", group_color.upper())
+                != re.sub(r"[^A-Z0-9]", "", variant_color.upper()))
+            or len(offers) != 1 or not isinstance(offers[0], dict)
+            or not isinstance(offers[0].get("url"), str)
+            or _url_key(urljoin(url, offers[0]["url"])) != _url_key(url)
+            or (variant_url and (not isinstance(variant_url, str)
+                                 or _url_key(urljoin(url, variant_url)) != _url_key(url)))):
+        return [], "La selección principal no vincula color y oferta de la variante"
+    offer = offers[0]
+    if offer.get("itemOffered") is not None or (
+            offer.get("sku") and node.get("sku") and offer["sku"] != node["sku"]):
+        return [], "La oferta contradice o no acredita el producto seleccionado"
+    if _raw_gtins(offer):
+        gtins = _gtins(node)
+        if len(gtins) != 1 or not _gtins_consistent(node, gtins[0]) or not _gtins_consistent(offer, gtins[0]):
+            return [], "El EAN de la oferta no coincide con la variante seleccionada"
+    return matches, ""
+
+
 def _from_json_ld(html: str, url: str) -> ProductPage | None:
     records: list[dict[str, Any]] = []
+    nodes: list[dict] = []
     for block in _LD_JSON.findall(html):
         try:
             data = json.loads(block.strip(), strict=False)  # shops often leave raw line breaks inside strings
         except json.JSONDecodeError:
             continue
         for node in _nodes(data):
+            nodes.append(node)
             if _is_type(node, "Product"):
                 records.append({"product": node, "shared_offer": None})
             elif _is_type(node, "ProductGroup"):
@@ -434,7 +489,8 @@ def _from_json_ld(html: str, url: str) -> ProductPage | None:
                 for variant in _as_list(node.get("hasVariant")):
                     if isinstance(variant, dict):
                         records.append({"product": {**inherited, **variant}, "shared_offer": common_offer,
-                                        "from_group": True})
+                                        "from_group": True, "variant_url": variant.get("url"),
+                                        "variant_color": variant.get("color"), "group_color": node.get("color")})
     if not records:
         return None
     products = [record["product"] for record in records]
@@ -451,7 +507,13 @@ def _from_json_ld(html: str, url: str) -> ProductPage | None:
     page.variant_scoped = len(products) > 1 or bool(variants) or any(
         key in {"variant", "selectedSize"}
         for value in page.variant_urls for key, _ in parse_qsl(urlparse(value).query))
-    matching = [record for record in records if _matches_product_url(record["product"], url)]
+    selected, selection_error = _mia_main_entity(records, nodes, url)
+    if selection_error:
+        page.ambiguous = True
+        page.variant_scoped = True
+        page.notes.append(selection_error)
+        return page
+    matching = selected or [record for record in records if _matches_product_url(record["product"], url)]
     matching = list({json.dumps(record, sort_keys=True): record for record in matching}.values())
     if len(matching) == 1:
         record = matching[0]
@@ -511,6 +573,11 @@ def _from_json_ld(html: str, url: str) -> ProductPage | None:
         "product_group_offer" if record.get("shared_offer") else
         "product_offer" if _as_list(node.get("offers")) else ""
     )
+    if selected:
+        page.variant_id = urlparse(urljoin(url, selected[0]["product"]["@id"])).fragment
+        page.variant_scoped = True
+        page.url_trace["selected_variant_source"] = "webpage_main_entity"
+        page.notes.append("Variante ProductGroup seleccionada explícitamente por WebPage.mainEntity")
     page.previous_price = facts.get("previous_price")
     page.availability = facts.get("availability", "unknown")
     if facts.get("sku_only_binding"):
@@ -1132,12 +1199,15 @@ def extract_product(html: str, url: str, *, price_selector: str = "", availabili
             page.market, page.market_source = explicit, "ficha:product:market"
     bound_variant_url = page.url_trace.get("selected_variant_url", "")
     offer_variant_url = page.url_trace.get("offer_variant_url", "")
+    selected_variant_source = page.url_trace.get("selected_variant_source", "")
     page.url_trace = {**(url_trace or {}), "final_url": requested_url,
                       "selected_variant_url": url if selected_size else bound_variant_url,
                       "canonical_urls": list(dict.fromkeys(urljoin(requested_url, href)
                                                            for href in parsed.canonicals))}
     if offer_variant_url:
         page.url_trace["offer_variant_url"] = offer_variant_url
+    if selected_variant_source:
+        page.url_trace["selected_variant_source"] = selected_variant_source
     if radio_selected:
         page.url_trace["selected_variant_source"] = "checked_radio"
     return page

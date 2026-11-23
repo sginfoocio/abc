@@ -115,6 +115,11 @@ def test_price_module_selects_direct_regressions_instead_of_entire_price_suite()
 
 @pytest.mark.parametrize(("source", "expected"), [
     ("price_url_candidates.py", {"tests/test_price_url_candidates.py"}),
+    ("price_access.py", {
+        "tests/test_price_access.py", "tests/test_price_locator.py", "tests/test_price_pilot.py",
+        "tests/test_price_point_check.py", "tests/test_price_review_refresh.py", "tests/test_price_trial.py",
+        "tests/test_price_monitor.py", "tests/test_price_recovery.py", "tests/test_manual_review_continuity_repro.py",
+    }),
     ("price_diagnostic.py", {
         "tests/test_price_diagnostic.py",
         "tests/test_price_trial.py",
@@ -135,7 +140,10 @@ def test_price_module_selects_direct_regressions_instead_of_entire_price_suite()
     }),
     ("price_web_extract.py", {
         "tests/test_price_comparator.py",
+        "tests/test_price_continuity_regressions.py",
+        "tests/test_price_reviewed_variants.py",
         "tests/test_price_saved_reevaluation.py",
+        "tests/test_price_web.py",
         "tests/test_price_web_competitor_pages.py",
     }),
 ])

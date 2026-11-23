@@ -137,6 +137,136 @@ def test_mia_rejects_excess_unscoped_barcodes():
         sanitise(Fetched(url, 200, text.encode(), url, []), 1024 * 1024)
 
 
+@pytest.mark.parametrize(("ean", "brand", "model", "color", "description", "stock"), [
+    ("0843023181451", "Cartier", "CT0550S", "001", "gold", "OutOfStock"),
+    ("0889652429687", "Saint Laurent", "SL 596 DUNE", "003", "brown", "InStock"),
+])
+def test_synthetic_mia_descriptive_color_and_canonical_do_not_select_variant(
+        ean, brand, model, color, description, stock):
+    from price_references import EXACT, classify
+    from price_web_extract import extract_product, select_product_variant
+
+    url = "https://miaburton.com/en/example-" + color
+    canonical = "https://miaburton.com/en/example-001"
+    node = {"@type": "Product", "name": f"Sunglasses {brand} {model} - Mia Burton",
+            "brand": {"@type": "Brand", "name": brand}, "color": description,
+            "offers": {"@type": "Offer", "url": url, "price": "223", "priceCurrency": "EUR",
+                       "availability": "https://schema.org/" + stock}}
+    text = ('<html><head><link rel="canonical" href="' + canonical + '">'
+            '<script type="application/ld+json">' + json.dumps(node) + '</script></head></html>')
+    metadata, artifact = sanitise(Fetched(url, 200, text.encode(), url, []), 2 * 1024 * 1024)
+    page = extract_product(artifact.decode(), url)
+    assert metadata["canonical_urls"] == [canonical]
+    assert not page.color and not page.variant_id
+    assert page.availability == ("unavailable" if stock == "OutOfStock" else "available")
+    product = {"ean": ean, "brand": brand, "model": model, "color": color}
+    page = select_product_variant(page, product)
+    assert classify(product, page.candidate(), allow_reference_match=True).status != EXACT
+    assert page.availability == "unknown" and not page.market
+
+
+@pytest.mark.parametrize(("model", "color", "stock"), [
+    ("CT0550S", "001", "OutOfStock"), ("SL 596 DUNE", "003", "InStock"),
+])
+def test_synthetic_mia_explicit_main_entity_survives_sanitisation(model, color, stock):
+    from price_references import EXACT, classify
+    from price_web_extract import extract_product, select_product_variant
+
+    url = "https://miaburton.com/en/example"
+    brand = "Cartier" if model == "CT0550S" else "Saint Laurent"
+    product = {"ean": "0843023181451" if brand == "Cartier" else "0889652429687",
+               "brand": brand, "model": model, "color": color, "caliber": "54-18"}
+    graph = {"@graph": [
+        {"@type": "WebPage", "url": url, "name": "Private Page Owner",
+         "mainEntity": {"@id": "#selected", "name": "Private Entity Owner"}},
+        {"@type": "ProductGroup", "name": f"{brand} {model}", "brand": {"@type": "Brand", "name": brand},
+         "model": model, "hasVariant": [
+             {"@type": "Product", "@id": "#selected", "color": color, "size": "56-18",
+              "offers": {"@type": "Offer", "url": url, "price": "223", "priceCurrency": "EUR",
+                         "availability": "https://schema.org/" + stock}},
+             {"@type": "Product", "@id": "#other", "color": "999",
+              "offers": {"@type": "Offer", "url": url + "-other", "price": "99",
+                         "priceCurrency": "EUR", "availability": "https://schema.org/InStock"}},
+         ]},
+        {"@type": "Person", "name": "Private Customer"},
+    ]}
+    text = ('<html><head><link rel="canonical" href="' + url + '-001">'
+            '<script type="application/ld+json">' + json.dumps(graph)
+            + '</script></head><body>customer@example.com</body></html>')
+    fetched = Fetched(url, 200, text.encode(), url, [])
+    metadata, artifact = sanitise(fetched, 2 * 1024 * 1024)
+    original, replay = extract_product(text, url), extract_product(artifact.decode(), url)
+    assert metadata["canonical_urls"] == [url + "-001"]
+    assert b"Private Customer" not in artifact and b"customer@example.com" not in artifact
+    assert b"Private Page Owner" not in artifact and b"Private Entity Owner" not in artifact
+    assert (replay.color, replay.variant_id, replay.price, replay.availability) == (
+        original.color, "selected", 223, "unavailable" if stock == "OutOfStock" else "available")
+    assert replay.url_trace["selected_variant_source"] == "webpage_main_entity"
+    assert classify(product, replay.candidate(), allow_reference_match=True).status == EXACT
+    scoped = select_product_variant(replay, product)
+    assert scoped.price == 223 and scoped.availability == "unknown"
+    assert not scoped.ean_published and not scoped.market
+
+
+@pytest.mark.parametrize("conflict", ["missing", "two", "other_offer", "other_ean", "missing_color",
+                                      "group_color", "duplicate_id"])
+def test_synthetic_mia_main_entity_conflicts_remain_ambiguous(conflict):
+    from price_web_extract import extract_product
+
+    url = "https://miaburton.com/en/example"
+    variant = {"@type": "Product", "@id": "#selected", "color": "003", "gtin13": "0889652429687",
+               "offers": {"@type": "Offer", "url": url, "price": "223", "priceCurrency": "EUR",
+                          "availability": "https://schema.org/InStock"}}
+    entity = {"@id": "#selected"}
+    if conflict == "missing":
+        entity = {"@id": "#missing"}
+    elif conflict == "two":
+        entity = [{"@id": "#selected"}, {"@id": "#other"}]
+    elif conflict == "other_offer":
+        variant["offers"]["url"] = url + "-other"
+    elif conflict == "other_ean":
+        variant["offers"]["gtin13"] = "8056376451320"
+    elif conflict == "missing_color":
+        del variant["color"]
+    group = {"@type": "ProductGroup", "hasVariant": [variant]}
+    if conflict in {"missing_color", "group_color"}:
+        group["color"] = "001"
+    nodes = [{"@type": "WebPage", "url": url, "mainEntity": entity}, group]
+    if conflict == "duplicate_id":
+        nodes.append({"@type": "Product", "@id": "#selected", "color": "001"})
+    graph = {"@graph": nodes}
+    text = '<html><script type="application/ld+json">' + json.dumps(graph) + '</script></html>'
+    metadata, artifact = sanitise(Fetched(url, 200, text.encode(), url, []), 2 * 1024 * 1024)
+    for source in (text, artifact.decode()):
+        page = extract_product(source, url)
+        assert page.ambiguous and page.price is None and page.availability == "unknown"
+
+
+def test_synthetic_mia_person_entity_is_not_sanitised_as_product():
+    url = "https://miaburton.com/en/example"
+    graph = {"@graph": [
+        {"@type": "WebPage", "url": url, "mainEntity": {"@type": "Person", "@id": "#selected"}},
+        {"@type": "ProductGroup", "hasVariant": [{"@type": "Product", "@id": "#selected"}]},
+    ]}
+    text = '<html><script type="application/ld+json">' + json.dumps(graph) + '</script></html>'
+    with pytest.raises(EvidenceError, match="Entidad principal"):
+        sanitise(Fetched(url, 200, text.encode(), url, []), 2 * 1024 * 1024)
+
+
+def test_synthetic_mia_sanitisation_cannot_merge_different_variant_ids():
+    url = "https://miaburton.com/en/example"
+    graph = {"@graph": [
+        {"@type": "WebPage", "url": url, "mainEntity": {"@id": "#selected"}},
+        {"@type": "ProductGroup", "hasVariant": [
+            {"@type": "Product", "@id": url + "?other=1#selected", "color": "003",
+             "offers": {"@type": "Offer", "url": url, "price": "223", "priceCurrency": "EUR"}},
+        ]},
+    ]}
+    text = '<html><script type="application/ld+json">' + json.dumps(graph) + '</script></html>'
+    with pytest.raises(EvidenceError, match="no conserva la selección"):
+        sanitise(Fetched(url, 200, text.encode(), url, []), 2 * 1024 * 1024)
+
+
 def test_sanitisation_preserves_restrictions_and_conflicting_tax_without_private_values():
     from price_web_extract import extract_product
 
