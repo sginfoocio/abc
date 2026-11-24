@@ -1,41 +1,19 @@
 # 🤖 Descarga Automática de Imágenes - Guía de Scripts
 
+> **Referencia, no evidencia de operación.** La presencia de scripts o un servicio en Compose no demuestra que Graph, el buzón o las descargas estén funcionando. No ejecutes lecturas de Graph, descargas, tareas programadas ni cambios de servicios productivos sin autorización específica. Sigue la [validación local de Cloud](../CLOUD_LOCAL_VALIDATION.md).
+
 ## 📋 Tres Scripts Principales
 
 ### 1️⃣ `monitor_luxoptica_downloads.py`
-**Propósito:** Monitorear estado y logs
-
-```powershell
-python monitor_luxoptica_downloads.py
-```
-
-**Qué revisa:**
-- ✅ Variables de configuración M365 en .env
-- ✅ Conectividad con Graph API (autenticación)
-- ✅ Archivo de estado de descargas
-- ✅ Imágenes ya descargadas
-
-**Output:**
-```
-✅ Configuración: OK
-✅ Conectividad Graph: OK
-✅ Estado de descargas: 5 correos procesados
-✅ Carpeta de descargas: 50 imágenes en lote-001
-```
-
-**Cuándo usarlo:** 
-- Verificar que todo está funcionando
-- Revisar qué imágenes se descargaron
-- Diagnosticar problemas
+**Propósito documentado:** inspeccionar configuración y estado. Puede autenticar contra Graph;
+úsalo únicamente en un entorno y alcance autorizados. No imprimas su salida si contiene datos
+operativos.
 
 ---
 
 ### 2️⃣ `run_luxoptica_download.py`
-**Propósito:** Ejecutar descarga de imágenes (manual/test)
-
-```powershell
-python run_luxoptica_download.py
-```
+**Propósito:** leer el buzón y descargar adjuntos. Su ejecución puede leer datos reales y escribir
+archivos/estado; requiere autorización específica previa.
 
 **Qué hace:**
 1. Valida configuración M365
@@ -47,132 +25,34 @@ python run_luxoptica_download.py
 7. Registra pendientes en `repo/images/.market_pending.json`
 8. Registra correos procesados en `.mail_download_state.json`
 
-**Output:**
-```
-✅ Correos escaneados: 15
-✅ Con adjuntos: 1
-✅ Adjuntos descargados: 50
-   Guardados en: docs/Luxoptica/descargas/2026-08-20/lote-001/
-```
-
-**Cuándo usarlo:**
-- Test manual para verificar que funciona
-- Ejecutar manualmente cuando sea necesario
-- Debugging de problemas
-
 ---
 
 ### 3️⃣ `scheduler_luxoptica.py`
-**Propósito:** Configurar ejecución automática (cada hora)
-
-```powershell
-# Ver instrucciones para crear scheduler
-python scheduler_luxoptica.py setup
-
-# Ejecutar descarga manual (test)
-python scheduler_luxoptica.py test
-
-# Ver estado actual
-python scheduler_luxoptica.py status
-```
-
-**Qué hace:**
-- Proporciona comando PowerShell para crear tarea en Windows Task Scheduler
-- Permite ejecutar pruebas
-- Muestra estado actual
+**Estado:** Configurador histórico de una tarea local; no es el monitor vigente y no debe activarse.
 
 ### Monitor automático en Docker
 
-En producción, `docker-compose.yml` incluye el servicio
-`abcd-luxoptica-monitor`. Revisa el buzón cada 10 minutos, descarga los ZIP y
-organiza las imágenes sin intervención manual.
-
-```bash
-docker compose up -d --build --force-recreate
-docker compose logs -f abcd-luxoptica-monitor
-```
-
-Las carpetas persistentes son:
-
-- `repo/images/`: imágenes originales y copias por mercado.
-- `luxoptica_data/`: solicitudes TXT, manifiestos y descargas auxiliares.
-- `masterdata_data/`: diccionario personalizado de producción.
-
-**Instalación de Scheduler (Windows):**
-```powershell
-# Copiar el comando que genera:
-python scheduler_luxoptica.py setup
-
-# Ejecutar en PowerShell (como Administrador)
-[Copiar y pegar el comando generado]
-
-# Verificar que se creó
-Get-ScheduledTask -TaskName "LuxopticaImageDownloader"
-```
+El procedimiento versionado documenta un intervalo de 10 minutos, pero no acredita el estado
+del servicio ni su configuración actual. No reconstruyas, recrees ni inicies el contenedor desde
+esta guía. Verifica los procesos existentes de forma local, de solo lectura y con autorización.
 
 ---
 
-## 🚀 Flujo Recomendado
+## Flujo de validación
 
-### Día 1: Envío a Luxoptica (hoy)
-```powershell
-# 1. Verificar que todo está ok
-python monitor_luxoptica_downloads.py
-
-# Debe mostrar:
-# ✅ Configuración: OK
-# ✅ Conectividad Graph: OK
-# ✅ Carpeta de descargas: vacía (esperando respuesta)
-```
-
-### Día 2-3: Esperar Respuesta Luxoptica
-- Luxoptica procesa (24-48h)
-- Envía correo a `images@diagonaleyewear.com`
-
-### Día 3+: Descargar Automáticamente
-
-**Opción A - Manual (Test Primero):**
-```powershell
-# Test 1: Ejecutar descarga manual
-python run_luxoptica_download.py
-
-# Output esperado:
-# ✅ Correos escaneados: 5
-# ✅ Adjuntos descargados: 50
-# 📁 Guardados en: docs/Luxoptica/descargas/2026-08-20/lote-001/
-
-# Test 2: Monitorear estado
-python monitor_luxoptica_downloads.py
-
-# Output esperado:
-# ✅ Estado de descargas: 50 imágenes descargadas
-# 📁 docs/Luxoptica/descargas/2026-08-20/lote-001/
-#    ├─ image-001.jpg
-#    ├─ image-002.jpg
-#    └─ ...
-```
-
-**Opción B - Automático (después de verificar):**
-```powershell
-# Crear tarea de Windows que ejecute cada hora
-python scheduler_luxoptica.py setup
-
-# Ver el comando PowerShell generado
-# Copiar y ejecutar en PowerShell (Admin)
-
-# Verificar que se creó
-Get-ScheduledTask -TaskName "LuxopticaImageDownloader"
-
-# Verificar que funciona
-python scheduler_luxoptica.py status
-```
+1. Preparar las solicitudes desde MASTERDATA sin enviar al portal.
+2. Obtener autorización específica para cualquier lectura real de Graph, descarga o importación.
+3. Seguir la [política de validación local Cloud](../CLOUD_LOCAL_VALIDATION.md), comenzar por
+   lecturas sin efectos y aislar las escrituras locales.
+4. Registrar resultado por SHA y marcar como bloqueada cualquier dependencia real que no pueda
+   comprobarse. No inferir éxito por mensajes de ejemplo o un contenedor activo.
 
 ---
 
-## 📊 Estructura de Archivos Descargados
+## 📊 Almacenamiento canónico
 
 ```
-repo/images/
+IMAGE_REPOSITORY_ROOT/
 └─ 8056262672563/
    └─ originales.png
 ```
@@ -278,34 +158,19 @@ Evidencia y limites: [captura consistente](../../deployment/nfs/CAPTURE.md).
 
 ## 🔍 Logs y Diagnostico
 
-### Ver qué correos se procesaron
-```powershell
-Get-Content docs/Luxoptica/descargas/.mail_download_state.json | ConvertFrom-Json | Select -ExpandProperty processed_message_ids
-```
-
-### Ver último resultado de ejecución
-```powershell
-# Si está en Windows Task Scheduler, revisar Event Viewer
-Get-EventLog -LogName Application -Source TaskScheduler -Newest 5
-```
-
-### Limpiar logs (si es necesario)
-```powershell
-# Resetear el estado (descargará todo de nuevo)
-Remove-Item docs/Luxoptica/descargas/.mail_download_state.json -Force
-```
+No borres ni reinicies el estado de correo: eso puede volver a procesar mensajes y duplicar
+descargas. Inspecciona recibos y logs solo con permisos autorizados; no publiques identificadores
+de correo, contenido, rutas ni secretos.
 
 ---
 
 ## ✅ Checklist de Verificación
 
-- [ ] `.env` tiene todas las 5 variables M365
-- [ ] `python test_graph_api_config.py` muestra ✅ TODAS LAS PRUEBAS PASARON
-- [ ] `python monitor_luxoptica_downloads.py` muestra 4x ✅
-- [ ] `python run_luxoptica_download.py` funciona sin errores (aún sin imágenes)
-- [ ] Windows Task Scheduler configurado (opcional pero recomendado)
-- [ ] Solicitud enviada a Luxoptica el 2026-08-19
-- [ ] Esperando respuesta (24-48h)
+- [ ] Revisar configuración por mecanismos aprobados sin imprimir secretos.
+- [ ] Confirmar por separado estado, identidad, intervalos y recibos del monitor.
+- [ ] Ejecutar lectura/descarga solo con autorización y alcance definidos.
+- [ ] Registrar SHA, entorno, muestra, resultado y evidencia sin datos sensibles.
+- [ ] Si no se puede validar una dependencia real, marcarla bloqueada.
 
 ---
 
@@ -313,11 +178,11 @@ Remove-Item docs/Luxoptica/descargas/.mail_download_state.json -Force
 
 | Script | Propósito | Ejecutar | Frecuencia |
 |--------|-----------|----------|-----------|
-| `test_graph_api_config.py` | Validar credenciales | 1x (setup) | Manual |
-| `monitor_luxoptica_downloads.py` | Ver estado | Bajo demanda | Manual |
-| `run_luxoptica_download.py` | Descargar imágenes | Test y manual | Manual |
-| `poll_luxoptica_mail.py` | Descargar y revisar pendientes | `--interval-minutes 10` | Automático |
-| `scheduler_luxoptica.py` | Automatizar descarga | Setup 1x | Automático (cada hora) |
+| `test_graph_api_config.py` | Comprobación técnica | Solo entorno y alcance autorizados | No inferir |
+| `monitor_luxoptica_downloads.py` | Inspeccionar estado | Solo entorno autorizado | Runtime no verificado |
+| `run_luxoptica_download.py` | Leer correo y descargar | Requiere autorización específica | Manual |
+| `poll_luxoptica_mail.py` | Monitor documentado | No iniciar otra instancia | 10 min documentados; runtime no verificado |
+| `scheduler_luxoptica.py` | Configurador histórico | No activar | No aplica |
 
 ---
 
@@ -325,42 +190,28 @@ Remove-Item docs/Luxoptica/descargas/.mail_download_state.json -Force
 
 ### Error: "Faltan variables de entorno"
 ```powershell
-# Verificar .env
-cat .env | Select-String "M365_"
-
-# Debe mostrar 5 líneas con M365_
+# No imprimas el contenido de .env.
+# Comprueba presencia/configuración con el mecanismo seguro aprobado.
 ```
 
 ### Error: "403 Forbidden"
-```powershell
-# Permisos no concedidos en Azure AD
-# Ejecutar en PowerShell (como admin):
-python test_graph_api_config.py
-
-# Revisar: docs/Luxoptica/CONFIGURACION_GRAPH_API.md Paso 3-4
-```
+No cambies permisos de Azure/Exchange para resolverlo desde esta guía. Solicita revisión a la
+persona administradora y autorización específica antes de cualquier reintento.
 
 ### No descarga las imágenes
-```powershell
-# Verificar que hay correos en mailbox
-# (Luxoptica aún no ha respondido - esperar 24-48h)
-
-# Ver estado actual
-python monitor_luxoptica_downloads.py
-
-# Si muestra "Carpeta: vacía" - es normal, esperar a Luxoptica
-```
+No infieras que el buzón está vacío ni que Luxottica no ha respondido sin una lectura autorizada.
+Verifica el monitor, el intervalo y los recibos de acuerdo con la guía de validación.
 
 ---
 
 ## 🎉 Próximos Pasos
 
-1. ✅ Ejecuta hoy: `python monitor_luxoptica_downloads.py`
-2. ⏳ Espera 24-48h a que Luxoptica responda
-3. 🔄 Ejecuta: `python run_luxoptica_download.py` (cuando llegue el correo)
-4. ✅ Verifica: `python monitor_luxoptica_downloads.py` (debe mostrar imágenes)
-5. 🤖 Configura: Scheduler automático si todo funciona bien
+1. Revisa y prepara un lote manual en la app.
+2. Obtén autorización para cualquier envío remoto, lectura de Graph o descarga.
+3. Verifica los resultados localmente y conserva evidencia para el SHA evaluado.
+4. No crees una tarea programada ni un segundo monitor.
 
 ---
 
-**Commit:** Todos estos scripts están en repositorio `main` y sincronizados.
+La réplica al NAS y la publicación remota no forman parte de la preparación de solicitudes.
+No ejecutes ni configures esos procesos desde esta guía.

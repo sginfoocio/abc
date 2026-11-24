@@ -42,7 +42,8 @@ ser válidas y el usuario debe iniciar sesión de nuevo; no se conserva una sesi
 recordada insegura. Una actualización recrea el proceso y pierde el estado de
 sesión en memoria de Streamlit; solo se restaura automáticamente una sesión si
 el usuario activó «Recordarme», el navegador conserva la cookie y el secreto de
-firma sigue siendo el mismo.
+firma sigue siendo el mismo. La cookie contiene un token firmado, no la
+contraseña, y se establece con `Secure` y `SameSite=Strict`.
 
 El estado de revocación y de intentos fallidos debe sobrevivir a los reinicios.
 En Docker de una sola instancia, `AUTH_STATE_PATH` apunta al volumen persistente

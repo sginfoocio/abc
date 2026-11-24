@@ -2,12 +2,10 @@
 
 ## 🌐 Acceso a la Aplicación
 
-1. **Abre tu navegador**
-   - URL: `http://localhost:8501`
-
-2. **Login en la App**
-   - Usuario: `diagonal`
-   - Contraseña: (como está configurada)
+Abre el entorno local autorizado de la aplicación e inicia sesión con una cuenta configurada.
+La sesión recordada requiere `AUTH_COOKIE_SECRET` (mínimo 32 caracteres) y almacenamiento
+persistente de revocaciones. La restauración tras recrear la app está cubierta offline; la
+persistencia real tras F5 en Cloud requiere validación autorizada.
 
 ---
 
@@ -83,90 +81,37 @@ relación en Odoo. Para operaciones en el canal debe usarse
 
 ---
 
-## 🎁 Fase 2: Solicitud de Imágenes Luxoptica
+## 🎁 Fase 2: Preparar solicitud de imágenes Luxottica
+
+La app prepara lotes manuales; no inicia sesión ni envía solicitudes al portal.
 
 ### Paso 1: Generar Lotes
 **Sección 3**: "Solicitud de imágenes (Luxoptica)"
 
-1. **Especificar email**:
-   - Campo: "Email para la solicitud"
-   - Valor: `images@diagonaleyewear.com` (ya predeterminado)
-
-2. **Click**: "Generar archivos para pedir imágenes"
-   - Sistema genera automáticamente lotes de 250 EAN máximo
-   - Si hay 50 EAN: genera 1 archivo
-   - Si hay 1000 EAN: genera 4 archivos
-
-3. **Resultado**:
-   - Se crean archivos `.txt` en `docs/Luxoptica/`
-   - Formato: `upc-products-images-request-YYYYMMDD_HHMMSS-lote-XXX.txt`
-   - Junto a cada lote se crea un manifiesto `.manifest.json` con EAN, modelo y color.
-     Se usa internamente para identificar las imágenes recibidas.
+1. Revisa la vista previa y confirma solo EAN válidos sin registros ni archivos de imagen.
+2. EAN completos, parciales, con solicitud activa, archivos sin catalogar o cobertura no
+   verificable no se proponen; resuelve primero los casos de revisión.
+3. La vista previa necesita acceso de solo lectura al catálogo, al repositorio de imágenes,
+   al almacén de solicitudes y al historial de lotes. Si una fuente no está disponible,
+   la preparación se bloquea.
+4. Confirma la selección. Los archivos TXT y su manifiesto se guardan localmente, con un
+   máximo de 250 EAN por lote. No se envía nada al portal.
 
 ### Paso 2: Descargar Lotes
-1. Se muestra tabla con lotes generados
-2. Para cada lote:
-   - 📄 **Botón Descargar**: Obtener archivo .txt
-   - ✅ **Botón Marcar procesado**: Cuando hayas enviado a Luxoptica
+El lote se envía manualmente por una persona autorizada conforme al procedimiento vigente.
+La marca de estado en la app registra la acción declarada, no la aceptación del portal ni la
+entrega de imágenes. No reenvíes un lote con resultado remoto ambiguo.
 
-3. **El archivo contiene**:
-   - 1 EAN por línea
-   - Sin prefijo "es."
-   - Listo para copiar/pegar en portal Luxoptica
+## 📧 Fase 3: Recepción e importación
 
----
+El monitor Graph es independiente de la preparación y el envío. El código o la existencia de
+un contenedor no demuestra que esté activo ni que las descargas funcionen. Verifica runtime,
+recibos, errores y permisos según la [guía de validación local Cloud](../CLOUD_LOCAL_VALIDATION.md).
+No ejecutes Graph ni descargues correo real sin autorización específica.
 
-## 📧 Fase 3: Enviar a Luxoptica
-
-### Paso 1: Portal Luxoptica
-1. Ir a: `https://portal.luxottica.com/` (o tu instancia)
-2. Login con credenciales
-
-### Paso 2: Solicitar Imágenes
-1. **Servicios** → **Recursos Digitales** → **Imágenes de Producto**
-2. Click **"Cargar archivo"**
-3. Seleccionar el `.txt` descargado
-4. **Opciones**:
-   - ✅ Seleccionar "Todas las vistas"
-   - ✅ Email: `images@diagonaleyewear.com`
-5. Click **"Enviar solicitud"**
-
-### Paso 3: Confirmar en App
-1. Vuelve a **Solicitud de imágenes** en la app
-2. Para cada lote enviado:
-   - Click ✅ **"Marcar como procesado"**
-   - App registra el estado
-
----
-
-## 🤖 Fase 4: Descarga Automática (Sin Intervención)
-
-### Lo que sucede automáticamente:
-1. **Luxoptica procesa** la solicitud (24-48 horas)
-2. **Luxoptica envía email** a `images@diagonaleyewear.com`
-3. **Script Graph API** detecta el email cada hora
-4. **Descarga automática** de adjuntos (imágenes)
-5. **Organización**:
-   ```
-   repo/images/
-   └── 8056262672563/                            (EAN)
-      ├── 0VE4526U__108_71__P21__noshad__fr.png (original)
-      ├── 0VE4526U__108_71__P21__noshad__qt.png (original)
-      └── 0VE4526U__108_71__P21__shad__lt.png   (original)
-   ```
-
-   Los originales se conservan en la carpeta del EAN. Los IDs de Farfetch y
-   Miinto se consultan en Odoo desde ese EAN; las representaciones de mercado
-   del catálogo son aliases, no copias dentro del origen canónico. La
-   publicación persistente se prepara separadamente con `market_publication.py`
-   bajo `/mnt/cloud-imagenes/market-publication/<Canal>/<EAN>/`; Miinto conserva
-   los bytes PNG originales bajo `.jpeg`, sin conversión. No confundir estos
-   aliases con la copia comercial ni activar la sincronización remota sin
-   autorización.
-
-### Monitoreo:
-- Ver archivo: `docs/Luxoptica/descargas/.mail_download_state.json`
-- Contiene: IDs de correos procesados, adjuntos descargados
+Las imágenes canónicas se guardan por EAN en `IMAGE_REPOSITORY_ROOT/<EAN>`. Los aliases de
+mercado y la publicación remota siguen sus flujos separados; no se activan al navegar por la
+biblioteca ni al generar un lote.
 
 ---
 
@@ -178,24 +123,18 @@ relación en Odoo. Para operaciones en el canal debe usarse
 - [ ] Subir Excel origen
 - [ ] Revisar advertencias de transformación
 - [ ] Descargar Excel transformado + auditorías
-- [ ] Especificar email: images@diagonaleyewear.com
-- [ ] Click "Generar archivos"
-- [ ] Descargar archivo .txt del lote
+- [ ] Revisar cobertura, solicitudes activas y estados de revisión
+- [ ] Confirmar únicamente EAN ausentes y descargar el TXT/manifiesto
 
-### Manual (Luxoptica Portal):
-- [ ] Acceder a portal Luxoptica
-- [ ] Cargar archivo .txt
-- [ ] Seleccionar "Todas las vistas"
-- [ ] Especificar email
-- [ ] Enviar solicitud
+### Envío manual autorizado:
+- [ ] Registrar autorización para el sistema, lote, efecto y límite
+- [ ] Persona autorizada envía el archivo conforme al procedimiento aprobado
+- [ ] Guardar evidencia del resultado fuera de Git
 
-### En la Aplicación (Confirmación):
-- [ ] Marcar lote como "Procesado"
-
-### Automático (Graph API):
-- [ ] Esperar respuesta de Luxoptica (24-48h)
-- [ ] Verificar `docs/Luxoptica/descargas/`
-- [ ] Imágenes descargadas y organizadas ✅
+### Recepción:
+- [ ] Verificar el estado del monitor y recibos, sin inferir éxito por un contenedor activo
+- [ ] Autorizar por separado cualquier lectura de Graph o descarga real
+- [ ] Validar/importar primero en almacenamiento aislado
 
 ---
 
@@ -214,32 +153,22 @@ streamlit run app_enhanced.py
 ```
 
 ### No puedo generar lotes
-- Verificar que hay datos en la transformación
-- Verificar que no hay errores críticos en advertencias
+- Revisar que la transformación contiene EAN válidos.
+- Confirmar acceso de solo lectura al catálogo y a los archivos.
+- Confirmar acceso al almacén de solicitudes y al historial de lotes; no omitir un error de acceso.
+- Revisar los estados completos, parciales, pendientes, desconocidos o sin catalogar.
 
-### Descarga de imágenes no funciona
-- Verificar que .env tiene credenciales Graph API
-- Ejecutar: `python test_graph_api_config.py`
-- Esperar 5-10 minutos después de otorgar permisos
+### Recepción o descarga no verificada
+- No ejecutar una prueba de Graph contra correo real sin autorización específica.
+- Consultar la [guía de validación local Cloud](../CLOUD_LOCAL_VALIDATION.md).
+- No interpretar un monitor iniciado ni una marca local como prueba de descarga.
 
 ---
 
 ## 📞 Soporte Rápido
 
-**Archivo de configuración**: `.env`
-**Variables M365 requeridas**:
-```env
-M365_TENANT_ID=...
-M365_CLIENT_ID=...
-M365_CLIENT_SECRET=...
-M365_MAILBOX=images@diagonaleyewear.com
-M365_DOWNLOAD_ROOT=docs/Luxoptica/descargas
-```
-
-**Logs útiles**:
-- App: Terminal donde arrancó streamlit
-- Descargas: `docs/Luxoptica/descargas/.mail_download_state.json`
-- Transformación: `docs/MasterData/*.json` (reporte de validación)
+No copies credenciales, correos, imágenes ni estado de producción a Git. La configuración de
+Graph se comprueba por un procedimiento autorizado y separado del flujo de solicitud.
 
 ---
 
@@ -251,21 +180,16 @@ M365_DOWNLOAD_ROOT=docs/Luxoptica/descargas
 │     ↓                                           │
 │  2. TRANSFORMAR A MASTERDATA                    │
 │     ↓                                           │
-│  3. GENERAR LOTES (250 EAN máx)                 │
+│  3. REVISAR Y CONFIRMAR EAN AUSENTES            │
 │     ↓                                           │
 │  4. DESCARGAR ARCHIVO .TXT                      │
 │     ↓                                           │
 │  5. ENVIAR A LUXOPTICA (manual)                 │
 │     ↓                                           │
-│  6. MARCAR COMO PROCESADO (app)                 │
-│     ↓                                           │
-│  7. ESPERAR RESPUESTA LUXOPTICA (24-48h)        │
-│     ↓                                           │
-│  8. DESCARGA AUTOMÁTICA (Graph API)             │
-│     ↓                                           │
-│  9. IMÁGENES EN docs/Luxoptica/descargas/       │
+│  6. VALIDAR RECEPCIÓN CON AUTORIZACIÓN          │
 │                                                 │
 └─────────────────────────────────────────────────┘
 ```
 
-**Tiempo total**: ~5-10 minutos (pasos 1-6) + 24-48h respuesta + 5 minutos descarga automática
+Los envíos y descargas reales requieren autorización y evidencia independiente. No hay un tiempo
+de respuesta ni una frecuencia de monitor garantizados por esta guía.

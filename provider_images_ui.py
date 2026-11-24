@@ -6,8 +6,9 @@ operator downloaded manually, reconciles ambiguous requests and resolves review 
 """
 from __future__ import annotations
 
+import json
 import os
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import streamlit as st
@@ -18,7 +19,8 @@ import nuorder_images
 import safilo_images
 from image_repository import IMAGE_CLASSIFICATIONS, ImageRepository
 from provider_images import (
-    FAILED, NEEDS_REVIEW, PARTIAL, PROVIDERS, ProviderService, ProviderStore, load_settings,
+    FAILED, NEEDS_REVIEW, PARTIAL, PROVIDERS, LuxotticaConnector, ProviderService, ProviderSettings,
+    ProviderStore, load_settings,
     parse_ean_file, parse_ean_text,
 )
 
@@ -51,13 +53,9 @@ STATE_LABELS = {
 def data_root() -> Path:
     """Persistent request store. Explicit PROVIDER_DATA_ROOT wins; otherwise it sits next to the Kering state
     (KERING_DATA_ROOT, on the persistent volume in every environment), never inside the image filesystem."""
-    explicit = os.getenv("PROVIDER_DATA_ROOT")
-    if explicit:
-        return Path(explicit)
-    kering = os.getenv("KERING_DATA_ROOT")
-    if kering:
-        return Path(kering).parent / "providers"
-    return Path(__file__).parent / "masterdata_data" / "providers"
+    from provider_order_policy import provider_data_root
+
+    return provider_data_root()
 
 
 class LazyRepository:
@@ -79,6 +77,10 @@ class LazyRepository:
 
 def build_connector(provider: str, engine=None, *, root: Path | None = None, repository=None):
     root = root or data_root()
+    if provider == "luxottica":
+        settings = ProviderSettings(provider, max_eans_per_request=250)
+        service = ProviderService(ProviderStore(root), repository or LazyRepository(), settings)
+        return LuxotticaConnector(service, engine)
     module = MODULES[provider]
     settings = load_settings(provider, root, module.DEFAULTS)
     if provider == "safilo":
@@ -172,6 +174,16 @@ def _request_actions(connector, rows, engine_factory) -> None:
         st.info("Preparada localmente. Este estado no confirma que la solicitud se haya enviado al proveedor.")
     st.code(connector.export_ean_list(selected), language="text")
     st.caption(export_caption(connector))
+    if service.settings.provider == "luxottica":
+        evidence = store.source_evidence(selected)
+        if evidence:
+            with st.expander("Evidencia de origen de la solicitud"):
+                st.dataframe([{
+                    "Origen": row["source"],
+                    "Registrado (UTC)": datetime.fromtimestamp(row["recorded_at"], timezone.utc).isoformat(),
+                    "Revisor": row["reviewer"],
+                    "Datos": json.dumps(row["evidence"], ensure_ascii=False, sort_keys=True),
+                } for row in evidence], use_container_width=True, hide_index=True)
     if connector.service.settings.provider == "marcolin":
         if st.button("Exportar Excel para Marcolin", key=f"prov_marcolin_xlsx_{selected}"):
             try:
@@ -375,7 +387,12 @@ def _detect_from_odoo(connector, engine_factory) -> None:
 
 
 def _odoo_association(provider: str, root: Path, engine_factory) -> None:
-    links = load_links(root).get(provider) or {}
+    all_links = load_links(root)
+    if not isinstance(all_links, dict):
+        raise ValueError("asociaciones_invalidas")
+    links = all_links.get(provider) or {}
+    if not isinstance(links, dict):
+        raise ValueError("asociacion_invalida")
     if links.get("confirmed"):
         st.success(f"Asociación confirmada por {links.get('reviewer')}: proveedores Odoo {links['partner_ids']} → {provider}.")
     else:
@@ -397,14 +414,18 @@ def _odoo_association(provider: str, root: Path, engine_factory) -> None:
                                  ", ".join(map(str, links.get("partner_ids", []))), key=f"prov_assoc_ids_{provider}")
         brands = st.text_input("Marcas/catálogos incluidos (informativo)", ", ".join(links.get("brands", [])),
                                key=f"prov_assoc_brands_{provider}")
+        note = st.text_input("Nombre comercial y evidencia de confirmación", links.get("note", ""),
+                             key=f"prov_assoc_note_{provider}")
         if st.button("Confirmar y guardar asociación", key=f"prov_assoc_save_{provider}"):
             who = st.session_state.get("auth_user") or st.session_state.get("auth_role") or "admin"
             try:
                 save_link(root, provider, [int(p) for p in ids_text.replace(";", ",").split(",") if p.strip()],
-                          reviewer=str(who), brands=brands.split(","))
+                          reviewer=str(who), brands=brands.split(","), note=note)
                 st.rerun()
             except ValueError as error:
                 st.error(f"No se guardó: {error}")
+            except (OSError, Timeout):
+                st.error("No se pudo guardar la asociación en el almacén local.")
 
 
 def _review(connector) -> None:

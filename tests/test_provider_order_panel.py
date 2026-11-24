@@ -313,6 +313,27 @@ def test_initial_render_displays_persisted_kering_cutoff_without_query(monkeypat
     assert app.selectbox(key="sup_provider").value == "kering"
 
 
+def test_admin_can_save_luxottica_association_from_order_panel(monkeypatch, tmp_path):
+    from app_pages import provider_orders_page as page
+    from provider_odoo_orders import load_links
+
+    monkeypatch.setattr(page, "data_root", lambda: tmp_path)
+    monkeypatch.setattr(page, "kering_root", lambda: tmp_path)
+    app = AppTest.from_string(APP)
+    app.session_state["auth_role"] = "admin"
+    app.session_state["auth_user"] = "Ruben"
+    app.run()
+    app.text_input(key="prov_assoc_ids_luxottica").set_value("570")
+    app.text_input(key="prov_assoc_note_luxottica").set_value("LUXOTTICA SPAIN,S.L.U.; confirmado")
+    app.button(key="prov_assoc_save_luxottica").click().run()
+    assert not app.exception
+    link = load_links(tmp_path)["luxottica"]
+    assert link["partner_ids"] == [570] and link["reviewer"] == "Ruben"
+    assert link["note"] == "LUXOTTICA SPAIN,S.L.U.; confirmado"
+    app.button(key="prov_assoc_save_luxottica").click().run()
+    assert load_links(tmp_path)["luxottica"] == link
+
+
 def test_streamlit_explicit_query_and_retained_results(monkeypatch, tmp_path, engine):
     root = tmp_path / "images"
     ImageRepository(root)
@@ -344,7 +365,7 @@ def test_streamlit_explicit_query_and_retained_results(monkeypatch, tmp_path, en
     next(widget for widget in app.selectbox if widget.label == "Ver detalle del pedido").select(23).run()
     assert not app.exception
     assert any("Sin historial disponible" in m.value for m in app.info)
-    app.text_input[0].set_value("ausente").run()
+    app.text_input(key="sup_number").set_value("ausente").run()
     assert not app.exception
     assert "Ningún pedido" in app.info[0].value
     acquire.side_effect = OdooUnavailable("detalle reservado")
@@ -358,7 +379,7 @@ def test_streamlit_explicit_query_and_retained_results(monkeypatch, tmp_path, en
     assert not app.metric and acquire.call_count == 2
 
 
-@pytest.mark.parametrize("provider", ["marcolin", "safilo", "nuorder"])
+@pytest.mark.parametrize("provider", ["luxottica", "marcolin", "safilo", "nuorder"])
 def test_assisted_operation_plans_once_and_imports_zip(provider, engine, tmp_path, monkeypatch):
     root = tmp_path / "images"
     repository = ImageRepository(root)
@@ -373,6 +394,11 @@ def test_assisted_operation_plans_once_and_imports_zip(provider, engine, tmp_pat
     rid, = result["created"]
     linked, = actions.linked_requests(order)
     assert linked["id"] == rid and linked["mode"] == "manual" and linked["state"] == "ready"
+    assert connector.service.store.odoo_lines(rid) == [{
+        "line_id": "101", "product_id": "40", "ean": EAN, "sku": "M-BLUE",
+        "product": "Azul", "quantity": "2", "supplier": "Sucursal",
+        "order_name": "PO25", "order_date": "2026-11-22",
+    }]
     assert actions.prepare_assisted(order, "Prueba")["already_live"] == [EAN]
     assert actions.linked_requests({**order, "name": "PO24"}) == []
     package = BytesIO()
@@ -398,6 +424,7 @@ def test_manual_retry_keeps_order_evidence_and_cannot_repeat(tmp_path):
         db.execute("UPDATE request_eans SET live=0 WHERE request_id=?", (rid,))
     new = store.retry(settings, rid, manual_codes={EAN.zfill(14)}, reviewer="Prueba")
     assert store.odoo_items(new) == store.odoo_items(rid)
+    assert store.odoo_lines(new) == store.odoo_lines(rid)
     with store.connect() as db:
         db.execute("UPDATE request_eans SET live=0 WHERE request_id=?", (new,))
     assert store.retry(settings, rid, manual_codes={EAN.zfill(14)}, reviewer="Prueba") is None
@@ -413,17 +440,56 @@ def test_confirmed_action_rereads_odoo_and_stops_if_coverage_is_now_complete(eng
     selected = {actions.line_identity(order["lines"][0])}
     fresh = actions.revalidate(lambda: engine, order, selected, root)
     assert [line["id"] for line in fresh["lines"]] == [101]
+    _save(repo, UPC, "frontal", "blue")
+    with pytest.raises(ValueError, match="cobertura ha cambiado"):
+        actions.revalidate(lambda: engine, order, selected, root)
     for view, color in zip(("frontal", "lateral", "perspectiva"), ("blue", "cyan", "navy")):
         _save(repo, UPC, view, color)
     with pytest.raises(ValueError, match="cobertura ha cambiado"):
         actions.revalidate(lambda: engine, order, selected, root)
 
 
+def test_luxottica_revalidation_preserves_equivalent_duplicate_lines(engine, tmp_path, monkeypatch):
+    order = read_purchase_page(engine, LINKS, ("kering",), START, END)[0][0]
+    line = {**order["lines"][0], "ean": "123456789012", "barcode_conflict": False}
+    sibling = {**line, "id": 102, "ean": "0123456789012"}
+    order.update(provider="luxottica", lines=[line, sibling])
+    monkeypatch.setattr(actions, "reload_order", lambda *_: order)
+    monkeypatch.setattr(actions, "image_evidence", lambda *_: (
+        {actions.ean_key(line["ean"]): {"incomplete": False, "status": "Sin imágenes"}}, None))
+    monkeypatch.setattr(actions, "data_root", lambda: tmp_path)
+    connector = build_connector("luxottica", root=tmp_path)
+    monkeypatch.setattr(actions, "build_connector", lambda _: connector)
+    scoped = actions.revalidate(None, order, {actions.line_identity(line)}, tmp_path)
+    result = actions.prepare_assisted(scoped, "admin")
+    rid, = result["created"]
+    assert {e["evidence"]["line_id"] for e in connector.service.store.source_evidence(rid)} == {line["id"], 102}
+    assert {e["evidence"]["ean"] for e in connector.service.store.source_evidence(rid)} == {
+        "123456789012", "0123456789012",
+    }
+    sibling["product_id"] = line["product_id"] + 1
+    with pytest.raises(ValueError, match="identidad contradictoria"):
+        actions.revalidate(None, order, {actions.line_identity(line)}, tmp_path)
+
+
+def test_partial_order_coverage_is_omitted_from_assisted_actions(engine):
+    order = read_purchase_page(engine, LINKS, ("kering",), START, END)[0][0]
+    order["provider"] = "luxottica"
+    for line in order["lines"]:
+        line["image"] = {"status": data.PARTIAL if line["ean"] == EAN else data.COMPLETE,
+                         "missing": ["perspectiva"], "incomplete": False}
+
+    allowed, omitted = actions.eligible_lines(order)
+
+    assert EAN.zfill(14) not in allowed
+    assert any(line["EAN/UPC"] == EAN and "parcial" in line["Motivo"].lower() for line in omitted)
+
+
 def test_order_actions_require_confirmation_and_do_not_execute_on_rerender(engine, monkeypatch):
     order = read_purchase_page(engine, LINKS, ("kering",), START, END)[0][0]
     order["provider"] = "marcolin"
     for line in order["lines"]:
-        line["image"] = {"status": data.COMPLETE if line["ean"] == OTHER else data.PARTIAL,
+        line["image"] = {"status": data.COMPLETE if line["ean"] == OTHER else data.NONE,
                          "missing": ["perspectiva"], "incomplete": False}
     load = Mock(return_value=order)
     prepare = Mock(return_value={"created": [1], "already_live": [], "already_prepared": []})

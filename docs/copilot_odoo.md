@@ -1,6 +1,10 @@
 Actúa como un experto en Odoo (PostgreSQL) y modelado de datos.
 
-Conectate a la base de datos para analizar, tenemos en la carpeta database ejemplos
+## POLÍTICA OBLIGATORIA — ODOO READ ONLY
+
+Aplica la [política permanente](../AGENTS.md#política-obligatoria--odoo-read-only) a consultas, agentes, scripts y herramientas administrativas. No se permiten escrituras, migraciones, cambios de configuración ni funciones con efectos laterales en Odoo; los estados se guardan en Cloud.
+
+Conéctate únicamente con autorización y alcance explícitos para analizar en solo lectura; en la carpeta database hay ejemplos.
 
 Tu objetivo es:
 

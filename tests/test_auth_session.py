@@ -74,9 +74,12 @@ def test_remembered_token_creation_requires_independent_secret() -> None:
     ) is not None
 
 
-@pytest.mark.parametrize("secret", ["", "short"])
-def test_normal_login_succeeds_without_valid_remembered_session_secret(
-    secret: str,
+@pytest.mark.parametrize(
+    ("secret", "remember_enabled"),
+    [("", False), ("short", False), ("s" * 32, True)],
+)
+def test_remembered_login_cookie_requires_secret_and_is_secure(
+    secret: str, remember_enabled: bool
 ) -> None:
     class Rerun(Exception):
         pass
@@ -116,7 +119,7 @@ def test_normal_login_succeeds_without_valid_remembered_session_secret(
 
         def checkbox(self, label, **kwargs):
             self.checkbox_options[label] = kwargs
-            return False
+            return kwargs.get("value", False)
 
         def form_submit_button(self, _label):
             return True
@@ -142,14 +145,19 @@ def test_normal_login_succeeds_without_valid_remembered_session_secret(
         def get(self, _name):
             return None
 
-        def remove(self, name):
-            self.removed.append(name)
+        def remove(self, name, **kwargs):
+            self.removed.append((name, kwargs))
 
         def set(self, *args, **kwargs):
             self.set_values.append((args, kwargs))
 
     streamlit = StreamlitStub()
     cookies = CookieControllerStub()
+
+    def make_token(username, auth_secret, password, days):
+        signing_key = derive_session_signing_key(auth_secret, username, password)
+        return create_auth_token(username, signing_key, days)
+
     namespace = {
         "st": streamlit,
         "APP_TITLE": "Cloud Diagonal",
@@ -174,10 +182,10 @@ def test_normal_login_succeeds_without_valid_remembered_session_secret(
         "_get_auth_state_store": lambda: AuthStoreStub(),
         "_get_auth_login_limit": lambda _name, default: default,
         "_get_cookie_controller": lambda: cookies,
-        "_remove_auth_cookie": lambda: cookies.remove("abc_auth_session"),
-        "_make_auth_token": lambda *_args: pytest.fail(
-            "Remembered token creation must be disabled"
+        "_remove_auth_cookie": lambda: cookies.remove(
+            "abc_auth_session", secure=True
         ),
+        "_make_auth_token": make_token,
     }
     _load_app_function("_render_login", namespace)
 
@@ -186,12 +194,19 @@ def test_normal_login_succeeds_without_valid_remembered_session_secret(
 
     assert streamlit.session_state["authenticated"] is True
     assert streamlit.session_state["auth_role"] == "admin"
-    assert "AUTH_COOKIE_SECRET" in streamlit.infos[0]
     assert streamlit.checkbox_options[
         "Recordarme durante 30 días"
-    ]["disabled"]
-    assert cookies.set_values == []
-    assert cookies.removed == ["abc_auth_session"]
+    ]["disabled"] is (not remember_enabled)
+    if remember_enabled:
+        assert cookies.set_values[0][1] == {
+            "max_age": 30 * 86400,
+            "secure": True,
+        }
+        assert cookies.removed == []
+    else:
+        assert "AUTH_COOKIE_SECRET" in streamlit.infos[0]
+        assert cookies.set_values == []
+        assert cookies.removed == [("abc_auth_session", {"secure": True})]
 
 
 def test_remembered_tokens_from_password_fallback_are_rejected() -> None:
@@ -545,13 +560,14 @@ def test_remove_auth_cookie_is_idempotent_with_real_controller(monkeypatch):
     assert controller._CookieController__cookies == {}
     assert len(commands) == 3
     assert all(command["method"] == "remove" and command["name"] == "synthetic_auth_cookie" for command in commands)
+    assert all(command["options"].get("secure") is True for command in commands)
 
 
 def test_remove_auth_cookie_does_not_hide_unrelated_errors():
     import pytest
 
     class BrokenController:
-        def remove(self, name):
+        def remove(self, name, **_kwargs):
             raise KeyError("unrelated_key")
 
     remove = _load_auth_cookie_remover(BrokenController())

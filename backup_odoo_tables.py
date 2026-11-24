@@ -3,8 +3,6 @@ from __future__ import annotations
 import csv
 from decimal import Decimal
 from pathlib import Path
-from typing import Iterable
-
 import psycopg2
 
 BACKUP_DIR = Path(__file__).resolve().parent / "database"
@@ -56,16 +54,6 @@ def dump_table_to_csv(table_name: str, connection: psycopg2.extensions.connectio
     return target_file
 
 
-def generate_restore_script(tables: Iterable[str]) -> Path:
-    restore_path = BACKUP_DIR / "restore_commands.txt"
-    with restore_path.open("w", encoding="utf-8") as file:
-        file.write("-- Restaurar los datos exportados usando psql o cualquier herramienta compatible.\n")
-        file.write("-- Ajusta la ruta si es necesario.\n\n")
-        for table in tables:
-            file.write(f"\copy {table} FROM '{table}.csv' CSV DELIMITER ';' HEADER;\n")
-    return restore_path
-
-
 def main() -> None:
     ensure_backup_dir()
 
@@ -76,8 +64,7 @@ def main() -> None:
             csv_path = dump_table_to_csv(table, connection)
             print(f"  -> {csv_path}")
 
-    restore_path = generate_restore_script(TABLES_TO_BACKUP)
-    print(f"Restore commands generated in: {restore_path}")
+    print("Odoo es de solo lectura; no se generan comandos de restauración.")
 
 
 if __name__ == "__main__":

@@ -567,8 +567,10 @@ def test_scheduler_recovers_from_transient_error_within_retry_budget(tmp_path, m
     assert any(row["status"] == "Error" for row in store.history())
 
 
-def test_cutoff_sql_boundary_and_manual_loader(tmp_path):
+def test_cutoff_sql_boundary_and_manual_loader(tmp_path, monkeypatch):
     import kering_jobs as jobs
+    from provider_order_policy import set_order_start_date
+    monkeypatch.setenv("PROVIDER_DATA_ROOT", str(tmp_path))
     engine = create_engine("sqlite://")
     with engine.begin() as connection:
         connection.execute(text("CREATE TABLE purchase_order(id INTEGER,name TEXT,partner_id INTEGER,date_order TEXT,state TEXT)"))
@@ -577,6 +579,11 @@ def test_cutoff_sql_boundary_and_manual_loader(tmp_path):
         connection.execute(text("INSERT INTO purchase_order VALUES(1,'OLD',7,'2026-08-31 21:59:59','purchase'),(2,'CUT',7,'2026-08-31 22:00:00','purchase'),(3,'END',7,'2026-09-01 21:59:59','purchase'),(4,'NEXT',7,'2026-09-01 22:00:00','purchase')"))
     config_store = ConfigStore(tmp_path)
     config = pilot_config(config_store, test_order_ids=[1, 2])
+    assert configured_orders(engine, config, date(2026, 8, 1), date(2026, 9, 1)) == []
+    assert [row["id"] for row in configured_orders(
+        engine, config, date(2026, 8, 1), date(2026, 9, 1), order_ids=[2]
+    )] == [2]
+    set_order_start_date(tmp_path, date(2026, 8, 1), actor="test")
     assert [row["id"] for row in configured_orders(engine, config, date(2026, 8, 1), date(2026, 9, 1))] == [2, 3]
     loader = jobs.make_loader(ImageStore(tmp_path), config_store, lambda: engine, date(2026, 8, 1), date(2026, 9, 1), 7)
     with pytest.raises(ValueError):

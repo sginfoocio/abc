@@ -12,11 +12,13 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+from filelock import FileLock
 from sqlalchemy import bindparam, text
 from sqlalchemy.exc import SQLAlchemyError
 
 from kering_images import AccessNotConfirmed, utc_interval
 from provider_images import PROVIDERS, ean_key, ean_valid
+from provider_order_policy import get_order_start_date
 from repository_catalog_readonly import catalog_coverage, unknown_coverage
 
 LINKS_FILE = "provider_odoo_links.json"
@@ -26,7 +28,8 @@ DEFAULT_MAX_LINES = 2000
 HARD_MAX_LINES = 10000
 STATEMENT_TIMEOUT_MS = 20000
 
-ELIGIBLE, DUPLICATE, REVIEW, COMPLETE = "Elegible", "Duplicado", "Requiere revisión", "Ya completa"
+ELIGIBLE, DUPLICATE, REVIEW, COMPLETE, PARTIAL, OUTSIDE_DATE = (
+    "Elegible", "Duplicado", "Requiere revisión", "Ya completa", "Parcial", "Fuera de fecha")
 IMAGES_COMPLETE, IMAGES_PARTIAL = "Completas", "Parciales"
 IMAGES_NONE = "Sin registros en el catálogo"
 IMAGES_NO_VIEWS = "Sin vistas válidas"
@@ -80,16 +83,24 @@ def save_link(root: Path, provider: str, partner_ids, *, reviewer: str, brands=(
         raise ValueError("sin_proveedores_odoo")
     if not str(reviewer).strip():
         raise ValueError("revisor_obligatorio")
-    links = load_links(root)
-    links[provider] = {"partner_ids": ids, "brands": [str(b).strip() for b in brands if str(b).strip()],
-                       "confirmed": True, "reviewer": str(reviewer).strip(), "note": note,
-                       "confirmed_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
     path = Path(root) / LINKS_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(links, indent=2, ensure_ascii=False), encoding="utf-8")
-    tmp.replace(path)
-    return links[provider]
+    entry = {"partner_ids": ids, "brands": [str(b).strip() for b in brands if str(b).strip()],
+             "confirmed": True, "reviewer": str(reviewer).strip(), "note": note}
+    with FileLock(path.parent / ".provider_odoo_links.lock", timeout=30, mode=0o600):
+        links = load_links(root)
+        if not isinstance(links, dict):
+            raise ValueError("asociaciones_invalidas")
+        existing = links.get(provider)
+        if existing is not None and not isinstance(existing, dict):
+            raise ValueError("asociacion_invalida")
+        if existing and existing.get("confirmed_at") and all(existing.get(k) == v for k, v in entry.items()):
+            return existing
+        links[provider] = {**entry, "confirmed_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(links, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(path)
+        return links[provider]
 
 
 def _read_only(connection, statement, parameters):
@@ -359,7 +370,8 @@ def _images_state(cov: dict) -> str:
     return IMAGE_LABELS.get(cov["label"], IMAGES_UNKNOWN)
 
 
-def build_preview(lines, coverage, live_keys=frozenset(), *, max_refs: int = 200) -> dict:
+def build_preview(lines, coverage, live_keys=frozenset(), *, max_refs: int = 200,
+                  order_start_date: date | None = None) -> dict:
     """One row per distinct code (most recent order first) plus review rows for lines without a usable EAN.
 
     ``coverage`` maps each code to a read-only catalog verdict (``repository_catalog_readonly``); an
@@ -381,6 +393,12 @@ def build_preview(lines, coverage, live_keys=frozenset(), *, max_refs: int = 200
             summary["duplicados"] += 1
             rows.append({**base, "Imágenes": "", "Base": "", "Estado": DUPLICATE,
                          "Motivo": "EAN repetido en otra línea (o su forma UPC/EAN-13)"})
+        elif order_start_date and date.fromisoformat(line.date) < order_start_date:
+            seen.add(key)
+            cov = coverage.get(line.ean) or unknown_coverage()
+            rows.append({**base, "Imágenes": _images_state(cov),
+                         "Base": BASIS_TEXT.get(cov["basis"], ""), "Estado": OUTSIDE_DATE,
+                         "Motivo": f"Pedido anterior al inicio común {order_start_date.isoformat()}"})
         else:
             seen.add(key)
             cov = coverage.get(line.ean) or unknown_coverage()
@@ -388,28 +406,34 @@ def build_preview(lines, coverage, live_keys=frozenset(), *, max_refs: int = 200
             base = {**base, "Imágenes": images, "Base": BASIS_TEXT.get(cov["basis"], "")}
             if key in live_keys:
                 rows.append({**base, "Estado": DUPLICATE, "Motivo": "solicitud en curso"})
+            elif cov["label"] == "parciales":
+                rows.append({**base, "Estado": PARTIAL, "Motivo": "Cobertura parcial; no solicitar automáticamente"})
+            elif cov["label"] == "sin_registros":
+                rows.append({**base, "Estado": ELIGIBLE, "Motivo": ""})
+            elif cov["label"] == "completas":
+                rows.append({**base, "Estado": COMPLETE, "Motivo": ""})
             else:
-                rows.append({**base, "Estado": COMPLETE if cov["label"] == "completas" else ELIGIBLE, "Motivo": ""})
+                rows.append({**base, "Estado": REVIEW, "Motivo": "Registros sin imágenes verificables"})
     eligible = [r for r in rows if r["Estado"] == ELIGIBLE]
     return {"rows": rows[:max_refs] if max_refs else rows, "summary": summary, "eligible": len(eligible),
             "shown_truncated": len(rows) > max_refs}
 
 
 def pick_pilot(rows, size: int = 8) -> list[str]:
-    """Proposal for a small real batch: eligible, no valid images first, then partial, recent orders first.
+    """Proposal for a small batch: only eligible EANs with no catalog records, newest first.
 
-    Rows whose coverage is unknown are never proposed as 'without images'. Partner membership is
-    already guaranteed by the confirmed association used to read the orders.
+    Existing partial images and unknown coverage are never proposed automatically. Partner
+    membership is guaranteed by the confirmed association used to read the orders.
     """
     size = max(1, min(int(size), 10))
-    rank = {IMAGES_NONE: 0, IMAGES_NO_VIEWS: 0, IMAGES_PARTIAL: 1}
+    rank = {IMAGES_NONE: 0}
     eligible = [r for r in rows if r["Estado"] == ELIGIBLE and r["Imágenes"] in rank]
     eligible.sort(key=lambda r: (rank[r["Imágenes"]], -int(r["Fecha"].replace("-", "") or 0)))
     return [r["EAN"] for r in eligible[:size]]
 
 
 def demand_preview(engine, connector, root: Path, start: date, end: date, *, max_lines=DEFAULT_MAX_LINES,
-                   max_refs: int = 200, catalog=None, image_root=None, verify_files: bool = False, env=None) -> dict:
+                   max_refs: int = 200, catalog=None, image_root=None, verify_files: bool = True, env=None) -> dict:
     """Odoo -> preview rows for the chosen portal. Raises AssociationNotConfigured / OdooUnavailable.
 
     Image coverage comes from the existing catalog opened read-only; the repository is never built.
@@ -424,7 +448,8 @@ def demand_preview(engine, connector, root: Path, start: date, end: date, *, max
         codes, catalog=catalog, required_views=service.settings.required_views,
         image_root=image_root or (environment.get("IMAGE_REPOSITORY_ROOT") or None) if verify_files else None,
         verify_files=verify_files, env=environment)
-    preview = build_preview(lines, report["coverage"], live, max_refs=max_refs)
+    preview = build_preview(
+        lines, report["coverage"], live, max_refs=max_refs, order_start_date=get_order_start_date(root))
     return {**preview, "lines_read": len(lines), "truncated": truncated, "partners": list(partners),
             "catalog": report["catalog"]}
 
@@ -436,7 +461,10 @@ def create_requests(connector, root: Path, rows, selected_eans, *, approved_by: 
     """
     if not str(approved_by).strip():
         raise ValueError("aprobacion_obligatoria")
-    by_ean = {r["EAN"]: r for r in rows if r["Estado"] == ELIGIBLE}
+    cutoff = get_order_start_date(root)
+    by_ean = {r["EAN"]: r for r in rows if r["Estado"] == ELIGIBLE
+              and r.get("Imágenes") == IMAGES_NONE
+              and date.fromisoformat(r["Fecha"]) >= cutoff}
     chosen = [e for e in dict.fromkeys(selected_eans) if e in by_ean]
     rejected = [e for e in dict.fromkeys(selected_eans) if e not in by_ean]
     result = connector.plan_eans(chosen, limit=len(chosen)) if chosen else {

@@ -67,9 +67,12 @@ from auth_session import (
 from app_exports import (
     dataframe_to_excel_bytes,
     extract_clean_eans as _extract_clean_eans,
+    extract_luxoptica_products,
     generate_luxoptica_request_files,
+    link_luxoptica_masterdata,
     load_masterdata_file,
     normalize_result_export_schema,
+    preview_luxoptica_request_products,
     split_report_warnings,
 )
 from app_navigation import build_navigation
@@ -547,7 +550,7 @@ def _get_cookie_controller() -> CookieController:
 
 def _remove_auth_cookie() -> None:
     try:
-        _get_cookie_controller().remove(AUTH_COOKIE_NAME)
+        _get_cookie_controller().remove(AUTH_COOKIE_NAME, secure=True)
     except KeyError as exc:
         if exc.args != (AUTH_COOKIE_NAME,):
             raise
@@ -638,7 +641,10 @@ def _render_login() -> None:
                 st.session_state["auth_session_id"] = claims.session_id
                 st.session_state["auth_session_expires_at"] = claims.expires_at
                 _get_cookie_controller().set(
-                    AUTH_COOKIE_NAME, token, max_age=remember_days * 86400
+                    AUTH_COOKIE_NAME,
+                    token,
+                    max_age=remember_days * 86400,
+                    secure=True,
                 )
             else:
                 _remove_auth_cookie()
@@ -837,12 +843,53 @@ def render_odoo_reconciliation_page() -> None:
     render_footer()
 
 
+def _provider_images_data_root() -> Path:
+    from provider_images_ui import data_root
+
+    return data_root()
+
+
+def _luxottica_request_connector(root: Path):
+    from provider_images_ui import build_connector
+
+    return build_connector("luxottica", root=root)
+
+
 def render_settings_page() -> None:
     render_sidebar_shell("Configuración")
     require_admin_access()
     cloud_page_title("Configuración")
     from build_info import render_version_info
     render_version_info()
+    st.divider()
+    from provider_order_policy import OrderPolicyUnavailable, get_order_start_date, set_order_start_date
+
+    policy_root = _provider_images_data_root()
+    try:
+        current_order_start = get_order_start_date(policy_root)
+    except OrderPolicyUnavailable as error:
+        st.error(str(error))
+        current_order_start = None
+    st.subheader("Inicio común de pedidos de proveedores de imágenes")
+    if current_order_start is not None:
+        st.caption(
+            f"Fecha efectiva: {current_order_start:%d/%m/%Y}. "
+            "Cambiarla no reprocesa pedidos ni modifica historiales; el piloto de Kering conserva sus límites."
+        )
+        with st.form("provider_order_start_date"):
+            new_order_start = st.date_input("Fecha de inicio común", value=current_order_start)
+            save_order_start = st.form_submit_button("Guardar fecha")
+        if save_order_start:
+            try:
+                result = set_order_start_date(
+                    policy_root, new_order_start, actor=st.session_state.get("auth_user", ""),
+                )
+            except (OSError, ValueError, RuntimeError) as error:
+                st.error(f"No se pudo guardar la fecha común: {error}")
+            else:
+                label = "guardada" if result["changed"] else "sin cambios"
+                st.success(f"Fecha común {label}: {result['new_value']}.")
+                st.rerun()
     st.divider()
     render_kering_settings(get_db_engine)
     st.divider()
@@ -1498,89 +1545,113 @@ def render_master_page(master_page: str | None = None) -> None:
 
             st.subheader("4. Solicitud de imágenes (Luxoptica)")
             configured_request_email = _read_env_setting(LUXOPTICA_REQUEST_EMAIL_ENV, "images@diagonaleyewear.com")
-            default_email = st.session_state.get("luxoptica_request_email", configured_request_email)
-            request_email = st.text_input("Email para la solicitud", value=default_email, key="luxoptica_request_email_input")
-            st.caption("Se generan lotes de 250 EAN máximos por archivo, sin prefijo.")
+            st.text_input("Email para la solicitud", value=configured_request_email, disabled=True)
+            st.caption("Solo se propondrán EAN ausentes y sin solicitud vigente. Máximo 250 por TXT.")
 
             col_gen_a, col_gen_b = st.columns(2)
 
             with col_gen_a:
-                generate_test_50 = st.button(
-                    "Generar lote de prueba (50 EAN)",
+                preview_test_50 = st.button(
+                    "Vista previa (máximo 50 EAN)",
                     key="generate_luxoptica_request_files_50",
                     use_container_width=True,
                 )
             with col_gen_b:
-                generate_full = st.button(
-                    "Generar lotes completos",
+                preview_full = st.button(
+                    "Vista previa completa",
                     key="generate_luxoptica_request_files_full",
                     use_container_width=True,
                 )
 
-            if generate_test_50 or generate_full:
-                luxoptica_dir = Path(__file__).resolve().parent / "docs" / "Luxoptica"
-                limit = 50 if generate_test_50 else None
-                generated_files = generate_luxoptica_request_files(
-                    export_df,
-                    luxoptica_dir,
-                    batch_size=250,
-                    max_total_eans=limit,
-                )
-                st.session_state["luxoptica_request_email"] = request_email.strip() or default_email
-                st.session_state["luxoptica_generated_files"] = [str(p) for p in generated_files]
-                st.session_state["luxoptica_generated_total_eans"] = sum(
-                    len(path.read_text(encoding="utf-8").splitlines()) for path in generated_files
-                )
-                st.session_state["luxoptica_processed_files"] = []
+            luxoptica_dir = Path(__file__).resolve().parent / "docs" / "Luxoptica"
+            if preview_test_50 or preview_full:
+                try:
+                    selection_preview = preview_luxoptica_request_products(
+                        export_df, request_root=_provider_images_data_root(), output_dir=luxoptica_dir,
+                    )
+                except (OSError, ValueError, RuntimeError) as error:
+                    st.error(f"No se pudo preparar la vista previa: {error}")
+                    selection_preview = None
+                if selection_preview is not None:
+                    candidate_limit = 50 if preview_test_50 else None
+                    st.session_state["luxoptica_selection_preview"] = {
+                        "products": extract_luxoptica_products(export_df),
+                        "identity": export_df.to_json(orient="split"),
+                        "candidate_limit": candidate_limit,
+                        "report": selection_preview,
+                    }
 
-                if generated_files:
-                    if limit:
-                        st.success(
-                            f"Generado lote de prueba con {st.session_state['luxoptica_generated_total_eans']} EAN en docs/Luxoptica."
+            preview_state = st.session_state.get("luxoptica_selection_preview")
+            if preview_state:
+                selection_preview = preview_state["report"]
+                st.caption(
+                    f"Catálogo: {selection_preview['catalog']['status']} · "
+                    + " · ".join(f"{key}: {value}" for key, value in selection_preview["summary"].items())
+                )
+                st.dataframe(selection_preview["rows"], hide_index=True, use_container_width=True)
+                limit = preview_state["candidate_limit"]
+                proposed = selection_preview["candidates"][:limit] if limit else selection_preview["candidates"]
+                if limit and len(selection_preview["candidates"]) > limit:
+                    st.caption(f"Se prepararán como máximo los primeros {limit} EAN ausentes.")
+                current_products = extract_luxoptica_products(export_df)
+                if (current_products != preview_state["products"]
+                        or export_df.to_json(orient="split") != preview_state.get("identity")):
+                    st.warning("La transformación ha cambiado. Genere una nueva vista previa.")
+                elif selection_preview["catalog"]["status"] != "consultado":
+                    st.error("Catálogo inaccesible: la propuesta está bloqueada, no equivale a imágenes ausentes.")
+                elif proposed and st.button("Confirmar y preparar lotes TXT", key="luxoptica_confirm_prepare"):
+                    try:
+                        generated_files = generate_luxoptica_request_files(
+                            export_df,
+                            luxoptica_dir,
+                            batch_size=250,
+                            max_total_eans=limit,
+                            request_root=_provider_images_data_root(),
+                            source_name=Path(source_name).name,
+                            reviewer=st.session_state.get("auth_user", ""),
                         )
+                    except (OSError, ValueError, RuntimeError) as error:
+                        st.error(f"No se pudieron preparar los lotes: {error}")
                     else:
-                        st.success(f"Generados {len(generated_files)} archivo(s) en docs/Luxoptica.")
-                else:
-                    st.info("No hay EAN con vistas pendientes para generar archivos.")
+                        st.session_state["luxoptica_generated_files"] = [str(path) for path in generated_files]
+                        st.session_state["luxoptica_generated_total_eans"] = sum(
+                            len(path.read_text(encoding="utf-8").splitlines()) for path in generated_files
+                        )
+                        st.session_state.pop("luxoptica_selection_preview", None)
+                        if generated_files:
+                            st.success(f"Preparadas {len(generated_files)} solicitud(es) local(es), sin envío al portal.")
+                        else:
+                            st.info("Los EAN ya tienen solicitudes vigentes o dejaron de ser elegibles.")
+                elif not proposed:
+                    st.info("No hay EAN ausentes y sin solicitud vigente para preparar.")
+                if (current_products == preview_state["products"]
+                        and export_df.to_json(orient="split") == preview_state.get("identity")
+                        and selection_preview["catalog"]["status"] == "consultado"
+                        and selection_preview["summary"]["Solicitud pendiente"]
+                        and st.session_state.get("auth_role") == "admin"):
+                    if st.button("Confirmar asociación Masterdata a solicitudes existentes",
+                                 key="luxoptica_link_masterdata"):
+                        try:
+                            linked = link_luxoptica_masterdata(
+                                export_df, reviewer=st.session_state.get("auth_user", ""),
+                                source_name=Path(source_name).name, request_root=_provider_images_data_root(),
+                                output_dir=luxoptica_dir,
+                            )
+                        except (OSError, ValueError, RuntimeError) as error:
+                            st.error(f"No se pudo asociar la evidencia: {error}")
+                        else:
+                            st.info(f"Identidades vinculadas: {len(linked['linked_evidence'])}; "
+                                    f"requieren revisión: {len(linked['identity_review'])}.")
 
             generated_files_raw = st.session_state.get("luxoptica_generated_files", [])
             if generated_files_raw:
                 generated_paths = [Path(p) for p in generated_files_raw if Path(p).exists()]
                 total_eans = st.session_state.get("luxoptica_generated_total_eans", 0)
-                processed_files = set(st.session_state.get("luxoptica_processed_files", []))
                 st.info(
-                    f"Email de solicitud: {st.session_state.get('luxoptica_request_email', request_email)} | "
-                    f"EAN totales: {total_eans} | Archivos: {len(generated_paths)}"
+                    f"Email de recepción: {configured_request_email} | EAN: {total_eans} | "
+                    f"Archivos: {len(generated_paths)}"
                 )
-                
-                # Botón de subida automática a Luxoptica
-                st.subheader("Subida Automática a Luxoptica")
-                col_auto_a, col_auto_b = st.columns([2, 1])
-                with col_auto_a:
-                    st.caption("Requiere credenciales en .env: LUXOPTICA_USERNAME, LUXOPTICA_PASSWORD")
-                with col_auto_b:
-                    if st.button("🚀 Subir a Luxoptica Automáticamente", use_container_width=True, key="auto_upload_luxoptica"):
-                        import subprocess
-                        try:
-                            result = subprocess.run(
-                                ["python", "luxoptica_auto_upload.py"],
-                                cwd=Path(__file__).parent,
-                                capture_output=True,
-                                text=True,
-                                timeout=300,
-                            )
-                            if result.returncode == 0:
-                                st.success("✅ Solicitud enviada a Luxoptica automáticamente!")
-                                st.session_state["luxoptica_processed_files"] = [p.name for p in generated_paths]
-                                st.rerun()
-                            else:
-                                st.error(f"❌ Error en la subida:\n{result.stdout}\n{result.stderr}")
-                        except subprocess.TimeoutExpired:
-                            st.error("❌ Timeout (5 minutos) en la subida")
-                        except Exception as e:
-                            st.error(f"❌ Error: {e}")
-                
-                st.caption("Sube los archivos uno por uno en Luxoptica. Cada archivo corresponde a una solicitud.")
+                st.caption("Suba los TXT manualmente al portal; el envío automático no está habilitado.")
 
                 for idx, file_path in enumerate(generated_paths, start=1):
                     content = file_path.read_text(encoding="utf-8")
@@ -1595,26 +1666,19 @@ def render_master_page(master_page: str | None = None) -> None:
                             key=f"luxoptica_download_{idx}_{file_path.name}",
                         )
                     with col_b:
-                        file_key = file_path.name
-                        if file_key in processed_files:
-                            st.success("✅ Procesado")
-                        else:
-                            if st.button("Marcar como procesado", key=f"luxoptica_mark_{idx}_{file_key}"):
-                                updated = list(processed_files)
-                                updated.append(file_key)
-                                st.session_state["luxoptica_processed_files"] = updated
+                        manifest_path = file_path.with_suffix(".manifest.json")
+                        request_id = json.loads(manifest_path.read_text(encoding="utf-8")).get("request_id")
+                        connector = _luxottica_request_connector(_provider_images_data_root())
+                        request = connector.service.store.get(int(request_id))
+                        if request["state"] == "ready":
+                            if st.button("Marcar enviada manualmente", key=f"luxoptica_mark_{idx}_{file_path.name}"):
+                                connector.service.store.transition(
+                                    int(request_id), "submitted", expect="ready",
+                                    detail="marcada_enviada_manualmente",
+                                )
                                 st.rerun()
-
-                processed_count = len([p for p in generated_paths if p.name in processed_files])
-                total_batches = len(generated_paths)
-                if total_batches > 0:
-                    st.progress(processed_count / total_batches)
-                    st.caption(f"Lotes procesados: {processed_count}/{total_batches}")
-
-                if total_batches > 0 and processed_count == total_batches:
-                    st.success(
-                        "Todos los lotes están procesados. Solicitudes de imágenes completadas para este lote de MASTERDATA."
-                    )
+                        else:
+                            st.caption(f"Estado registrado: {request['state']}")
 
             st.subheader("5. Descarga automática de imágenes (Microsoft 365)")
             m365_cfg = load_m365_config()
