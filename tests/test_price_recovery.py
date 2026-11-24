@@ -228,6 +228,24 @@ def test_retired_gate_preview_does_not_expire_incidents_or_expose_config(retired
     assert dump(store) == before
 
 
+def test_retired_gate_rejects_changed_runtime_dependency(retired_gate, monkeypatch):
+    from pathlib import Path
+
+    store, ids, now, _, _ = retired_gate
+    plan = preview_retired_pilot_gate(store.database_path, **ids, now=now)
+    original_read = Path.read_bytes
+
+    def changed_dependency(path):
+        content = original_read(path)
+        return content + b"\n# synthetic changed dependency\n" if path.name == "price_web_extract.py" else content
+
+    monkeypatch.setattr(Path, "read_bytes", changed_dependency)
+    before = dump(store)
+    with pytest.raises(ValueError, match="Plan obsoleto"):
+        apply_retired_pilot_gate(store.database_path, **ids, plan_hash=plan["plan_hash"], now=now,
+                                actor="synthetic", note="Reviewed plan", build_commit="b" * 40, approved=True)
+    assert dump(store) == before
+
 def test_preview_is_read_only_and_validates_snapshot_and_scope(recovery):
     store, allowlist, report, entries, _ = recovery
     before = dump(store)

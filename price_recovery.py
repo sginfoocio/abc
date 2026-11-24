@@ -462,6 +462,13 @@ def _retired_gate_plan(con, path, *, continuity_id, pair_id, check_id, now):
     reference = {
         "rule": "retired-pilot-gate-1",
         "script_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "dependency_sha256": {
+            name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+            for name in ("competitor_requirements.py", "price_access.py", "price_batch.py",
+                         "price_comparator.py", "price_locator.py", "price_monitor.py",
+                         "price_references.py", "price_trial.py", "price_watch.py",
+                         "price_web.py", "price_web_extract.py", "price_web_fetch.py")
+        },
         "continuity": {field: continuity[field] for field in
                        ("id", "status", "started_at", "manifest", "limits", "interval_hours")},
         "pair": pair, "check": check, "trial": trial, "active_pilots": active_pilots,
