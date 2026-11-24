@@ -934,7 +934,7 @@ class WebPriceSearch:
         if outcome.match_status == "manual_review":
             status = "manual_review"
         market, market_note, conflict = resolve_market(page, config) if page else ("", "", False)
-        if (page and not market) or conflict or (page and page.tax_conflict):
+        if (page and not market and status != "rejected") or conflict or (page and page.tax_conflict):
             status = "manual_review"
         priced = page is not None and page.has_price and status != "rejected"
         tax = "" if page is None or page.includes_tax is None else ("sí" if page.includes_tax else "no")

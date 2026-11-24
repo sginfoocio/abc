@@ -30,12 +30,16 @@ def load(name, url):
     return extract_product((FIXTURES / f"{name}.html").read_text(encoding="utf-8"), url)
 
 
-def test_missing_page_keeps_rejected_observation_instead_of_market_review():
+@pytest.mark.parametrize("has_page", [False, True])
+def test_rejected_observation_keeps_rejection_when_market_is_unknown(has_page):
     from price_web import Outcome, WebPriceSearch
+    from price_web_extract import ProductPage
 
     config = {"name": "synthetic", "domain": "example.test", "currency": "EUR", "market": "ES"}
+    page = ProductPage(url="https://example.test/rejected", price=49, currency="EUR",
+                       includes_tax=True) if has_page else None
     outcome = Outcome(PR27["ean"], "synthetic", "synthetic", "rejected",
-                      url="https://example.test/missing", detail="Synthetic absent product")
+                      url="https://example.test/rejected", page=page, detail="Synthetic rejected identity")
     row = WebPriceSearch.frame_row(PR27, config, outcome, "2026-11-24T20:29:45+00:00")
     assert row["Estado coincidencia"] == "rejected"
     assert row["Precio"] == ""
