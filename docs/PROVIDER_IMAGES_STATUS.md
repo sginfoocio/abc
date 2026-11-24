@@ -8,6 +8,15 @@ Verifica el runtime y los recibos por separado según la guía de validación lo
 
 Para todos los proveedores, Odoo solo se consulta; las asociaciones y solicitudes se guardan en Cloud. La [política permanente](../AGENTS.md#política-obligatoria--odoo-read-only) prohíbe toda escritura o cambio de estructura, permisos o configuración en Odoo.
 
+## Validación productiva Luxottica — 24/11/2026
+
+- Despliegue de #158: commit `ae71b9331becf9a2bdb4925c9a7018785144ebc9`, digest de registro `ghcr.io/sginfoocio/abc@sha256:bf1041fe3dd9fc898a92c1724e87121575e8bd11c91cf64c29cb04c1d729ab96`; `abcd-control` healthy.
+- Asociación Luxottica → Odoo 570 existente en el almacén persistente de Cloud y visible en el panel. Fecha común efectiva: `2026-11-01`. La muestra productiva consultó dos pedidos y dos líneas bajo transacciones `READ ONLY`, sin escrituras en Odoo.
+- El importador Masterdata abre y el NAS y catálogo son legibles. En la muestra de catálogo se verificaron dos EAN con cobertura completa y dos parcial; ausencia de registros no acredita ausencia de archivos no catalogados. No se repitió la auditoría completa de Masterdata en producción.
+- Trazabilidad compartida y deduplicación se comprobaron previamente en almacenamiento aislado con datos reales; no se ha creado ni enviado una solicitud productiva para repetir la prueba. En producción no había solicitudes Luxottica activas al consultar el almacén; el índice único parcial está presente.
+- Logout volvió al formulario y el contador agregado de revocaciones aumentó; la invalidación de un token concreto no se comprobó. La sesión recordada no persistió tras una recarga en el navegador integrado: incidencia #161. Expiración, aislamiento y atributo `Secure` efectivo siguen pendientes en producción.
+- El monitor Luxottica permanecía activo; el recibo del 24/11 a las 19:59 UTC fue correcto. El panel muestra un error histórico de Kering del 17/11 y su programación desactivada; no se modificó el servicio.
+
 ## Decisión: Cloud es independiente de Odoo
 
 Flujo principal, sin Odoo ni `supplier_ids`: elegir proveedor → pegar/importar EAN (CSV/TXT) → validación y
