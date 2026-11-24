@@ -13,8 +13,10 @@ from pathlib import Path
 import re
 import sqlite3
 import time as clock
+from urllib.parse import urljoin, urlsplit
 
 from filelock import FileLock, Timeout
+import requests
 from sqlalchemy import text
 
 from adyen_reconciliation import ReportError
@@ -23,6 +25,8 @@ from kering_images import ConfigStore, atomic_write
 
 
 LOGGER = logging.getLogger(__name__)
+PORTAL_URL = "https://opticadiagonal-gioweb.deipe.com/"
+PORTAL_HOST = "opticadiagonal-gioweb.deipe.com"
 TERMINAL = {"blocked", "ready", "candidate", "no_movements", "download_error", "internal_error"}
 STATES = {
     "pending": "Pendiente", "downloading": "Descargando", "downloaded": "Descargado",
@@ -32,7 +36,9 @@ STATES = {
 }
 DEFAULTS = {
     "enabled": False, "daily_time": "07:00", "recipients": [], "send_enabled": False,
-    "username": "", "password": "", "operations_approved": False,
+    "portal_url": PORTAL_URL, "username": "", "password": "",
+    "last_connection_status": "not_checked", "last_connection_check": "",
+    "operations_approved": False,
     "odoo_import_evidence": "", "business_evidence": "",
     "mapping": {"company": 0, "journals": dict.fromkeys(CENTRES, 0),
                 "accounts": dict.fromkeys(("43000000", "47700000", "70000001", "70000002", "70000005"), 0)},
@@ -69,18 +75,22 @@ class GioConfigStore(ConfigStore):
         result = json.loads(json.dumps(DEFAULTS))
         if path.exists():
             result.update(json.loads(self.cipher().decrypt(path.read_bytes())))
+        result["enabled"] = False
+        result["send_enabled"] = False
         return result
 
     def save(self, config: dict) -> None:
+        config = {**DEFAULTS, **config}
         if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", config["daily_time"]):
             raise ValueError("La hora debe tener formato HH:MM (Europe/Madrid)")
+        config["portal_url"] = validate_portal_url(config["portal_url"])
         if not isinstance(config["recipients"], list) or any(
             not isinstance(value, str) or not re.fullmatch(r"[^@\s;,<>]+@[^@\s;,<>]+\.[^@\s;,<>]+", value)
             for value in config["recipients"]
         ):
             raise ValueError("Destinatarios no validos")
-        if config["send_enabled"] and not config["recipients"]:
-            raise ValueError("Configure destinatarios antes de habilitar envios")
+        if config["send_enabled"]:
+            raise ValueError("Envios reales bloqueados hasta validar el funcionamiento completo de GIO")
         if config["enabled"]:
             raise ValueError("Automatizacion bloqueada: falta verificar el adaptador autenticado GIO")
         if config["odoo_import_evidence"].strip():
@@ -89,6 +99,83 @@ class GioConfigStore(ConfigStore):
             raise ValueError("Documente la aprobacion de operaciones y referencias")
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         atomic_write(self.root / "config.enc", self.cipher().encrypt(json.dumps(config).encode()))
+
+
+class GioConnectionError(Exception):
+    pass
+
+
+def validate_portal_url(value: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError("La URL GIO debe ser el portal HTTPS oficial")
+    try:
+        parsed = urlsplit(value.strip())
+        port = parsed.port
+    except ValueError:
+        raise ValueError("La URL GIO debe ser el portal HTTPS oficial") from None
+    if (parsed.scheme != "https" or parsed.hostname != PORTAL_HOST or port is not None
+            or parsed.username or parsed.password or parsed.path not in ("", "/")
+            or parsed.query or parsed.fragment):
+        raise ValueError("La URL GIO debe ser el portal HTTPS oficial")
+    return PORTAL_URL
+
+
+def check_gio_connection(config: dict) -> None:
+    username = config.get("username", "")
+    password = config.get("password", "")
+    if not isinstance(username, str) or not username.strip() or not isinstance(password, str) or not password:
+        raise GioConnectionError("Guarde el usuario y la contraseña de GIO antes de probar la conexión.")
+    username = username.strip()
+
+    portal_url = validate_portal_url(config.get("portal_url", PORTAL_URL))
+    with requests.Session() as session:
+        try:
+            response = session.get(portal_url, timeout=(5, 15), allow_redirects=False)
+        except requests.Timeout:
+            raise GioConnectionError("El portal GIO agotó el tiempo de espera.") from None
+        except requests.RequestException:
+            raise GioConnectionError("No se pudo acceder al portal GIO por HTTPS.") from None
+
+        if response.is_redirect:
+            destination = urljoin(portal_url, response.headers.get("Location", ""))
+            try:
+                target = urlsplit(destination)
+                target_port = target.port
+            except ValueError:
+                raise GioConnectionError("El portal GIO redirigió fuera del dominio autorizado.") from None
+            if (target.scheme != "https" or target.hostname != PORTAL_HOST or target_port is not None
+                    or target.username or target.password):
+                raise GioConnectionError("El portal GIO redirigió fuera del dominio autorizado.")
+            try:
+                response = session.get(destination, timeout=(5, 15), allow_redirects=False)
+            except requests.Timeout:
+                raise GioConnectionError("El portal GIO agotó el tiempo de espera.") from None
+            except requests.RequestException:
+                raise GioConnectionError("No se pudo acceder al portal GIO por HTTPS.") from None
+
+        if response.status_code != 200 or "gioweb_login.js" not in response.text:
+            raise GioConnectionError("La respuesta no corresponde a la pantalla de acceso GIO esperada.")
+
+        try:
+            response = session.post(
+                urljoin(PORTAL_URL, "login_check"),
+                data={"_username": username, "_password": password, "idioma": "Español"},
+                timeout=(5, 15),
+                allow_redirects=False,
+            )
+        except requests.Timeout:
+            raise GioConnectionError("La comprobación de credenciales GIO agotó el tiempo de espera.") from None
+        except requests.RequestException:
+            raise GioConnectionError("No se pudo completar la comprobación de credenciales GIO.") from None
+
+        if response.status_code != 200:
+            raise GioConnectionError("GIO no aceptó la comprobación de acceso.")
+        try:
+            result = response.json()
+        except ValueError:
+            raise GioConnectionError("GIO devolvió una respuesta de acceso no reconocida.") from None
+        if not isinstance(result, dict) or result.get("success") is not True:
+            raise GioConnectionError("GIO rechazó las credenciales o requiere una acción adicional.")
 
 
 class PortalNotVerified(Exception):

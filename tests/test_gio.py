@@ -455,9 +455,95 @@ def test_config_encrypted_admin_only_and_unverified_automation_cannot_be_enabled
     with pytest.raises(ValueError, match="bloqueada"):
         config_store.save(config)
     config["enabled"] = False
+    config["send_enabled"] = True
+    with pytest.raises(ValueError, match="Envios reales bloqueados"):
+        config_store.save(config)
+    config["send_enabled"] = False
     config["daily_time"] = "25:00"
     with pytest.raises(ValueError, match="hora"):
         config_store.save(config)
+
+
+def test_config_store_keeps_legacy_automation_and_mail_disabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("KERING_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    store = cloud.GioConfigStore(tmp_path)
+    legacy = {**cloud.DEFAULTS, "enabled": True, "send_enabled": True}
+    store.root.mkdir(parents=True, exist_ok=True)
+    store.cipher()
+    from kering_images import atomic_write
+    atomic_write(store.root / "config.enc", store.cipher().encrypt(json.dumps(legacy).encode()))
+
+    loaded = store.load()
+
+    assert loaded["enabled"] is False
+    assert loaded["send_enabled"] is False
+
+
+@pytest.mark.parametrize("url", [
+    "http://opticadiagonal-gioweb.deipe.com/",
+    "https://other.example/",
+    "https://user:password@opticadiagonal-gioweb.deipe.com/",
+    "https://opticadiagonal-gioweb.deipe.com:8443/",
+    "https://opticadiagonal-gioweb.deipe.com/login",
+])
+def test_gio_portal_url_is_restricted_to_the_official_https_origin(url):
+    with pytest.raises(ValueError, match="portal HTTPS oficial"):
+        cloud.validate_portal_url(url)
+
+
+def test_gio_connection_check_uses_observed_login_form_without_registering_session(monkeypatch):
+    session = Mock()
+    session.__enter__ = Mock(return_value=session)
+    session.__exit__ = Mock(return_value=False)
+    redirect = Mock(status_code=302, is_redirect=True, headers={"Location": "/login"})
+    login_page = Mock(status_code=200, is_redirect=False, text='<script src="gioweb_login.js"></script>')
+    login_response = Mock(status_code=200)
+    login_response.json.return_value = {"success": True, "result": {"redirect": "/"}}
+    session.get.side_effect = [redirect, login_page]
+    session.post.return_value = login_response
+    monkeypatch.setattr(cloud.requests, "Session", Mock(return_value=session))
+
+    cloud.check_gio_connection({
+        "portal_url": cloud.PORTAL_URL, "username": "SYNTHETIC_USER", "password": "SYNTHETIC_PASSWORD",
+    })
+
+    assert session.get.call_args_list[0].args[0] == cloud.PORTAL_URL
+    assert session.get.call_args_list[1].args[0].endswith("/login")
+    assert session.post.call_args.args[0] == cloud.PORTAL_URL + "login_check"
+    assert session.post.call_args.kwargs["data"] == {
+        "_username": "SYNTHETIC_USER", "_password": "SYNTHETIC_PASSWORD", "idioma": "Español",
+    }
+    assert session.post.call_args.kwargs["allow_redirects"] is False
+    assert session.get.call_count == 2
+    session.__exit__.assert_called_once()
+
+
+def test_gio_connection_check_rejects_external_redirect_and_bad_login(monkeypatch):
+    session = Mock()
+    session.__enter__ = Mock(return_value=session)
+    session.__exit__ = Mock(return_value=False)
+    session.get.return_value = Mock(
+        status_code=302, is_redirect=True, headers={"Location": "https://attacker.example/login"},
+    )
+    monkeypatch.setattr(cloud.requests, "Session", Mock(return_value=session))
+    config = {"portal_url": cloud.PORTAL_URL, "username": "SYNTHETIC_USER", "password": "SYNTHETIC_PASSWORD"}
+
+    with pytest.raises(cloud.GioConnectionError, match="dominio autorizado"):
+        cloud.check_gio_connection(config)
+    session.post.assert_not_called()
+
+    session.reset_mock()
+    session.__enter__ = Mock(return_value=session)
+    session.__exit__ = Mock(return_value=False)
+    session.get.return_value = Mock(
+        status_code=200, is_redirect=False, text='<script src="gioweb_login.js"></script>',
+    )
+    rejected = Mock(status_code=200)
+    rejected.json.return_value = {"success": False}
+    session.post.return_value = rejected
+    monkeypatch.setattr(cloud.requests, "Session", Mock(return_value=session))
+    with pytest.raises(cloud.GioConnectionError, match="rechazó"):
+        cloud.check_gio_connection(config)
 
 
 def test_download_and_control_permissions(tmp_path):
@@ -504,7 +590,8 @@ from app_pages.gio import render
 render()
 """).run()
     assert not app.exception
-    app.button[-2].click().run()  # enqueue form, before the refresh button
+    assert not {"Guardar configuración", "Probar conexión"} & {button.label for button in app.button}
+    app.button[0].click().run()
     assert not app.exception
     assert len(cloud.GioStore(tmp_path).history()) == 3
     assert all(row["state"] == "pending" for row in cloud.GioStore(tmp_path).history())
@@ -517,10 +604,56 @@ render()
     assert denied.error and not denied.exception
 
 
+def test_cloud_gio_settings_save_encrypted_credentials_and_test_connection(tmp_path, monkeypatch):
+    monkeypatch.setenv("GIO_DATA_ROOT", str(tmp_path))
+    monkeypatch.setenv("KERING_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    import app_pages.gio as gio_page
+    connection_check = Mock()
+    monkeypatch.setattr(gio_page, "check_gio_connection", connection_check)
+    app = AppTest.from_string("""
+import streamlit as st
+st.session_state["auth_role"] = "admin"
+st.session_state["auth_user"] = "synthetic-admin"
+from app_pages.gio import render_settings
+render_settings()
+""").run()
+
+    assert not app.exception
+    app.text_input(key="gio_username").set_value("SYNTHETIC_USER")
+    app.text_input(key="gio_password").set_value("SYNTHETIC_PASSWORD")
+    app.button[0].click().run()
+
+    config_store = cloud.GioConfigStore(tmp_path)
+    saved = config_store.load()
+    assert saved["username"] == "SYNTHETIC_USER"
+    assert saved["password"] == "SYNTHETIC_PASSWORD"
+    assert saved["enabled"] is False and saved["send_enabled"] is False
+    assert b"SYNTHETIC_PASSWORD" not in (tmp_path / "config.enc").read_bytes()
+    assert app.text_input(key="gio_password").value == ""
+    assert app.toggle(key="gio_automation_enabled").disabled
+    assert app.toggle(key="gio_mail_enabled").disabled
+    assert app.button(key="gio_test_connection").disabled is False
+
+    app.button(key="gio_test_connection").click().run()
+    checked = config_store.load()
+    connection_check.assert_called_once()
+    assert checked["last_connection_status"] == "ok"
+    assert checked["last_connection_check"]
+    assert checked["enabled"] is False and checked["send_enabled"] is False
+
+    app.text_input(key="gio_username").set_value("SYNTHETIC_USER_UPDATED")
+    app.button[0].click().run()
+    changed = config_store.load()
+    assert changed["last_connection_status"] == "not_checked"
+    assert changed["last_connection_check"] == ""
+
+
 def test_ui_reads_only_explicitly_prepared_artifact(tmp_path, monkeypatch):
     monkeypatch.setenv("GIO_DATA_ROOT", str(tmp_path))
     monkeypatch.setenv("KERING_ENCRYPTION_KEY", Fernet.generate_key().decode())
-    cloud.GioConfigStore(tmp_path).save(settings())
+    config = settings()
+    config["send_enabled"] = False
+    cloud.GioConfigStore(tmp_path).save(config)
     w = worker(tmp_path)
     w.store.enqueue(DAY, ["0"], originals={"0": report(movement())}, **ACTOR)
     w.tick(NOW)

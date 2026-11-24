@@ -20,7 +20,7 @@ from streamlit_cookies_controller import CookieController
 from db_loader import load_odoo_dataframe
 from adyen_reconciliation_ui import render_reconciliation_page
 from kering_images_ui import render_kering_page, render_kering_settings
-from app_pages.gio import render as render_gio_page
+from app_pages.gio import render as render_gio_page, render_settings as render_gio_settings
 from engine import run_abcd_engine
 from db_config import load_db_config, load_env_file
 from transform_luxottica_masterdata import (
@@ -916,6 +916,8 @@ def render_settings_page() -> None:
         else:
             st.error(message)
 
+    st.divider()
+    render_gio_settings()
     render_footer()
 
 

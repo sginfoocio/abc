@@ -136,9 +136,10 @@ Al disponer de credenciales mediante Cloud:
 
 ## Configuracion y arquitectura Cloud
 
-La seccion **Contabilidad -> GIO** solo aparece para admin; tambien valida
-el permiso al abrirla y antes de encolar, reintentar o descargar. No accede
-al portal ni a Odoo al navegar. Utiliza componentes y tema Cloud existentes.
+La configuracion de GIO esta integrada en **Configuracion -> GIO**; la seccion
+**Contabilidad -> GIO** queda solo para operaciones. Ambas requieren admin.
+La pagina operativa no accede al portal ni a Odoo al navegar. Utiliza
+componentes y tema Cloud existentes.
 
 - Persistencia: `GIO_DATA_ROOT`, por defecto `masterdata_data/gio`; en Compose,
   `/app/data/gio` dentro del volumen persistente existente.
@@ -146,12 +147,22 @@ al portal ni a Odoo al navegar. Utiliza componentes y tema Cloud existentes.
   proveedores: `KERING_ENCRYPTION_KEY_FILE` o `KERING_ENCRYPTION_KEY` existente.
   No se genera otra clave ni se escribe un secreto en el repositorio. La clave
   debe ser identica en app/worker; no rotarla sin migrar los cifrados existentes.
-- Credenciales GIO: guardar desde la pantalla con permiso admin; no se muestran
-  al recargar. Campos vacios conservan lo guardado; hay eliminacion explicita.
+- Credenciales GIO: guardar desde **Configuracion -> GIO**; el portal, usuario
+  y contraseña se cifran juntos en `config.enc`. La contraseña no se muestra
+  al recargar; dejar el campo vacio conserva la guardada y hay eliminacion
+  explicita.
+- **Probar conexion** realiza GET al portal y POST al `/login_check` observado,
+  con los campos publicados `_username`, `_password` e idioma. Solo acepta una
+  respuesta JSON de autenticacion exitosa. No sigue redirects del POST ni llama
+  a `sesionesweb/registrar`, y cierra la sesion HTTP al terminar. No valida las
+  pantallas/exportaciones autenticadas, el importador Odoo ni el correo. Guarda
+  estado y hora de comprobacion en el mismo `config.enc`; cambiar URL o
+  credenciales invalida ese resultado.
 - Hora configurable HH:MM en **Europe/Madrid**, destinatarios y permiso de correo.
-  Automatico y envios parten **desactivados**. No basta con guardar destinatarios
-  para enviar. Un correo solicitado queda pendiente mientras los envios esten
-  deshabilitados: revisar la cola antes de habilitarlos.
+  Los controles de automatizacion y correo permanecen bloqueados en esta fase,
+  incluso tras una comprobacion de acceso correcta. Los envios reales parten
+  **desactivados**; no basta con guardar destinatarios. Una solicitud de correo
+  queda pendiente mientras los envios esten deshabilitados.
 - Programacion: **worker `kering_jobs.py` existente**, no n8n, cron nuevo,
   servicio nuevo ni hilo ligado a Streamlit. Se incorpora un tick GIO antes del
   tick Kering; un fallo GIO se registra de forma saneada y no impide Kering.
@@ -290,8 +301,9 @@ inofensivos y no se purgan automaticamente.
 
 ### Activacion (fuera de esta PR)
 
-1. Resolver descarga autenticada y evidencia por los tres centros; despues
-   habilitar la puerta del automatico con pruebas.
+1. La comprobacion de acceso de Configuracion solo prueba las credenciales.
+   Resolver la descarga autenticada y obtener evidencia por los tres centros;
+   no habilitar automatizacion ni envios solo por el login.
 2. Acordar operaciones/conceptos y resolver exportaciones irregulares y el
    descuadre de 16,42 con GIO/contabilidad, sin ajustar cifras.
 3. Validar el importador en una copia autorizada de Odoo y registrar evidencia.

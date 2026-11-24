@@ -1,4 +1,4 @@
-"""Admin-only GIO configuration, durable requests and local artifact history."""
+"""Admin-only GIO configuration and operational history."""
 from datetime import datetime, time, timezone
 import json
 import sqlite3
@@ -8,8 +8,11 @@ from filelock import Timeout
 import streamlit as st
 
 from cloud_design import page_title
-from gio_cloud import CENTRES, STATES, GioConfigStore, GioStore, current_result, data_root
-from gio_reports import previous_day
+from gio_cloud import (
+    CENTRES, STATES, GioConfigStore, GioConnectionError, GioStore,
+    check_gio_connection, current_result, data_root,
+)
+from gio_reports import MADRID, previous_day
 
 
 def render():
@@ -19,63 +22,180 @@ def render():
     page_title("GIO", "Ventas diarias por centro e importacion manual en Odoo")
     try:
         store = GioStore(data_root())
-        config_store = GioConfigStore(data_root())
-        config = config_store.load()
-        settings, manual, history = st.tabs(["Configuracion", "Ejecucion manual", "Historico"])
-        with settings:
-            render_settings(config_store, config)
-        with manual:
-            render_manual(store)
-        with history:
-            render_history(store, config)
+        config = GioConfigStore(data_root()).load()
+        render_manual(store)
+        st.divider()
+        render_history(store, config)
     except (OSError, sqlite3.Error, InvalidToken):
         st.error("No se puede leer GIO. Revise permisos de almacenamiento y la clave de cifrado del servidor.")
     except ValueError as exc:
         st.error(str(exc))
 
 
-def render_settings(config_store, config):
-    st.warning("Descarga autenticada pendiente. Automatico bloqueado; envios desactivados de fabrica.")
-    st.caption("Las claves se cifran con el mecanismo de proveedores de Cloud. No se muestran las credenciales guardadas.")
-    with st.form("gio_settings"):
-        enabled = st.toggle("Activar automatizacion diaria", value=config["enabled"], disabled=True)
-        daily = st.time_input("Hora diaria (Europe/Madrid)", value=time.fromisoformat(config["daily_time"]))
-        recipients = st.text_input("Destinatarios (separados por punto y coma)", "; ".join(config["recipients"]))
-        send_enabled = st.toggle("Permitir envios reales solicitados explicitamente", value=config["send_enabled"])
-        username = st.text_input("Usuario GIO (dejar vacio para conservar)")
-        password = st.text_input("Contrasena GIO (dejar vacio para conservar)", type="password")
-        clear = st.checkbox("Eliminar credenciales GIO guardadas")
-        st.subheader("Contrato de importacion Odoo")
-        st.caption("IDs de base de datos, NO nombres ni codigos. No se escribe en Odoo. "
-                   "La evidencia debe acreditar la agrupacion de las cinco lineas en un asiento.")
-        mapping = {"company": int(st.number_input("ID sociedad Odoo", min_value=0,
-                                                  value=config["mapping"]["company"])),
-                   "journals": {}, "accounts": {}}
-        for centre, (name, journal, _) in CENTRES.items():
-            mapping["journals"][centre] = int(st.number_input(
-                f"ID diario {name} ({journal})", min_value=0, value=config["mapping"]["journals"][centre]))
-        for code, value in config["mapping"]["accounts"].items():
-            mapping["accounts"][code] = int(st.number_input(f"ID cuenta {code}", min_value=0, value=value))
-        odoo_evidence = st.text_area("Evidencia de validacion de importacion Odoo (version, sociedad, campos y agrupacion)",
-                                     config["odoo_import_evidence"])
-        approved = st.checkbox("Operaciones y referencias aprobadas por contabilidad", value=config["operations_approved"])
-        business = st.text_area("Referencia de aprobacion contable", config["business_evidence"])
-        save = st.form_submit_button("Guardar GIO", icon=":material/save:")
-    if save:
+def render_settings():
+    st.subheader("GIO")
+    st.caption("Configuración protegida con el almacén cifrado existente de proveedores.")
+    try:
+        config_store = GioConfigStore(data_root())
+        config = config_store.load()
+    except (OSError, InvalidToken, ValueError) as exc:
+        st.error(f"No se puede leer la configuración GIO: {exc}")
+        return
+
+    def save_configuration():
+        clear_credentials = st.session_state["gio_clear_credentials"]
+        mapping = {
+            "company": int(st.session_state["gio_odoo_company"]),
+            "journals": {centre: int(st.session_state[f"gio_odoo_journal_{centre}"]) for centre in CENTRES},
+            "accounts": {
+                code: int(st.session_state[f"gio_odoo_account_{code}"])
+                for code in config["mapping"]["accounts"]
+            },
+        }
+        updated = {
+            **config,
+            "portal_url": st.session_state["gio_portal_url"].strip(),
+            "username": "" if clear_credentials else st.session_state["gio_username"].strip(),
+            "password": "" if clear_credentials else st.session_state["gio_password"] or config["password"],
+            "daily_time": st.session_state["gio_daily_time"].strftime("%H:%M"),
+            "recipients": [
+                value.strip() for value in st.session_state["gio_recipients"].split(";") if value.strip()
+            ],
+            "enabled": False,
+            "send_enabled": False,
+            "mapping": mapping,
+            "odoo_import_evidence": st.session_state["gio_odoo_evidence"].strip(),
+            "operations_approved": st.session_state["gio_business_approved"],
+            "business_evidence": st.session_state["gio_business_evidence"].strip(),
+        }
+        credentials_changed = any(
+            updated[key] != config[key] for key in ("portal_url", "username", "password")
+        )
+        if credentials_changed:
+            updated["last_connection_status"] = "not_checked"
+            updated["last_connection_check"] = ""
         try:
-            config_store.save_for_user({
-                **config, "enabled": enabled, "daily_time": daily.strftime("%H:%M"),
-                "recipients": [value.strip() for value in recipients.split(";") if value.strip()],
-                "send_enabled": send_enabled, "mapping": mapping, "odoo_import_evidence": odoo_evidence.strip(),
-                "operations_approved": approved, "business_evidence": business.strip(),
-                "username": "" if clear else username.strip() or config["username"],
-                "password": "" if clear else password or config["password"],
-            }, role=st.session_state.get("auth_role"))
-            st.success("Configuracion cifrada guardada. No se ha conectado al portal ni enviado correo.")
+            config_store.save_for_user(updated, role=st.session_state.get("auth_role"))
         except (ValueError, PermissionError) as exc:
-            st.error(str(exc))
-        except (OSError, InvalidToken):
-            st.error("No se pudo guardar. Revise la clave de cifrado y los permisos.")
+            st.session_state["gio_settings_message"] = ("error", str(exc))
+        except (OSError, InvalidToken) as exc:
+            st.session_state["gio_settings_message"] = (
+                "error", f"No se pudo guardar la configuración cifrada de GIO: {exc}",
+            )
+        else:
+            st.session_state["gio_settings_message"] = (
+                "success", "Configuración GIO guardada de forma cifrada. Automatización y envíos siguen desactivados.",
+            )
+        st.session_state["gio_password"] = ""
+        st.session_state["gio_clear_credentials"] = False
+
+    with st.form("gio_settings", clear_on_submit=True):
+        st.text_input("URL del portal GIO", value=config["portal_url"], key="gio_portal_url")
+        st.text_input("Usuario GIO", value=config["username"], key="gio_username")
+        st.text_input(
+            "Contraseña GIO", type="password", placeholder="Vacía conserva la contraseña guardada",
+            key="gio_password",
+        )
+        st.checkbox("Eliminar credenciales GIO guardadas", key="gio_clear_credentials")
+        st.time_input(
+            "Hora de ejecución diaria (Europe/Madrid)",
+            value=time.fromisoformat(config["daily_time"]),
+            key="gio_daily_time",
+        )
+        st.text_input(
+            "Destinatarios del correo (separados por punto y coma)",
+            value="; ".join(config["recipients"]),
+            key="gio_recipients",
+        )
+        st.toggle(
+            "Activar automatización diaria",
+            value=False,
+            disabled=True,
+            key="gio_automation_enabled",
+            help="Bloqueado hasta validar la descarga autenticada, el CSV, Odoo y la operación completa.",
+        )
+        st.toggle(
+            "Permitir envíos de correo",
+            value=False,
+            disabled=True,
+            key="gio_mail_enabled",
+            help="Los envíos reales permanecerán desactivados hasta completar y autorizar su validación.",
+        )
+        st.subheader("Configuración contable de Odoo")
+        st.caption("IDs técnicos de base de datos; no se escribe en Odoo.")
+        st.number_input("ID sociedad Odoo", min_value=0, value=config["mapping"]["company"], key="gio_odoo_company")
+        for centre, (name, journal, _) in CENTRES.items():
+            st.number_input(
+                f"ID diario {name} ({journal})", min_value=0,
+                value=config["mapping"]["journals"][centre], key=f"gio_odoo_journal_{centre}",
+            )
+        for code, value in config["mapping"]["accounts"].items():
+            st.number_input(
+                f"ID cuenta {code}", min_value=0, value=value, key=f"gio_odoo_account_{code}",
+            )
+        st.text_area(
+            "Evidencia de validación del importador Odoo (versión, sociedad, campos y agrupación)",
+            config["odoo_import_evidence"],
+            key="gio_odoo_evidence",
+        )
+        st.checkbox(
+            "Operaciones y referencias aprobadas por contabilidad",
+            value=config["operations_approved"],
+            key="gio_business_approved",
+        )
+        st.text_area(
+            "Referencia de aprobación contable", config["business_evidence"], key="gio_business_evidence",
+        )
+        st.form_submit_button("Guardar configuración", type="primary", on_click=save_configuration)
+
+    save_message = st.session_state.pop("gio_settings_message", None)
+    if save_message:
+        level, message = save_message
+        st.success(message) if level == "success" else st.error(message)
+
+    status_text = {
+        "ok": "Correcta: credenciales aceptadas",
+        "failed": "Fallida: revisar credenciales o acceso",
+        "not_checked": "Sin comprobar",
+    }.get(config["last_connection_status"], "Sin comprobar")
+    checked_at = config["last_connection_check"]
+    if checked_at:
+        checked = datetime.fromisoformat(checked_at).astimezone(MADRID).strftime("%d/%m/%Y %H:%M")
+        checked_text = f"{checked} Europe/Madrid"
+    else:
+        checked_text = "Nunca"
+    st.caption(f"Última comprobación: {status_text} · {checked_text}")
+    st.caption(
+        "La prueba usa la configuración guardada. Valida el acceso, no registra una sesión operativa "
+        "ni prueba las descargas."
+    )
+    if st.button(
+        "Probar conexión",
+        key="gio_test_connection",
+        disabled=not config["username"] or not config["password"],
+    ):
+        try:
+            with st.spinner("Comprobando acceso a GIO..."):
+                check_gio_connection(config)
+        except (GioConnectionError, ValueError) as exc:
+            config["last_connection_status"] = "failed"
+            message = str(exc)
+            success = False
+        else:
+            config["last_connection_status"] = "ok"
+            message = "Credenciales aceptadas. No se registró una sesión GIO operativa."
+            success = True
+        config["last_connection_check"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        try:
+            config_store.save_for_user(config, role=st.session_state.get("auth_role"))
+        except (OSError, InvalidToken, ValueError, PermissionError) as exc:
+            st.error(f"No se pudo guardar el resultado de la comprobación: {exc}")
+        else:
+            if success:
+                st.success(message)
+            else:
+                st.error(message)
+            st.rerun()
 
 
 def identity():

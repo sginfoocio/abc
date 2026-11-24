@@ -16,8 +16,8 @@ RULES = {
          "tests/test_release_versioning.py", "tests/test_dockerfile_provider_modules.py"),
     ),
     "gio": (
-        ("gio_cloud.py", "gio_reports.py", "app_pages/gio.py"),
-        ("tests/test_gio.py",),
+        ("gio_cloud.py", "gio_reports.py", "app_pages/gio.py", "app_enhanced.py"),
+        ("tests/test_gio.py", "tests/test_app_navigation.py"),
     ),
     "images": (
         ("app_pages/*image*.py", "app_pages/provider*.py", "image*.py", "repository*.py", "bulk_image*.py",
