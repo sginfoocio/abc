@@ -40,6 +40,26 @@ precio con el sistema existente (`import_offers`, histórico, gráficos). Códig
 - **Sin stock** o precio caducado: se muestran, no comparan, y no se recupera un precio antiguo.
 - **Bloqueo** (401/403/407/429/CAPTCHA): se detiene la ejecución, el competidor queda `blocked` y no se vuelve a consultar.
 
+### Cruce documental por identidad
+
+`price_url_candidates.documentary_route_records` separa fichas con EAN publicado
+y referencia explícita, candidatas de variante, fuentes generales y ejemplos
+ajenos. El EAN heredado de un objeto, el competidor o el archivo no acreditan la
+asociación de sus URLs: las listas de ejemplos no se multiplican por todos los
+EAN. Las categorías, sitemaps y redirecciones documentadas al catálogo conservan
+su procedencia, pero no son fichas localizadas. Las hipótesis del slug nunca
+acreditan identidad observada, aprobación, mercado, stock ni oferta.
+El HTML se lee por filas, no por líneas: una tabla minificada puede contener
+los 600 pares en una sola línea. Las filas sin un EAN único y los enlaces
+generales quedan sin asignación a un producto; nunca forman un producto cartesiano.
+
+Los informes deben conservar esas categorías por separado. `route_localized`
+solo corresponde a una ficha vinculada por identidad, no a la existencia de una
+fuente general o una candidata. El índice operativo 11x14 se valida por EAN,
+competidor y referencia completa; no consume el cruce documental del informe.
+La regresión del par 90 conserva las candidatas RB2140 90158 y excluye de ellas
+BV1274S y FT1026 sin borrar las fuentes originales.
+
 ## Estados de un conector
 
 `implementado` (código y configuración) → `verificado` (al menos una oferta real, exacta y comparable) →
