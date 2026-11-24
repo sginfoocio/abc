@@ -143,11 +143,11 @@ def _authorized_database_grant(grant: str) -> bool:
     privileges, scope = match.groups()
     if privileges == "USAGE" and scope == "*.*":
         return True
-    scope = scope.replace("\\\\", "\\").replace("\\_", "_")
+    scope = scope.replace("\\\\", "\\")
     allowed = {"SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "REFERENCES", "INDEX",
                "ALTER", "CREATE TEMPORARY TABLES", "LOCK TABLES", "EXECUTE", "CREATE VIEW",
                "SHOW VIEW", "CREATE ROUTINE", "ALTER ROUTINE", "EVENT", "TRIGGER"}
-    return scope == "`ps_vytria`.*" and set(privileges.split(", ")) <= allowed
+    return scope == r"`ps\_vytria`.*" and set(privileges.split(", ")) <= allowed
 
 
 def _connection_security(cur, config: dict, cipher: str, authorization: dict | None) -> dict:

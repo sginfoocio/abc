@@ -88,6 +88,8 @@ territorial/compuesto, ecotasa y configuraciones o módulos no soportados.
    Se contrasta además `CURRENT_USER()` y `DATABASE()` en la sesión real.
    La excepción no acepta grants sobre otras bases, permisos globales distintos
    de `USAGE`, roles, permisos delegables ni privilegios fuera de los previstos.
+   Exige el ámbito literal `ps_vytria` (guion bajo escapado en los grants
+   MariaDB), no una concesión con comodines de nombre de base.
    El lector mantiene TLS obligatorio, transacciones `READ ONLY`, consultas
    de precio `SELECT` parametrizadas y rollback; no ejecuta DML, DDL ni rutinas.
    En la conexión MariaDB autorizada comprueba también `@@tx_read_only=1`

@@ -146,8 +146,8 @@ def test_broad_account_authorization_cannot_move_to_another_connection(monkeypat
     ("GRANT price_role TO reader", ("ps_user_vytria_lect@origin", "ps_vytria")),
     ("GRANT SELECT ON `ps_vytria`.* TO reader WITH GRANT OPTION",
      ("ps_user_vytria_lect@origin", "ps_vytria")),
-    ("GRANT SELECT, INSERT ON `ps_vytria`.* TO reader", ("another@origin", "ps_vytria")),
-    ("GRANT SELECT, INSERT ON `ps_vytria`.* TO reader", ("ps_user_vytria_lect@origin", "another")),
+    (r"GRANT SELECT, INSERT ON `ps\_vytria`.* TO reader", ("another@origin", "ps_vytria")),
+    (r"GRANT SELECT, INSERT ON `ps\_vytria`.* TO reader", ("ps_user_vytria_lect@origin", "another")),
 ])
 def test_broad_authorization_preserves_scope_and_actual_session_checks(monkeypatch, grant, identity):
     authorized_account(monkeypatch)
@@ -177,6 +177,10 @@ def test_missing_explicit_broad_authorization_and_out_of_scope_eans_fail_closed(
     connect.assert_not_called()
 
 
+def test_broad_authorization_rejects_database_wildcard_grants():
+    assert not ps._authorized_database_grant("GRANT SELECT, INSERT ON `ps_vytria`.* TO reader")
+
+
 @pytest.mark.parametrize(("cipher", "read_only", "reason"), [
     ("", 1, "TLS activo"), ("AES", 0, "READ ONLY"),
 ])
@@ -187,7 +191,7 @@ def test_broad_authorization_does_not_bypass_tls_or_readonly(monkeypatch, cipher
     cur.fetchone.side_effect = [
         ("Ssl_cipher", cipher), ("ps_user_vytria_lect@origin", "ps_vytria"), (read_only,),
     ]
-    cur.fetchall.return_value = [("GRANT SELECT, INSERT ON `ps_vytria`.* TO reader",)]
+    cur.fetchall.return_value = [(r"GRANT SELECT, INSERT ON `ps\_vytria`.* TO reader",)]
     monkeypatch.setattr(pymysql, "connect", lambda **kwargs: con)
     read_batch = MagicMock()
     monkeypatch.setattr(ps, "read_batch", read_batch)
