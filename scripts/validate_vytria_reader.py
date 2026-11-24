@@ -75,11 +75,21 @@ path = os.getenv("PRICE_COMPARATOR_DB_PATH", "/app/data/price_comparator.sqlite3
 with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as con:
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA query_only=ON")
+    con.execute("BEGIN")
     active = {row[0] for row in con.execute("SELECT ean FROM watch_products WHERE active=1")}
     if active != set(eans):
         raise RuntimeError("El alcance activo no coincide con los 100 EAN")
     marks = ",".join("?" for _ in eans)
-    snapshot = {}
+    snapshot = {
+        "watch_groups": [dict(row) for row in con.execute(
+            f"SELECT * FROM watch_groups WHERE name IN "
+            f"(SELECT group_name FROM watch_products WHERE ean IN ({marks}) UNION "
+            f"SELECT r.group_name FROM watch_rules r JOIN watch_products w ON w.rule_id=r.id "
+            f"WHERE w.ean IN ({marks}))", [*eans, *eans])],
+        "watch_rules": [dict(row) for row in con.execute(
+            f"SELECT * FROM watch_rules WHERE id IN "
+            f"(SELECT rule_id FROM watch_products WHERE ean IN ({marks}))", eans)],
+    }
     for table in ("products", "watch_products", "vytria_prices"):
         snapshot[table] = [dict(row) for row in con.execute(
             f"SELECT * FROM {table} WHERE ean IN ({marks})", eans)]
@@ -88,9 +98,16 @@ with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as con:
 
 
 PILOT = r"""
-import json, os, sqlite3, sys
+import json, os, sqlite3, sys, traceback
 from datetime import datetime, timezone
 from pathlib import Path
+
+def unexpected_error(kind, value, trace):
+    print(json.dumps({"status": "blocked", "stage": "unexpected_exception", "error_type": kind.__name__,
+                      "frames": [{"file": os.path.basename(frame.filename), "line": frame.lineno,
+                                  "function": frame.name} for frame in traceback.extract_tb(trace)]}))
+
+sys.excepthook = unexpected_error
 payload = json.load(sys.stdin)
 os.environ.update(payload["environment"])
 import prestashop_prices as ps
@@ -98,7 +115,7 @@ from price_comparator import PriceComparatorStore
 
 store = PriceComparatorStore(Path("/pilot/prices.sqlite3"))
 with store._connect() as con, con:
-    for table in ("products", "watch_products", "vytria_prices"):
+    for table in ("watch_groups", "watch_rules", "products", "watch_products", "vytria_prices"):
         rows = payload["snapshot"][table]
         if not rows:
             continue

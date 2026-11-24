@@ -186,7 +186,11 @@ La excepción y la activación se aplican **sólo dentro del proceso del piloto*
 
 Se toma mediante `SELECT` una muestra de los productos vigilados y sus
 referencias Odoo persistidas; no se consulta Odoo ni se monta la base productiva
-como destino de escritura. Se prueba primero `8056597435581` y, sólo si pasa,
+como destino de escritura. La instantánea coherente incluye únicamente los
+grupos y reglas referenciados por esa vigilancia, copiados antes que sus hijos
+para conservar las claves foráneas. No se ejecutan reglas ni monitores.
+Los errores inesperados devuelven tipo y ubicación de código, sin mensajes
+del driver, variables locales ni secretos. Se prueba primero `8056597435581` y, sólo si pasa,
 el caso adicional `8056597684446` (7861/8425, ya incluido en el manifiesto)
 y los otros 98 en lotes de hasta 25. No vuelve a leer los dos primeros.
 Los resultados y el informe quedan en una

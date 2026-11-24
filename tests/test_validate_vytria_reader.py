@@ -1,8 +1,14 @@
+import io
 import json
 import sys
 from unittest.mock import MagicMock
 
 import pytest
+import pandas as pd
+
+from price_comparator import PriceComparatorStore
+from price_watch import PriceWatch
+import prestashop_prices as ps
 
 from scripts import validate_vytria_reader as pilot
 
@@ -43,6 +49,47 @@ def test_native_pilot_preserves_php_guard_and_requires_explicit_confirmation():
     assert original["services"]["abcd-app"]["environment"]["PRESTASHOP_PRICE_ENABLED"] == "0"
     with pytest.raises(pilot.PilotError, match="CODE_AUDITED"):
         pilot.pilot_environment(original, "reviewer", "approved-test")
+
+
+@pytest.mark.parametrize("with_rule", [False, True])
+def test_pilot_copies_watch_foreign_keys_before_any_mysql_read(tmp_path, monkeypatch, capsys, with_rule):
+    source = PriceComparatorStore(tmp_path / "source.sqlite3")
+    eans = sorted(ps.manifest_eans())
+    source.import_products(pd.DataFrame([{"EAN": ean, "MARCA": "Fixture", "MODELO": "Test", "COLOR": "Test"}
+                                        for ean in eans]))
+    watch = PriceWatch(source)
+    watch.save_group("selected", 24)
+    if with_rule:
+        watch.save_group("rule-origin", 48)
+        rule_id = watch.save_rule("fixture", actor="test", group="rule-origin", brand="Fixture")
+        watch.add(eans, actor="test", group="selected", source="rule", rule_id=rule_id)
+    else:
+        watch.add(eans, actor="test", group="selected")
+    monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(source.database_path))
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(eans)))
+    exec(compile(pilot.SNAPSHOT, "readonly-snapshot", "exec"), {})
+    snapshot = json.loads(capsys.readouterr().out)
+    assert {row["name"] for row in snapshot["watch_groups"]} == (
+        {"selected", "rule-origin"} if with_rule else {"selected"})
+    destination = tmp_path / "pilot.sqlite3"
+    prefix = pilot.PILOT.split("\neans = sorted", 1)[0]
+    prefix = prefix.replace('Path("/pilot/prices.sqlite3")', repr(str(destination)))
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({"environment": {}, "snapshot": snapshot})))
+    monkeypatch.setattr(sys, "excepthook", sys.excepthook)
+    namespace = {}
+    exec(compile(prefix, "isolated-pilot-setup", "exec"), namespace)
+    with namespace["store"]._connect() as con:
+        assert con.execute("SELECT COUNT(*) FROM watch_products WHERE active=1").fetchone()[0] == 100
+        assert not con.execute("PRAGMA foreign_key_check").fetchall()
+        assert con.execute("SELECT COUNT(*) FROM prestashop_prices").fetchone()[0] == 0
+    try:
+        raise RuntimeError("fixture-private-secret")
+    except RuntimeError as error:
+        namespace["unexpected_error"](type(error), error, error.__traceback__)
+    output = capsys.readouterr().out
+    report = json.loads(output)
+    assert report["status"] == "blocked" and report["error_type"] == "RuntimeError" and report["frames"]
+    assert "fixture-private-secret" not in output
 
 
 @pytest.mark.parametrize("changes", [
