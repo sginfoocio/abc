@@ -81,6 +81,7 @@ def test_production_deploy_is_only_triggered_by_a_successful_push_run_on_main():
         "test_provider_images_ui.py", "test_provider_order_panel.py",
         "test_provider_order_policy.py", "test_provider_odoo_orders.py",
     }, set()),
+    (["auth_cookie_component/index.html"], {"test_auth_session.py", "test_auth_browser.py"}, set()),
     (["provider_order_policy.py"], {
         "test_app_exports.py", "test_provider_odoo_orders.py",
         "test_provider_order_panel.py", "test_provider_order_policy.py",

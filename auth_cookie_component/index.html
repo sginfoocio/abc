@@ -1,0 +1,40 @@
+<!doctype html>
+<html><body><script>
+"use strict";
+let lastId = null;
+function send(type, data) {
+  window.parent.postMessage({isStreamlitMessage: true, type, ...data}, "*");
+}
+function readCookie(name) {
+  const prefix = encodeURIComponent(name) + "=";
+  for (const part of document.cookie.split("; ")) {
+    if (part.startsWith(prefix)) return decodeURIComponent(part.slice(prefix.length));
+  }
+  return null;
+}
+window.addEventListener("message", (event) => {
+  if (event.source !== window.parent || event.data.type !== "streamlit:render") return;
+  const {id, action, name, value, maxAge} = event.data.args;
+  if (id === lastId) return;
+  lastId = id;
+  let result;
+  try {
+    if (action === "get") {
+      result = {id, ok: true, value: readCookie(name)};
+    } else if (action === "set" || action === "remove") {
+      const age = action === "remove" ? 0 : maxAge;
+      const cookieValue = action === "remove" ? "" : value;
+      document.cookie = encodeURIComponent(name) + "=" + encodeURIComponent(cookieValue)
+        + "; Path=/; Max-Age=" + age + "; Secure; SameSite=Strict";
+      result = {id, ok: action === "remove" ? readCookie(name) === null : readCookie(name) === value};
+    } else {
+      result = {id, ok: false};
+    }
+  } catch (_error) {
+    result = {id, ok: false};
+  }
+  send("streamlit:setComponentValue", {value: result, dataType: "json"});
+});
+send("streamlit:componentReady", {apiVersion: 1});
+send("streamlit:setFrameHeight", {height: 0});
+</script></body></html>
