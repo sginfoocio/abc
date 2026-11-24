@@ -271,7 +271,7 @@ def test_general_download_is_shared_and_centres_process_independently(tmp_path):
     assert sender.call_count == 1
 
 
-def test_mail_preview_includes_general_original_candidate_and_incident_without_sending(tmp_path):
+def test_mail_preview_withholds_unreleased_candidate_and_includes_incident_without_sending(tmp_path):
     discrepancy = movement(OPERACION="FACTURA", BIMPONIBLE_10="100", CUOTA_10="10", TOTAL_10="110",
                            BIMPONIBLE_21="0", CUOTA_21="0", TOTAL_21="0", TOTAL="115")
     content = report(discrepancy, movement(TIENDA="1"))
@@ -285,20 +285,36 @@ def test_mail_preview_includes_general_original_candidate_and_incident_without_s
     w.tick(NOW)
 
     batch = w.store.batch(DAY.isoformat())
-    preview = cloud.prepare_mail_payload(w.store, batch, config, include_candidates=True)
+    preview = cloud.prepare_mail_payload(w.store, batch, config, include_preview_notice=True)
     names = [name for name, _ in preview["attachments"]]
     assert names.count(f"GIO-{DAY.isoformat()}-original-general.csv") == 1
-    assert names == [
-        f"GIO-{DAY.isoformat()}-original-general.csv",
-        f"GIO-{DAY.isoformat()}-1-odoo-candidato.csv",
-    ]
+    assert names == [f"GIO-{DAY.isoformat()}-original-general.csv"]
+    assert "CSV candidato no adjunto; importador Odoo no validado" in preview["body"]
     assert "FACTURA; descuadre_total (5.00)" in preview["body"]
     assert "CLIENTE SINTETICO" not in preview["body"]
     assert "Respuesta web rechazada" not in preview["body"]
-    assert "no se envia" in preview["body"]
+    assert "VISTA PREVIA: no se envia" in preview["body"]
     assert preview["terminal"] and not preview["complete"]
     assert sender.call_count == 0
     assert w.store.batch(DAY.isoformat())["mail_state"] == "pending"
+
+
+def test_mail_preview_includes_released_csv_with_general_original(tmp_path):
+    downloader, sender = Mock(), Mock()
+    downloader.fetch.return_value = report(movement(TIENDA="1"))
+    w = worker(tmp_path, downloader=downloader, sender=sender)
+    w.store.enqueue(DAY, list(cloud.CENTRES), **ACTOR)
+    w.tick(NOW)
+
+    batch = w.store.batch(DAY.isoformat())
+    preview = cloud.prepare_mail_payload(w.store, batch, settings())
+    attachment_names = [name for name, _ in preview["attachments"]]
+
+    assert attachment_names == [
+        f"GIO-{DAY.isoformat()}-original-general.csv",
+        f"GIO-{DAY.isoformat()}-1-odoo.csv",
+    ]
+    assert not sender.called
     generated = [json.loads(event["detail"]) for event in w.store.events(DAY.isoformat())
                  if event["stage"] == "generated"]
     assert generated and all("mapping" not in event and "business_evidence" not in event for event in generated)
@@ -912,9 +928,10 @@ def test_test_mail_requires_confirmation_uses_only_test_recipient_and_never_chan
     assert subject.startswith("[PRUEBA]")
     assert "Correo de prueba solicitado manualmente" in body
     assert "VISTA PREVIA: no se envia" not in body
-    assert "CSV candidato adjunto solo para revision" in body
+    assert body.count("CSV candidato no adjunto") == 2
     assert recipients == ["test@example.test"]
-    assert sender.call_args.kwargs["attachments"]
+    attachment_names = [name for name, _ in sender.call_args.kwargs["attachments"]]
+    assert attachment_names == [f"GIO-{DAY.isoformat()}-original-general.csv"]
     assert w.store.batch(DAY.isoformat())["mail_state"] == mail_state
     assert config["send_enabled"] is False
     assert w.store.test_mail_attempted(DAY.isoformat())
@@ -1016,7 +1033,7 @@ render_history(GioStore(data_root()), GioConfigStore(data_root()).load())
 """).run()
     assert not app.exception and not sender.called
     app.button(key=f"gio_prepare_mail_preview_{DAY.isoformat()}").click().run()
-    assert not app.exception and len(app.get("download_button")) == 2
+    assert not app.exception and len(app.get("download_button")) == 1
     test_button = app.button(key=f"gio_test_mail_submit_{DAY.isoformat()}")
     assert not test_button.disabled
     assert app.checkbox(key=f"gio_test_mail_confirm_{DAY.isoformat()}").value is False

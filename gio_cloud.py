@@ -510,8 +510,7 @@ def current_result(job: dict, config: dict) -> bool:
 
 
 def prepare_mail_payload(store: GioStore, batch: dict, config: dict, *,
-                         include_candidates=False, require_terminal=False,
-                         include_preview_notice=True) -> dict:
+                         require_terminal=False, include_preview_notice=False) -> dict:
     day = batch["day"]
     with store.connect() as conn:
         jobs = [dict(row) for row in conn.execute("SELECT * FROM centres WHERE day=? ORDER BY centre", (day,))]
@@ -545,11 +544,9 @@ def prepare_mail_payload(store: GioStore, batch: dict, config: dict, *,
             attachments.append((f"GIO-{day}-{centre}-original.csv", store.blob(job["original"])))
         if current_result(job, config):
             attachments.append((f"GIO-{day}-{centre}-odoo.csv", store.blob(job["result"])))
-        elif (include_candidates and state == "candidate" and job["result"]
-              and summary.get("contract") == contract_digest(config)):
-            attachments.append((f"GIO-{day}-{centre}-odoo-candidato.csv", store.blob(job["result"])))
+        elif state == "candidate" and job["result"]:
             statuses.append(
-                f"{CENTRES[centre][0]}: CSV candidato adjunto solo para revision; importador Odoo no validado.")
+                f"{CENTRES[centre][0]}: CSV candidato no adjunto; importador Odoo no validado.")
         elif state == "ready":
             complete = False
             statuses.append("CSV retenido: aprobaciones de configuracion retiradas")
@@ -560,8 +557,11 @@ def prepare_mail_payload(store: GioStore, batch: dict, config: dict, *,
     subject = f"GIO {day} - {label} - envio {batch['generation']}"
     body = "<p>" + "</p><p>".join(escape(value) for value in statuses) + "</p>"
     body += "<p>Aceptacion por Graph no acredita entrega. CSV solo para importacion manual, nunca publicados en Odoo.</p>"
-    if include_candidates and include_preview_notice:
-        body += "<p>VISTA PREVIA: no se envia. Los CSV candidatos no deben importarse hasta validar el importador.</p>"
+    if include_preview_notice:
+        body += (
+            "<p>VISTA PREVIA: no se envia. Los CSV candidatos no se adjuntan ni deben importarse "
+            "hasta validar el importador.</p>"
+        )
     return {
         "subject": subject,
         "body": body,
@@ -646,8 +646,7 @@ def send_test_mail(store: GioStore, batch: dict, config: dict, *, confirmed: boo
         if store.test_mail_attempted(day):
             raise ValueError("Ya existe un intento de prueba para esta fecha; revise Elementos enviados antes de repetir")
         payload = prepare_mail_payload(
-            store, batch, config, include_candidates=True, require_terminal=True,
-            include_preview_notice=False,
+            store, batch, config, require_terminal=True,
         )
         if not payload.get("terminal"):
             raise ValueError("Espere a que terminen los centros registrados antes de enviar la prueba")

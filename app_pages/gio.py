@@ -293,7 +293,7 @@ def render_history(store, config):
         if st.session_state.get(preview_key):
             batch = store.batch(row["day"])
             if batch:
-                preview = prepare_mail_payload(store, batch, config, include_candidates=True)
+                preview = prepare_mail_payload(store, batch, config, include_preview_notice=True)
                 st.write(
                     "Destinatarios diarios:",
                     "; ".join(preview["recipients"]) or "No configurados",

@@ -220,10 +220,12 @@ Un identificador externo repetido puede actualizar un asiento al reimportarlo:
 - Actualizar el historico para ver estado, incidencias, intentos, originales,
   candidatos/resultados y eventos con actor. Los originales no se muestran
   como tablas con clientes. Cada version se puede descargar como admin.
-- La vista previa muestra destinatarios, asunto, estados e incidencias, y
-  permite descargar el original general y candidatos compatibles para revision.
-  Es local y no llama al remitente; el boton no crea una generacion de envio.
-  Los descuadres se muestran por fila y tipo de operacion, sin datos de cliente.
+- La vista previa muestra destinatarios, asunto, estados, incidencias y
+  adjuntos liberados: el original general y los CSV que cumplen el contrato
+  actual. Los candidatos no se adjuntan; se descargan desde el historico para
+  revision. La vista previa es local y no llama al remitente ni crea una
+  generacion de envio. Los descuadres se muestran por fila y tipo de operacion,
+  sin datos de cliente.
 - El envio de prueba es una accion separada de la cola diaria. Requiere un
   destinatario de prueba guardado, centros terminados, adjuntos disponibles y
   una confirmacion en la interfaz. Usa solo ese destinatario, no modifica el
