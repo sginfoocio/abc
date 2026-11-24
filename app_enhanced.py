@@ -7,6 +7,7 @@ from datetime import date, datetime, timedelta
 import hmac
 import json
 import os
+import secrets
 import time
 
 import numpy as np
@@ -15,7 +16,7 @@ import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 from sqlalchemy import create_engine, text, URL
-from streamlit_cookies_controller import CookieController
+import streamlit.components.v1 as components
 
 from db_loader import load_odoo_dataframe
 from adyen_reconciliation_ui import render_reconciliation_page
@@ -107,6 +108,9 @@ AUTH_COOKIE_SECRET_ENV = "AUTH_COOKIE_SECRET"
 AUTH_REMEMBER_DAYS_ENV = "AUTH_REMEMBER_DAYS"
 AUTH_REMEMBER_DAYS_DEFAULT = 30
 AUTH_COOKIE_NAME = "abc_auth_session"
+_auth_cookie_component = components.declare_component(
+    "abc_auth_cookie", path=str(Path(__file__).resolve().parent / "auth_cookie_component")
+)
 AUTH_PASSWORD_ENV = "APP_PASSWORD"
 AUTH_STATE_PATH_ENV = "AUTH_STATE_PATH"
 AUTH_STATE_DATABASE_URL_ENV = "AUTH_STATE_DATABASE_URL"
@@ -542,18 +546,34 @@ def _verify_auth_token(
     return bool(claims and not _get_auth_state_store().is_revoked(claims.session_id))
 
 
-def _get_cookie_controller() -> CookieController:
-    if "_cookie_controller" not in st.session_state:
-        st.session_state["_cookie_controller"] = CookieController()
-    return st.session_state["_cookie_controller"]
+def _queue_auth_cookie(action: str, value: str = "", max_age: int = 0) -> None:
+    st.session_state["_auth_cookie_command"] = {
+        "id": secrets.token_hex(16),
+        "action": action,
+        "name": AUTH_COOKIE_NAME,
+        "value": value,
+        "maxAge": max_age,
+    }
 
 
-def _remove_auth_cookie() -> None:
-    try:
-        _get_cookie_controller().remove(AUTH_COOKIE_NAME, secure=True)
-    except KeyError as exc:
-        if exc.args != (AUTH_COOKIE_NAME,):
-            raise
+def _read_auth_cookie() -> str | None:
+    command = st.session_state.get("_auth_cookie_command") or {
+        "id": "read",
+        "action": "get",
+        "name": AUTH_COOKIE_NAME,
+    }
+    result = _auth_cookie_component(**command, key="auth_cookie", default=None)
+    if not isinstance(result, dict) or result.get("id") != command["id"]:
+        st.info("Comprobando la sesión...")
+        st.stop()
+    if result.get("ok") is not True:
+        st.error("No se pudo acceder a la cookie de sesión segura. Comprueba HTTPS y la configuración del navegador.")
+        st.stop()
+    if command["action"] != "get":
+        st.session_state.pop("_auth_cookie_command", None)
+        return None
+    value = result.get("value")
+    return value if isinstance(value, str) else None
 
 
 def _render_login() -> None:
@@ -618,7 +638,7 @@ def _render_login() -> None:
                 user_config["password"],
             )
             st.session_state["auth_credential_fingerprint"] = signing_key
-            existing_token = _get_cookie_controller().get(AUTH_COOKIE_NAME)
+            existing_token = st.session_state.get("_auth_cookie_value")
             existing_claims = (
                 verify_auth_token(existing_token, username, signing_key)
                 if existing_token
@@ -640,14 +660,9 @@ def _render_login() -> None:
                 assert claims is not None
                 st.session_state["auth_session_id"] = claims.session_id
                 st.session_state["auth_session_expires_at"] = claims.expires_at
-                _get_cookie_controller().set(
-                    AUTH_COOKIE_NAME,
-                    token,
-                    max_age=remember_days * 86400,
-                    secure=True,
-                )
+                _queue_auth_cookie("set", token, remember_days * 86400)
             else:
-                _remove_auth_cookie()
+                _queue_auth_cookie("remove")
             st.rerun()
         st.error("Usuario o contraseña incorrectos")
 
@@ -656,6 +671,8 @@ def _render_login() -> None:
 
 def require_authentication() -> None:
     """Bloquea la app hasta que el usuario se autentique (incluye sesión recordada por cookie)."""
+    token = _read_auth_cookie()
+    st.session_state["_auth_cookie_value"] = token
     users = _get_auth_users()
     if st.session_state.get("authenticated", False):
         expected_user = st.session_state.get("auth_user", "")
@@ -686,10 +703,10 @@ def require_authentication() -> None:
         st.session_state.pop("auth_session_id", None)
         st.session_state.pop("auth_session_expires_at", None)
         st.session_state.pop("auth_credential_fingerprint", None)
-        _remove_auth_cookie()
+        _queue_auth_cookie("remove")
+        st.rerun()
 
     if users:
-        token = _get_cookie_controller().get(AUTH_COOKIE_NAME)
         secret = _get_auth_cookie_secret()
         for expected_user, user_config in users.items():
             if token and len(secret) >= AUTH_COOKIE_SECRET_MIN_LENGTH and _verify_auth_token(
@@ -803,7 +820,8 @@ def render_sidebar_shell(section_name: str) -> None:
             st.session_state.pop("auth_role", None)
             st.session_state.pop("auth_session_id", None)
             st.session_state.pop("auth_session_expires_at", None)
-            _remove_auth_cookie()
+            st.session_state.pop("_auth_cookie_value", None)
+            _queue_auth_cookie("remove")
             st.rerun()
         st.divider()
         st.markdown("### Información")

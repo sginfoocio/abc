@@ -91,6 +91,7 @@ COPY db_loader.py .
 COPY engine.py .
 COPY abcd_snapshots.py .
 COPY auth_session.py .
+COPY auth_cookie_component ./auth_cookie_component
 COPY db_config.py .
 COPY transform_luxottica_masterdata.py .
 COPY validate_masterdata_odoo_dryrun.py .

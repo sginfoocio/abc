@@ -132,10 +132,13 @@ SCOPED_DEPENDENCY_TESTS = {
     "scripts/validate_vytria_reader.py": ("tests/test_validate_vytria_reader.py",),
     "tests/test_validate_vytria_reader.py": ("tests/test_validate_vytria_reader.py",),
     "pytest.ini": ("tests/test_ci_stacked_prs.py", "tests/test_price_monitor.py"),
+    "auth_cookie_component/index.html": ("tests/test_auth_session.py", "tests/test_auth_browser.py"),
+    "tests/fixtures/auth_browser_harness.py": ("tests/test_auth_browser.py",),
     "backup_odoo_tables.py": ("tests/test_engine.py",),
     "app_enhanced.py": (
         "tests/test_app_exports.py",
         "tests/test_auth_session.py",
+        "tests/test_auth_browser.py",
         "tests/test_ci_stacked_prs.py",
         "tests/test_provider_images_ui.py",
         "tests/test_provider_order_panel.py",

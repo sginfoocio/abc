@@ -44,6 +44,13 @@ sesión en memoria de Streamlit; solo se restaura automáticamente una sesión s
 el usuario activó «Recordarme», el navegador conserva la cookie y el secreto de
 firma sigue siendo el mismo. La cookie contiene un token firmado, no la
 contraseña, y se establece con `Secure` y `SameSite=Strict`.
+La escritura y lectura se confirman desde el componente del navegador antes de
+continuar la autenticación. La cookie usa `Path=/` y el dominio del host. Como
+Streamlit la establece mediante JavaScript, no puede marcarla `HttpOnly`; requiere
+protección frente a XSS y un navegador que permita cookies para el componente.
+Si el navegador rechaza la escritura se muestra un error, sin afirmar que la
+sesión recordada se ha guardado. La prueba HTTPS local con certificado de prueba
+no sustituye la comprobación en el navegador y proxy de producción.
 
 El estado de revocación y de intentos fallidos debe sobrevivir a los reinicios.
 En Docker de una sola instancia, `AUTH_STATE_PATH` apunta al volumen persistente
