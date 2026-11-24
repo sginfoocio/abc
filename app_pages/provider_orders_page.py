@@ -12,7 +12,7 @@ from app_pages.provider_order_snapshot import (
 from app_pages.provider_order_media import render_order_export, render_photos
 from kering_images import ConfigStore, data_root as kering_root
 from provider_images import ean_key, ean_valid
-from provider_images_ui import data_root
+from provider_images_ui import _odoo_association, data_root
 from provider_order_policy import OrderPolicyUnavailable, get_order_start_date
 from provider_odoo_orders import MAX_ORDER_DAYS, OdooUnavailable
 from repository_storage import state_root
@@ -212,6 +212,10 @@ def render_order_panel(engine_factory, legacy_renderer, library_page=None):
                           for key, label in PROVIDERS.items()))
     for notice in association_notices:
         st.warning(notice)
+    try:
+        _odoo_association("luxottica", data_root(), engine_factory)
+    except (OSError, ValueError):
+        st.error("No se pudo leer la asociación local de Luxottica.")
     if (kering_root() / "config.enc").is_file():
         try:
             cutoff = date.fromisoformat(ConfigStore(kering_root()).load()["cutoff_date"])

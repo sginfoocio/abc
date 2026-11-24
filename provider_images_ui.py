@@ -387,7 +387,12 @@ def _detect_from_odoo(connector, engine_factory) -> None:
 
 
 def _odoo_association(provider: str, root: Path, engine_factory) -> None:
-    links = load_links(root).get(provider) or {}
+    all_links = load_links(root)
+    if not isinstance(all_links, dict):
+        raise ValueError("asociaciones_invalidas")
+    links = all_links.get(provider) or {}
+    if not isinstance(links, dict):
+        raise ValueError("asociacion_invalida")
     if links.get("confirmed"):
         st.success(f"Asociación confirmada por {links.get('reviewer')}: proveedores Odoo {links['partner_ids']} → {provider}.")
     else:
@@ -409,14 +414,18 @@ def _odoo_association(provider: str, root: Path, engine_factory) -> None:
                                  ", ".join(map(str, links.get("partner_ids", []))), key=f"prov_assoc_ids_{provider}")
         brands = st.text_input("Marcas/catálogos incluidos (informativo)", ", ".join(links.get("brands", [])),
                                key=f"prov_assoc_brands_{provider}")
+        note = st.text_input("Nombre comercial y evidencia de confirmación", links.get("note", ""),
+                             key=f"prov_assoc_note_{provider}")
         if st.button("Confirmar y guardar asociación", key=f"prov_assoc_save_{provider}"):
             who = st.session_state.get("auth_user") or st.session_state.get("auth_role") or "admin"
             try:
                 save_link(root, provider, [int(p) for p in ids_text.replace(";", ",").split(",") if p.strip()],
-                          reviewer=str(who), brands=brands.split(","))
+                          reviewer=str(who), brands=brands.split(","), note=note)
                 st.rerun()
             except ValueError as error:
                 st.error(f"No se guardó: {error}")
+            except (OSError, Timeout):
+                st.error("No se pudo guardar la asociación en el almacén local.")
 
 
 def _review(connector) -> None:

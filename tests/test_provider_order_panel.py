@@ -313,6 +313,27 @@ def test_initial_render_displays_persisted_kering_cutoff_without_query(monkeypat
     assert app.selectbox(key="sup_provider").value == "kering"
 
 
+def test_admin_can_save_luxottica_association_from_order_panel(monkeypatch, tmp_path):
+    from app_pages import provider_orders_page as page
+    from provider_odoo_orders import load_links
+
+    monkeypatch.setattr(page, "data_root", lambda: tmp_path)
+    monkeypatch.setattr(page, "kering_root", lambda: tmp_path)
+    app = AppTest.from_string(APP)
+    app.session_state["auth_role"] = "admin"
+    app.session_state["auth_user"] = "Ruben"
+    app.run()
+    app.text_input(key="prov_assoc_ids_luxottica").set_value("570")
+    app.text_input(key="prov_assoc_note_luxottica").set_value("LUXOTTICA SPAIN,S.L.U.; confirmado")
+    app.button(key="prov_assoc_save_luxottica").click().run()
+    assert not app.exception
+    link = load_links(tmp_path)["luxottica"]
+    assert link["partner_ids"] == [570] and link["reviewer"] == "Ruben"
+    assert link["note"] == "LUXOTTICA SPAIN,S.L.U.; confirmado"
+    app.button(key="prov_assoc_save_luxottica").click().run()
+    assert load_links(tmp_path)["luxottica"] == link
+
+
 def test_streamlit_explicit_query_and_retained_results(monkeypatch, tmp_path, engine):
     root = tmp_path / "images"
     ImageRepository(root)
@@ -344,7 +365,7 @@ def test_streamlit_explicit_query_and_retained_results(monkeypatch, tmp_path, en
     next(widget for widget in app.selectbox if widget.label == "Ver detalle del pedido").select(23).run()
     assert not app.exception
     assert any("Sin historial disponible" in m.value for m in app.info)
-    app.text_input[0].set_value("ausente").run()
+    app.text_input(key="sup_number").set_value("ausente").run()
     assert not app.exception
     assert "Ningún pedido" in app.info[0].value
     acquire.side_effect = OdooUnavailable("detalle reservado")

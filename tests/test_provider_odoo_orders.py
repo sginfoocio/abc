@@ -1,7 +1,9 @@
 import json
-from datetime import date
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+from datetime import date, datetime, timezone
 
 import pytest
+from filelock import FileLock
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError
 
@@ -108,6 +110,49 @@ def test_association_must_be_configured_and_reviewed(env, tmp_path):
     assert link["confirmed"] and po.confirmed_partner_ids(root, "marcolin") == (573,)
     with pytest.raises(po.AssociationNotConfigured):  # other portals are not implied
         po.confirmed_partner_ids(root, "safilo")
+
+
+def test_luxottica_association_is_persistent_idempotent_and_preserves_other_links(tmp_path, monkeypatch):
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 11, 24, 10, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(po, "datetime", Clock)
+    other = po.save_link(tmp_path, "marcolin", [573], reviewer="ana")
+    link = po.save_link(tmp_path, "luxottica", [570, 570], reviewer="Ruben",
+                        note="LUXOTTICA SPAIN,S.L.U.; confirmado por el responsable")
+    original = (tmp_path / po.LINKS_FILE).read_bytes()
+
+    class LaterClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 11, 25, 10, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(po, "datetime", LaterClock)
+    assert po.save_link(tmp_path, "luxottica", [570], reviewer="Ruben",
+                        note="LUXOTTICA SPAIN,S.L.U.; confirmado por el responsable") == link
+    assert (tmp_path / po.LINKS_FILE).read_bytes() == original
+    assert po.confirmed_partner_ids(tmp_path, "luxottica") == (570,)
+    assert po.load_links(tmp_path)["marcolin"] == other
+    with pytest.raises(ValueError, match="proveedor_desconocido"):
+        po.save_link(tmp_path, "unknown", [570], reviewer="Ruben")
+
+
+def test_association_saves_serialize_across_writers(tmp_path):
+    lock = FileLock(tmp_path / ".provider_odoo_links.lock", timeout=5)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        with lock:
+            first = executor.submit(po.save_link, tmp_path, "luxottica", [570], reviewer="Ruben")
+            second = executor.submit(po.save_link, tmp_path, "marcolin", [573], reviewer="ana")
+            with pytest.raises(FutureTimeout):
+                first.result(timeout=0.3)
+            with pytest.raises(FutureTimeout):
+                second.result(timeout=0.3)
+        first.result(timeout=5)
+        second.result(timeout=5)
+    assert po.confirmed_partner_ids(tmp_path, "luxottica") == (570,)
+    assert po.confirmed_partner_ids(tmp_path, "marcolin") == (573,)
 
 
 def test_name_candidates_are_proposals_not_associations(env):

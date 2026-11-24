@@ -77,7 +77,9 @@ Secundario y de solo lectura (`SET TRANSACTION READ ONLY`, timeout de sentencia,
 
 1. **Asociación explícita proveedor Odoo ↔ portal** (`provider_odoo_links.json` en `PROVIDER_DATA_ROOT`, sin secretos).
    Sin asociación confirmada la consulta se rechaza (`asociacion_proveedor_portal_no_configurada`). «Buscar candidatos»
-   por nombre solo propone; hay que confirmar los ids y queda registrado el revisor y la fecha. Las marcas son
+   por nombre solo propone; hay que confirmar los ids y queda registrado el revisor, la fecha y la evidencia indicada.
+   En el panel de pedidos, la asociación de Luxottica se administra desde su sección de asociación. Las escrituras
+   concurrentes se serializan y confirmar de nuevo los mismos datos conserva la fecha original. Las marcas son
    informativas: el filtrado por marca requiere conocer el campo real de marca en Odoo y no se ha implementado.
 2. **Consulta**: pedidos en estado `purchase` o `done` (se excluyen `draft`, `sent` y `cancel`), contactos comerciales del
    partner agrupados, líneas con producto, `default_code`, `barcode`, proveedor, pedido y fecha, más recientes primero.

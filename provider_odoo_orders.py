@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+from filelock import FileLock
 from sqlalchemy import bindparam, text
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -82,16 +83,24 @@ def save_link(root: Path, provider: str, partner_ids, *, reviewer: str, brands=(
         raise ValueError("sin_proveedores_odoo")
     if not str(reviewer).strip():
         raise ValueError("revisor_obligatorio")
-    links = load_links(root)
-    links[provider] = {"partner_ids": ids, "brands": [str(b).strip() for b in brands if str(b).strip()],
-                       "confirmed": True, "reviewer": str(reviewer).strip(), "note": note,
-                       "confirmed_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
     path = Path(root) / LINKS_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(links, indent=2, ensure_ascii=False), encoding="utf-8")
-    tmp.replace(path)
-    return links[provider]
+    entry = {"partner_ids": ids, "brands": [str(b).strip() for b in brands if str(b).strip()],
+             "confirmed": True, "reviewer": str(reviewer).strip(), "note": note}
+    with FileLock(path.parent / ".provider_odoo_links.lock", timeout=30, mode=0o600):
+        links = load_links(root)
+        if not isinstance(links, dict):
+            raise ValueError("asociaciones_invalidas")
+        existing = links.get(provider)
+        if existing is not None and not isinstance(existing, dict):
+            raise ValueError("asociacion_invalida")
+        if existing and existing.get("confirmed_at") and all(existing.get(k) == v for k, v in entry.items()):
+            return existing
+        links[provider] = {**entry, "confirmed_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(links, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(path)
+        return links[provider]
 
 
 def _read_only(connection, statement, parameters):
