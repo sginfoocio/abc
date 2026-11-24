@@ -212,6 +212,12 @@ def select(paths, test_files):
             continue
         if path in SCOPED_DEPENDENCY_TESTS:
             group_tests = {test for test in SCOPED_DEPENDENCY_TESTS[path] if test in test_files}
+            groups = [name for name, (source, _) in RULES.items() if matches(path, source)]
+            for name in groups:
+                rule_tests = {test for test in test_files if matches(test, RULES[name][1])}
+                if rule_tests:
+                    group_tests.update(rule_tests)
+                    reasons.append(f"{name}: {path}")
             if group_tests:
                 tests.update(group_tests)
                 reasons.append(f"scoped dependency: {path}")

@@ -3,7 +3,9 @@ import subprocess
 
 import pytest
 
-from scripts.ci_test_selection import ROOT_TESTS, changed_paths, comparison_base, select
+from scripts.ci_test_selection import (
+    ROOT_TESTS, SCOPED_DEPENDENCY_TESTS, changed_paths, comparison_base, select,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = (ROOT / ".github/workflows/deploy.yml").read_text(encoding="utf-8")
@@ -102,6 +104,23 @@ def test_impact_selection(files, included, root_tests):
     assert included <= {Path(p).name for p in targets}
     assert ("tests" in targets) == ("tests" in included)
     assert bool(targets) == bool(reasons) == bool(included)
+
+
+def test_scoped_dependency_keeps_overlapping_domain_tests(monkeypatch):
+    monkeypatch.setitem(
+        SCOPED_DEPENDENCY_TESTS,
+        "app_enhanced.py",
+        ("tests/test_provider_order_panel.py",),
+    )
+    inventory = {p.relative_to(ROOT).as_posix() for p in (ROOT / "tests").rglob("test_*.py")}
+
+    targets, _ = select(["app_enhanced.py"], inventory)
+
+    assert {
+        "tests/test_provider_order_panel.py",
+        "tests/test_gio.py",
+        "tests/test_app_navigation.py",
+    } <= set(targets)
 
 
 def test_price_module_selects_direct_regressions_instead_of_entire_price_suite():
