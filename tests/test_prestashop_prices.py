@@ -21,6 +21,7 @@ CONTEXT = {"shop_id": 1, "group_id": 2, "country_id": 6, "currency_id": 1,
            "tax_included": True, "shipping_included": False, "cart_discount": False}
 OPEN = "0000-00-00 00:00:00"
 PRIORITY = "id_group;id_currency;id_country;id_shop"
+NATIVE_CONTEXT = {**CONTEXT, "group_id": 1}
 
 
 @pytest.mark.parametrize(("mode", "ca"), [
@@ -79,6 +80,128 @@ def test_mysql_validates_session_before_reading_prices(monkeypatch, cipher, gran
     con.close.assert_called_once()
 
 
+def authorized_account(monkeypatch, **changes):
+    config = {"host": "mysql.example.invalid", "user": "ps_user_vytria_lect",
+              "password": "test", "database": "ps_vytria"}
+    for key, value in config.items():
+        monkeypatch.setenv(f"PRESTASHOP_MYSQL_{key.upper()}", value)
+    monkeypatch.setenv("PRESTASHOP_MYSQL_ACCOUNT_POLICY", "authorized_broad")
+    monkeypatch.setenv("PRESTASHOP_MYSQL_SSL_MODE", "REQUIRED")
+    monkeypatch.delenv("PRESTASHOP_MYSQL_SSL_CA", raising=False)
+    receipt = {"id": "approved-test", "actor": "reviewer", "at": NOW.isoformat(),
+               "host": config["host"], "port": 3306, "user": config["user"],
+               "database": config["database"], **changes}
+    monkeypatch.setenv("PRESTASHOP_MYSQL_ACCOUNT_AUTHORIZATION", json.dumps(receipt))
+    return config, receipt
+
+
+def test_authorized_broad_account_is_scoped_read_only_and_audited(monkeypatch):
+    _, receipt = authorized_account(monkeypatch)
+    con = MagicMock()
+    cur = con.cursor.return_value.__enter__.return_value
+    cur.fetchone.side_effect = [("Ssl_cipher", "AES"), ("ps_user_vytria_lect@origin", "ps_vytria"), (1,)]
+    cur.fetchall.return_value = [
+        ("GRANT USAGE ON *.* TO reader",),
+        (r"GRANT SELECT, INSERT, UPDATE, EXECUTE ON `ps\\_vytria`.* TO reader",),
+    ]
+    monkeypatch.setattr(pymysql, "connect", lambda **kwargs: con)
+    read_batch = MagicMock(return_value=([(EAN, 498, 90, 0)], [(EAN, json.dumps(quote()))]))
+    monkeypatch.setattr(ps, "read_batch", read_batch)
+
+    identities, rows = ps._mysql_rows([EAN], CONTEXT)
+    stored, _, _ = ps.resolve([EAN], identities, rows, CONTEXT, NOW)[EAN]
+    security = json.loads(stored)["connection_security"]
+    assert security["account_policy"] == "authorized_broad"
+    assert security["account_permissions"] == "broad"
+    assert security["tls_required"] and security["tls_cipher"] == "AES"
+    assert security["transaction_read_only"] is True
+    assert security["certificate_verified"] is False
+    assert security["server_identity_verified"] is False
+    assert security["authorization"] == {key: receipt[key] for key in ("id", "actor", "at")}
+    assert "host" not in security and "password" not in security
+    statements = [call.args[0] for call in cur.execute.call_args_list]
+    assert "SET SESSION TRANSACTION READ ONLY" in statements
+    assert statements[-2:] == ["START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY",
+                               "SELECT @@tx_read_only"]
+    con.rollback.assert_called_once()
+    con.close.assert_called_once()
+
+
+@pytest.mark.parametrize("changes", [
+    {"host": "another.example.invalid"}, {"port": 3307}, {"database": "another"},
+    {"user": "another"}, {"actor": ""}, {"at": "no-timezone"},
+    {"at": "9999-01-01T00:00:00+00:00"},
+])
+def test_broad_account_authorization_cannot_move_to_another_connection(monkeypatch, changes):
+    authorized_account(monkeypatch, **changes)
+    connect = MagicMock()
+    monkeypatch.setattr(pymysql, "connect", connect)
+    with pytest.raises(ps.QuoteError, match="autorización válida y acotada"):
+        ps._mysql_rows([EAN], CONTEXT)
+    connect.assert_not_called()
+
+
+@pytest.mark.parametrize(("grant", "identity"), [
+    ("GRANT SELECT, INSERT ON other.* TO reader", ("ps_user_vytria_lect@origin", "ps_vytria")),
+    ("GRANT SELECT, INSERT ON *.* TO reader", ("ps_user_vytria_lect@origin", "ps_vytria")),
+    ("GRANT price_role TO reader", ("ps_user_vytria_lect@origin", "ps_vytria")),
+    ("GRANT SELECT ON `ps_vytria`.* TO reader WITH GRANT OPTION",
+     ("ps_user_vytria_lect@origin", "ps_vytria")),
+    (r"GRANT SELECT, INSERT ON `ps\_vytria`.* TO reader", ("another@origin", "ps_vytria")),
+    (r"GRANT SELECT, INSERT ON `ps\_vytria`.* TO reader", ("ps_user_vytria_lect@origin", "another")),
+])
+def test_broad_authorization_preserves_scope_and_actual_session_checks(monkeypatch, grant, identity):
+    authorized_account(monkeypatch)
+    con = MagicMock()
+    cur = con.cursor.return_value.__enter__.return_value
+    cur.fetchone.side_effect = [("Ssl_cipher", "AES"), identity]
+    cur.fetchall.return_value = [("GRANT USAGE ON *.* TO reader",), (grant,)]
+    monkeypatch.setattr(pymysql, "connect", lambda **kwargs: con)
+    read_batch = MagicMock()
+    monkeypatch.setattr(ps, "read_batch", read_batch)
+    with pytest.raises(ps.QuoteError, match="ámbito autorizado|cuenta y base autorizadas"):
+        ps._mysql_rows([EAN], CONTEXT)
+    read_batch.assert_not_called()
+    con.close.assert_called_once()
+
+
+def test_missing_explicit_broad_authorization_and_out_of_scope_eans_fail_closed(monkeypatch):
+    authorized_account(monkeypatch)
+    monkeypatch.delenv("PRESTASHOP_MYSQL_ACCOUNT_AUTHORIZATION")
+    connect = MagicMock()
+    monkeypatch.setattr(pymysql, "connect", connect)
+    with pytest.raises(ps.QuoteError, match="autorización válida y acotada"):
+        ps._mysql_rows([EAN], CONTEXT)
+    authorized_account(monkeypatch)
+    with pytest.raises(ps.QuoteError, match="manifiesto autorizado"):
+        ps._mysql_rows(["0000000000017"], CONTEXT)
+    connect.assert_not_called()
+
+
+def test_broad_authorization_rejects_database_wildcard_grants():
+    assert not ps._authorized_database_grant("GRANT SELECT, INSERT ON `ps_vytria`.* TO reader")
+
+
+@pytest.mark.parametrize(("cipher", "read_only", "reason"), [
+    ("", 1, "TLS activo"), ("AES", 0, "READ ONLY"),
+])
+def test_broad_authorization_does_not_bypass_tls_or_readonly(monkeypatch, cipher, read_only, reason):
+    authorized_account(monkeypatch)
+    con = MagicMock()
+    cur = con.cursor.return_value.__enter__.return_value
+    cur.fetchone.side_effect = [
+        ("Ssl_cipher", cipher), ("ps_user_vytria_lect@origin", "ps_vytria"), (read_only,),
+    ]
+    cur.fetchall.return_value = [(r"GRANT SELECT, INSERT ON `ps\_vytria`.* TO reader",)]
+    monkeypatch.setattr(pymysql, "connect", lambda **kwargs: con)
+    read_batch = MagicMock()
+    monkeypatch.setattr(ps, "read_batch", read_batch)
+    with pytest.raises(ps.QuoteError, match=reason):
+        ps._mysql_rows([EAN], CONTEXT)
+    read_batch.assert_not_called()
+    con.close.assert_called_once()
+
+
 def rule(sid=5, aid=0, rule_id=0, shop=0, currency=0, country=0, group=0, quantity=1,
          fixed="-1", discount="0.15", kind="percentage", included=0, start=OPEN, end=OPEN):
     return (sid, aid, rule_id, shop, 0, currency, country, group, quantity,
@@ -88,6 +211,179 @@ def rule(sid=5, aid=0, rule_id=0, shop=0, currency=0, country=0, group=0, quanti
 def calculate(rules, priority=PRIORITY, taxes=((0, "0", "0", Decimal(21), 1, 0),), *, combination=90, active=1):
     return ps._calculate((Decimal("100"), 0, 63, active, 1, 1), (Decimal("10"), 0, 1),
                          combination, taxes, rules, priority, CONTEXT, NOW, ZoneInfo("Europe/Madrid"))
+
+
+def native_confirmation(monkeypatch, **changes):
+    authorized_account(monkeypatch)
+    monkeypatch.setenv("PRESTASHOP_MYSQL_PREFIX", "ps_")
+    monkeypatch.setenv("PRESTASHOP_PRICE_CODE_AUDITED", "0")
+    monkeypatch.setenv("PRESTASHOP_PRICE_VALIDATION_MODE", "native_rules_confirmed")
+    receipt = {"id": "native-test", "actor": "reviewer", "at": NOW.isoformat(),
+               "account_authorization_id": "approved-test", "context": NATIVE_CONTEXT,
+               "claim": "native_prestashop_catalog_rules", **changes}
+    monkeypatch.setenv("PRESTASHOP_PRICE_NATIVE_CONFIRMATION", json.dumps(receipt))
+
+
+def test_native_contract_is_explicit_not_a_php_audit_and_default_stays_blocked(monkeypatch):
+    native_confirmation(monkeypatch)
+    validation = ps._price_validation(NATIVE_CONTEXT)
+    assert validation["mode"] == "native_rules_confirmed" and validation["php_inspected"] is False
+    ps._validate_price_hooks([("actionpresentproduct", "theme")], validation)
+    with pytest.raises(ps.QuoteError, match="modules/pricer/pricer.php"):
+        ps._validate_price_hooks([("actionproductpricecalculation", "pricer")], validation)
+    monkeypatch.delenv("PRESTASHOP_PRICE_VALIDATION_MODE")
+    with pytest.raises(ps.QuoteError, match="Pendiente auditar"):
+        ps._price_validation(CONTEXT)
+
+
+@pytest.mark.parametrize("changes", [
+    {"account_authorization_id": "another"}, {"claim": "php_audited"},
+    {"context": {**NATIVE_CONTEXT, "group_id": 2}}, {"actor": ""}, {"at": "9999-01-01T00:00:00+00:00"},
+])
+def test_native_confirmation_cannot_change_scope_or_claim_php_inspection(monkeypatch, changes):
+    native_confirmation(monkeypatch, **changes)
+    with pytest.raises(ps.QuoteError, match="confirmación acotada"):
+        ps._price_validation(NATIVE_CONTEXT)
+
+
+def catalog_fixture():
+    row = rule(sid=35, rule_id=35, shop=1, start="2026-11-01 00:00:00", end="2026-12-02 00:00:00")
+    parents = {35: (1, 0, 0, 0, 1, Decimal(-1), Decimal(15), "percentage", 0, row[13], row[14])}
+    return row, parents, [(35, 213, "category", "560")], {498: {560}}
+
+
+def test_category_rule_is_materialized_once_and_specific_offer_takes_precedence():
+    row, parents, conditions, categories = catalog_fixture()
+    origin = ps._catalog_origin(498, row, parents, conditions, categories)
+    assert origin["catalog_reduction"] == "15" and origin["materialized_reduction"] == "0.15"
+    assert calculate([row])["price"] == "113.14"  # (100 + 10) * 1.21 * 0.85, not another 15%.
+    specific = rule(sid=384459, aid=90, fixed="100", discount="0.10")
+    result = calculate([row, specific])
+    assert result["price"] == "108.90" and result["offer"]["reference"] == "384459"
+
+
+@pytest.mark.parametrize("case", ["missing", "changed", "category", "unsupported"])
+def test_native_catalog_lineage_discrepancies_are_not_silently_accepted(case):
+    row, parents, conditions, categories = catalog_fixture()
+    if case == "missing":
+        parents = {}
+    elif case == "changed":
+        row = (*row[:10], Decimal("0.25"), *row[11:])
+    elif case == "category":
+        categories = {498: {561}}
+    else:
+        conditions = [(35, 213, "custom_discount", "560")]
+    with pytest.raises(ps.QuoteError):
+        ps._catalog_origin(498, row, parents, conditions, categories)
+
+
+@pytest.mark.parametrize("value", [Decimal("90.5"), Decimal("NaN"), Decimal("Infinity"), -1, True, "90"])
+def test_mysql_identity_normalization_rejects_fractional_or_invalid_identifiers(value):
+    with pytest.raises(ps.QuoteError, match="Identificador MySQL"):
+        ps._database_id(value)
+
+
+@pytest.mark.parametrize("change", [None, "reference", "product"])
+def test_current_literal_ean_preserves_approved_model_colour_without_transferring_stock(monkeypatch, change):
+    native_confirmation(monkeypatch)
+    ean = "8056262833902"
+    original, pid, original_aid, brand, _, _, reference = ps.PRICE_REFERENCES[ean]
+    current_aid = 21270
+    current_pid = pid + 1 if change == "product" else pid
+    cur = MagicMock()
+    cur.fetchall.side_effect = [
+        [(NOW.replace(tzinfo=None),)],
+        [(original, pid, original_aid, 1), (ean, current_pid, Decimal(current_aid), 0)],
+        [(pid, brand, "changed" if change == "reference" else reference)],
+        [(1, "ES", "EUR", 2, 0, 0, 0)],
+        list({"PS_VERSION_DB": "8.2.1", "PS_TAX": "1", "PS_UNIDENTIFIED_GROUP": "1",
+              "PS_CURRENCY_DEFAULT": "1", "PS_PRICE_ROUND_MODE": "2", "PS_ROUND_TYPE": "2",
+              "PS_TAX_ADDRESS_TYPE": "id_address_delivery", "PS_TIMEZONE": "Europe/Madrid",
+              "PS_SPECIFIC_PRICE_FEATURE_ACTIVE": "1", "PS_SPECIFIC_PRICE_PRIORITIES": PRIORITY}.items()),
+        [], [],
+        [(pid, Decimal(100), 0, 63, 0, 1, 1)],
+        [(pid, current_aid, 0, 0, 1)],
+        [(63, 0, "0", "0", Decimal(21), 1, 0)],
+        [], [],
+        [(pid, original_aid, 100), (pid, current_aid, 0)],
+    ]
+    identities, rows = ps.read_batch(cur, [ean], NATIVE_CONTEXT)
+    result = ps.resolve([ean], identities, rows, NATIVE_CONTEXT, NOW)[ean]
+    if change:
+        assert isinstance(result, str) and "referencia auditada cambió" in result
+    else:
+        price = json.loads(result[0])
+        assert price["product_id"] == pid and price["combination_id"] == current_aid
+        assert price["price"] == "121.00" and price["in_stock"] is False
+        assert "price_reference" not in price
+        association = price["price_association"]
+        assert association["literal_ean_verified"] is True
+        assert association["original_reference_combination_id"] == original_aid
+        assert association["original_barcode"] == original
+
+
+@pytest.mark.parametrize("contradictory_calibre", [False, True])
+def test_native_batch_keeps_real_selection_trace_or_reports_calibre_conflict(monkeypatch, contradictory_calibre):
+    native_confirmation(monkeypatch)
+    monkeypatch.setenv("PRESTASHOP_MYSQL_PREFIX", "ps_")
+    catalog, parents, conditions, categories = catalog_fixture()
+    specific = rule(sid=384459, aid=90, fixed="100", discount="0.25")
+    cur = MagicMock()
+    current = [[]]
+
+    def execute(sql, args=()):
+        assert sql.lstrip().startswith("SELECT ") and ";" not in sql
+        if "UTC_TIMESTAMP" in sql:
+            rows = [(NOW.replace(tzinfo=None),)]
+        elif "UNION ALL" in sql:
+            rows = [(EAN, 498, Decimal(90), 0)]
+        elif "price_display_method" in sql:
+            rows = [(1, "ES", "EUR", 2, 0, 0, 0)]
+        elif "SELECT name,value" in sql:
+            rows = list({"PS_VERSION_DB": "8.2.1", "PS_TAX": "1", "PS_UNIDENTIFIED_GROUP": "1",
+                         "PS_CURRENCY_DEFAULT": "1", "PS_PRICE_ROUND_MODE": "2", "PS_ROUND_TYPE": "2",
+                         "PS_TAX_ADDRESS_TYPE": "id_address_delivery", "PS_TIMEZONE": "Europe/Madrid",
+                         "PS_SPECIFIC_PRICE_FEATURE_ACTIVE": "1", "PS_SPECIFIC_PRICE_PRIORITIES": PRIORITY}.items())
+        elif "LOWER(h.name)" in sql or "group_reduction" in sql or "SELECT id_product,priority" in sql:
+            rows = []
+        elif "SELECT id_product,price,ecotax" in sql:
+            rows = [(498, Decimal(100), 0, 63, 0, 1, 1)]
+        elif "SELECT id_product,id_product_attribute,price,ecotax" in sql:
+            rows = [(498, 90, 0, 0, 1)]
+            if contradictory_calibre:
+                rows.append((498, 91, Decimal(10), 0, 1))
+        elif "SELECT r.id_tax_rules_group" in sql:
+            rows = [(63, 0, "0", "0", Decimal(21), 1, 0)]
+        elif "SELECT id_product,id_specific_price" in sql:
+            rows = [(498, *catalog), (498, *specific)]
+        elif "SELECT id_specific_price_rule,id_shop" in sql:
+            rows = [(rid, *parent) for rid, parent in parents.items()]
+        elif "SELECT g.id_specific_price_rule" in sql:
+            rows = conditions
+        elif "SELECT id_product,id_category" in sql:
+            rows = [(pid, category) for pid, values in categories.items() for category in values]
+        elif "stock_available" in sql:
+            rows = [(498, 90, 0)]
+        else:
+            pytest.fail(f"Unexpected price query: {sql}")
+        current[0] = rows
+
+    cur.execute.side_effect = execute
+    cur.fetchall.side_effect = lambda: current[0]
+    identities, raw = ps.read_batch(cur, [EAN], NATIVE_CONTEXT)
+    result = ps.resolve([EAN], identities, raw, NATIVE_CONTEXT, NOW)[EAN]
+    if contradictory_calibre:
+        assert isinstance(result, str) and "contradictorios" in result
+    else:
+        price = json.loads(result[0])
+        assert type(price["combination_id"]) is int and price["combination_id"] == 90
+        assert price["price"] == "90.75" and price["active"] is False and price["in_stock"] is False
+        assert price["price_validation"]["php_inspected"] is False
+        assert price["discount_trace"]["selected_specific_price_id"] == 384459
+        assert price["discount_trace"]["catalog_discount_reapplied"] is False
+        assert {origin["kind"] for origin in price["discount_trace"]["eligible_sources"]} == {
+            "specific_offer", "materialized_catalog_rule",
+        }
 
 
 def test_inactive_product_keeps_the_same_offer_and_tax():
@@ -235,13 +531,17 @@ def test_watched_sync_is_scoped_deduplicates_and_does_not_fall_back(tmp_path, mo
     current_time = [NOW]
     fail = [False]
     price = ["232.05"]
+    security = {"account_policy": "authorized_broad", "account_permissions": "broad",
+                "tls_required": True, "tls_cipher": "AES", "certificate_verified": False,
+                "server_identity_verified": False,
+                "authorization": {"id": "approved-test", "actor": "reviewer", "at": NOW.isoformat()}}
 
     def mysql(eans, context):
         calls.append(set(eans))
         if fail[0]:
             raise OperationalError("private connection details")
         payload = quote(price=price[0], observed_at=current_time[0].isoformat(), active=False,
-                        in_stock=len(calls) == 1)
+                        in_stock=len(calls) == 1, connection_security=security)
         return [(EAN, 498, 90, 0)], [(EAN, json.dumps(payload))]
 
     monkeypatch.setattr(ps, "_mysql_rows", mysql)
@@ -270,10 +570,13 @@ def test_watched_sync_is_scoped_deduplicates_and_does_not_fall_back(tmp_path, mo
         history = con.execute("SELECT payload FROM prestashop_price_history ORDER BY id").fetchall()
         assert [json.loads(row[0])["price"] for row in history] == ["232.05", "230.00"]
         assert current["synced_at"] == (current_time[0] - timedelta(minutes=1)).isoformat()
+        assert current["observed_at"] == (current_time[0] - timedelta(minutes=1)).isoformat()
         assert json.loads(current["payload"])["price"] == "230.00"
         assert json.loads(current["payload"])["active"] is False
         assert json.loads(current["payload"])["in_stock"] is False
         assert all("in_stock" not in json.loads(row[0]) for row in history)
+        assert json.loads(current["payload"])["connection_security"] == security
+        assert all(json.loads(row[0])["connection_security"] == security for row in history)
         assert "OperationalError" in current["issue"] and "private" not in current["issue"]
         assert con.execute("SELECT price FROM vytria_prices WHERE ean=?", (EAN,)).fetchone()[0] == 273
 
