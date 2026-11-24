@@ -178,6 +178,82 @@ def _connection_security(cur, config: dict, cipher: str, authorization: dict | N
     return security
 
 
+def _price_validation(context: dict, *, audit: bool = False) -> dict:
+    if audit:
+        return {"mode": "audit_only", "php_inspected": False}
+    mode = os.getenv("PRESTASHOP_PRICE_VALIDATION_MODE", "php_review")
+    if mode == "php_review":
+        if os.getenv("PRESTASHOP_PRICE_CODE_AUDITED") != "1":
+            raise QuoteError("Pendiente auditar overrides PHP y módulos de presentación de precios")
+        return {"mode": mode, "php_inspected": True}
+    if mode != "native_rules_confirmed":
+        raise QuoteError("Modo de validación de precios no soportado")
+    expected = {"shop_id": 1, "group_id": 1, "country_id": 6, "currency_id": 1, "market": "ES",
+                "currency": "EUR", "customer_id": 0, "quantity": 1, "tax_included": True,
+                "shipping_included": False, "cart_discount": False}
+    try:
+        config = {key: os.environ[f"PRESTASHOP_MYSQL_{key.upper()}"]
+                  for key in ("host", "user", "database")}
+        account = _account_authorization(config, int(os.getenv("PRESTASHOP_MYSQL_PORT", "3306")))
+        receipt = json.loads(os.environ["PRESTASHOP_PRICE_NATIVE_CONFIRMATION"])
+        if (account is None or type(receipt) is not dict
+                or set(receipt) != {"id", "actor", "at", "account_authorization_id", "context", "claim"}
+                or any(not isinstance(receipt[key], str) or not receipt[key].strip()
+                       or len(receipt[key]) > 200 for key in ("id", "actor", "at", "account_authorization_id"))
+                or receipt["account_authorization_id"] != account["id"]
+                or receipt["claim"] != "native_prestashop_catalog_rules"
+                or type(receipt["context"]) is not dict or receipt["context"] != expected
+                or context != expected
+                or any(type(receipt["context"][key]) is not type(value) for key, value in expected.items())
+                or _time(receipt["at"]) > datetime.now(timezone.utc)):
+            raise ValueError
+    except (KeyError, TypeError, ValueError, OverflowError):
+        raise QuoteError("Falta confirmación acotada del responsable para el cálculo nativo") from None
+    return {"mode": mode, "php_inspected": False,
+            "basis": "responsible_confirmation_and_native_database_checks",
+            "authorization": {key: receipt[key] for key in ("id", "actor", "at")},
+            "account_authorization_id": account["id"]}
+
+
+def _catalog_origin(product_id: int, row: tuple, parents: dict, conditions: list, categories: dict) -> dict:
+    sid, _, rule_id, *_ = row
+    if not rule_id:
+        return {"specific_price_id": sid, "catalog_rule_id": 0, "kind": "specific_offer"}
+    parent = parents.get(rule_id)
+    if parent is None:
+        raise QuoteError(f"Precio específico {sid} sin regla nativa de origen {rule_id}")
+    # Catalog percentages are stored as 15; materialized specific prices store 0.15.
+    reduction = Decimal(parent[6]) / 100 if parent[7] == "percentage" else Decimal(parent[6])
+    expected = (parent[0], parent[1], parent[2], parent[3], parent[4], parent[5],
+                reduction, parent[7], parent[8], parent[9], parent[10])
+    actual = (row[3], row[5], row[6], row[7], row[8], row[9], row[10], row[11],
+              row[12], row[13], row[14])
+    if actual != expected:
+        raise QuoteError(f"Precio específico {sid} discrepa de su regla nativa {rule_id}")
+    groups = defaultdict(set)
+    for rid, group, kind, value in conditions:
+        if rid != rule_id:
+            continue
+        if kind != "category" or not isinstance(value, str) or not value.isdecimal() or int(value) < 1:
+            raise QuoteError(f"Condición no soportada en regla nativa {rule_id}: {kind}")
+        groups[group].add(int(value))
+    if groups and not any(group <= categories.get(product_id, set()) for group in groups.values()):
+        raise QuoteError(f"Producto {product_id} fuera de las categorías de la regla nativa {rule_id}")
+    return {"specific_price_id": sid, "catalog_rule_id": rule_id, "kind": "materialized_catalog_rule",
+            "condition_groups": {str(group): sorted(values) for group, values in groups.items()},
+            "catalog_reduction": str(parent[6]), "materialized_reduction": str(row[10])}
+
+
+def _validate_price_hooks(hooks: list, validation: dict) -> None:
+    for hook, module in hooks:
+        if validation["mode"] == "native_rules_confirmed":
+            if hook in {"actionproductpricecalculation", "actiontaxmanager", "actiongetproductpropertiesafter"}:
+                raise QuoteError(f"Cálculo no soportado: {module}/{hook}; revisar modules/{module}/{module}.php")
+        elif (hook, module) not in {("actionpresentproduct", "altautofiller"),
+                                    ("displayproductpriceblock", "revolutpayment")}:
+            raise QuoteError("Hay un módulo de cálculo o presentación de precios no auditado")
+
+
 def _mysql_rows(eans: list[str], context: dict) -> tuple[list[tuple], list[tuple]]:
     import pymysql
 
@@ -300,12 +376,10 @@ def read_batch(cur, eans: list[str], context: dict, *, audit: bool = False) -> t
         WHERE hm.id_shop=%s AND m.active=1 AND LOWER(h.name) IN
         ('actionproductpricecalculation','actiontaxmanager','actionpresentproduct',
          'actiongetproductpropertiesafter','displayproductpriceblock')""", (shop,))
-    if any(tuple(hook) not in {("actionpresentproduct", "altautofiller"),
-                               ("displayproductpriceblock", "revolutpayment")} for hook in hooks):
-        raise QuoteError("Hay un módulo de cálculo o presentación de precios no auditado")
-    # This gate is set only after reviewing deployed PHP overrides and presentation hooks.
-    if not audit and os.getenv("PRESTASHOP_PRICE_CODE_AUDITED") != "1":
-        raise QuoteError("Pendiente auditar overrides PHP y módulos de presentación de precios")
+    validation = _price_validation(context, audit=audit)
+    _validate_price_hooks(hooks, validation)
+    if validation["mode"] == "native_rules_confirmed":
+        validation["presentation_hooks"] = [{"hook": hook, "module": module} for hook, module in hooks]
     if select("SELECT 1 FROM {group_reduction} WHERE id_group=%s LIMIT 1", (group,)):
         raise QuoteError("Grupo público con descuentos por categoría no soportados")
     bases = {r[0]: r[1:] for r in select("""SELECT id_product,price,ecotax,id_tax_rules_group,active,show_price,
@@ -329,10 +403,27 @@ def read_batch(cur, eans: list[str], context: dict, *, audit: bool = False) -> t
         for row in select("""SELECT id_product,id_specific_price,id_product_attribute,id_specific_price_rule,
             id_shop,id_shop_group,id_currency,id_country,id_group,from_quantity,price,reduction,reduction_type,
             reduction_tax,CAST(`from` AS CHAR),CAST(`to` AS CHAR)
-            FROM {specific_price} WHERE id_product IN (0,MARKS) AND id_shop IN (0,%s) AND id_currency IN (0,%s)
+            FROM {specific_price} WHERE id_product IN (0,MARKS) AND id_shop IN (0,%s)
+            AND id_shop_group IN (0,%s) AND id_currency IN (0,%s)
             AND id_country IN (0,%s) AND id_group IN (0,%s) AND id_cart=0 AND id_customer=0 AND from_quantity<=1"""
-                          .replace("MARKS", marks), (*products, shop, currency, country, group)):
+                          .replace("MARKS", marks), (*products, shop, shop_group, currency, country, group)):
             rules[row[0]].append(row[1:])
+    parents, conditions, categories = {}, [], defaultdict(set)
+    if validation["mode"] == "native_rules_confirmed":
+        rule_ids = sorted({row[2] for rows in rules.values() for row in rows if row[2]})
+        if rule_ids:
+            rule_marks = ",".join(["%s"] * len(rule_ids))
+            parents = {row[0]: row[1:] for row in select("""SELECT id_specific_price_rule,id_shop,id_currency,
+                id_country,id_group,from_quantity,price,reduction,reduction_type,reduction_tax,
+                CAST(`from` AS CHAR),CAST(`to` AS CHAR) FROM {specific_price_rule}
+                WHERE id_specific_price_rule IN (MARKS)""".replace("MARKS", rule_marks), rule_ids)}
+            conditions = select("""SELECT g.id_specific_price_rule,g.id_specific_price_rule_condition_group,
+                c.type,c.value FROM {specific_price_rule_condition_group} g
+                LEFT JOIN {specific_price_rule_condition} c USING(id_specific_price_rule_condition_group)
+                WHERE g.id_specific_price_rule IN (MARKS)""".replace("MARKS", rule_marks), rule_ids)
+            for pid, category in select("""SELECT id_product,id_category FROM {category_product}
+                WHERE id_product IN (MARKS)""".replace("MARKS", marks), products):
+                categories[pid].add(category)
     stock = defaultdict(list)
     stock_scope = (0, shop_group) if market[0][6] else (shop, 0)
     for pid, aid, quantity in select("""SELECT id_product,id_product_attribute,quantity
@@ -358,6 +449,18 @@ def read_batch(cur, eans: list[str], context: dict, *, audit: bool = False) -> t
                                   context, now, tz)
 
             payload = _with_other_calibres(calculate, aid, variants[pid])
+            if validation["mode"] == "native_rules_confirmed":
+                if any(price != payload["price"] for price in payload["other_calibres"].values()):
+                    raise QuoteError("Importes contradictorios entre combinaciones: verificar modelo/color/calibre")
+                eligible = set(payload["eligible_specific_price_ids"])
+                payload["discount_trace"] = {
+                    "authority": "specific_price_materialized_rows",
+                    "selected_specific_price_id": int(payload["offer"]["reference"]) if payload["offer"] else None,
+                    "eligible_sources": [_catalog_origin(pid, row, parents, conditions, categories)
+                                         for row in rules[0] + rules[pid] if row[0] in eligible],
+                    "catalog_discount_reapplied": False,
+                }
+            payload["price_validation"] = validation
             if ean in reference_links:
                 _annotate_reference(payload, ean, reference_links[ean])
             quantities = stock[pid, aid]
@@ -482,6 +585,7 @@ def _calculate(base, variant, combination, taxes, rules, priority, context, now,
             "base_price_ex_tax": str(base_price), "combination_impact_ex_tax": str(impact),
             "taxable_base": str(net), "vat_rate": str(rate), "rounding": "half-up/2",
             "offer": offer, "valid_until": until.isoformat(),
+            "eligible_specific_price_ids": [row[0] for _, row in contenders],
             "fiscal_context": f"ES peninsular · grupo fiscal {tax_group} · IVA {rate}%"}
 
 
@@ -534,6 +638,9 @@ def _decode(raw: str, identity: tuple[int, int], context: dict, now: datetime) -
         snapshot["price_reference"] = payload["price_reference"]
     if payload.get("connection_security"):
         snapshot["connection_security"] = payload["connection_security"]
+    for key in ("price_validation", "discount_trace"):
+        if payload.get(key):
+            snapshot[key] = payload[key]
     for key in ("active", "in_stock"):
         if type(payload.get(key)) is bool:
             snapshot[key] = payload[key]

@@ -66,16 +66,21 @@ y reducción con `Decimal`. Para el grupo visitante excluye precios de clientes,
 carritos y descuentos que requieren más de una unidad. Rechaza empates, IVA
 territorial/compuesto, ecotasa y configuraciones o módulos no soportados.
 
-1. Verificar los overrides PHP desplegados y los módulos `altautofiller`
+1. El modo predeterminado `PRESTASHOP_PRICE_VALIDATION_MODE=php_review` exige
+   verificar los overrides PHP desplegados y los módulos `altautofiller`
    (`actionPresentProduct`) y `revolutpayment` (`displayProductPriceBlock`).
    Los contrastes de ficha no prueban su comportamiento para todo el catálogo.
    Solo tras confirmar su efecto, establecer `PRESTASHOP_PRICE_CODE_AUDITED=1`.
+   Existe un contrato alternativo explícito, descrito debajo, que no declara
+   una inspección PHP ni modifica este indicador.
 2. El modo predeterminado `PRESTASHOP_MYSQL_ACCOUNT_POLICY=select_only` exige
    `SELECT` sin permisos delegables ni roles. No modificar permisos de cuentas
    compartidas para facilitar una prueba. El lector sólo consulta `product[_shop]`,
    `product_attribute[_shop]`, `manufacturer`, `shop`, `shop_group`, `stock_available`, `country`, `currency`, `group`,
    `configuration`, `hook`, `hook_module`, `module`, `group_reduction`,
-   `tax_rule`, `tax`, `specific_price` y `specific_price_priority` (prefijo real).
+   `tax_rule`, `tax`, `specific_price`, `specific_price_priority`,
+   `specific_price_rule`, `specific_price_rule_condition_group`,
+   `specific_price_rule_condition` y `category_product` (prefijo real).
    Comprobar `SHOW GRANTS`, `APPLICABLE_ROLES` y `ENABLED_ROLES`; no validar
    los permisos intentando escribir. Para la cuenta amplia expresamente
    autorizada, configurar `PRESTASHOP_MYSQL_ACCOUNT_POLICY=authorized_broad`
@@ -114,6 +119,46 @@ territorial/compuesto, ecotasa y configuraciones o módulos no soportados.
    `_CURRENCY_ID` (prefijo `PRESTASHOP_PRICE`). Solo después de validar la
    instalación y obtener aprobación, `PRESTASHOP_PRICE_ENABLED=1`.
 
+### Contrato acotado de reglas nativas (#159)
+
+Rubén confirma que los descuentos de Vytria se configuran mediante reglas
+nativas de catálogo por categoría, materializadas en precios específicos,
+no mediante un cálculo propio de Panda. Es **confirmación del responsable
+sobre la configuración comercial**, no inspección independiente del PHP.
+La comprobación SQL de módulos/hooks tampoco acredita archivos desplegados.
+
+`PRESTASHOP_PRICE_VALIDATION_MODE=native_rules_confirmed` requiere además
+`PRESTASHOP_PRICE_NATIVE_CONFIRMATION`, un recibo JSON administrativo con
+exactamente `id`, `actor`, `at`, `account_authorization_id`, `context` y
+`claim=native_prestashop_catalog_rules`. La referencia de cuenta debe coincidir
+con el recibo `authorized_broad`. El contexto autorizado es exactamente tienda
+1, grupo público 1, España 6, EUR 1, cliente 0, cantidad 1, IVA incluido, sin
+portes ni descuentos de carrito. Se conservan ambos recibos en la trazabilidad.
+No establecer `CODE_AUDITED=1` para usar este contrato.
+
+El lector contrasta los padres y condiciones de categoría de las ofertas
+nativas aplicables. El porcentaje del padre (por ejemplo, 15) se compara con
+la fracción materializada (0,15); **no se descuenta de nuevo**. El cálculo usa
+una única fila de `specific_price` conforme a combinación, cantidad, regla
+manual/catálogo y prioridades de ámbito, no el mayor porcentaje ni la suma
+de ofertas. Un origen ausente, distinto, con condiciones no soportadas o
+categorías incompatibles bloquea el precio afectado. Los hooks registrados
+de cálculo/impuestos siguen bloqueando con módulo/hook y archivo concreto;
+los de presentación quedan declarados, no inspeccionados. La mera presencia
+de Panda o de un módulo de presentación no constituye evidencia de un
+cálculo adicional. No se garantiza aquí el comportamiento del PHP/checkout.
+La administración muestra «reglas nativas confirmadas; PHP no inspeccionado».
+Una discrepancia de importe entre combinaciones del mismo producto requiere
+revisión de modelo/color/calibre; no se presupone que cualquier combinación
+sea únicamente otro calibre.
+
+En la lectura real acotada de las relaciones SQL, el producto 498 tiene
+oferta manual 427094 y alternativa materializada de regla 35/categoría 560
+(15 %). El producto 7861 tiene oferta de combinación 384459/8425 (calibre 54)
+y alternativa de regla 37/categoría 562 (25 %). Las ofertas manuales tienen
+origen 0: no se presentan como generadas por esas reglas. Los importes actuales
+deben obtenerse nuevamente con el piloto; estos IDs no fijan precios en código.
+
 ### Piloto administrativo con configuración privada
 
 Si la identidad SSH no puede leer el Compose, el administrador puede ejecutar
@@ -128,8 +173,11 @@ python3 scripts/validate_vytria_reader.py \
 El script resuelve `/etc/cloud-production/compose.private.json` con
 `docker compose config --format json`, captura su salida sin publicarla y
 no vuelve a interpretar los dólares de la contraseña. No lee `.mylogin.cnf`.
-Requiere la comprobación PHP previa y `PRESTASHOP_PRICE_CODE_AUDITED=1`;
-no establece ese indicador ni sustituye la revisión por la auditoría comercial.
+Por defecto requiere la comprobación PHP previa y `CODE_AUDITED=1`.
+Para el contrato nativo autorizado añadir explícitamente
+`--native-confirmation-id <referencia-confirmacion-Ruben>`. El piloto genera
+su recibo auditable ligado a la autorización y contexto, sin establecer
+`CODE_AUDITED=1` ni afirmar una revisión PHP.
 Usa la imagen instalada sólo para dependencias y extrae el código del SHA con
 `git archive`. Crea un único contenedor independiente, sin puertos ni monitores,
 con usuario `1037:100`, raíz de sólo lectura y límites. La configuración MySQL
@@ -139,15 +187,20 @@ La excepción y la activación se aplican **sólo dentro del proceso del piloto*
 Se toma mediante `SELECT` una muestra de los productos vigilados y sus
 referencias Odoo persistidas; no se consulta Odoo ni se monta la base productiva
 como destino de escritura. Se prueba primero `8056597435581` y, sólo si pasa,
-los otros 99 en lotes de hasta 25. Los resultados y el informe quedan en una
+el caso adicional `8056597684446` (7861/8425, ya incluido en el manifiesto)
+y los otros 98 en lotes de hasta 25. No vuelve a leer los dos primeros.
+Los resultados y el informe quedan en una
 base aislada bajo `/var/lib/cloud-production-validation`, privada del
 administrador. Se comprueban vigencia, fuente del comparador, conservación de
 Odoo y registros duplicados. Se retira únicamente el contenedor del piloto.
+También se exige conservar las 95 asociaciones por código y cinco referencias
+explícitas; un cambio del reparto queda bloqueado y visible en el informe.
 El script no modifica el Compose, no cambia grants y **no activa producción**.
 No ejecutar con `sudo` sin la autorización administrativa correspondiente.
 
 Tras acreditar la prueba y el CI/Docker del SHA definitivo, el administrador
-incorpora al Compose protegido la excepción con su recibo y
+incorpora al Compose protegido la excepción con su recibo y, si se usa el
+contrato nativo, su modo y recibo de confirmación comercial, además de
 `PRESTASHOP_PRICE_ENABLED=1`, conservando el respaldo. El despliegue aprobado
 recrea sólo `abcd-app`; hay una interrupción técnica durante esa recreación,
 aunque la vigilancia persistida siga `active`. No ejecutar un `compose up`
@@ -175,8 +228,9 @@ contexto, IVA, redondeo, versión del cálculo y vigencia. El resultado vence
 como máximo a las 24 horas o al siguiente cambio de oferta conocido. No se
 transfiere disponibilidad entre calibres. Para una referencia de precio con
 marca, modelo completo y color auditados, el calibre no cambia el precio ni se
-exige conocerlo para aceptar la referencia; las diferencias o incidencias de
-otras combinaciones se muestran aparte y no invalidan esa referencia.
+exige conocerlo para aceptar la referencia. En el contrato nativo, importes
+contradictorios entre calibres requieren revisión, sin elegir otro arbitrariamente;
+las incidencias de otras combinaciones se muestran aparte.
 Actividad y stock se muestran por separado y no condicionan el precio propio
 ni crean puntos en su histórico.
 «Con stock» significa cantidad positiva en la fila de la combinación exacta;

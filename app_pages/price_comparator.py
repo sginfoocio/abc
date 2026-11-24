@@ -272,6 +272,10 @@ def _render_native_prices(store: PriceComparatorStore, prices: pd.DataFrame) -> 
             "Vinculación": (f"Referencia marca/modelo/color · {reference['original_barcode']}"
                             if reference else "EAN exacto" if payload else "—"),
             "Origen": payload.get("source", "") if payload else "—",
+            "Validación del precio": {
+                "native_rules_confirmed": "Reglas nativas confirmadas; PHP no inspeccionado",
+                "php_review": "Revisión PHP declarada",
+            }.get(payload.get("price_validation", {}).get("mode"), "Sin verificar"),
             "Permisos MySQL": {"broad": "Amplios; uso autorizado",
                               "select_only": "Solo lectura"}.get(security.get("account_permissions"), "Sin verificar"),
             "TLS": "Cifrado" if security.get("tls_required") is True else "Sin verificar",

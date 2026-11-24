@@ -31,6 +31,20 @@ def test_effective_compose_password_is_not_reinterpreted_or_written_back():
     assert "password" not in receipt
 
 
+def test_native_pilot_preserves_php_guard_and_requires_explicit_confirmation():
+    original = config(PRESTASHOP_PRICE_CODE_AUDITED="0")
+    environment = pilot.pilot_environment(original, "reviewer", "approved-test", "native-test")
+    assert environment["PRESTASHOP_PRICE_CODE_AUDITED"] == "0"
+    assert environment["PRESTASHOP_PRICE_VALIDATION_MODE"] == "native_rules_confirmed"
+    receipt = json.loads(environment["PRESTASHOP_PRICE_NATIVE_CONFIRMATION"])
+    assert receipt["claim"] == "native_prestashop_catalog_rules"
+    assert receipt["account_authorization_id"] == "approved-test"
+    assert receipt["context"]["group_id"] == 1 and receipt["context"]["tax_included"] is True
+    assert original["services"]["abcd-app"]["environment"]["PRESTASHOP_PRICE_ENABLED"] == "0"
+    with pytest.raises(pilot.PilotError, match="CODE_AUDITED"):
+        pilot.pilot_environment(original, "reviewer", "approved-test")
+
+
 @pytest.mark.parametrize("changes", [
     {"PRESTASHOP_MYSQL_USER": "another"}, {"PRESTASHOP_MYSQL_SSL_MODE": "DISABLED"},
     {"PRESTASHOP_PRICE_COUNTRY_ID": "7"}, {"PRESTASHOP_PRICE_ENABLED": "1"},

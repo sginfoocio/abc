@@ -25,7 +25,8 @@ def run(stage: str, command: list[str], *, data: bytes | None = None, timeout: i
     return result.stdout
 
 
-def pilot_environment(config: dict, actor: str, authorization_id: str) -> dict[str, str]:
+def pilot_environment(config: dict, actor: str, authorization_id: str,
+                      native_confirmation_id: str | None = None) -> dict[str, str]:
     environment = config["services"]["abcd-app"]["environment"]
     expected = {
         "PRESTASHOP_MYSQL_USER": "ps_user_vytria_lect", "PRESTASHOP_MYSQL_DATABASE": "ps_vytria",
@@ -38,7 +39,7 @@ def pilot_environment(config: dict, actor: str, authorization_id: str) -> dict[s
         raise PilotError("El contexto efectivo de Compose no coincide con el piloto autorizado")
     if not environment.get("PRESTASHOP_MYSQL_HOST") or not environment.get("PRESTASHOP_MYSQL_PASSWORD"):
         raise PilotError("Falta la conexion efectiva resuelta por Compose")
-    if environment.get("PRESTASHOP_PRICE_CODE_AUDITED") != "1":
+    if native_confirmation_id is None and environment.get("PRESTASHOP_PRICE_CODE_AUDITED") != "1":
         raise PilotError("Bloqueado: falta acreditar overrides/modulos PHP; CODE_AUDITED no es 1")
     if not actor.strip() or not authorization_id.strip():
         raise PilotError("Falta actor o referencia de autorizacion")
@@ -52,6 +53,17 @@ def pilot_environment(config: dict, actor: str, authorization_id: str) -> dict[s
         "port": int(selected.get("PRESTASHOP_MYSQL_PORT", "3306")),
         "user": selected["PRESTASHOP_MYSQL_USER"], "database": selected["PRESTASHOP_MYSQL_DATABASE"],
     })
+    if native_confirmation_id is not None:
+        if not native_confirmation_id.strip():
+            raise PilotError("Falta referencia de confirmacion comercial del contrato nativo")
+        selected["PRESTASHOP_PRICE_VALIDATION_MODE"] = "native_rules_confirmed"
+        selected["PRESTASHOP_PRICE_NATIVE_CONFIRMATION"] = json.dumps({
+            "id": native_confirmation_id, "actor": actor, "at": datetime.now(timezone.utc).isoformat(),
+            "account_authorization_id": authorization_id, "claim": "native_prestashop_catalog_rules",
+            "context": {"shop_id": 1, "group_id": 1, "country_id": 6, "currency_id": 1, "market": "ES",
+                        "currency": "EUR", "customer_id": 0, "quantity": 1, "tax_included": True,
+                        "shipping_included": False, "cart_discount": False},
+        })
     selected["PRESTASHOP_PRICE_ENABLED"] = "1"  # Only the isolated process receives this override.
     return selected
 
@@ -106,7 +118,18 @@ if first["issues"]:
     print(json.dumps({"status": "blocked", "stage": "first_ean", "ean": pilot,
                       "issue": first_row["issue"], "production_activated": False}))
     sys.exit(1)
-remaining = [ean for ean in eans if ean != pilot]
+additional = "8056597684446"
+second = ps.refresh(store._connect, [additional], lambda: datetime.now(timezone.utc))
+with store._connect() as con:
+    second_row = dict(con.execute("SELECT * FROM prestashop_prices WHERE ean=?", (additional,)).fetchone())
+if second["issues"] or not second_row["payload"]:
+    print(json.dumps({"status": "blocked", "stage": "product_7861", "issue": second_row["issue"],
+                      "production_activated": False}))
+    sys.exit(1)
+second_price = json.loads(second_row["payload"])
+if (second_price["product_id"], second_price["combination_id"]) != (7861, 8425):
+    raise RuntimeError("La identidad del caso adicional 7861 cambió")
+remaining = [ean for ean in eans if ean not in (pilot, additional)]
 for start in range(0, len(remaining), 25):
     ps.refresh(store._connect, remaining[start:start + 25], lambda: datetime.now(timezone.utc))
 
@@ -133,17 +156,25 @@ with store._connect() as con:
         odoo_preserved = odoo_preserved and all(current[key] == value for key, value in reference.items())
 security_verified = bool(prices) and all(price["connection_security"].get("transaction_read_only") is True
                         and price["connection_security"].get("tls_required") is True for price in prices)
+code_links = sum(not price.get("price_reference") for price in prices)
+explicit_references = sum(bool(price.get("price_reference")) for price in prices)
 correct = (len(good) == 100 and source_correct and odoo_preserved and security_verified
-           and duplicate_history == 0)
+           and code_links == 95 and explicit_references == 5 and duplicate_history == 0)
 report = {
     "status": "correct" if correct else "blocked", "candidate_sha": payload["commit"],
     "production_activated": False, "ean_pilot": pilot,
     "pilot_price": json.loads(first_row["payload"])["price"],
     "pilot_offer": json.loads(first_row["payload"])["offer"],
+    "pilot_discount_trace": json.loads(first_row["payload"]).get("discount_trace"),
+    "price_validation": json.loads(first_row["payload"]).get("price_validation"),
+    "product_7861_price": second_price["price"], "product_7861_offer": second_price["offer"],
+    "product_7861_discount_trace": second_price.get("discount_trace"),
     "connection_security": json.loads(first_row["payload"])["connection_security"],
     "calculated_and_saved": len(good), "issues": len(eans) - len(good),
-    "code_links": sum(not price.get("price_reference") for price in prices),
-    "explicit_price_references": sum(bool(price.get("price_reference")) for price in prices),
+    "code_links": code_links, "explicit_price_references": explicit_references,
+    "association_mix_verified": code_links == 95 and explicit_references == 5,
+    "price_issues": [{"ean": row["ean"], "issue": row["issue"] or "Lectura sin vigencia acreditada"}
+                     for row in rows if row not in good],
     "inactive": sum(price.get("active") is False for price in prices),
     "without_stock": sum(price.get("in_stock") is False for price in prices),
     "history_rows": history, "duplicate_history_rows": duplicate_history,
@@ -161,6 +192,8 @@ def main() -> int:
     parser.add_argument("--commit", required=True)
     parser.add_argument("--actor", required=True)
     parser.add_argument("--authorization-id", required=True)
+    parser.add_argument("--native-confirmation-id",
+                        help="Explicit responsible confirmation of native catalog rules; not a PHP audit")
     args = parser.parse_args()
     if getattr(os, "geteuid", lambda: -1)() != 0:
         raise PilotError("Ejecutar como administrador; no cambiar permisos del Compose")
@@ -175,7 +208,7 @@ def main() -> int:
         "--project-name", "cloud-nas", "-f", "/etc/cloud-production/compose.private.json",
         "config", "--format", "json",
     ]))
-    environment = pilot_environment(config, args.actor, args.authorization_id)
+    environment = pilot_environment(config, args.actor, args.authorization_id, args.native_confirmation_id)
     names = run("fuentes", [*git, "ls-tree", "--name-only", args.commit]).decode().splitlines()
     sources = [name for name in names if name.endswith(".py")]
     sources += ["price_trial_manifest.json"]
