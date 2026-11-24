@@ -348,6 +348,13 @@ def main():
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as file:
         file.write(f"documentation_only={str(docs_only).lower()}\nbenchmark={str(benchmark).lower()}\n")
     if targets:
+        if os.environ.get("CI") == "true" and (
+            "tests" in targets or "tests/test_auth_browser.py" in targets
+        ):
+            subprocess.run(
+                ["python", "-m", "playwright", "install", "--with-deps", "chromium"],
+                check=True,
+            )
         subprocess.run(["python", "-m", "pytest", "-q", "-m", "not stress", "--", *targets], check=True)
 
 

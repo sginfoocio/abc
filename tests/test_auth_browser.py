@@ -17,6 +17,24 @@ from auth_session import create_auth_token, derive_session_signing_key
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def chromium_or_skip(playwright):
+    if not Path(playwright.chromium.executable_path).exists():
+        if os.environ.get("CI") == "true":
+            pytest.fail("Playwright Chromium is required for authentication browser tests in CI")
+        pytest.skip("Playwright Chromium is not installed")
+    return playwright.chromium.launch(headless=True)
+
+
+def test_missing_browser_fails_in_ci(monkeypatch, tmp_path):
+    class PlaywrightStub:
+        class chromium:
+            executable_path = str(tmp_path / "missing-chromium")
+
+    monkeypatch.setenv("CI", "true")
+    with pytest.raises(pytest.fail.Exception, match="required"):
+        chromium_or_skip(PlaywrightStub())
+
+
 @pytest.fixture(scope="module")
 def browser_server(tmp_path_factory):
     state = tmp_path_factory.mktemp("auth-browser") / "auth.sqlite3"
@@ -55,9 +73,7 @@ def browser_server(tmp_path_factory):
 
 def test_remembered_session_navigation_logout_and_isolation(browser_server):
     with sync_playwright() as playwright:
-        if not Path(playwright.chromium.executable_path).exists():
-            pytest.skip("Playwright Chromium is not installed")
-        browser = playwright.chromium.launch(headless=True)
+        browser = chromium_or_skip(playwright)
         first = browser.new_context()
         second = browser.new_context()
         page = first.new_page()
@@ -106,9 +122,7 @@ def test_expired_cookie_does_not_restore_session(browser_server):
     key = derive_session_signing_key("synthetic-secret-" * 4, "admin", "synthetic-password")
     expired = create_auth_token("admin", key, days=1, now=1)
     with sync_playwright() as playwright:
-        if not Path(playwright.chromium.executable_path).exists():
-            pytest.skip("Playwright Chromium is not installed")
-        browser = playwright.chromium.launch(headless=True)
+        browser = chromium_or_skip(playwright)
         context = browser.new_context()
         context.add_cookies([{
             "name": "abc_auth_session", "value": expired,
