@@ -2,13 +2,21 @@
 
 ## Estado de entrega
 
-**No fusionar ni desplegar todavia.** La descarga diaria real se verifico en
-una validacion anterior; no se repitio sobre el SHA `6891105`. En ese checkout
-se consumio localmente el reintento de Vigo desde el original general cacheado,
-se genero un CSV candidato y se preparo la vista previa local. El mapeo y el
-esquema Odoo se verificaron despues en solo lectura. Siguen pendientes la
-validacion del importador en una copia autorizada, la resolucion de los
-descuadres y la autorizacion del correo de prueba.
+**Desarrollo finalizado; no se ha fusionado ni desplegado.** La entrega se
+divide en tres puertas: integracion y despliegue tecnico con las funciones
+automaticas desactivadas; validacion funcional manual en produccion; y
+activacion posterior, con aprobacion expresa. La validacion del importador Odoo
+y el correo real son requisitos de las funciones contables y de envio
+respectivamente, no una prohibicion general para publicar el modulo desactivado.
+Esta separacion no sustituye las politicas generales de validacion local,
+revision, CI, proteccion de ramas, aprobacion de despliegue, backup ni rollback.
+
+La descarga diaria real se verifico en una validacion anterior; no se repitio
+sobre el SHA `6891105`. En ese checkout se consumio localmente el reintento de
+Vigo desde el original general cacheado, se genero un CSV candidato y se preparo
+la vista previa local. El mapeo y el esquema Odoo se verificaron despues en solo
+lectura. El importador no se ha validado en una copia autorizada; los descuadres
+siguen pendientes y no se ha realizado el correo de prueba.
 
 | Componente | Evidencia |
 |---|---|
@@ -264,61 +272,83 @@ con ambos consumidores parados mediante mantenimiento autorizado.
 Los blobs que queden huerfanos por un reinicio entre escritura y commit son
 inofensivos y no se purgan automaticamente.
 
-### Activacion (fuera de esta PR)
+### Puertas de integracion, validacion y activacion
 
-1. La comprobacion de acceso de Configuracion solo prueba las credenciales.
-   La descarga general ya se ha validado localmente; no habilitar automatizacion
-   ni envios solo por el login o esa descarga.
-2. Acordar operaciones/conceptos y resolver las incidencias y descuadres con
-   GIO/contabilidad, sin ajustar cifras.
-3. Validar el importador en una copia autorizada de Odoo y registrar evidencia.
-4. Preparar directorio persistente protegido, backup/retencion y secretos.
-   Aplicar cambios de app **y worker** en mantenimiento autorizado. El
-   despliegue Cloud normal es app-only: no actualiza el worker implicitamente.
-   Seguir `deployment/cloud/KERING_WORKER_RELEASE.md` para su identidad,
-   drenaje y rollback, incluyendo ahora directorio/clave GIO y variables M365.
-   El Compose privado real debe reflejar montajes, `GIO_DATA_ROOT`, clave y
-   Graph del worker; cambiar el Compose del repositorio no lo despliega.
-5. Configurar y revisar el destinatario de prueba en **Configuracion -> GIO**.
-   Tras revisar localmente la vista previa y los adjuntos, autorizar un unico
-   envio explicito desde el boton de prueba. Comprobar aceptacion y entrega,
-   sin importar nada en Odoo.
-6. Revisar toda la cola pendiente antes de permitir envios. Configurar hora,
-   destinatarios y automatico solo despues de superar todas las puertas.
+#### A. Integracion y despliegue tecnico del modulo
 
-Rollback de codigo: detener consumo GIO y envios con mantenimiento autorizado,
-conservar directorio, clave, originales y estados. No borrar la DB para
-recuperar la automatizacion: perderia la proteccion de duplicados.
+La primera fase puede publicar la interfaz GIO manteniendo desactivados
+`enabled` y `send_enabled`, sin escrituras Odoo y sin liberar CSV candidatos.
+Para que las ejecuciones manuales y el historico procesado funcionen se requiere
+actualizar tambien el worker existente; un despliegue app-only solo publica la
+interfaz. El importador Odoo y el correo real no bloquean por si solos esta fase
+mientras sus funciones sigan protegidas y desactivadas. No se trasladan
+credenciales, originales ni almacenamiento del entorno local a produccion.
 
-### Secuencia controlada de fusion, despliegue y rollback
+Antes de fusionar siguen siendo obligatorios: las pruebas locales pertinentes
+para el alcance desactivado, evidencia real autorizada del servicio externo que
+si se use, CI del SHA exacto, revision y aprobaciones requeridas, ausencia de
+conflictos y defectos criticos, verificacion de protecciones de `main` y
+comprobacion del flujo de despliegue automatico. Si una comprobacion general
+obligatoria esta bloqueada, no se fusiona ni despliega.
 
-Este procedimiento es una preparacion; no autoriza fusion, despliegue ni
-activacion:
+Antes de desplegar, un administrador debe confirmar mediante lectura el SHA y
+digest objetivo, estado de app y worker, Compose efectivo, volumen persistente,
+identidad/permisos, clave existente compartida, Graph requerido por el worker,
+estado de automatizaciones y ausencia de trabajos activos. Preparar y verificar
+el backup/restauracion y conservar los digests anteriores. El pipeline Cloud
+normal despliega solo la app; el worker compartido requiere mantenimiento
+autorizado independiente. Seguir `deployment/cloud/README.md` y
+`deployment/cloud/KERING_WORKER_RELEASE.md`; no cambiar el Compose productivo
+global ni iniciar otro scheduler.
 
-1. Antes de fusionar, completar las pruebas locales pertinentes, la descarga
-   real autorizada, el CI del SHA exacto y la revision/aprobacion expresa. No
-   fusionar mientras el importador Odoo, el correo de prueba o cualquier
-   comprobacion obligatoria siga bloqueada.
-2. Despues de la aprobacion de fusion, registrar el SHA integrado y el digest
-   de imagen que genera el pipeline. Ejecutar el despliegue Cloud app-only
-   aprobado siguiendo `deployment/cloud/README.md`; no usar un push de feature
-   como despliegue ni cambiar la configuracion productiva para probar.
-3. La app y `kering_jobs.py` comparten el worker. El despliegue de la app no
-   actualiza el worker: en una ventana de mantenimiento autorizada, actualizar
-   solo el servicio worker existente al mismo digest compatible, conservando
-   identidad, comando, usuario, red, montajes, `GIO_DATA_ROOT` y el mecanismo
-   de clave. Seguir `deployment/cloud/KERING_WORKER_RELEASE.md`; no ejecutar un
-   `compose up` global ni iniciar un segundo scheduler.
-4. Verificar por separado SHA/digest y salud de app y worker; que ambos lean el
-   mismo almacén cifrado y volumen GIO; que automatizacion y correo sigan
-   desactivados; que no haya reintentos, duplicados ni escrituras Odoo; y que
-   la interfaz, el historico y las descargas sigan disponibles. Registrar
-   resultados agregados sin destinatarios, IDs, importes ni originales.
-5. Para rollback, detener el consumo GIO y cualquier envio con mantenimiento
-   autorizado; volver la app y el worker a sus imagenes/digests previos como
-   operaciones separadas. Conservar SQLite, WAL, originales y clave; no borrar
-   la base ni cambiar la configuracion de automatizacion/correo para ocultar el
-   fallo. Verificar el estado y la ausencia de duplicados antes de reanudar.
+Solicitar aprobacion expresa antes de fusionar, antes de despachar el despliegue
+app-only y, separadamente, antes de abrir la ventana del worker. Durante la
+ventana: comprobar que no haya ejecuciones activas, pausar temporalmente la
+automatizacion Kering solo si estaba activa, drenar trabajo, tomar una copia
+consistente de SQLite/WAL, `config.enc`, artefactos y clave, y verificar su
+restauracion aislada. Actualizar la app y solo el worker existente al digest
+aprobado compatible, siguiendo sus procedimientos separados; validar salud,
+identidad, mounts y clave, y comprobar que los demas proveedores no cambian.
+Restaurar el estado de automatizacion
+previo de Kering, no activarlo si estaba desactivado. Ante cualquier fallo,
+revertir app y worker por separado, conservar datos y clave y mantener
+desactivadas las automatizaciones GIO.
+
+#### B. Validacion funcional manual en produccion
+
+Despues del despliegue, el usuario introduce las credenciales desde
+**Configuracion -> GIO**, prueba la conexion y solicita una descarga manual
+limitada a la fecha acordada. Revisar el original general, historico, estados e
+incidencias de los tres centros. La prueba de conexion valida solo autenticacion;
+no demuestra que la descarga, el importador o el correo funcionen.
+
+Odoo permanece exclusivamente en lectura. Los CSV no importados se identifican
+como candidatos y no se liberan para importar. Revisar descuadres por centro sin
+ajustes artificiales; un descuadre bloquea solo el asiento afectado.
+Verificar la configuracion Graph efectiva del app y del worker, confirmar el
+remitente y configurar el destinatario de prueba. Revisar preview y adjuntos.
+Un unico correo real requiere autorizacion expresa inmediatamente antes del
+envio y verificacion posterior; si el resultado es incierto, no reintentar
+automaticamente.
+
+#### C. Activacion posterior
+
+Mantener la ejecucion diaria GIO y los envios programados desactivados hasta
+obtener aprobacion expresa. Para liberar CSV/asientos se requiere validar el
+formato en una copia autorizada de Odoo y registrar aprobacion contable del
+mapeo. Para habilitar correo se requiere confirmar Graph, remitente, destinatario
+y completar el envio de prueba autorizado. Revisar y resolver incidencias y
+descadres con GIO/Contabilidad; no modificar cifras para forzar el equilibrio.
+La activacion de cada capacidad es una decision separada y no se deriva del
+despliegue ni de una comprobacion de login.
+
+#### Rollback
+
+Detener el consumo GIO y cualquier envio con mantenimiento autorizado. Volver
+app y worker a sus digests previos como operaciones separadas. Conservar
+SQLite/WAL, originales, artefactos, configuracion cifrada y clave; no borrar la
+base ni cambiar los flags para ocultar un fallo. Verificar que Kering y los
+demas proveedores conservan su estado previo antes de reanudar operaciones.
 
 ## Pruebas y controles
 
