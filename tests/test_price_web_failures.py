@@ -119,7 +119,7 @@ def test_business_vat_applies_to_verified_page_without_per_page_tax(tmp_path):
 @pytest.mark.parametrize("overrides", [{"market": None}, {"currency": "USD"}])
 def test_unverified_market_or_foreign_currency_is_not_comparable(tmp_path, overrides, monkeypatch):
     if "market" in overrides and not overrides["market"]:
-        monkeypatch.setattr("price_web_extract.business_market_policy_for", lambda *args: None)
+        monkeypatch.setattr("competitor_requirements.business_market_policy_for", lambda url: None)
     site, store, search, cid = _setup(tmp_path)
     site.add(GOOD, prada_page(EAN, **overrides))
     sub = search.submit_url(EAN, cid, GOOD)

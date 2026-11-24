@@ -445,7 +445,7 @@ def test_search_itemlist_and_nested_related_product_are_not_a_product_page():
 ])
 def test_exact_identity_does_not_bypass_commercial_validation(pilot, fields, monkeypatch):
     if "market" in fields and not fields["market"]:
-        monkeypatch.setattr("price_web_extract.business_market_policy_for", lambda *args: None)
+        monkeypatch.setattr("competitor_requirements.business_market_policy_for", lambda url: None)
     service, store, search, site, cid, _ = pilot
     node = product(url=SITE + "/product.html", price=153,
                    valueAddedTaxIncluded=True, eligibleRegion="ES")

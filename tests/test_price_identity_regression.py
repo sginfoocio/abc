@@ -114,7 +114,7 @@ def test_production_values_missing_caliber_comparable_by_exact_ean(pilot):
 ])
 def test_strict_identity_and_commercial_rejections(pilot, fields, reason, monkeypatch):
     if "market" in fields and not fields["market"]:
-        monkeypatch.setattr("price_web_extract.business_market_policy_for", lambda *args: None)
+        monkeypatch.setattr("competitor_requirements.business_market_policy_for", lambda url: None)
     empty_caliber(pilot)
     reasons, validation = check(pilot, exact_production_page(pilot, **fields))
     assert any(reason.lower() in item.lower() for item in reasons), reasons

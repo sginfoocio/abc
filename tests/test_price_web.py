@@ -181,7 +181,7 @@ def test_registered_business_vat_is_stored_without_a_per_page_statement(tmp_path
 @pytest.mark.parametrize("business_policy_present", [False, True])
 def test_unpublished_market_requires_audited_business_policy(tmp_path, monkeypatch, business_policy_present):
     if not business_policy_present:
-        monkeypatch.setattr("price_web_extract.business_market_policy_for", lambda *args: None)
+        monkeypatch.setattr("competitor_requirements.business_market_policy_for", lambda url: None)
     site = FakeSite()
     store, search = make_search(tmp_path, site)
     cid = competitor_id(store)
