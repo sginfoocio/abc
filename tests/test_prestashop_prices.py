@@ -276,6 +276,12 @@ def test_native_catalog_lineage_discrepancies_are_not_silently_accepted(case):
         ps._catalog_origin(498, row, parents, conditions, categories)
 
 
+@pytest.mark.parametrize("value", [Decimal("90.5"), Decimal("NaN"), Decimal("Infinity"), -1, True, "90"])
+def test_mysql_identity_normalization_rejects_fractional_or_invalid_identifiers(value):
+    with pytest.raises(ps.QuoteError, match="Identificador MySQL"):
+        ps._database_id(value)
+
+
 @pytest.mark.parametrize("contradictory_calibre", [False, True])
 def test_native_batch_keeps_real_selection_trace_or_reports_calibre_conflict(monkeypatch, contradictory_calibre):
     native_confirmation(monkeypatch)
@@ -290,7 +296,7 @@ def test_native_batch_keeps_real_selection_trace_or_reports_calibre_conflict(mon
         if "UTC_TIMESTAMP" in sql:
             rows = [(NOW.replace(tzinfo=None),)]
         elif "UNION ALL" in sql:
-            rows = [(EAN, 498, 90, 0)]
+            rows = [(EAN, 498, Decimal(90), 0)]
         elif "price_display_method" in sql:
             rows = [(1, "ES", "EUR", 2, 0, 0, 0)]
         elif "SELECT name,value" in sql:
@@ -330,6 +336,7 @@ def test_native_batch_keeps_real_selection_trace_or_reports_calibre_conflict(mon
         assert isinstance(result, str) and "contradictorios" in result
     else:
         price = json.loads(result[0])
+        assert type(price["combination_id"]) is int and price["combination_id"] == 90
         assert price["price"] == "90.75" and price["active"] is False and price["in_stock"] is False
         assert price["price_validation"]["php_inspected"] is False
         assert price["discount_trace"]["selected_specific_price_id"] == 384459

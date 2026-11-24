@@ -254,6 +254,14 @@ def _validate_price_hooks(hooks: list, validation: dict) -> None:
             raise QuoteError("Hay un módulo de cálculo o presentación de precios no auditado")
 
 
+def _database_id(value: int | Decimal) -> int:
+    if (type(value) not in (int, Decimal)
+            or isinstance(value, Decimal) and (not value.is_finite() or value != value.to_integral_value())
+            or not 0 <= value <= 0xFFFFFFFF):
+        raise QuoteError("Identificador MySQL no entero o fuera de rango")
+    return int(value)
+
+
 def _mysql_rows(eans: list[str], context: dict) -> tuple[list[tuple], list[tuple]]:
     import pymysql
 
@@ -323,6 +331,9 @@ def read_batch(cur, eans: list[str], context: dict, *, audit: bool = False) -> t
                 ON ats.id_product_attribute=a.id_product_attribute AND ats.id_shop=%s
                 JOIN {product_shop} ps ON ps.id_product=a.id_product AND ps.id_shop=ats.id_shop
                 WHERE a.ean13 IN (MARKS)""".replace("MARKS", identity_marks), (shop, *forms, shop, *forms))
+    # MySQL can promote the literal-zero/unsigned-ID UNION column to DECIMAL.
+    identities = [(ean, _database_id(pid), _database_id(aid), unresolved)
+                  for ean, pid, aid, unresolved in identities]
     reference_links = {}
     reference_issues = {}
     pending = {ean: ref for ean, ref in references.items()
