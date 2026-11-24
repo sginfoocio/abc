@@ -2,23 +2,29 @@
 
 ## Estado de entrega
 
-**No fusionar ni desplegar todavia.** La descarga diaria esta verificada
-localmente contra GIO. Siguen pendientes confirmar la persistencia del mapeo,
-consumir el reintento de Vigo, validar el importador y preparar la vista previa
-real del correo.
+**No fusionar ni desplegar todavia.** La descarga diaria real se verifico en
+una validacion anterior; no se repitio sobre el SHA `6891105`. En ese checkout
+se consumio localmente el reintento de Vigo desde el original general cacheado,
+se genero un CSV candidato y se preparo la vista previa local. El mapeo y el
+esquema Odoo se verificaron despues en solo lectura. Siguen pendientes la
+validacion del importador en una copia autorizada, la resolucion de los
+descuadres y la autorizacion del correo de prueba.
 
 | Componente | Evidencia |
 |---|---|
-| Portal GIO | GET autenticado del informe general devolvio CSV y coincidio byte a byte con la exportacion manual local |
-| Procesamiento | El worker descarga una vez por fecha, conserva el original general y separa los estados por centro |
-| Interfaz local | Configuracion e historico revisados con sesion local autenticada; no se reprodujo la perdida de sesion al navegar. La vista previa real sigue pendiente porque Vigo no tiene CSV generado |
-| CSV para Odoo | El mapeo real se verifico mediante lectura Odoo. La UI confirmo el guardado, pero no se pudo verificar su persistencia cifrada; no se reescribio para evitar sustituir valores por controles reiniciados |
-| Odoo y correo | Sin escrituras, importaciones ni envios reales; automatizacion y correo siguen desactivados |
+| Portal GIO | GET autenticado devolvio el informe general, coincidente byte a byte con la exportacion manual local; validado antes de `6891105`, no repetido en ese SHA |
+| Procesamiento | Tick local exclusivo de GIO consumio el reintento desde el original cacheado; no repitio la descarga ni genero duplicados |
+| Interfaz local | Configuracion e historico revisados con sesion local autenticada; no se reprodujo la perdida de sesion. Ourense muestra descuadre, Vigo CSV candidato y Coruña sin movimientos |
+| CSV para Odoo | Candidato de Vigo equilibrado, generado con el mapeo cifrado; se reviso la estructura del Excel original como referencia. Mapeo y esquema se verificaron en lectura; el importador no se probo |
+| Odoo y correo | Verificacion Odoo en transaccion de solo lectura y rollback; sin escrituras/importaciones. Vista previa local sin destinatarios; no se envio correo. Automatizacion y envios siguen desactivados |
 | Produccion | Sin despliegue, reinicio, activacion, merge ni cambios remotos |
 
-No se encontro el worker local `kering_jobs.py` en ejecucion y el reintento de
-Vigo permanece en cola. Esta terminal de validacion no dispone de la clave
-Fernet, por lo que no se pudo descifrar la configuracion ni verificar el mapeo.
+No se encontro el worker compartido `kering_jobs.py` en ejecucion. Para no
+ejecutar tareas Kering ni de otros proveedores, se uso un tick local exclusivo
+de GIO, con el mismo `GIO_DATA_ROOT` y `KERING_ENCRYPTION_KEY_FILE` que establecio
+el lanzador aislado de Cloud. Se reutilizo el archivo Fernet existente sin leer,
+mostrar ni regenerar su contenido; el ejecutor desactivo red, correo y conexion
+Odoo.
 
 Se han seguido las instrucciones `AGENTS.md`, README, workflows, configuracion
 cifrada de proveedores, permisos admin, diseno Cloud, SQLite/FileLock y worker
@@ -38,10 +44,12 @@ administradores. No se modifica ni se repara automaticamente ningun original.
 
 ### Contrato contable
 
-El mapeo de cuentas y diarios se configura localmente en Cloud y se conserva
-cifrado. No se guardan IDs Odoo, importaciones ni cifras de ventas en esta
-documentacion. Los CSV son candidatos para `account.move` y requieren validar
-el importador y el contrato contable antes de cualquier uso.
+El mapeo de sociedad, cuentas y diarios se configura localmente en Cloud y se
+conserva cifrado. Se verifico el mapeo y el esquema con la conexion Cloud
+existente, usando una transaccion `READ ONLY`, timeout y rollback. No se
+guardan IDs Odoo, importaciones ni cifras de ventas en esta documentacion. Los
+CSV son candidatos para `account.move`; esa verificacion no ejercito el
+importador ni certifica que acepte el formato.
 
 ### Muestra real
 
@@ -65,18 +73,29 @@ ejecución no volvió a descargar ni duplicó registros. El CSV automático coin
 byte a byte con la exportación manual facilitada por el usuario.
 
 Resultado separado por centro en el historico local: Ourense, **descuadre
-contable**; Vigo, **pendiente**; Coruña, **sin movimientos**, sin asiento vacío.
-El reintento de Vigo sigue encolado porque no hay worker local activo y no se
-confirmo el mapeo cifrado; no se genero su CSV. Un candidato anterior se comprobo
-solo en memoria con IDs sinteticos; no se guardo ni se importo.
+contable** con dos operaciones identificadas y diferencias no nulas, sin
+ajustes artificiales; Vigo, **CSV candidato equilibrado**, no liberado para
+importar; Coruña, **sin movimientos**, sin asiento vacío. El candidato conserva
+las bases imponibles y cuotas del original. Se verificaron cabecera, fecha,
+diario, cuentas contra el mapeo cifrado y sumas. El Excel original se reviso
+como referencia de estructura contable (fecha, concepto, documento, cuenta,
+descripcion, debe y haber); no se hizo una comparacion transaccional de sus
+importes con el candidato.
+
+La vista previa local incluye el original general y el CSV candidato, resume las
+incidencias de Ourense y no invoca el remitente. No hay destinatarios configurados
+en esta instancia. El estado del correo sigue en borrador; no se envio nada.
 No se incluyen aquí filas, clientes, importes, NIF, credenciales ni huellas del
 archivo original.
 
-Las credenciales se leyeron del almacén cifrado local. No se hicieron escrituras
-en Odoo, envíos de correo ni registros/cierres de sesión del portal. La
-configuración de automatización y correo siguió desactivada. La configuración
-contable real no está completa, así que el worker conserva el centro válido como
-candidato y no publica un CSV importable.
+Las credenciales se leyeron del almacen cifrado local. Despues del tick se
+verificaron la sociedad, los diarios, las cuentas y el esquema Odoo mediante la
+conexion Cloud existente en una transaccion de solo lectura, con timeout y
+rollback; no se probaron importaciones. No se hicieron escrituras en Odoo,
+envios de correo ni registros/cierres de sesion del portal. La automatizacion y
+los envios siguieron desactivados. Sin validar el importador ni completar las
+aprobaciones, el worker conserva el centro valido como candidato y no publica
+un CSV listo para importar.
 
 ## Configuracion y arquitectura Cloud
 
