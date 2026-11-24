@@ -215,6 +215,7 @@ def calculate(rules, priority=PRIORITY, taxes=((0, "0", "0", Decimal(21), 1, 0),
 
 def native_confirmation(monkeypatch, **changes):
     authorized_account(monkeypatch)
+    monkeypatch.setenv("PRESTASHOP_MYSQL_PREFIX", "ps_")
     monkeypatch.setenv("PRESTASHOP_PRICE_CODE_AUDITED", "0")
     monkeypatch.setenv("PRESTASHOP_PRICE_VALIDATION_MODE", "native_rules_confirmed")
     receipt = {"id": "native-test", "actor": "reviewer", "at": NOW.isoformat(),
@@ -280,6 +281,45 @@ def test_native_catalog_lineage_discrepancies_are_not_silently_accepted(case):
 def test_mysql_identity_normalization_rejects_fractional_or_invalid_identifiers(value):
     with pytest.raises(ps.QuoteError, match="Identificador MySQL"):
         ps._database_id(value)
+
+
+@pytest.mark.parametrize("change", [None, "reference", "product"])
+def test_current_literal_ean_preserves_approved_model_colour_without_transferring_stock(monkeypatch, change):
+    native_confirmation(monkeypatch)
+    ean = "8056262833902"
+    original, pid, original_aid, brand, _, _, reference = ps.PRICE_REFERENCES[ean]
+    current_aid = 21270
+    current_pid = pid + 1 if change == "product" else pid
+    cur = MagicMock()
+    cur.fetchall.side_effect = [
+        [(NOW.replace(tzinfo=None),)],
+        [(original, pid, original_aid, 1), (ean, current_pid, Decimal(current_aid), 0)],
+        [(pid, brand, "changed" if change == "reference" else reference)],
+        [(1, "ES", "EUR", 2, 0, 0, 0)],
+        list({"PS_VERSION_DB": "8.2.1", "PS_TAX": "1", "PS_UNIDENTIFIED_GROUP": "1",
+              "PS_CURRENCY_DEFAULT": "1", "PS_PRICE_ROUND_MODE": "2", "PS_ROUND_TYPE": "2",
+              "PS_TAX_ADDRESS_TYPE": "id_address_delivery", "PS_TIMEZONE": "Europe/Madrid",
+              "PS_SPECIFIC_PRICE_FEATURE_ACTIVE": "1", "PS_SPECIFIC_PRICE_PRIORITIES": PRIORITY}.items()),
+        [], [],
+        [(pid, Decimal(100), 0, 63, 0, 1, 1)],
+        [(pid, current_aid, 0, 0, 1)],
+        [(63, 0, "0", "0", Decimal(21), 1, 0)],
+        [], [],
+        [(pid, original_aid, 100), (pid, current_aid, 0)],
+    ]
+    identities, rows = ps.read_batch(cur, [ean], NATIVE_CONTEXT)
+    result = ps.resolve([ean], identities, rows, NATIVE_CONTEXT, NOW)[ean]
+    if change:
+        assert isinstance(result, str) and "referencia auditada cambió" in result
+    else:
+        price = json.loads(result[0])
+        assert price["product_id"] == pid and price["combination_id"] == current_aid
+        assert price["price"] == "121.00" and price["in_stock"] is False
+        assert "price_reference" not in price
+        association = price["price_association"]
+        assert association["literal_ean_verified"] is True
+        assert association["original_reference_combination_id"] == original_aid
+        assert association["original_barcode"] == original
 
 
 @pytest.mark.parametrize("contradictory_calibre", [False, True])

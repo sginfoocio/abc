@@ -335,28 +335,35 @@ def read_batch(cur, eans: list[str], context: dict, *, audit: bool = False) -> t
     identities = [(ean, _database_id(pid), _database_id(aid), unresolved)
                   for ean, pid, aid, unresolved in identities]
     reference_links = {}
+    literal_reference_links = {}
     reference_issues = {}
-    pending = {ean: ref for ean, ref in references.items()
-               if not any(row[0].zfill(13) == ean for row in identities)}
-    if pending:
-        refs = sorted({row[6] for row in pending.values()})
+    if references:
+        refs = sorted({row[6] for row in references.values()})
         reference_rows = select("""SELECT p.id_product,m.name,p.reference FROM {product} p
             JOIN {manufacturer} m ON m.id_manufacturer=p.id_manufacturer
             JOIN {product_shop} ps ON ps.id_product=p.id_product AND ps.id_shop=%s
             WHERE p.reference IN (MARKS)""".replace("MARKS", ",".join(["%s"] * len(refs))), (shop, *refs))
-        for ean, ref in pending.items():
+        for ean, ref in references.items():
             original, pid, aid, brand, _, _, reference = ref
             matching_rows = {row for row in identities if row[0].zfill(13) == original.zfill(13)}
             expected_rows = {(original, pid, aid, 0), (original, pid, 0, bool(aid))}
             live = {row[0] for row in reference_rows if row[1:] == (brand, reference)}
-            if live == {pid} and (original, pid, aid, 0) in matching_rows and matching_rows <= expected_rows:
+            literal = {row for row in identities if row[0].zfill(13) == ean}
+            if literal:
+                if live == {pid} and {row[1] for row in literal} == {pid}:
+                    literal_reference_links[ean] = ref
+                else:
+                    reference_issues[ean] = QuoteError(
+                        "La ficha de referencia auditada cambió, no pertenece a la tienda o es ambigua")
+            elif live == {pid} and (original, pid, aid, 0) in matching_rows and matching_rows <= expected_rows:
                 reference_links[ean] = ref
                 identities.append((ean, pid, aid, 0))
             else:
                 reference_issues[ean] = QuoteError(
                     "La ficha de referencia auditada cambió, no pertenece a la tienda o es ambigua")
     requested = set(eans)
-    identities = [row for row in identities if row[0].zfill(13) in requested]
+    identities = [row for row in identities if row[0].zfill(13) in requested
+                  and row[0].zfill(13) not in reference_issues]
     products = sorted({row[1] for row in identities})
     if not products:
         return identities, list(reference_issues.items())
@@ -474,6 +481,8 @@ def read_batch(cur, eans: list[str], context: dict, *, audit: bool = False) -> t
             payload["price_validation"] = validation
             if ean in reference_links:
                 _annotate_reference(payload, ean, reference_links[ean])
+            elif ean in literal_reference_links:
+                _annotate_reference(payload, ean, literal_reference_links[ean], literal=True)
             quantities = stock[pid, aid]
             payload.update(context, product_id=pid, combination_id=aid, engine=ENGINE,
                            observed_at=now.isoformat())
@@ -486,9 +495,9 @@ def read_batch(cur, eans: list[str], context: dict, *, audit: bool = False) -> t
     return identities, quotes
 
 
-def _annotate_reference(payload: dict, ean: str, link: tuple) -> None:
-    original, _, _, brand, model, colour, reference = link
-    payload["price_reference"] = {
+def _annotate_reference(payload: dict, ean: str, link: tuple, *, literal: bool = False) -> None:
+    original, pid, aid, brand, model, colour, reference = link
+    association = {
         "kind": "marca/modelo/color", "requested_ean": ean, "original_barcode": original,
         "brand": brand, "model": model, "colour": colour, "reference": reference,
         "evidence": "Auditoría PR #145: catálogo vigilado, ps_manufacturer, ps_product.reference, "
@@ -496,6 +505,15 @@ def _annotate_reference(payload: dict, ean: str, link: tuple) -> None:
         "reason": "Mismo modelo y color; el calibre no modifica el precio. El código coincide solo con la ficha de referencia. "
                   "No acredita variante ni disponibilidad del EAN solicitado.",
     }
+    if literal:
+        association.update(
+            original_reference_product_id=pid, original_reference_combination_id=aid,
+            literal_ean_verified=True,
+            reason="Asociación de precio conservada: mismo producto, marca y referencia completa auditados. "
+                   "La identidad actual procede de la coincidencia literal UPC-12/EAN-13, no del código anterior. "
+                   "La disponibilidad se consulta sólo para la combinación actual.",
+        )
+    payload["price_association" if literal else "price_reference"] = association
 
 
 def _with_other_calibres(calculate: Callable[[int], dict], combination: int, siblings: Iterable[int]) -> dict:
@@ -649,7 +667,7 @@ def _decode(raw: str, identity: tuple[int, int], context: dict, now: datetime) -
         snapshot["price_reference"] = payload["price_reference"]
     if payload.get("connection_security"):
         snapshot["connection_security"] = payload["connection_security"]
-    for key in ("price_validation", "discount_trace"):
+    for key in ("price_validation", "discount_trace", "price_association"):
         if payload.get(key):
             snapshot[key] = payload[key]
     for key in ("active", "in_stock"):

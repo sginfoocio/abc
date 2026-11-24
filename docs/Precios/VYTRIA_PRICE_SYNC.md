@@ -197,8 +197,15 @@ Los resultados y el informe quedan en una
 base aislada bajo `/var/lib/cloud-production-validation`, privada del
 administrador. Se comprueban vigencia, fuente del comparador, conservación de
 Odoo y registros duplicados. Se retira únicamente el contenedor del piloto.
-También se exige conservar las 95 asociaciones por código y cinco referencias
-explícitas; un cambio del reparto queda bloqueado y visible en el informe.
+También se exige conservar las cinco asociaciones comerciales explícitas del
+alcance original 95+5. Si aparece un EAN literal en una nueva combinación del
+mismo producto, se verifica la marca y referencia completa ya aprobadas, sin
+atribuirle la identidad ni el stock del código anterior. Se guarda esa asociación
+histórica separadamente en `price_association`, manteniendo los IDs y stock de la
+coincidencia literal actual. Las referencias sin EAN literal conservan el camino
+anterior `price_reference`. El informe distingue coincidencias literales,
+referencias sin coincidencia y asociaciones comerciales conservadas; no exige
+que los cinco códigos sigan ausentes ni acepta un cambio de producto/referencia.
 El script no modifica el Compose, no cambia grants y **no activa producción**.
 No ejecutar con `sudo` sin la autorización administrativa correspondiente.
 
@@ -257,7 +264,9 @@ código se deba al calibre, ni que ambos códigos sean la misma variante.
 | `8056597669023` | Miu Miu MU 04UV VAU1O1 | `8056262667491` | 1615/13343 | 224,00 € | 593897 / 10 % |
 
 El lector solo usa estas correspondencias explícitas si no hay coincidencia
-del código solicitado. Revalida el código original, los IDs, la pertenencia a
+del código solicitado. Si ahora existe, conserva y contrasta la asociación
+comercial con el mismo producto, marca y referencia, sin exigir la combinación
+antigua ni trasladar su stock. Si no existe, revalida el código original, los IDs, la pertenencia a
 la tienda, la marca y la referencia completa. Si la ficha cambia, hay varias
 identidades o no se puede descartar un precio distinto en otra combinación,
 deja el caso pendiente. No traslada actividad ni stock al EAN consultado.

@@ -175,8 +175,12 @@ security_verified = bool(prices) and all(price["connection_security"].get("trans
                         and price["connection_security"].get("tls_required") is True for price in prices)
 code_links = sum(not price.get("price_reference") for price in prices)
 explicit_references = sum(bool(price.get("price_reference")) for price in prices)
+literal_references = sum(bool(price.get("price_association")) for price in prices)
+association_eans = {row["ean"] for row, price in zip(good, prices)
+                    if price.get("price_reference") or price.get("price_association")}
+associations_verified = association_eans == set(ps.PRICE_REFERENCES) and code_links + explicit_references == 100
 correct = (len(good) == 100 and source_correct and odoo_preserved and security_verified
-           and code_links == 95 and explicit_references == 5 and duplicate_history == 0)
+           and associations_verified and duplicate_history == 0)
 report = {
     "status": "correct" if correct else "blocked", "candidate_sha": payload["commit"],
     "production_activated": False, "ean_pilot": pilot,
@@ -189,7 +193,9 @@ report = {
     "connection_security": json.loads(first_row["payload"])["connection_security"],
     "calculated_and_saved": len(good), "issues": len(eans) - len(good),
     "code_links": code_links, "explicit_price_references": explicit_references,
-    "association_mix_verified": code_links == 95 and explicit_references == 5,
+    "literal_matches_with_approved_reference": literal_references,
+    "approved_price_associations": len(association_eans),
+    "association_mix_verified": associations_verified,
     "price_issues": [{"ean": row["ean"], "issue": row["issue"] or "Lectura sin vigencia acreditada"}
                      for row in rows if row not in good],
     "inactive": sum(price.get("active") is False for price in prices),

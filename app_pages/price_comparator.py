@@ -254,6 +254,7 @@ def _render_native_prices(store: PriceComparatorStore, prices: pd.DataFrame) -> 
         security = payload.get("connection_security", {})
         offer = payload.get("offer")
         reference = payload.get("price_reference")
+        association = payload.get("price_association")
         price = payload.get("price")
         alternative = payload.get("other_calibres", {})
         issue = quote["issue"] if quote else "Sin lectura de PrestaShop"
@@ -270,7 +271,8 @@ def _render_native_prices(store: PriceComparatorStore, prices: pd.DataFrame) -> 
             "EAN": ean, "Precio Odoo": odoo.get(ean), "Precio final en Vytria": float(price) if price else None,
             "Descuento/oferta aplicada": _native_offer_label(offer) if payload else "—",
             "Vinculación": (f"Referencia marca/modelo/color · {reference['original_barcode']}"
-                            if reference else "EAN exacto" if payload else "—"),
+                            if reference else "EAN exacto · asociación comercial conservada" if association
+                            else "EAN exacto" if payload else "—"),
             "Origen": payload.get("source", "") if payload else "—",
             "Validación del precio": {
                 "native_rules_confirmed": "Reglas nativas confirmadas; PHP no inspeccionado",
