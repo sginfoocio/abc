@@ -113,6 +113,71 @@ def _mysql_tls_options() -> dict:
     raise QuoteError("Configurar TLS de MySQL: VERIFY_IDENTITY con CA o REQUIRED explícito sin CA")
 
 
+def _account_authorization(config: dict, port: int) -> dict | None:
+    policy = os.getenv("PRESTASHOP_MYSQL_ACCOUNT_POLICY", "select_only")
+    if policy == "select_only":
+        return None
+    if policy != "authorized_broad":
+        raise QuoteError("Política de cuenta MySQL no reconocida")
+    try:
+        receipt = json.loads(os.environ["PRESTASHOP_MYSQL_ACCOUNT_AUTHORIZATION"])
+        required = {"id", "actor", "at", "host", "port", "user", "database"}
+        if (type(receipt) is not dict or set(receipt) != required
+                or any(not isinstance(receipt[key], str) or not receipt[key].strip()
+                       or len(receipt[key]) > 200 for key in required - {"port"})
+                or type(receipt["port"]) is not int or receipt["port"] != port
+                or any(receipt[key] != config[key] for key in ("host", "user", "database"))
+                or receipt["user"] != "ps_user_vytria_lect"
+                or receipt["database"] != "ps_vytria"
+                or _time(receipt["at"]) > datetime.now(timezone.utc)):
+            raise ValueError
+    except (KeyError, TypeError, ValueError, OverflowError):
+        raise QuoteError("Falta autorización válida y acotada para la cuenta MySQL de permisos amplios") from None
+    return {key: receipt[key] for key in ("id", "actor", "at")}
+
+
+def _authorized_database_grant(grant: str) -> bool:
+    match = re.match(r"^GRANT (.+?) ON (.+?) TO ", grant)
+    if not match or "WITH GRANT OPTION" in grant:
+        return False
+    privileges, scope = match.groups()
+    if privileges == "USAGE" and scope == "*.*":
+        return True
+    scope = scope.replace("\\\\", "\\").replace("\\_", "_")
+    allowed = {"SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "REFERENCES", "INDEX",
+               "ALTER", "CREATE TEMPORARY TABLES", "LOCK TABLES", "EXECUTE", "CREATE VIEW",
+               "SHOW VIEW", "CREATE ROUTINE", "ALTER ROUTINE", "EVENT", "TRIGGER"}
+    return scope == "`ps_vytria`.*" and set(privileges.split(", ")) <= allowed
+
+
+def _connection_security(cur, config: dict, cipher: str, authorization: dict | None) -> dict:
+    cur.execute("SHOW GRANTS")
+    grants = [grant for (grant,) in cur.fetchall()]
+    restricted = all(re.match(r"^GRANT (USAGE|SELECT) ON ", grant)
+                     and "WITH GRANT OPTION" not in grant for grant in grants)
+    if not grants or (not restricted and authorization is None):
+        raise QuoteError("La cuenta de PrestaShop no tiene permisos exclusivamente de lectura")
+    if authorization is not None:
+        if not all(_authorized_database_grant(grant) for grant in grants):
+            raise QuoteError("Permisos MySQL fuera del ámbito autorizado")
+        cur.execute("SELECT CURRENT_USER(), DATABASE()")
+        identity = cur.fetchone()
+        if (not identity or len(identity) != 2 or not isinstance(identity[0], str)
+                or identity[0].rpartition("@")[0] != config["user"]
+                or identity[1] != config["database"]):
+            raise QuoteError("La sesión MySQL no corresponde a la cuenta y base autorizadas")
+    security = {
+        "account_policy": "authorized_broad" if authorization is not None else "select_only",
+        "account_permissions": "select_only" if restricted else "broad",
+        "tls_required": True, "tls_cipher": cipher,
+        "certificate_verified": os.getenv("PRESTASHOP_MYSQL_SSL_MODE", "VERIFY_IDENTITY") == "VERIFY_IDENTITY",
+        "server_identity_verified": os.getenv("PRESTASHOP_MYSQL_SSL_MODE", "VERIFY_IDENTITY") == "VERIFY_IDENTITY",
+    }
+    if authorization is not None:
+        security["authorization"] = authorization
+    return security
+
+
 def _mysql_rows(eans: list[str], context: dict) -> tuple[list[tuple], list[tuple]]:
     import pymysql
 
@@ -122,7 +187,10 @@ def _mysql_rows(eans: list[str], context: dict) -> tuple[list[tuple], list[tuple
             ("database", "DATABASE"))}
         port = int(os.getenv("PRESTASHOP_MYSQL_PORT", "3306"))
     except (KeyError, ValueError):
-        raise QuoteError("Falta configurar la conexión MySQL de solo lectura") from None
+        raise QuoteError("Falta configurar la conexión MySQL de PrestaShop") from None
+    authorization = _account_authorization(config, port)
+    if not eans or len(eans) != len(set(eans)) or not set(eans) <= manifest_eans():
+        raise QuoteError("La lectura MySQL debe limitarse al manifiesto autorizado de 100 EAN")
     with closing(pymysql.connect(**config, port=port, **_mysql_tls_options(),
                                  connect_timeout=5, read_timeout=15, write_timeout=15,
                                  charset="utf8mb4")) as con, con.cursor() as cur:
@@ -130,19 +198,31 @@ def _mysql_rows(eans: list[str], context: dict) -> tuple[list[tuple], list[tuple
         cipher = cur.fetchone()
         if not cipher or not cipher[1]:
             raise QuoteError("La sesión MySQL de PrestaShop no tiene TLS activo")
-        cur.execute("SHOW GRANTS")
-        for (grant,) in cur.fetchall():
-            if not re.match(r"^GRANT (USAGE|SELECT) ON ", grant) or "WITH GRANT OPTION" in grant:
-                raise QuoteError("La cuenta de PrestaShop no tiene permisos exclusivamente de lectura")
+        security = _connection_security(cur, config, cipher[1], authorization)
+        cur.execute("SET SESSION TRANSACTION READ ONLY")
         cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
         cur.execute("START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY")
-        return read_batch(cur, eans, context)
+        try:
+            if authorization is not None:
+                cur.execute("SELECT @@tx_read_only")
+                read_only = cur.fetchone()
+                if not read_only or read_only[0] != 1:
+                    raise QuoteError("La sesión MySQL autorizada no está en modo READ ONLY")
+                security["transaction_read_only"] = True
+            identities, quotes = read_batch(cur, eans, context)
+            return identities, [(ean, json.dumps({**json.loads(raw), "connection_security": security})
+                                 if isinstance(raw, str) else raw) for ean, raw in quotes]
+        finally:
+            con.rollback()
 
 
 def read_batch(cur, eans: list[str], context: dict, *, audit: bool = False) -> tuple[list[tuple], list[tuple]]:
     shop, country, currency, group = (context[k] for k in ("shop_id", "country_id", "currency_id", "group_id"))
 
     def select(sql, args=()):
+        if (not sql.lstrip().upper().startswith("SELECT ")
+                or re.search(r";|--|/\*|#|\b(?:INTO|LOAD_FILE|SLEEP|BENCHMARK)\b", sql, re.I)):
+            raise QuoteError("El lector de precios solo admite sus consultas SELECT parametrizadas")
         sql = re.sub(r"\{([a-z_]+)\}", lambda m: _identifier("PRESTASHOP_MYSQL_PREFIX", m[1]), sql)
         cur.execute(sql, args)
         return list(cur.fetchall())
@@ -452,6 +532,8 @@ def _decode(raw: str, identity: tuple[int, int], context: dict, now: datetime) -
         snapshot["other_calibre_issues"] = payload["other_calibre_issues"]
     if payload.get("price_reference"):
         snapshot["price_reference"] = payload["price_reference"]
+    if payload.get("connection_security"):
+        snapshot["connection_security"] = payload["connection_security"]
     for key in ("active", "in_stock"):
         if type(payload.get(key)) is bool:
             snapshot[key] = payload[key]

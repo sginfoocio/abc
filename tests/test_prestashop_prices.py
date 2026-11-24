@@ -79,6 +79,124 @@ def test_mysql_validates_session_before_reading_prices(monkeypatch, cipher, gran
     con.close.assert_called_once()
 
 
+def authorized_account(monkeypatch, **changes):
+    config = {"host": "mysql.example.invalid", "user": "ps_user_vytria_lect",
+              "password": "test", "database": "ps_vytria"}
+    for key, value in config.items():
+        monkeypatch.setenv(f"PRESTASHOP_MYSQL_{key.upper()}", value)
+    monkeypatch.setenv("PRESTASHOP_MYSQL_ACCOUNT_POLICY", "authorized_broad")
+    monkeypatch.setenv("PRESTASHOP_MYSQL_SSL_MODE", "REQUIRED")
+    monkeypatch.delenv("PRESTASHOP_MYSQL_SSL_CA", raising=False)
+    receipt = {"id": "approved-test", "actor": "reviewer", "at": NOW.isoformat(),
+               "host": config["host"], "port": 3306, "user": config["user"],
+               "database": config["database"], **changes}
+    monkeypatch.setenv("PRESTASHOP_MYSQL_ACCOUNT_AUTHORIZATION", json.dumps(receipt))
+    return config, receipt
+
+
+def test_authorized_broad_account_is_scoped_read_only_and_audited(monkeypatch):
+    _, receipt = authorized_account(monkeypatch)
+    con = MagicMock()
+    cur = con.cursor.return_value.__enter__.return_value
+    cur.fetchone.side_effect = [("Ssl_cipher", "AES"), ("ps_user_vytria_lect@origin", "ps_vytria"), (1,)]
+    cur.fetchall.return_value = [
+        ("GRANT USAGE ON *.* TO reader",),
+        (r"GRANT SELECT, INSERT, UPDATE, EXECUTE ON `ps\\_vytria`.* TO reader",),
+    ]
+    monkeypatch.setattr(pymysql, "connect", lambda **kwargs: con)
+    read_batch = MagicMock(return_value=([(EAN, 498, 90, 0)], [(EAN, json.dumps(quote()))]))
+    monkeypatch.setattr(ps, "read_batch", read_batch)
+
+    identities, rows = ps._mysql_rows([EAN], CONTEXT)
+    stored, _, _ = ps.resolve([EAN], identities, rows, CONTEXT, NOW)[EAN]
+    security = json.loads(stored)["connection_security"]
+    assert security["account_policy"] == "authorized_broad"
+    assert security["account_permissions"] == "broad"
+    assert security["tls_required"] and security["tls_cipher"] == "AES"
+    assert security["transaction_read_only"] is True
+    assert security["certificate_verified"] is False
+    assert security["server_identity_verified"] is False
+    assert security["authorization"] == {key: receipt[key] for key in ("id", "actor", "at")}
+    assert "host" not in security and "password" not in security
+    statements = [call.args[0] for call in cur.execute.call_args_list]
+    assert "SET SESSION TRANSACTION READ ONLY" in statements
+    assert statements[-2:] == ["START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY",
+                               "SELECT @@tx_read_only"]
+    con.rollback.assert_called_once()
+    con.close.assert_called_once()
+
+
+@pytest.mark.parametrize("changes", [
+    {"host": "another.example.invalid"}, {"port": 3307}, {"database": "another"},
+    {"user": "another"}, {"actor": ""}, {"at": "no-timezone"},
+    {"at": "9999-01-01T00:00:00+00:00"},
+])
+def test_broad_account_authorization_cannot_move_to_another_connection(monkeypatch, changes):
+    authorized_account(monkeypatch, **changes)
+    connect = MagicMock()
+    monkeypatch.setattr(pymysql, "connect", connect)
+    with pytest.raises(ps.QuoteError, match="autorización válida y acotada"):
+        ps._mysql_rows([EAN], CONTEXT)
+    connect.assert_not_called()
+
+
+@pytest.mark.parametrize(("grant", "identity"), [
+    ("GRANT SELECT, INSERT ON other.* TO reader", ("ps_user_vytria_lect@origin", "ps_vytria")),
+    ("GRANT SELECT, INSERT ON *.* TO reader", ("ps_user_vytria_lect@origin", "ps_vytria")),
+    ("GRANT price_role TO reader", ("ps_user_vytria_lect@origin", "ps_vytria")),
+    ("GRANT SELECT ON `ps_vytria`.* TO reader WITH GRANT OPTION",
+     ("ps_user_vytria_lect@origin", "ps_vytria")),
+    ("GRANT SELECT, INSERT ON `ps_vytria`.* TO reader", ("another@origin", "ps_vytria")),
+    ("GRANT SELECT, INSERT ON `ps_vytria`.* TO reader", ("ps_user_vytria_lect@origin", "another")),
+])
+def test_broad_authorization_preserves_scope_and_actual_session_checks(monkeypatch, grant, identity):
+    authorized_account(monkeypatch)
+    con = MagicMock()
+    cur = con.cursor.return_value.__enter__.return_value
+    cur.fetchone.side_effect = [("Ssl_cipher", "AES"), identity]
+    cur.fetchall.return_value = [("GRANT USAGE ON *.* TO reader",), (grant,)]
+    monkeypatch.setattr(pymysql, "connect", lambda **kwargs: con)
+    read_batch = MagicMock()
+    monkeypatch.setattr(ps, "read_batch", read_batch)
+    with pytest.raises(ps.QuoteError, match="ámbito autorizado|cuenta y base autorizadas"):
+        ps._mysql_rows([EAN], CONTEXT)
+    read_batch.assert_not_called()
+    con.close.assert_called_once()
+
+
+def test_missing_explicit_broad_authorization_and_out_of_scope_eans_fail_closed(monkeypatch):
+    authorized_account(monkeypatch)
+    monkeypatch.delenv("PRESTASHOP_MYSQL_ACCOUNT_AUTHORIZATION")
+    connect = MagicMock()
+    monkeypatch.setattr(pymysql, "connect", connect)
+    with pytest.raises(ps.QuoteError, match="autorización válida y acotada"):
+        ps._mysql_rows([EAN], CONTEXT)
+    authorized_account(monkeypatch)
+    with pytest.raises(ps.QuoteError, match="manifiesto autorizado"):
+        ps._mysql_rows(["0000000000017"], CONTEXT)
+    connect.assert_not_called()
+
+
+@pytest.mark.parametrize(("cipher", "read_only", "reason"), [
+    ("", 1, "TLS activo"), ("AES", 0, "READ ONLY"),
+])
+def test_broad_authorization_does_not_bypass_tls_or_readonly(monkeypatch, cipher, read_only, reason):
+    authorized_account(monkeypatch)
+    con = MagicMock()
+    cur = con.cursor.return_value.__enter__.return_value
+    cur.fetchone.side_effect = [
+        ("Ssl_cipher", cipher), ("ps_user_vytria_lect@origin", "ps_vytria"), (read_only,),
+    ]
+    cur.fetchall.return_value = [("GRANT SELECT, INSERT ON `ps_vytria`.* TO reader",)]
+    monkeypatch.setattr(pymysql, "connect", lambda **kwargs: con)
+    read_batch = MagicMock()
+    monkeypatch.setattr(ps, "read_batch", read_batch)
+    with pytest.raises(ps.QuoteError, match=reason):
+        ps._mysql_rows([EAN], CONTEXT)
+    read_batch.assert_not_called()
+    con.close.assert_called_once()
+
+
 def rule(sid=5, aid=0, rule_id=0, shop=0, currency=0, country=0, group=0, quantity=1,
          fixed="-1", discount="0.15", kind="percentage", included=0, start=OPEN, end=OPEN):
     return (sid, aid, rule_id, shop, 0, currency, country, group, quantity,
@@ -235,13 +353,17 @@ def test_watched_sync_is_scoped_deduplicates_and_does_not_fall_back(tmp_path, mo
     current_time = [NOW]
     fail = [False]
     price = ["232.05"]
+    security = {"account_policy": "authorized_broad", "account_permissions": "broad",
+                "tls_required": True, "tls_cipher": "AES", "certificate_verified": False,
+                "server_identity_verified": False,
+                "authorization": {"id": "approved-test", "actor": "reviewer", "at": NOW.isoformat()}}
 
     def mysql(eans, context):
         calls.append(set(eans))
         if fail[0]:
             raise OperationalError("private connection details")
         payload = quote(price=price[0], observed_at=current_time[0].isoformat(), active=False,
-                        in_stock=len(calls) == 1)
+                        in_stock=len(calls) == 1, connection_security=security)
         return [(EAN, 498, 90, 0)], [(EAN, json.dumps(payload))]
 
     monkeypatch.setattr(ps, "_mysql_rows", mysql)
@@ -270,10 +392,13 @@ def test_watched_sync_is_scoped_deduplicates_and_does_not_fall_back(tmp_path, mo
         history = con.execute("SELECT payload FROM prestashop_price_history ORDER BY id").fetchall()
         assert [json.loads(row[0])["price"] for row in history] == ["232.05", "230.00"]
         assert current["synced_at"] == (current_time[0] - timedelta(minutes=1)).isoformat()
+        assert current["observed_at"] == (current_time[0] - timedelta(minutes=1)).isoformat()
         assert json.loads(current["payload"])["price"] == "230.00"
         assert json.loads(current["payload"])["active"] is False
         assert json.loads(current["payload"])["in_stock"] is False
         assert all("in_stock" not in json.loads(row[0]) for row in history)
+        assert json.loads(current["payload"])["connection_security"] == security
+        assert all(json.loads(row[0])["connection_security"] == security for row in history)
         assert "OperationalError" in current["issue"] and "private" not in current["issue"]
         assert con.execute("SELECT price FROM vytria_prices WHERE ean=?", (EAN,)).fetchone()[0] == 273
 

@@ -58,6 +58,8 @@ def test_production_deploy_is_only_triggered_by_a_successful_push_run_on_main():
 
 @pytest.mark.parametrize(("files", "included", "root_tests"), [
     (["docs/README.md"], set(), set()),
+    (["scripts/validate_vytria_reader.py", "tests/test_validate_vytria_reader.py"],
+     {"test_validate_vytria_reader.py"}, set()),
     (["docs/Precios/100_EAN/busqueda_11_20261122/matriz_11x14.json"],
      {"test_price_url_candidates.py"}, set()),
     (["docs/Precios/100_EAN/busqueda_11_20261122/rutas_candidatas_primarias.json"],

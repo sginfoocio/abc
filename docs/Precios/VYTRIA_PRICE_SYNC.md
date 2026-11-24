@@ -52,9 +52,12 @@ repetición bajo el mismo producto no es ambigua cuando hay una sola
 combinación exacta; nunca se elige entre varios productos o varios calibres
 con el mismo GTIN.
 
-**Antes de habilitar:** el login MySQL de la auditoría cifra la conexión
-pero todavía tiene permisos de escritura; no se debe usar en el contenedor
-hasta retirarlos y verificar los permisos efectivos del mismo login.
+**Antes de habilitar:** por defecto, el lector rechaza cuentas con permisos
+distintos de lectura. El login de la auditoría tiene permisos amplios; una
+transacción `READ ONLY` no convierte esa cuenta en una cuenta restringida.
+La autorización expresa del responsable del 24/11/2026 permite utilizar
+exclusivamente `ps_user_vytria_lect` en `ps_vytria`, sin cambiar sus grants,
+mediante la excepción acotada y auditable descrita a continuación.
 La auditoría se ejecutó vía SSH exclusivamente en transacciones `READ ONLY`.
 El lector por lotes no necesita vista, rutina ni API. Abre una conexión,
 verifica los permisos, y lee en una instantánea `REPEATABLE READ`, `READ ONLY`.
@@ -67,17 +70,32 @@ territorial/compuesto, ecotasa y configuraciones o módulos no soportados.
    (`actionPresentProduct`) y `revolutpayment` (`displayProductPriceBlock`).
    Los contrastes de ficha no prueban su comportamiento para todo el catálogo.
    Solo tras confirmar su efecto, establecer `PRESTASHOP_PRICE_CODE_AUDITED=1`.
-2. Confirmar con el administrador si `ps_user_vytria_lect` se comparte con
-   otros procesos antes de cambiar sus permisos. Si no depende de la escritura,
-   retirar los privilegios sobrantes en la entrada exacta `usuario@host`
-   devuelta por `CURRENT_USER()`, dejando `SELECT` solo sobre las tablas
-   que consulta el lector: `product[_shop]`,
+2. El modo predeterminado `PRESTASHOP_MYSQL_ACCOUNT_POLICY=select_only` exige
+   `SELECT` sin permisos delegables ni roles. No modificar permisos de cuentas
+   compartidas para facilitar una prueba. El lector sólo consulta `product[_shop]`,
    `product_attribute[_shop]`, `manufacturer`, `shop`, `shop_group`, `stock_available`, `country`, `currency`, `group`,
    `configuration`, `hook`, `hook_module`, `module`, `group_reduction`,
    `tax_rule`, `tax`, `specific_price` y `specific_price_priority` (prefijo real).
    Comprobar `SHOW GRANTS`, `APPLICABLE_ROLES` y `ENABLED_ROLES`; no validar
-   los permisos intentando escribir. El lector rechaza concesiones de roles,
-   permisos adicionales y permisos delegables.
+   los permisos intentando escribir. Para la cuenta amplia expresamente
+   autorizada, configurar `PRESTASHOP_MYSQL_ACCOUNT_POLICY=authorized_broad`
+   y `PRESTASHOP_MYSQL_ACCOUNT_AUTHORIZATION` mediante el mismo mecanismo
+   protegido de configuración. Su valor JSON contiene exactamente:
+   `id`, `actor`, `at` (ISO con zona horaria, no futura), `host`, `port`,
+   `user` y `database`. Los cuatro últimos deben coincidir con la conexión
+   configurada; sólo se admite `user=ps_user_vytria_lect` y `database=ps_vytria`.
+   No incluir contraseñas en este recibo ni guardar la configuración real en Git.
+   Se contrasta además `CURRENT_USER()` y `DATABASE()` en la sesión real.
+   La excepción no acepta grants sobre otras bases, permisos globales distintos
+   de `USAGE`, roles, permisos delegables ni privilegios fuera de los previstos.
+   El lector mantiene TLS obligatorio, transacciones `READ ONLY`, consultas
+   de precio `SELECT` parametrizadas y rollback; no ejecuta DML, DDL ni rutinas.
+   En la conexión MariaDB autorizada comprueba también `@@tx_read_only=1`
+   antes de leer precios.
+   No acepta SQL proporcionado por el usuario y sólo admite los 100 EAN del
+   manifiesto. El recibo, la amplitud real de los permisos, el cifrado y la
+   verificación del certificado/servidor quedan en `connection_security`
+   del precio persistido y se muestran en la administración de precios.
 3. Inyectar por el gestor de secretos aprobado en el entorno del proceso
    `PRESTASHOP_MYSQL_HOST`, `_PORT` (3306 si se omite), `_DATABASE`, `_USER`,
    `_PASSWORD` y `_PREFIX`. No montar ni copiar el perfil MySQL del usuario SSH.
@@ -93,6 +111,49 @@ territorial/compuesto, ecotasa y configuraciones o módulos no soportados.
    confirmados `PRESTASHOP_PRICE_SHOP_ID`, `_GROUP_ID`, `_COUNTRY_ID`,
    `_CURRENCY_ID` (prefijo `PRESTASHOP_PRICE`). Solo después de validar la
    instalación y obtener aprobación, `PRESTASHOP_PRICE_ENABLED=1`.
+
+### Piloto administrativo con configuración privada
+
+Si la identidad SSH no puede leer el Compose, el administrador puede ejecutar
+[`scripts/validate_vytria_reader.py`](../../scripts/validate_vytria_reader.py)
+desde un checkout limpio del SHA candidato revisado:
+
+```sh
+python3 scripts/validate_vytria_reader.py \
+  --commit <SHA-candidato> --actor <revisor> --authorization-id <referencia-autorizacion>
+```
+
+El script resuelve `/etc/cloud-production/compose.private.json` con
+`docker compose config --format json`, captura su salida sin publicarla y
+no vuelve a interpretar los dólares de la contraseña. No lee `.mylogin.cnf`.
+Requiere la comprobación PHP previa y `PRESTASHOP_PRICE_CODE_AUDITED=1`;
+no establece ese indicador ni sustituye la revisión por la auditoría comercial.
+Usa la imagen instalada sólo para dependencias y extrae el código del SHA con
+`git archive`. Crea un único contenedor independiente, sin puertos ni monitores,
+con usuario `1037:100`, raíz de sólo lectura y límites. La configuración MySQL
+se envía por stdin, no como argumentos, variables Docker ni archivos.
+La excepción y la activación se aplican **sólo dentro del proceso del piloto**.
+
+Se toma mediante `SELECT` una muestra de los productos vigilados y sus
+referencias Odoo persistidas; no se consulta Odoo ni se monta la base productiva
+como destino de escritura. Se prueba primero `8056597435581` y, sólo si pasa,
+los otros 99 en lotes de hasta 25. Los resultados y el informe quedan en una
+base aislada bajo `/var/lib/cloud-production-validation`, privada del
+administrador. Se comprueban vigencia, fuente del comparador, conservación de
+Odoo y registros duplicados. Se retira únicamente el contenedor del piloto.
+El script no modifica el Compose, no cambia grants y **no activa producción**.
+No ejecutar con `sudo` sin la autorización administrativa correspondiente.
+
+Tras acreditar la prueba y el CI/Docker del SHA definitivo, el administrador
+incorpora al Compose protegido la excepción con su recibo y
+`PRESTASHOP_PRICE_ENABLED=1`, conservando el respaldo. El despliegue aprobado
+recrea sólo `abcd-app`; hay una interrupción técnica durante esa recreación,
+aunque la vigilancia persistida siga `active`. No ejecutar un `compose up`
+general ni alterar workers. El controlador exige avance de commit: no permite
+reaplicar configuración al mismo SHA. Un cambio sólo de configuración requiere
+un procedimiento administrativo aprobado, no un commit ficticio ni saltarse
+el controlador. Después, usar una única sincronización del mecanismo
+`VytriaPriceSync`, respetando su bloqueo o reutilizando una lectura ya vigente.
 
 **Resultado medido (cálculo v3):** 13 consultas de lote, 1,61 s por SSH
 (incluye lecturas y cálculo; no es una medición del contenedor). Se calcularon

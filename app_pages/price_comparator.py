@@ -251,6 +251,7 @@ def _render_native_prices(store: PriceComparatorStore, prices: pd.DataFrame) -> 
     for ean in sorted(scope):
         quote = quotes.get(ean)
         payload = json.loads(quote["payload"]) if quote and quote["payload"] else {}
+        security = payload.get("connection_security", {})
         offer = payload.get("offer")
         reference = payload.get("price_reference")
         price = payload.get("price")
@@ -271,6 +272,13 @@ def _render_native_prices(store: PriceComparatorStore, prices: pd.DataFrame) -> 
             "Vinculación": (f"Referencia marca/modelo/color · {reference['original_barcode']}"
                             if reference else "EAN exacto" if payload else "—"),
             "Origen": payload.get("source", "") if payload else "—",
+            "Permisos MySQL": {"broad": "Amplios; uso autorizado",
+                              "select_only": "Solo lectura"}.get(security.get("account_permissions"), "Sin verificar"),
+            "TLS": "Cifrado" if security.get("tls_required") is True else "Sin verificar",
+            "Transacción": "READ ONLY" if security.get("transaction_read_only") is True else "Sin verificar",
+            "Identidad del servidor": {True: "Verificada", False: "No verificada"}.get(
+                security.get("server_identity_verified"), "Sin verificar"),
+            "Autorización MySQL": security.get("authorization", {}).get("id", "—"),
             "Estado en tienda": {True: "Activo", False: "Inactivo"}.get(payload.get("active"), "Sin verificar"),
             "Stock": {True: "Con stock", False: "Sin stock"}.get(payload.get("in_stock"), "Sin verificar"),
             "Última actualización": quote["observed_at"] if quote else None,

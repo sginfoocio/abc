@@ -129,6 +129,8 @@ PRICE_SOURCE_TESTS = {
     "vytria_price_sync.py": ("tests/test_prestashop_prices.py", "tests/test_vytria_price_sync.py"),
 }
 SCOPED_DEPENDENCY_TESTS = {
+    "scripts/validate_vytria_reader.py": ("tests/test_validate_vytria_reader.py",),
+    "tests/test_validate_vytria_reader.py": ("tests/test_validate_vytria_reader.py",),
     "pytest.ini": ("tests/test_ci_stacked_prs.py", "tests/test_price_monitor.py"),
     "Dockerfile": ("tests/test_dockerfile_provider_modules.py",),
     "docs/Precios/100_EAN/busqueda_11_20261122/matriz_11x14.json": (
