@@ -176,7 +176,9 @@ caso de rechazo. No se realizaron capturas reales en el desarrollo.
 La acción separada «Diagnóstico supervisado de candidatas en revisión» permite
 seleccionar una URL ya documentada para el competidor y EAN exactos, incluso con
 el par en revisión. Acepta candidatas pendientes del índice, piloto, localizador
-o recibos de continuidad; no acepta URLs rechazadas ni arbitrarias. La interfaz
+o recibos de continuidad; también admite la URL aceptada cuya lectura terminó en
+revisión, si la decisión humana y el monitor de esa URL siguen coincidiendo.
+No acepta URLs rechazadas ni arbitrarias. La interfaz
 registra la solicitud sin esperar al bloqueo de continuidad; el trabajador procesa
 como máximo una por turno tras la vigilancia normal. Una selección idéntica no
 crea duplicados. Se muestran el estado y los resultados guardados tras una nueva
@@ -235,13 +237,20 @@ de la base, sus auxiliares, volumen y copias, el operador puede seleccionar el
 mismo par y URL documentada y pulsar **Reintentar rechazo previo a HTTP**, con su
 identidad real, motivo y confirmación. El servidor conserva el intento anterior,
 vincula un nuevo intento y registra auditoría; un doble envío devuelve el mismo
-intento nuevo. Solo se permite ese motivo de privacidad, con auditoría coincidente,
+intento nuevo. Se permite ese motivo de privacidad o un `PilotError` en la
+etapa `lock_and_scope`, con auditoría coincidente,
 sin peticiones ni reservas atribuibles o inciertas durante el intento anterior.
 Se revalidan alcance, candidata, estado y aplazamientos bajo los bloqueos
 compartidos. El trabajador vuelve a comprobar esos extremos, además de privacidad,
 cuota, permisos, robots y presupuesto, antes de HTTP. Si existe un bloqueo o una
 reserva incierta, no se fuerza el reintento. Capturar la URL `901-32` no acepta su
 identidad ni autoriza a atribuirle el EAN `0805289126577`.
+
+El diagnóstico 6 de JOEY conservó únicamente `PilotError`, sin el mensaje
+original; no es posible identificar retrospectivamente su causa concreta.
+Los errores nuevos conservan el mensaje. La elegibilidad preliminar mostrada
+en la interfaz no sustituye la comprobación de recibos y reservas del servidor.
+Los rechazos por tamaño después de HTTP no se reintentan por esta vía.
 
 No se ejecutó el reintento ni la reevaluación selectiva en producción durante el
 desarrollo. La recuperación de los elegibles del lote anterior ya se aplicó:

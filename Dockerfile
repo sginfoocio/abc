@@ -59,17 +59,22 @@ COPY scripts/monitor_stop_fixture ./scripts/monitor_stop_fixture
 COPY deployment/nfs/staging-layout.tsv ./deployment/nfs/staging-layout.tsv
 COPY scripts/smoke_image_storage.py ./scripts/smoke_image_storage.py
 COPY scripts/smoke_price_diagnostic.py ./scripts/smoke_price_diagnostic.py
+COPY tests/fixtures/web_pages/partial_20261117_7.html tests/fixtures/web_pages/partial_20261117_8.html tests/fixtures/web_pages/partial_20261117_9.html tests/fixtures/web_pages/edel_optics.html ./tests/fixtures/web_pages/
 COPY scripts/smoke_image_thumbnails.py ./scripts/smoke_image_thumbnails.py
 COPY scripts/regenerate_image_thumbnails.py ./scripts/regenerate_image_thumbnails.py
 COPY scripts/cloud_image_entrypoint.sh ./scripts/cloud_image_entrypoint.sh
 COPY cloud_dashboard.py process_activity.py build_info.py .
 COPY gio_cloud.py gio_reports.py .
 COPY price_comparator.py vytria_price_sync.py price_connectors.py price_scheduler.py price_analytics.py price_web.py price_web_extract.py price_web_fetch.py .
+COPY prestashop_prices.py .
 COPY price_references.py price_observations.py competitor_requirements.py price_known_urls.py .
-COPY price_pilot.py price_discovery.py price_auto_confirm.py price_access.py price_watch.py price_locator.py price_monitor.py price_recovery.py .
+COPY price_pilot.py price_discovery.py price_auto_confirm.py price_access.py price_watch.py price_locator.py price_monitor.py price_recovery.py price_saved_reevaluation.py .
 COPY price_batch.py price_url_candidates.py price_diagnostic.py price_trial.py price_trial_manifest.json price_watch_continuity.json .
 COPY docs/PRICE_COVERAGE_MEASUREMENT_EVIDENCE.csv ./docs/
 COPY docs/Precios/100_EAN/evidencia_replay_133_20261116.zip ./docs/Precios/100_EAN/evidencia_replay_133_20261116.zip
+COPY docs/Precios/100_EAN/correcciones_29_edel_amevista_20261120/MATRIZ_100x14_ESTADO_CLOUD_20261120.csv docs/Precios/100_EAN/correcciones_29_edel_amevista_20261120/MATRIZ_RUTAS_29_EDEL_AMEVISTA_20261120.csv ./docs/Precios/100_EAN/correcciones_29_edel_amevista_20261120/
+COPY docs/Precios/busqueda_38_20261119/38-fichas-y-rutas.json ./docs/Precios/busqueda_38_20261119/
+COPY docs/Precios/100_EAN/busqueda_11_20261122/rutas_candidatas_primarias.json ./docs/Precios/100_EAN/busqueda_11_20261122/
 COPY assets ./assets
 COPY static ./static
 COPY .streamlit/config.toml ./.streamlit/config.toml

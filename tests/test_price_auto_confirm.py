@@ -205,7 +205,7 @@ def test_historical_reevaluation_is_explicit_offline_and_audited(pilot, monkeypa
 
 def test_reevaluation_respects_current_authorization(pilot, monkeypatch):
     _, store, search, site, cid, _ = pilot
-    discovery, _, _ = _legacy_candidates(pilot, monkeypatch)
+    discovery, frame, _ = _legacy_candidates(pilot, monkeypatch)
     search.update_config(cid, search_verified=False)
     preview = discovery.reevaluate()
     assert set(preview.result) == {"manual_review"}
@@ -216,7 +216,7 @@ def test_reevaluation_waits_for_running_pilot(pilot, monkeypatch):
     from filelock import FileLock
 
     _, store, _, _, _, _ = pilot
-    discovery, _, _ = _legacy_candidates(pilot, monkeypatch)
+    discovery, frame, _ = _legacy_candidates(pilot, monkeypatch)
     with FileLock(f"{store.database_path}.pilot.lock", timeout=0):
         with pytest.raises(PilotError, match="incompatible"):
             discovery.reevaluate(note="Ana", apply=True)
@@ -246,7 +246,7 @@ def test_reevaluation_report_script_counts_without_touching_the_source(pilot, mo
     assert set(discovery.candidates().state) == {"candidate_found", "discarded"}
 
 
-def test_review_ui_separates_groups_and_reevaluates_with_preview(pilot, monkeypatch):
+def test_historical_reevaluation_stays_out_of_the_current_review_tray(pilot, monkeypatch):
     import app_pages.price_comparator as page
 
     _, store, search, site, cid, _ = pilot
@@ -258,34 +258,16 @@ def test_review_ui_separates_groups_and_reevaluates_with_preview(pilot, monkeypa
     app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
                               "render_price_comparator_page()").run(timeout=60)
     assert not app.exception
+    app.radio(key="top_level_section").set_value("Administración").run(timeout=60)
+    app.selectbox(key="price_admin_section").set_value("Por revisar").run(timeout=60)
 
-    def metrics():
-        return {metric.label: metric.value for metric in app.metric}
-
-    assert {key: metrics()[key] for key in ("Confirmadas automáticamente", "Confirmadas manualmente",
-                                            "Pendientes de revisión", "Ambiguas o rechazadas")} == {
-        "Confirmadas automáticamente": "0", "Confirmadas manualmente": "0",
-        "Pendientes de revisión": "2", "Ambiguas o rechazadas": "1"}
-    assert any("código de color" in item.value for item in app.markdown)
-    app.button(key="discovery_reevaluate_preview").click().run(timeout=60)
-    assert metrics()["Se confirmarían automáticamente"] == "1"
-    assert metrics()["Seguirían en revisión manual"] == "1"
-    table = next(item.value for item in app.dataframe if "Resultado" in item.value.columns)
-    assert list(table.columns) == ["Producto", "Competidor", "Resultado", "Motivos", "URL"]
-    assert set(table["Resultado"]) == {"Se confirmaría automáticamente", "Seguiría en revisión manual"}
-    assert set(table["Competidor"]) == {"Visio Factory"}
-    assert app.button(key="discovery_reevaluate_apply").disabled is False
+    assert not any(metric.label in {"Confirmadas automáticamente", "Se confirmarían automáticamente"}
+                   for metric in app.metric)
+    assert not any(button.key.startswith("discovery_reevaluate") for button in app.button)
+    assert not any(THIRD in str(frame.value) for frame in app.dataframe)
     with store._connect() as connection:
         assert connection.execute("SELECT COUNT(*) FROM pilot_candidate_reevaluations").fetchone()[0] == 0
-    app.text_input(key="discovery_reevaluate_note").set_value("Ana: regla comercial acordada")
-    app.button(key="discovery_reevaluate_apply").click().run(timeout=60)
-    assert not app.exception
-    assert any("1 fichas confirmadas automáticamente" in item.value for item in app.success)
-    assert metrics()["Confirmadas automáticamente"] == "1" and metrics()["Pendientes de revisión"] == "1"
-    app.radio(key="discovery_review_group").set_value("automatic").run(timeout=60)
-    assert not app.exception
-    assert app.selectbox(key="discovery_evidence_automatic").value == int(frame.loc[EAN, "id"])
-    assert any(AUTO_RULE in str(item.value) for item in app.json)
-    app.radio(key="discovery_review_group").set_value("doubtful").run(timeout=60)
-    assert app.selectbox(key="discovery_evidence_doubtful").value == int(frame.loc[THIRD, "id"])
+    rows = discovery.candidates()
+    assert set(rows["state"]) == {"candidate_found", "discarded"}
+    assert set(rows["review_origin"]) == {"", "manual"}
     assert site.calls == []

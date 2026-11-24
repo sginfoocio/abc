@@ -7,6 +7,8 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from pathlib import Path
+from datetime import datetime, timezone
 import pandas as pd
 import streamlit as st
 from typing import TYPE_CHECKING
@@ -17,7 +19,7 @@ if TYPE_CHECKING:
 
 from price_access import (DEFAULT_BUDGETS, INCIDENT_KINDS, METHOD_STATES, METHODS, AccessControl,
                           external_search_enabled)
-from price_comparator import PriceComparatorStore
+from price_comparator import PriceComparatorStore, normalize_gtin
 from price_locator import (ADAPTERS, JOB_STATES, MAX_DEPTH, SCHEDULE_ENV, SOURCE_KINDS, PriceLocator,
                            schedule_enabled)
 from price_monitor import (ALERTS, STATES, SCHEDULE_ENV as MONITOR_ENV, PriceMonitor,
@@ -323,44 +325,91 @@ def _render_incidents(access: AccessControl, names: dict[str, str]) -> None:
                 st.error(str(exc))
 
 
-def _render_locator(store: PriceComparatorStore, names: dict[str, str]) -> None:
-    st.caption("Motor propio: busca cada producto vigilado por marca + modelo + código de color en las fuentes "
-               "autorizadas (URL ya verificada, feed, sitemap, páginas de marca/catálogo, buscador interno), guarda "
-               "un índice local reutilizable y confirma solo coincidencias exactas. Sin servicios externos. Un "
-               "bloqueo o un límite suspende el competidor; la falta de autorización nunca se registra como "
-               "«producto inexistente».")
-    locator = PriceLocator(store)
-    c1, c2, c3, c4 = st.columns([1.2, 1.5, 1, 1])
-    if c1.button("Preparar cola", key="locate_enqueue", width="stretch",
-                 help="Crea las búsquedas pendientes de los productos vigilados (sin consultas HTTP)."):
-        result = locator.enqueue()
-        st.success(f"{result['created']} búsquedas nuevas · {result['relocate']} relocalizaciones · "
-                   f"{result['reopened']} reabiertas tras cambios de autorización.")
-    target = c2.selectbox("Competidor", ["Todos", *ordered(names, names.get)], key="locate_competitor",
-                          format_func=lambda value: names.get(value, value))
-    max_jobs = c3.number_input("Máx. productos", 1, 2000, 50, key="locate_max_jobs")
-    deadline = c4.number_input("Plazo (min)", 1, 120, 10, key="locate_deadline")
-    if st.button("Procesar lote", key="locate_run", type="primary",
-                 help="Consulta solo métodos autorizados, dentro de presupuestos, pausas y robots.txt."):
-        with st.spinner("Localizando fichas…"):
-            report = locator.run(None if target == "Todos" else [target], max_jobs=int(max_jobs),
-                                 deadline_seconds=float(deadline) * 60)
-        st.success(report.summary)
-        for cid, reason in report.stopped.items():
-            st.warning(f"{names.get(cid, cid)}: {reason}")
+def _render_saved_reevaluation(store: PriceComparatorStore) -> None:
+    from filelock import Timeout
+    from price_saved_reevaluation import SavedSampleReevaluation
 
-    status = locator.status()
-    totals = status.groupby("state")["jobs"].sum() if not status.empty else pd.Series(dtype=int)
-    cols = st.columns(5)
-    for col, (label, keys) in zip(cols, [("Verificadas", ("done",)), ("Pendientes", ("pending", "running", "waiting")),
-                                         ("Revisión manual", ("review",)),
-                                         ("Sin acceso / bloqueadas", ("unavailable", "blocked")),
-                                         ("Sin ficha / fallidas", ("not_found", "failed"))]):
-        col.metric(label, int(sum(totals.get(key, 0) for key in keys)))
-    if not status.empty:
-        pivot = status.assign(state=status["state"].map(lambda s: JOB_STATES.get(s, s))).pivot_table(
-            index="competitor", columns="state", values="jobs", aggfunc="sum", fill_value=0)
-        st.dataframe(pivot, width="stretch")
+    evidence = Path(__file__).resolve().parents[1] / "docs" / "Precios" / "100_EAN" / \
+        "Paquete_revision_7_casos_20261117.zip"
+    with st.expander("Reevaluación local de muestra guardada"):
+        st.caption("Sin HTTP: revalida una solicitud histórica, conserva su fecha y no renueva muestras caducadas.")
+        if not evidence.is_file():
+            st.error("Paquete histórico no disponible.")
+            return
+        request_id = st.number_input("ID de solicitud manual", min_value=1, step=1, key="saved_reeval_request")
+        if st.button("Previsualizar reevaluación", key="saved_reeval_preview"):
+            try:
+                st.session_state["saved_reeval_preview"] = SavedSampleReevaluation(
+                    store, evidence).preview(int(request_id))
+            except (ValueError, KeyError, OSError, sqlite3.Error) as exc:
+                st.error(str(exc))
+        preview = st.session_state.get("saved_reeval_preview")
+        if preview:
+            st.json(preview)
+            with st.form("saved_reeval_apply"):
+                actor = st.text_input("Responsable", value=_actor(), key="saved_reeval_actor")
+                note = st.text_input("Motivo", key="saved_reeval_note")
+                approved = st.checkbox("Confirmo reevaluación local sin HTTP", key="saved_reeval_confirm")
+                commit = st.text_input("Versión/commit de 40 caracteres", key="saved_reeval_commit")
+                submitted = st.form_submit_button("Aplicar reevaluación auditada")
+            if submitted:
+                try:
+                    if not approved:
+                        raise ValueError("Confirmación expresa obligatoria")
+                    result = SavedSampleReevaluation(store, evidence).apply(
+                        int(request_id), actor=actor, note=note, build_commit=commit,
+                        approved=True)
+                    st.json(result)
+                    st.session_state.pop("saved_reeval_preview", None)
+                except (ValueError, Timeout, TimeoutError, sqlite3.Error) as exc:
+                    st.error(str(exc))
+
+
+def _render_locator(store: PriceComparatorStore, names: dict[str, str], *, advanced: bool = True) -> None:
+    """Review tray and optional advanced locator tools.
+
+    The review mechanics stay shared; advanced queue, limits and diagnostics are only shown to
+    the settings page that opts into them.
+    """
+    locator = PriceLocator(store)
+    if advanced:
+        st.caption("Motor propio: busca cada producto vigilado por marca + modelo + código de color en las fuentes "
+                   "autorizadas (URL ya verificada, feed, sitemap, páginas de marca/catálogo, buscador interno), "
+                   "guarda un índice local reutilizable y confirma solo coincidencias exactas. Sin servicios externos.")
+        c1, c2, c3, c4 = st.columns([1.2, 1.5, 1, 1])
+        if c1.button("Preparar cola", key="locate_enqueue", width="stretch",
+                     help="Crea las búsquedas pendientes de los productos vigilados (sin consultas HTTP)."):
+            result = locator.enqueue()
+            st.success(f"{result['created']} búsquedas nuevas · {result['relocate']} relocalizaciones · "
+                       f"{result['reopened']} reabiertas tras cambios de autorización.")
+        target = c2.selectbox("Competidor", ["Todos", *ordered(names, names.get)], key="locate_competitor",
+                              format_func=lambda value: names.get(value, value))
+        max_jobs = c3.number_input("Máx. productos", 1, 2000, 50, key="locate_max_jobs")
+        deadline = c4.number_input("Plazo (min)", 1, 120, 10, key="locate_deadline")
+        if st.button("Procesar lote", key="locate_run", type="primary",
+                     help="Consulta solo métodos autorizados, dentro de presupuestos, pausas y robots.txt."):
+            with st.spinner("Localizando fichas…"):
+                report = locator.run(None if target == "Todos" else [target], max_jobs=int(max_jobs),
+                                     deadline_seconds=float(deadline) * 60)
+            st.success(report.summary)
+            for cid, reason in report.stopped.items():
+                st.warning(f"{names.get(cid, cid)}: {reason}")
+
+        status = locator.status()
+        totals = status.groupby("state")["jobs"].sum() if not status.empty else pd.Series(dtype=int)
+        cols = st.columns(5)
+        for col, (label, keys) in zip(cols, [
+            ("Verificadas", ("done",)),
+            ("Pendientes", ("pending", "running", "waiting")),
+            ("Revisión manual", ("review",)),
+            ("Sin acceso / bloqueadas", ("unavailable", "blocked")),
+            ("Sin ficha / fallidas", ("not_found", "failed")),
+        ]):
+            col.metric(label, int(sum(totals.get(key, 0) for key in keys)))
+        if not status.empty:
+            pivot = status.assign(state=status["state"].map(lambda s: JOB_STATES.get(s, s))).pivot_table(
+                index="competitor", columns="state", values="jobs", aggfunc="sum", fill_value=0)
+            st.dataframe(pivot, width="stretch")
 
     review = locator.jobs(states=("review",), limit=None)
     st.markdown(f"**Revisión manual** ({len(review)})")
@@ -499,6 +548,8 @@ def _render_locator(store: PriceComparatorStore, names: dict[str, str]) -> None:
         if preview:
             preview_rows = review[review["id"].astype(int).isin(preview["snapshots"])]
             st.markdown(f"**Vista previa: {len(preview_rows)} fichas seleccionadas**")
+            st.caption("La acción afecta únicamente a las filas marcadas en esta vista previa, "
+                       "no a otras fichas ocultas ni a todos los resultados del filtro.")
             st.dataframe(preview_rows[["ean", "brand", "model", "color", "competitor", "url"]].rename(
                 columns={"ean": "EAN", "brand": "Marca", "model": "Modelo", "color": "Color",
                          "competitor": "Competidor", "url": "URL"}), hide_index=True, width="stretch",
@@ -509,8 +560,9 @@ def _render_locator(store: PriceComparatorStore, names: dict[str, str]) -> None:
                 confirmed = st.checkbox(
                     f"Confirmo expresamente este conjunto de {len(preview_rows)} fichas",
                     key="review_bulk_confirmed")
-                apply_bulk = st.form_submit_button("Confirmar seleccionadas y actualizar precios")
-            if apply_bulk:
+                apply_bulk = st.form_submit_button("Confirmar seleccionadas y solicitar lectura")
+                discard_bulk = st.form_submit_button("Descartar seleccionadas")
+            if apply_bulk or discard_bulk:
                 if not bulk_note.strip() or not confirmed or preview_rows.empty:
                     st.error("Indique el motivo y confirme expresamente el conjunto previsualizado.")
                 else:
@@ -519,12 +571,20 @@ def _render_locator(store: PriceComparatorStore, names: dict[str, str]) -> None:
                     for job_id, expected in preview["snapshots"].items():
                         row = indexed.loc[job_id]
                         try:
-                            refresh_id = locator.review(
-                                row["ean"], row["competitor_id"], row["url"], accept=True,
-                                actor=_actor(), note=bulk_note, update_price=True,
-                                expected_candidate=expected)
-                            results.append({"ID": job_id, "EAN": row["ean"], "Competidor": row["competitor"],
-                                            "Resultado": f"Ficha aceptada; lectura {refresh_id} en cola"})
+                            if discard_bulk:
+                                locator.review(
+                                    row["ean"], row["competitor_id"], row["url"], accept=False,
+                                    actor=_actor(), note=bulk_note, update_price=False,
+                                    expected_candidate=expected)
+                                results.append({"ID": job_id, "EAN": row["ean"], "Competidor": row["competitor"],
+                                                "Resultado": "Ficha descartada; sin consulta HTTP ni lectura"})
+                            else:
+                                refresh_id = locator.review(
+                                    row["ean"], row["competitor_id"], row["url"], accept=True,
+                                    actor=_actor(), note=bulk_note, update_price=True,
+                                    expected_candidate=expected)
+                                results.append({"ID": job_id, "EAN": row["ean"], "Competidor": row["competitor"],
+                                                "Resultado": f"Ficha aceptada; lectura {refresh_id} en cola"})
                         except (ValueError, sqlite3.Error) as exc:
                             results.append({"ID": job_id, "EAN": row["ean"], "Competidor": row["competitor"],
                                             "Resultado": f"Excluida: {exc}"})
@@ -551,13 +611,14 @@ def _render_locator(store: PriceComparatorStore, names: dict[str, str]) -> None:
             if decision:
                 row = indexed.loc[job_id]
                 try:
-                    locator.review(row["ean"], row["competitor_id"], row["url"], accept=decision == "accept",
-                                   actor=_actor(), note=note, update_price=decision == "accept",
-                                   expected_candidate=_review_expected_candidate(row, job_id=job_id))
+                    refresh_id = locator.review(
+                        row["ean"], row["competitor_id"], row["url"], accept=decision == "accept",
+                        actor=_actor(), note=note, update_price=decision == "accept",
+                        expected_candidate=_review_expected_candidate(row, job_id=job_id))
                     st.session_state["manual_review_action_results"] = [{
                         "ID": int(job_id), "EAN": row["ean"], "Competidor": row["competitor"],
-                        "Resultado": ("Ficha aceptada; lectura inmediata en cola" if decision == "accept"
-                                      else "Ficha descartada"),
+                        "Resultado": (f"Ficha aprobada · lectura {refresh_id} en cola"
+                                      if decision == "accept" else "Ficha descartada"),
                     }]
                 except (ValueError, sqlite3.Error) as exc:
                     st.session_state["manual_review_action_results"] = [{
@@ -569,22 +630,36 @@ def _render_locator(store: PriceComparatorStore, names: dict[str, str]) -> None:
                 st.session_state["manual_review_grid_revision"] = revision + 1
                 st.rerun()
 
+    if advanced:
+        _render_saved_reevaluation(store)
+
     st.markdown("**Progreso persistente de confirmaciones y lecturas**")
-    progress = PriceMonitor(store).review_refreshes()
+    monitor = PriceMonitor(store)
+    progress = monitor.review_refreshes()
     if progress.empty:
         st.caption("Todavía no hay solicitudes de lectura por revisión manual.")
     else:
+        st.caption("La tabla muestra las últimas 100 solicitudes; el CSV incluye el inventario completo. "
+                   "Importe la columna EAN como texto para conservar los ceros iniciales.")
+        st.download_button("Exportar todas las solicitudes de lectura (CSV)",
+                           monitor.review_refreshes(limit=None).to_csv(index=False).encode("utf-8-sig"),
+                           "solicitudes-lectura-manual.csv", "text/csv", key="review_refresh_export")
         progress = progress.copy()
-        progress["Resultado"] = progress.apply(
-            lambda row: ("Oferta comparable" if pd.notna(row["eligible"]) and bool(row["eligible"])
-                         else "No comparable")
-            if row["status"] == "done" else {
-                "pending": "Ficha aceptada · lectura pendiente",
-                "running": "Ficha aceptada · leyendo",
-                "deferred": "Aplazada por control",
-                "blocked": "Aceptada · bloqueada",
-                "error": "Error / revisión de identidad",
-            }.get(row["status"], row["status"]), axis=1)
+        def _refresh_status(row):
+            if row["status"] == "done":
+                return ("Lectura terminada · consultar vigencia y comparador"
+                        if pd.notna(row["eligible"]) and bool(row["eligible"])
+                        else "Lectura terminada · no comparable")
+            if row["status"] == "deferred":
+                return f"Aplazado · próximo intento {row['retry_at'] or 'pendiente'}"
+            return {
+                "pending": "Ficha aprobada · esperando lectura",
+                "running": "Lectura en curso",
+                "blocked": "Aprobada · bloqueada",
+                "error": "Error técnico / identidad: revisar el detalle",
+            }.get(row["status"], row["status"])
+
+        progress["Resultado"] = progress.apply(_refresh_status, axis=1)
         st.dataframe(progress[["id", "ean", "brand", "model", "color", "competitor", "url", "actor",
                               "reason", "Resultado", "detail", "http_requests", "requested_at", "retry_at"]]
                      .rename(columns={"id": "Lectura", "ean": "EAN", "brand": "Marca", "model": "Modelo",
@@ -594,23 +669,24 @@ def _render_locator(store: PriceComparatorStore, names: dict[str, str]) -> None:
                                       "retry_at": "Reintento más próximo"}),
                      hide_index=True, width="stretch", column_config={"URL": st.column_config.LinkColumn("URL")})
 
-    with st.expander("Últimas búsquedas"):
-        recent = locator.jobs(limit=200)
-        if recent.empty:
-            st.caption("Sin búsquedas todavía.")
-        else:
-            st.dataframe(recent.assign(state=recent["state"].map(lambda s: JOB_STATES.get(s, s)))[
-                ["ean", "brand", "model", "color", "competitor", "kind", "state", "method", "url", "detail",
-                 "updated_at"]], hide_index=True, width="stretch")
-    with st.expander("Índice local de fichas"):
-        st.caption("Fichas y enlaces ya descubiertos: se reutilizan entre productos y ejecuciones. Las páginas de "
-                   "marca/catálogo solo se vuelven a consultar cuando caducan.")
-        st.dataframe(locator.index_summary().rename(columns={
-            "competitor": "Competidor", "indexed": "Enlaces indexados", "checked": "Fichas comprobadas",
-            "pages": "Páginas de listado", "last_refresh": "Última actualización", "sources": "Fuentes activas"}),
-            hide_index=True, width="stretch")
-    _render_sources(locator, names)
-    _render_locate_schedule(locator, names)
+    if advanced:
+        with st.expander("Últimas búsquedas"):
+            recent = locator.jobs(limit=200)
+            if recent.empty:
+                st.caption("Sin búsquedas todavía.")
+            else:
+                st.dataframe(recent.assign(state=recent["state"].map(lambda s: JOB_STATES.get(s, s)))[
+                    ["ean", "brand", "model", "color", "competitor", "kind", "state", "method", "url", "detail",
+                     "updated_at"]], hide_index=True, width="stretch")
+        with st.expander("Índice local de fichas"):
+            st.caption("Fichas y enlaces ya descubiertos: se reutilizan entre productos y ejecuciones. Las páginas de "
+                       "marca/catálogo solo se vuelven a consultar cuando caducan.")
+            st.dataframe(locator.index_summary().rename(columns={
+                "competitor": "Competidor", "indexed": "Enlaces indexados", "checked": "Fichas comprobadas",
+                "pages": "Páginas de listado", "last_refresh": "Última actualización", "sources": "Fuentes activas"}),
+                hide_index=True, width="stretch")
+        _render_sources(locator, names)
+        _render_locate_schedule(locator, names)
 
 
 def _render_sources(locator: PriceLocator, names: dict[str, str]) -> None:
@@ -704,19 +780,27 @@ def _render_locate_schedule(locator: PriceLocator, names: dict[str, str]) -> Non
 
 def _render_monitor(store: PriceComparatorStore, names: dict[str, str], *, advanced: bool = True) -> None:
     import price_analytics as analytics
+    from price_monitor import schedule_enabled
 
     monitor = PriceMonitor(store)
     sync = VytriaPriceSync(store)
     with st.expander("Precio Vytria y ciclo diario"):
-        st.caption("Fuente operativa: Odoo tarifa 59, ES/EUR con IVA. Contraste con el precio publicado en "
-                   "PrestaShop pendiente. Vigencia máxima de los precios Vytria vigilados: 24 h.")
+        st.caption("Referencia: Odoo tarifa 59. Cuando el lector de PrestaShop está habilitado, "
+                   "la comparación usa su precio final vigente (ES/EUR con IVA), sin sustituirlo por Odoo "
+                   "ante una incidencia. Vigencia máxima: 24 h.")
         daily = st.toggle("Sincronizar Vytria antes de la vigilancia diaria", value=sync.auto_enabled,
                           key="watch_vytria_daily")
         if daily != sync.auto_enabled:
             sync.set_auto_enabled(daily)
-        st.caption("El ciclo requiere también PRICE_MONITOR_SCHEDULE_ENABLED y cada competidor habilitado. "
-                   "La localización conserva su planificación independiente. No se activa ningún servicio aquí.")
-        approved_sync = st.checkbox("Autorizo la lectura supervisada de Odoo para los EAN vigilados",
+        st.caption("Esta planificación periódica y la continuidad vigente son mecanismos separados. "
+                   "Su estado no impide solicitar aquí una lectura manual autorizada.")
+        if advanced:
+            st.caption(
+                f"Diagnóstico: planificación periódica general "
+                f"{'activa' if schedule_enabled() else 'desactivada'} "
+                "(PRICE_MONITOR_SCHEDULE_ENABLED); la localización usa su propia planificación."
+            )
+        approved_sync = st.checkbox("Autorizo la lectura supervisada de precios Vytria para los EAN vigilados",
                                     key="watch_vytria_approved")
         if st.button("Sincronizar solo Vytria vigilados", disabled=not approved_sync or sync.is_running(),
                      key="watch_vytria_sync"):
@@ -735,8 +819,16 @@ def _render_monitor(store: PriceComparatorStore, names: dict[str, str], *, advan
     st.caption("Solo fichas verificadas de productos vigilados. No repite búsquedas. Identidad: marca + modelo + "
                "color; calibre no vinculante. Solo se comparan ofertas disponibles con mercado ES, EUR e IVA "
                "incluido confirmados. Caducidad: un intervalo del grupo o competidor (24 h por defecto).")
-    if not monitor_enabled():
-        st.warning(f"Monitorización periódica desactivada ({MONITOR_ENV}). Los lotes supervisados son explícitos.")
+    from price_trial import continuity_row
+    continuity = continuity_row(store)
+    if continuity and continuity["status"] == "active":
+        st.caption("Vigilancia de continuidad activa. La programación periódica general no gobierna esta selección.")
+    elif continuity and continuity["status"] == "paused":
+        st.warning("Vigilancia de continuidad pausada. Las consultas periódicas están detenidas; las acciones manuales siguen sujetas a autorización.")
+    elif continuity and continuity["status"] == "stopped":
+        st.warning("Vigilancia de continuidad detenida. Las consultas manuales no pueden iniciarse hasta reanudarla.")
+    elif not monitor_enabled():
+        st.caption("La programación periódica general está desactivada. Puede usar una consulta manual autorizada.")
     cid = st.selectbox("Competidor", ordered(names, names.get), format_func=names.get,
                        key="monitor_competitor")
     if advanced:
@@ -875,9 +967,10 @@ def _render_alerts(store: PriceComparatorStore) -> None:
                        mime="text/plain", key="monitor_email")
 
 
-ADMIN_SECTIONS = (
-    "Panel general", "Productos en vigilancia", "Competidores", "Actualizaciones",
-    "Alertas e incidencias", "Configuración y diagnóstico",
+ADMIN_SECTIONS = ("Resumen", "Productos", "Tiendas", "Por revisar", "Vigilancia y consumos")
+DIAGNOSTIC_SECTIONS = (
+    "Ajustes técnicos", "Importaciones", "Históricos y auditoría", "Colas y recuperaciones",
+    "Búsqueda manual (avanzada)",
 )
 
 
@@ -926,6 +1019,87 @@ def _render_overview(store: PriceComparatorStore) -> None:
         st.dataframe(alerts, hide_index=True, width="stretch")
 
 
+def _render_store_urls(store: PriceComparatorStore, cid: str) -> None:
+    from price_monitor import PriceMonitor
+    from price_web import WebPriceSearch, validate_competitor_url
+
+    competitor = store.competitors().set_index("id").loc[cid]
+    st.subheader("URLs y fichas")
+    with store._connect() as connection:
+        urls = pd.read_sql_query(
+            "SELECT ean,url,status,source,note,submitted_at,verified_at FROM competitor_product_urls "
+            "WHERE competitor_id=? ORDER BY ean,url",
+            connection,
+            params=(cid,),
+        )
+    if urls.empty:
+        st.info("Todavía no hay URLs guardadas para esta tienda.")
+    else:
+        st.dataframe(urls.rename(columns={
+            "ean": "EAN", "url": "URL", "status": "Estado", "source": "Origen",
+            "note": "Nota", "submitted_at": "Guardada", "verified_at": "Verificada",
+        }), hide_index=True, width="stretch",
+            column_config={"URL": st.column_config.LinkColumn("URL")})
+    watched = PriceWatch(store).watchlist()
+    options = watched["ean"].tolist() if not watched.empty else []
+    if not options:
+        st.info("Añada primero los productos que desea vigilar.")
+        return
+    ean = st.selectbox("Producto", options, key=f"store_url_ean_{cid}")
+    url = st.text_input("URL candidata o sustituta", key=f"store_url_value_{cid}",
+                        placeholder="https://...")
+    replace = st.checkbox("Sustituir las URL actuales de este producto",
+                          value=False, key=f"store_url_replace_{cid}",
+                          help="Conserva las URL anteriores como histórico y marca la sustitución.")
+    if st.button("Guardar URL", key=f"store_url_save_{cid}", disabled=not url.strip()):
+        try:
+            normalized = normalize_gtin(ean)
+            search = WebPriceSearch(store)
+            config = search.config(cid)
+            validated = validate_competitor_url(url.strip(), config["domain"])
+            stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            with store._connect() as connection, connection:
+                connection.execute("""INSERT INTO competitor_product_urls(
+                    competitor_id,ean,url,match_status,status,verified_at,source,note,submitted_at
+                ) VALUES(?,?,?,'manual_review','pending_verification','','user',
+                    'Aportada manualmente; pendiente de verificar',?)
+                ON CONFLICT(competitor_id,ean,url) DO UPDATE SET status='pending_verification',
+                    note=excluded.note,submitted_at=excluded.submitted_at""",
+                                   (cid, normalized, validated, stamp))
+                if replace:
+                    connection.execute("""UPDATE competitor_product_urls SET status='replaced'
+                        WHERE competitor_id=? AND ean=? AND url<>? AND status IN
+                        ('verified','probable','pending_verification','needs_relocation')""",
+                                       (cid, normalized, validated))
+                connection.execute("""INSERT INTO access_audit(
+                    scope,scope_id,action,previous,current,actor,note,at
+                ) VALUES('competitor_url',?,?,'',?,'user','URL guardada sin confirmar identidad ni oferta',?)""",
+                                   (f"{cid}:{normalized}", "saved",
+                                    "Sustituida" if replace else "Añadida", stamp))
+            st.success("URL guardada como candidata. Esta acción no confirma identidad, oferta, stock ni autorización.")
+        except (ValueError, sqlite3.Error) as exc:
+            st.error(str(exc))
+
+    verified = urls[(urls["ean"] == normalize_gtin(ean)) & urls["status"].eq("verified")]
+    verified_urls = verified["url"].drop_duplicates().tolist()
+    if len(verified_urls) > 1:
+        selected_url = st.selectbox("Ficha confirmada para leer", verified_urls,
+                                    key=f"store_url_verified_{cid}")
+    else:
+        selected_url = verified_urls[0] if verified_urls else None
+    if not verified_urls:
+        st.info("Esta URL aún no está confirmada. Al confirmar la identidad en «Por revisar», "
+                "el trabajador solicitará la lectura prioritaria automáticamente.")
+    if st.button("Solicitar lectura de ficha confirmada", key=f"store_url_request_{cid}",
+                 disabled=not selected_url):
+        try:
+            normalized = normalize_gtin(ean)
+            refresh = PriceMonitor(store).enqueue([cid], [normalized], exact_url=selected_url)
+            st.info(f"Solicitud registrada: {refresh}. El trabajador decidirá reutilización, espera o bloqueo.")
+        except (ValueError, sqlite3.Error) as exc:
+            st.error(str(exc))
+
+
 def render_competitor_card(store: PriceComparatorStore, cid: str, search: WebPriceSearch,
                            scheduler: CompetitorScheduler, states_frame: pd.DataFrame) -> None:
     from app_pages.price_comparator import _render_competitor_panels
@@ -953,10 +1127,12 @@ def render_competitor_card(store: PriceComparatorStore, cid: str, search: WebPri
                 except ValueError as exc:
                     st.error(str(exc))
     task = st.selectbox("Configuración del competidor", [
-        "Acceso y métodos", "Fuentes y conectores", "Presupuestos y límites",
+        "URLs y fichas", "Acceso y métodos", "Fuentes y conectores", "Presupuestos y límites",
         "Frecuencia de actualización", "Incidencias y bloqueos",
     ], key="competitor_card_section")
-    if task == "Acceso y métodos":
+    if task == "URLs y fichas":
+        _render_store_urls(store, cid)
+    elif task == "Acceso y métodos":
         _render_methods(access, cid)
     elif task == "Fuentes y conectores":
         _render_sources(PriceLocator(store), names)
@@ -986,81 +1162,38 @@ def render_competitor_card(store: PriceComparatorStore, cid: str, search: WebPri
         _render_locate_schedule(PriceLocator(store), names)
 
 
-def _render_trial(store: PriceComparatorStore) -> None:
-    from filelock import Timeout
-    from build_info import load_build_info
-    from price_trial import PriceTrial, manifest
+def _render_trial_history(store: PriceComparatorStore) -> None:
+    from price_trial import trial_row
 
-    service = PriceTrial(store)
-    with st.expander("Piloto automático de 72 horas · 100 EAN × seis tiendas"):
-        report = service.report()
-        if report is None:
-            frozen = manifest()
-            st.caption("Tres ciclos diarios, Odoo tarifa 59 de solo lectura y los 600 pares explícitos del manifiesto. "
-                       "No se cambian permisos ni presupuestos; Otticait queda excluida. El cierre es absoluto.")
-            st.download_button("Descargar manifiesto de 600 pares (JSON)",
-                               json.dumps(frozen, ensure_ascii=False, indent=2).encode("utf-8"),
-                               "piloto-72h-manifiesto.json", "application/json", key="trial_manifest")
-            try:
-                prepared = service.preflight()
-            except ValueError as exc:
-                st.warning(str(exc))
-                return
-            st.dataframe(pd.DataFrame(prepared["limits"].values()), hide_index=True)
-            info = load_build_info()
-            approved = st.checkbox("Autorizo activar los 600 pares durante 72 horas y sincronizar solo esos 100 EAN",
-                                   key="trial_approval")
-            if st.button("Activar piloto de 72 horas", key="trial_activate",
-                         disabled=not approved or not info["build"].startswith("actions-")):
-                try:
-                    service.activate(actor=_actor(), build_commit=info["commit"])
-                    _refresh("Ventana persistida. El trabajador del servidor ejecutará el primer ciclo.")
-                except (ValueError, RuntimeError, Timeout) as exc:
-                    st.error(str(exc))
-            _render_continuity(store, service)
-            return
-        st.write({name: report[name] for name in ("status", "build_commit", "started_at", "expires_at",
-                                                "started_at_madrid", "expires_at_madrid", "heartbeat_at", "error")})
-        if report["recoveries"]:
-            recovery = report["recoveries"][-1]
-            st.caption(f"Compilación de recuperación: {recovery['note']['recovery_build_commit']} · "
-                       "El commit de activación y la ventana original se conservan.")
-        st.caption("La configuración no demuestra ejecución: compruebe el heartbeat y los recibos de cada ciclo. "
-                   "Los demás disparadores no pueden consultar estos pares, tampoco después de caducar.")
-        st.dataframe(pd.DataFrame.from_dict(report["summary"], orient="index"), width="stretch")
-        deferred = [{
-            "ciclo": pair["cycle"], "competidor": pair["competitor_id"], "EAN": pair["ean"],
-            "estado": pair["state"], "próxima comprobación": pair.get("next_check_at"),
-            "motivo": pair.get("defer_reason") or pair.get("pending_reason", ""),
-        } for pair in report["pairs"] if pair["state"] == "pending"]
-        if deferred:
-            st.caption("Las fechas y motivos de cada par pendiente se conservan; `done` no equivale a consultado.")
-            st.dataframe(pd.DataFrame(deferred), width="stretch", hide_index=True)
-        st.download_button("Descargar historial e informe del piloto (JSON)",
-                           json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8"),
-                           "piloto-72h-historial.json", "application/json", key="trial_report")
-        if report["status"] == "failed":
-            try:
-                service.recovery_preflight()
-            except ValueError as exc:
-                st.warning(f"Recuperación sin reintentos: {exc}")
-            else:
-                st.info("El fallo inicial no dejó sincronizaciones ni peticiones. Puede reanudar la misma "
-                        "ventana; se conservará en auditoría el estado anterior completo.")
-                info = load_build_info()
-                approved = st.checkbox("Autorizo reanudar el piloto fallido sin ampliar su fecha de cierre",
-                                       key="trial_resume_approval")
-                if st.button("Reanudar tras corregir el arranque", key="trial_resume",
-                             disabled=not approved or not info["build"].startswith("actions-")):
-                    try:
-                        service.resume_initial_sync_failure(actor=_actor(), build_commit=info["commit"])
-                        _refresh("Piloto recuperado con su ventana original. El trabajador continuará sin duplicar consultas.")
-                    except (ValueError, RuntimeError, Timeout) as exc:
-                        st.error(str(exc))
-        if report["status"] == "active" and st.button("Detener piloto ahora", key="trial_stop"):
-            service.stop(actor=_actor())
-            _refresh("Piloto detenido: no se iniciarán consultas nuevas. Los recibos se conservan.")
-    _render_continuity(store, service)
+    row = trial_row(store)
+    if row is None:
+        st.info("No hay una ejecución histórica del piloto de 72 horas.")
+        return
+    with store._connect() as con:
+        cycles = [dict(item) for item in con.execute(
+            "SELECT * FROM price_trial_cycles ORDER BY cycle").fetchall()]
+        pairs = [dict(item) for item in con.execute(
+            "SELECT cycle,competitor_id,ean,state,started_at,finished_at,next_check_at,receipt "
+            "FROM price_trial_pairs ORDER BY cycle,competitor_id,ean").fetchall()]
+        audits = [dict(item) for item in con.execute(
+            "SELECT id,actor,action,at,note FROM access_audit WHERE scope='price_trial' AND scope_id='1' "
+            "ORDER BY id").fetchall()]
+    for pair in pairs:
+        pair["receipt"] = json.loads(pair["receipt"] or "{}")
+    history = {
+        "status": row["status"], "started_at": row["started_at"], "expires_at": row["expires_at"],
+        "stopped_at": row["stopped_at"], "manifest": json.loads(row["manifest"]),
+        "cycles": cycles, "pairs": pairs, "audit": audits,
+    }
+    st.caption("Solo consulta histórica. No activa, reanuda ni detiene trabajos, y no realiza consultas.")
+    st.write({key: history[key] for key in ("status", "started_at", "expires_at", "stopped_at")})
+    if pairs:
+        pair_frame = pd.DataFrame(pairs)
+        st.dataframe(pair_frame.groupby(["state"], as_index=False).size().rename(
+            columns={"state": "Estado", "size": "Pares"}), hide_index=True)
+    st.download_button("Descargar histórico del piloto (JSON)",
+                       json.dumps(history, ensure_ascii=False, indent=2).encode("utf-8"),
+                       "piloto-72h-historial.json", "application/json", key="trial_history_export")
 
 
 def _render_continuity(store: PriceComparatorStore, service=None) -> None:
@@ -1077,8 +1210,8 @@ def _render_continuity(store: PriceComparatorStore, service=None) -> None:
         st.caption(
             ("Configuración preparada y desactivada. " if report is None else "Selección persistida de continuidad. ")
             + f"100 EAN × {len(frozen['competitors'])} tiendas. "
-            "No modifica ni prolonga el piloto expirado. La sincronización Vytria/Odoo es solo de lectura y "
-            "queda limitada a esos 100 EAN. El SHA mostrado corresponde al manifiesto original de origen."
+            "La sincronización Vytria/Odoo es solo de lectura y queda limitada a esos 100 EAN. "
+            "El SHA mostrado corresponde al manifiesto original de origen."
         )
         st.write({
             "manifest_sha256": config["manifest_sha256"],
@@ -1346,11 +1479,196 @@ def _render_selected_recovery(store: PriceComparatorStore, continuity_id: int) -
                 st.error(f"No se pudo aplicar la recuperación: {exc}")
 
 
+def _render_approved_read_recovery(store: PriceComparatorStore, names: dict[str, str]) -> None:
+    import sqlite3
+    from filelock import Timeout
+    from build_info import load_build_info
+    from price_recovery import apply_manual_reviews, preview_manual_reviews
+
+    st.caption(
+        "La vista previa es local y de solo lectura: reevalúa muestras y artefactos conservados, "
+        "sin HTTP. La aplicación revalida aprobaciones, identidad, vigencia, permisos, robots, "
+        "presupuesto y bloqueos; las lecturas nuevas las ejecuta únicamente el monitor existente."
+    )
+    columns = st.columns(3)
+    competitor_ids = columns[0].multiselect(
+        "Competidores", options=sorted(names), format_func=lambda value: names[value],
+        key="approved_read_competitors",
+    )
+    ean_query = columns[1].text_input("EAN", key="approved_read_ean")
+    reason_query = columns[2].text_input("Motivo o evidencia", key="approved_read_reason")
+    filters = (tuple(competitor_ids), ean_query.strip(), reason_query.strip())
+    if st.session_state.get("approved_read_filters") != filters:
+        st.session_state.pop("approved_read_preview", None)
+        st.session_state.pop("approved_read_selection", None)
+        st.session_state.pop("approved_read_approval_selection", None)
+        st.session_state["approved_read_filters"] = filters
+
+    if st.button("Previsualizar lecturas aprobadas", key="approved_read_preview_button"):
+        try:
+            st.session_state["approved_read_preview_revision"] = (
+                int(st.session_state.get("approved_read_preview_revision", 0)) + 1)
+            st.session_state["approved_read_preview"] = preview_manual_reviews(
+                store.database_path,
+                competitor_ids=competitor_ids or None,
+                ean_query=ean_query,
+                reason_query=reason_query,
+            )
+            st.session_state["approved_read_selection"] = []
+            st.session_state["approved_read_approval_selection"] = []
+        except (ValueError, KeyError, TypeError, OSError, sqlite3.Error) as exc:
+            st.session_state.pop("approved_read_preview", None)
+            st.error(f"No se pudo preparar la vista previa: {exc}")
+
+    preview = st.session_state.get("approved_read_preview")
+    if preview is None:
+        return
+    counts = preview["action_counts"]
+    metrics = st.columns(5)
+    metrics[0].metric("Reutilizaciones locales", counts["reuse"])
+    metrics[1].metric("Reprogramaciones", counts["requeue"])
+    metrics[2].metric("Ya en cola", counts["already_queued"])
+    metrics[3].metric("Exclusiones", counts["excluded"])
+    metrics[4].metric("HTTP nuevos en esta acción", 0)
+
+    actionable = [row for row in preview["requests"]
+                  if row["action"] in {"local_reevaluation", "requeue", "recover_corrected_error"}]
+    if actionable:
+        selected = set(st.session_state.get("approved_read_selection", []))
+        grid_key = (f"approved_read_grid_{st.session_state.get('approved_read_preview_revision', 0)}_"
+                    f"{hashlib.sha256(repr(filters).encode()).hexdigest()[:10]}")
+        grid = pd.DataFrame([{
+            "Seleccionar": row["id"] in selected,
+            "ID": row["id"],
+            "EAN": row["ean"],
+            "Competidor": names.get(row["competitor_id"], row["competitor_id"]),
+            "URL aprobada": row["url"],
+            "Aprobación": row["approval_id"],
+            "Error histórico": row["detail"],
+            "Resultado local": (
+                ", ".join(item["result"] for item in
+                          row["evidence"].get("artifact_evaluations", []))
+                or row["evidence"]["sample_kind"]
+            ),
+            "Oferta comparable": ("Sí · muestra vigente" if row["action"] == "local_reevaluation"
+                                  else "No · requiere lectura gobernada"),
+            "Acción / motivo": f"{row['action']}: {row['reason']}",
+            "HTTP previos": row["http_requests"],
+            "Recibos": ", ".join(
+                f"{receipt['id']}:{receipt['result'] or 'reserved'}"
+                for receipt in row["evidence"]["receipt_summaries"]),
+        } for row in actionable])
+        edited = st.data_editor(
+            grid, key=grid_key, hide_index=True, width="stretch", num_rows="fixed",
+            disabled=[column for column in grid.columns if column != "Seleccionar"],
+            column_config={"URL aprobada": st.column_config.LinkColumn("URL aprobada")},
+        )
+        st.session_state["approved_read_selection"] = edited.loc[
+            edited["Seleccionar"], "ID"].astype(int).tolist()
+    else:
+        st.info("No hay solicitudes de lecturas recuperables en estos filtros.")
+
+    excluded = [row for row in preview["requests"] if row["category"] == "excluded"]
+    if excluded:
+        with st.expander(f"Exclusiones actuales ({len(excluded)})"):
+            st.dataframe(pd.DataFrame([{
+                "ID": row["id"],
+                "EAN": row["ean"],
+                "Competidor": names.get(row["competitor_id"], row["competitor_id"]),
+                "URL aprobada": row["url"],
+                "Aprobación": row["approval_id"],
+                "Error histórico": row["detail"],
+                "Motivo de exclusión": row["reason"],
+                "Artefactos": ", ".join(
+                    item["result"] for item in row["evidence"].get("artifact_evaluations", [])),
+                "HTTP previos": row["http_requests"],
+                "Recibos": ", ".join(
+                    f"{receipt['id']}:{receipt['result'] or 'reserved'}"
+                    for receipt in row["evidence"]["receipt_summaries"]),
+            } for row in excluded]), hide_index=True, width="stretch")
+
+    approvals = preview["approvals_without_request"]
+    if approvals:
+        st.dataframe(pd.DataFrame([{
+            "Aprobación": row["approval_id"],
+            "EAN": row["ean"],
+            "Competidor": names.get(row["competitor_id"], row["competitor_id"]),
+            "URL aprobada": row["url"],
+            "Acción": row["action"],
+            "Motivo": row["reason"],
+        } for row in approvals]), hide_index=True, width="stretch")
+        approval_labels = {
+            row["approval_id"]: f"{row['approval_id']} · {row['ean']} · "
+                                f"{names.get(row['competitor_id'], row['competitor_id'])}"
+            for row in approvals if row["action"] in {"create", "reuse_saved_sample"}
+        }
+        selected_approvals = st.multiselect(
+            "Aprobaciones auditadas elegibles sin solicitud",
+            options=list(approval_labels),
+            format_func=approval_labels.get,
+            key="approved_read_approval_selection",
+        )
+    else:
+        selected_approvals = []
+        st.caption("No hay aprobaciones auditadas sin solicitud en estos filtros.")
+
+    request_ids = st.session_state.get("approved_read_selection", [])
+    info = load_build_info()
+    with st.form("approved_read_apply_form"):
+        actor = st.text_input("Responsable", value=_actor(), key="approved_read_actor")
+        note = st.text_input("Motivo de aplicación", key="approved_read_note")
+        approved = st.checkbox("Autorizo aplicar solo las filas elegibles seleccionadas",
+                               key="approved_read_confirm")
+        submitted = st.form_submit_button(
+            "Aplicar reevaluación auditada",
+            disabled=not (request_ids or selected_approvals) or not info["build"].startswith("actions-"),
+        )
+    if submitted:
+        try:
+            result = apply_manual_reviews(
+                store.database_path, actor=actor, note=note, build_commit=info["commit"], approved=approved,
+                request_ids=request_ids or None, approval_ids=selected_approvals or None,
+            )
+            st.session_state.pop("approved_read_preview", None)
+            st.session_state.pop("approved_read_selection", None)
+            st.session_state.pop("approved_read_approval_selection", None)
+            changed = set(result["changed"])
+            linked = {item["request_id"] for item in result["linked"]}
+            selected_requests = set(request_ids)
+            request_rows = [{
+                "ID": row["id"],
+                "EAN": row["ean"],
+                "Competidor": names.get(row["competitor_id"], row["competitor_id"]),
+                "Estado final": ("done" if row["action"] == "local_reevaluation" else "pending")
+                if row["id"] in changed else "ya en cola" if row["id"] in linked else "sin cambios",
+                "Acción": row["action"],
+                "Motivo": row["reason"],
+            } for row in result["requests"] if row["id"] in selected_requests]
+            approval_rows = [{
+                "Aprobación": row.get("approval_id"),
+                "Solicitud": row.get("request_id"),
+                "Acción": row["action"],
+                "Motivo": row["reason"],
+            } for row in result["approval_results"]]
+            outcomes = [*request_rows, *approval_rows]
+            if changed or linked or any(row["action"] == "created" for row in approval_rows):
+                st.success("Aplicación auditada completada; no se hizo HTTP. "
+                           "Las nuevas lecturas quedan a cargo del monitor.")
+            else:
+                st.info("No hubo cambios: las filas ya estaban resueltas/en cola o dejaron de ser elegibles.")
+            if outcomes:
+                st.dataframe(pd.DataFrame(outcomes), hide_index=True, width="stretch")
+        except (ValueError, KeyError, TypeError, OSError, sqlite3.Error, Timeout) as exc:
+            st.error(f"No se pudo aplicar la reevaluación: {exc}")
+
+
 def _render_continuity_capture(service, frozen: dict, *, active: bool = True) -> None:
     import sqlite3
 
     from filelock import Timeout
     from build_info import load_build_info
+    from price_diagnostic import CAPTURE_VERSION
+    from price_trial import DIAGNOSTIC_RETRY_CAPTURE_UPDATE
 
     with st.expander("Captura supervisada de un par"):
         st.caption("Procesa solo un par pendiente y vencido con ficha ya verificada, usando el trabajador y "
@@ -1380,8 +1698,9 @@ def _render_continuity_capture(service, frozen: dict, *, active: bool = True) ->
             st.download_button("Descargar evidencia de captura", json.dumps(result, ensure_ascii=False).encode("utf-8"),
                                "price-continuity-capture.json", "application/json", key="continuity_capture_download")
 
-    with st.expander("Diagnóstico supervisado de candidatas en revisión"):
-        st.caption("Consulta una candidata ya documentada sin aceptar la revisión ni modificar ofertas o plazos. "
+    with st.expander("Diagnóstico supervisado de fichas en revisión"):
+        st.caption("Consulta una candidata documentada o ficha aceptada cuya lectura falló, sin aceptar otra "
+                   "revisión ni modificar ofertas o plazos. "
                    "Usa permisos, robots y presupuestos existentes; los rechazos también se auditan. Introduzca "
                    "su identidad real; el campo no autentica al responsable.")
         cid = st.selectbox("Competidor", options=list(frozen["competitors"]),
@@ -1391,13 +1710,26 @@ def _render_continuity_capture(service, frozen: dict, *, active: bool = True) ->
         st.button("Actualizar estado", key="diagnostic_refresh")
         results = service.diagnostic_results(cid, ean)
         retried_ids = {r["retry_of"] for r in results if r["retry_of"] is not None}
+        retryable_ids = set()
+        for result in results:
+            if result["status"] != "rejected" or result["id"] in retried_ids:
+                continue
+            try:
+                audit = json.loads(result["result"])
+            except (TypeError, json.JSONDecodeError):
+                st.warning(f"Resultado diagnóstico {result['id']} ilegible; no se propone reintento.")
+                continue
+            if (isinstance(audit, dict) and audit.get("stage") == "lock_and_scope"
+                    and audit.get("requests") == []
+                    and (audit.get("error_type") == "PilotError"
+                         or (audit.get("error_type") == "EvidenceError"
+                             and result["reason"] == "El almacenamiento no acredita permisos privados"))):
+                retryable_ids.add(result["id"])
         if results:
             labels = {"pending": "pendiente", "running": "ejecutando", "captured": "capturado",
                       "deferred": "aplazado", "expired": "caducado", "rejected": "rechazado"}
             display = [{**r, "estado": ("reintentable (sujeto a comprobación)"
-                        if r["status"] == "rejected"
-                        and r["id"] not in retried_ids
-                        and r["reason"] == "El almacenamiento no acredita permisos privados"
+                        if r["id"] in retryable_ids
                         else labels.get(r["status"], r["status"]))} for r in results]
             st.dataframe(pd.DataFrame(display), hide_index=True)
             available = [r for r in results if r["available"]]
@@ -1412,29 +1744,52 @@ def _render_continuity_capture(service, frozen: dict, *, active: bool = True) ->
                 except (ValueError, sqlite3.Error) as exc:
                     st.warning(f"Evidencia no disponible: {exc}")
         if not candidates:
-            st.info("No hay candidatas documentadas pendientes de revisión para este par.")
+            st.info("No hay fichas documentadas elegibles para diagnóstico de este par.")
             return
-        url = st.selectbox("URL candidata documentada", candidates, key="diagnostic_url")
+        url = st.selectbox("URL documentada o ficha aceptada", candidates, key="diagnostic_url")
         info = load_build_info()
-        retryable = [r for r in results if r["id"] not in retried_ids
-                     and r["url"] == url and r["status"] == "rejected"
-                     and r["reason"] == "El almacenamiento no acredita permisos privados"]
+        retryable = [r for r in results if r["id"] in retryable_ids and r["url"] == url]
+        captured_retryable = [r for r in results if r["status"] == "captured" and r["available"]
+                              and r["url"] == url and r["capture_version"] != CAPTURE_VERSION]
         with st.form("diagnostic_capture_form"):
             actor = st.text_input("Responsable", value="")
             note = st.text_input("Motivo del diagnóstico")
             approved = st.checkbox("Autorizo una consulta diagnóstica gobernada")
+            if captured_retryable:
+                previous_capture = st.selectbox(
+                    "Captura anterior con evidencia insuficiente",
+                    captured_retryable,
+                    format_func=lambda r: (f"{r['id']} · {r['finished_at']} · "
+                                           f"{r['capture_version'] or 'capturador anterior sin versión'}"),
+                    key="diagnostic_capture_retry",
+                )
+            else:
+                previous_capture = None
             submitted = st.form_submit_button("Solicitar evidencia diagnóstica",
                                               disabled=not info["build"].startswith("actions-"))
             retried = st.form_submit_button("Reintentar rechazo previo a HTTP",
                                             disabled=not retryable or not info["build"].startswith("actions-"))
-        if submitted or retried:
+            retried_capture = st.form_submit_button(
+                "Reintentar captura con capturador actualizado",
+                disabled=not captured_retryable or not info["build"].startswith("actions-"),
+            )
+        if submitted or retried or retried_capture:
             try:
-                if retried:
+                if retried_capture:
+                    if not previous_capture:
+                        raise ValueError("Seleccione la captura anterior que se va a revisar")
+                    saved = service.retry_diagnostic(
+                        previous_capture["id"], actor=actor, note=note, build_commit=info["commit"],
+                        approved=approved, retry_reason=DIAGNOSTIC_RETRY_CAPTURE_UPDATE,
+                    )
+                elif retried:
                     saved = service.retry_diagnostic(retryable[0]["id"], actor=actor, note=note,
                                                      build_commit=info["commit"], approved=approved)
-                else:
+                elif submitted:
                     saved = service.request_diagnostic(
                         cid, ean, url, actor=actor, note=note, build_commit=info["commit"], approved=approved)
+                else:
+                    raise ValueError("No se seleccionó una acción diagnóstica")
                 labels = {"pending": "pendiente", "running": "ejecutando", "deferred": "aplazada",
                           "captured": "capturado", "rejected": "rechazado", "expired": "caducado"}
                 label = labels.get(saved["status"], saved["status"])
@@ -1449,7 +1804,6 @@ def _render_continuity_capture(service, frozen: dict, *, active: bool = True) ->
 def _render_batch(store: PriceComparatorStore, names: dict[str, str]) -> None:
     from price_batch import WatchBatch, batch_pairs_export
 
-    _render_trial(store)
     with st.expander("Historial persistente de lotes"):
         with store._connect() as con:
             history = con.execute("""SELECT id,started_at,summary FROM locate_runs
@@ -1470,8 +1824,8 @@ def _render_batch(store: PriceComparatorStore, names: dict[str, str]) -> None:
     point_check = st.checkbox("Comprobación puntual: nuevo intento de negativos y lectura actual de fichas",
                               key="batch_point_check")
     st.caption("Una sola pasada por par seleccionado. No modifica frecuencias, no acepta revisiones ni anula "
-               "permisos, robots, bloqueos, pausas, presupuestos o reservas. Los pares del piloto antiguo "
-               "se registran en una nueva ejecución supervisada del piloto, con las fuentes autorizadas actuales.")
+               "permisos, robots, bloqueos, pausas, presupuestos o reservas. Las decisiones del piloto histórico "
+               "no amplían ni bloquean la selección vigente.")
     scope = (tuple(sorted(eans)), tuple(sorted(cids)), point_check)
     if scope != st.session_state.get("batch_selection") or st.session_state.pop("batch_reset", False):
         st.session_state["batch_approved"] = False
@@ -1498,9 +1852,9 @@ def _render_batch(store: PriceComparatorStore, names: dict[str, str]) -> None:
         "provenance": "Procedencia", "status": "Precio", "interval_hours": "Frecuencia efectiva (h)", "access": "Acceso",
         "minimum_http": "HTTP base", "remaining_http": "HTTP restantes hoy", "estimate": "Previsión"})
     display = display.rename(columns={"defer_reason": "Motivo de aplazamiento", "queue_state": "Estado de cola",
-                                      "not_before": "No antes de", "attempts": "Intentos", "pilot_route": "Flujo piloto"})
+                                      "not_before": "No antes de", "attempts": "Intentos"})
     st.dataframe(display[["EAN", "Competidor", "Trabajo necesario", "Precio", "Procedencia", "Ficha reutilizada",
-                          "Motivo de aplazamiento", "Estado de cola", "No antes de", "Intentos", "Flujo piloto"]],
+                          "Motivo de aplazamiento", "Estado de cola", "No antes de", "Intentos"]],
                  hide_index=True, width="stretch", column_config={
                      "Ficha reutilizada": st.column_config.LinkColumn("Ficha reutilizada", display_text="Ver ficha")})
     with st.expander("Detalle de permisos, consumo y frecuencias"):
@@ -1560,7 +1914,7 @@ def _render_batch(store: PriceComparatorStore, names: dict[str, str]) -> None:
                          hide_index=True, width="stretch")
     st.warning("El consumo de localización es variable. El mínimo no es una cuota reservada. "
                "Robots, paginación, pausas, límites compartidos y bloqueos se comprueban de nuevo al ejecutar. "
-               "Las fichas verificadas se reutilizan; los pares pendientes del piloto se gestionan en el piloto.")
+               "Las fichas verificadas se reutilizan; las reservas heredadas no detienen la cola actual.")
     if st.button("Preparar trabajos sin HTTP", key="batch_prepare"):
         try:
             batch.prepare(eans, cids, point_check=point_check)
@@ -1606,7 +1960,7 @@ def _render_batch(store: PriceComparatorStore, names: dict[str, str]) -> None:
                            json.dumps(result, ensure_ascii=False, indent=2).encode("utf-8"),
                            "resultado-lote.json", "application/json", key="batch_result_export")
         if result["skipped"]:
-            st.info("Pares sin ejecución: precio todavía vigente, gestión en piloto, revisión o restricciones de acceso.")
+            st.info("Pares sin ejecución: precio vigente, revisión pendiente o restricciones de acceso.")
             st.dataframe(pd.DataFrame(result["skipped"]), hide_index=True, width="stretch")
         if result["deferred"]:
             st.warning(f"{result['deferred']} pares aptos no procesados: límite, reserva, bloqueo o cambio "
@@ -1622,10 +1976,12 @@ def render_admin(store: PriceComparatorStore, data: dict) -> None:
     access.ensure_defaults()
     PriceLocator(store).seed_sources()
     names = {r["id"]: r["name"] for r in store.competitors().to_dict("records")}
+    if st.session_state.get("price_admin_section") not in ADMIN_SECTIONS:
+        st.session_state.pop("price_admin_section", None)
     section = st.selectbox("Administración", ADMIN_SECTIONS, key="price_admin_section")
-    if section == "Panel general":
+    if section == "Resumen":
         _render_overview(store)
-    elif section == "Productos en vigilancia":
+    elif section == "Productos":
         _render_watchlist(watch)
         task = st.selectbox("Gestionar productos", ["Añadir / importar", "Reglas", "Grupos y frecuencia",
                                                   "Estado de localización"], key="watch_product_task")
@@ -1646,54 +2002,64 @@ def render_admin(store: PriceComparatorStore, data: dict) -> None:
                          "locate_detail": "Detalle", "url": "Ficha", "provenance": "Procedencia",
                          "interval_hours": "Frecuencia efectiva (h)"}),
                     hide_index=True, width="stretch")
-    elif section == "Competidores":
+    elif section == "Tiendas":
+        st.caption("Ficha de cada tienda: estado, mercado, URLs, métodos, frecuencia, consumos y bloqueos.")
         page._render_competitors(store, data)
-    elif section == "Actualizaciones":
-        task = st.selectbox("Actualización", ["Lote supervisado", "Precios y observaciones",
-                                             "Colas y revisión (avanzado)"], key="watch_update_task")
+    elif section == "Por revisar":
+        st.caption("Candidatas y problemas en una sola bandeja. Confirmar una ficha solicita la lectura prioritaria "
+                   "al trabajador existente; descartar no consulta la tienda.")
+        _render_locator(store, names, advanced=False)
+    else:
+        task = st.selectbox(
+            "Vigilancia y consumo",
+            ["Estado y consumos", "Lote supervisado", "Continuidad vigente"],
+            key="watch_vigilance_task",
+        )
         if task == "Lote supervisado":
             active = store.competitors()
             active_names = {r["id"]: r["name"] for r in active[active["active"].eq(1)].to_dict("records")}
             _render_batch(store, active_names)
-        elif task == "Precios y observaciones":
+        elif task == "Estado y consumos":
             _render_monitor(store, names, advanced=False)
         else:
-            advanced = st.selectbox("Herramienta avanzada", ["Localización", "Monitorización"],
-                                    key="watch_advanced_task")
-            if advanced == "Localización":
-                _render_locator(store, names)
-            else:
-                _render_monitor(store, names)
-    elif section == "Alertas e incidencias":
-        task = st.selectbox("Consultar", ["Alertas comerciales", "Incidencias y recuperación"], key="watch_alert_task")
-        if task == "Alertas comerciales":
-            _render_alerts(store)
-        else:
-            _render_incidents(access, names)
-    else:
-        task = st.selectbox("Diagnóstico", ["Parámetros generales", "Importaciones técnicas",
-                                           "Auditoría, históricos y exportaciones", "Piloto anterior",
-                                           "Recuperación de búsquedas"], key="watch_diagnostic_task")
-        if task == "Parámetros generales":
-            page._render_settings(store)
-        elif task == "Importaciones técnicas":
-            page._render_data_sources(store)
-        elif task == "Auditoría, históricos y exportaciones":
-            page._render_admin_history(store)
-        elif task == "Recuperación de búsquedas":
-            page._render_budget_recovery(store)
-        else:
-            from price_pilot import PricePilot
+            _render_continuity(store)
 
-            sub = st.selectbox("Tarea del piloto", ["Configuración del piloto", "Localización supervisada",
-                                                    "Actualización de precios", "Búsqueda manual"],
-                               key="price_pilot_section")
-            pilot = PricePilot(store)
-            if sub == "Configuración del piloto":
-                page._render_pilot(store)
-            elif sub == "Localización supervisada":
-                page._render_discovery(pilot, pilot.is_running())
-            elif sub == "Actualización de precios":
-                page._render_pilot_price_refresh(store)
-            else:
-                page._render_web_finder(store)
+
+def render_diagnostics(store: PriceComparatorStore, data: dict) -> None:
+    from app_pages import price_comparator as page
+
+    _notices()
+    access = AccessControl(store)
+    access.ensure_defaults()
+    PriceWatch(store).ensure_defaults()
+    PriceLocator(store).seed_sources()
+    names = {r["id"]: r["name"] for r in store.competitors().to_dict("records")}
+    if st.session_state.get("price_diagnostic_section") not in DIAGNOSTIC_SECTIONS:
+        st.session_state.pop("price_diagnostic_section", None)
+    section = st.selectbox("Diagnóstico técnico", DIAGNOSTIC_SECTIONS, key="price_diagnostic_section")
+    if section == "Ajustes técnicos":
+        page._render_settings(store)
+    elif section == "Importaciones":
+        page._render_data_sources(store)
+    elif section == "Históricos y auditoría":
+        page._render_admin_history(store)
+        with st.expander("Histórico del piloto de 72 horas"):
+            _render_trial_history(store)
+    elif section == "Colas y recuperaciones":
+        task = st.selectbox(
+            "Herramienta de diagnóstico",
+            ["Localización automática", "Monitorización", "Incidencias y recuperación",
+             "Reevaluar lecturas aprobadas"],
+            key="diagnostic_queue_task",
+        )
+        if task == "Localización automática":
+            _render_locator(store, names)
+        elif task == "Monitorización":
+            _render_monitor(store, names)
+        elif task == "Incidencias y recuperación":
+            _render_incidents(access, names)
+        elif task == "Reevaluar lecturas aprobadas":
+            _render_approved_read_recovery(store, names)
+    else:
+        st.caption("Búsqueda manual acotada; se mantienen permisos, presupuesto, pausas, robots y bloqueos.")
+        page._render_web_finder(store)

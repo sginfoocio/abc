@@ -329,14 +329,17 @@ def test_page_shows_insufficient_data_message_and_renders_with_data(tmp_path, mo
     assert not app.exception
     assert any("Datos insuficientes para medir competitividad" in item.value for item in app.info)
     assert [m.label for m in app.metric[:4]] == [
-        "Productos comparados", "Igual o más barato", "Más caro", "Diferencia media vs. mejor"]
+        "Productos comparados", "Igual o más barato",
+        "Más caro", "Diferencia media vs. mejor",
+    ]
     rendered_headers = {item.value for item in app.header}
     assert {
         "Cobertura de comparación", "Posición competitiva",
         "Evolución de la competitividad", "Dónde debemos actuar",
     }.issubset(rendered_headers)
     assert app.metric[0].value == "0 / 1"
-    assert app.metric[1].value == "Sin datos" and app.metric[2].value == "Sin datos"
+    assert app.metric[1].value == "Sin datos"
+    assert app.metric[2].value == "Sin datos"
     from tests.admin_navigation import navigate
     navigate(app, "Historial y diagnósticos", timeout=30)
     assert app.button(key="update_competitors").disabled # nothing enabled yet: Pendiente de configurar
@@ -373,6 +376,7 @@ def test_page_shows_insufficient_data_message_and_renders_with_data(tmp_path, mo
     assert app.metric[0].value == "0 / 1"  # the shared period filter excludes the 10-day-old offer
     assert history_windows[-1] == (7, 30)  # chart window shrinks; per-observation freshness stays configured
     assert any("Datos insuficientes para medir competitividad" in item.value for item in app.info)
+    app.radio(key="top_level_section").set_value("Comparativa de precios").run(timeout=30)
     assert app.selectbox(key="products_selected_ean").value == EAN
     comparison = next(frame.value for frame in app.dataframe if "Uso en comparación" in frame.value.columns)
     assert comparison.iloc[0]["Uso en comparación"] == "Comparable"

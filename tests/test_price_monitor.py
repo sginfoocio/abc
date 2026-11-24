@@ -8,7 +8,7 @@ import pytest
 import sqlite3
 
 from price_comparator import PriceComparatorStore
-from price_locator import LEASE
+from price_locator import LEASE, PriceLocator
 from price_monitor import PriceMonitor, SCHEDULE_ENV, _inventory_datetime
 from price_watch import PriceWatch
 from price_web import WebPriceSearch
@@ -54,7 +54,7 @@ def _monitor_env(tmp_path, *, count=1):
         ean = _gtin(f"841{i + 1:09d}")
         model = f"AL{1000 + i}"
         rows.append((ean, "Alpha", model, "93E", "50-18"))
-        site.product("Alpha", model, "93E", caliber="58-20")
+        site.product("Alpha", model, "93E", caliber="58-20", gtin=ean)
     _watch(store, rows)
     locator.run([cid], max_jobs=count)
     monitor = PriceMonitor(store, transport=site, clock=clock, sleep=lambda s: clock.advance(seconds=s))
@@ -64,6 +64,7 @@ def _monitor_env(tmp_path, *, count=1):
 
 def _edit(site, monitor, *, price=120, stock=True, **kwargs):
     job = monitor.jobs().iloc[0]
+    kwargs.setdefault("gtin", job["ean"])
     site.pages[job["url"]] = page(name="Alpha AL1000 93E 60-20", price=price, brand="Alpha", stock=stock, **kwargs)
 
 
@@ -302,6 +303,7 @@ def test_frequency_group_override_stale_alert_and_schedule_switch(tmp_path, monk
     assert not store.competitors().empty
 
 
+@pytest.mark.stress
 def test_full_500_ean_location_monitoring_changes_recovery_and_pilot_isolation(tmp_path):
     site = Site()
     other_site = Site(base="https://usd.example")
@@ -396,7 +398,7 @@ def test_expired_price_excluded_from_existing_dashboard_but_history_kept(tmp_pat
     assert len(store.offer_history(EAN)) == 1
 
 
-def test_receipt_recovery_after_import_before_completion_and_duplicate_ean_url(tmp_path, monkeypatch):
+def test_receipt_recovery_does_not_transfer_stock_across_published_eans(tmp_path, monkeypatch):
     store, _, locator, monitor, clock, cid, site = _monitor_env(tmp_path)
     other = _gtin("841000000009")
     _watch(store, [(other, "Alpha", "AL1000", "93E", "62-22")])
@@ -414,9 +416,15 @@ def test_receipt_recovery_after_import_before_completion_and_duplicate_ean_url(t
             monitor.run([cid])
     assert len(site.calls) == 1 and len(store.offer_history(EAN)) == 1
     clock.advance(minutes=11)
-    assert monitor.run([cid]).states == {"done": 2}
-    assert len(site.calls) == 1  # both EAN/calibres share the saved product and robots receipts
-    assert len(store.offer_history(EAN)) == len(store.offer_history(other)) == 1
+    assert monitor.run([cid]).states == {"done": 1}
+    assert len(site.calls) == 1  # the saved receipt is reused; no HTTP is repeated
+    assert len(store.offer_history(other)) == 0
+    with store._connect() as con:
+        route = con.execute(
+            "SELECT status,last_availability FROM competitor_product_urls WHERE ean=?",
+            (other,),
+        ).fetchone()
+    assert tuple(route) == ("probable", "unknown")
 
 
 @pytest.mark.parametrize("price,expected", [(114.01, False), (114, True)])
@@ -457,19 +465,21 @@ def test_monitoring_ui_shows_prices_and_alerts_without_network(tmp_path, monkeyp
         raise AssertionError("Opening the screen must not send requests")
 
     monkeypatch.setattr("requests.get", forbidden)
-    app = AppTest.from_string("from app_pages.price_watch import render_admin\n"
-                              "from price_comparator import PriceComparatorStore\n"
-                              "render_admin(PriceComparatorStore(), {})").run(timeout=30)
+    app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
+                              "render_price_comparator_page()").run(timeout=30)
     from tests.admin_navigation import watch_section
     for section in ("Precios y monitorización", "Alertas"):
         watch_section(app, section)
         assert not app.exception
-    assert any("envío automático desactivado" in str(item.value) for item in app.info)
+    assert not any("envío automático desactivado" in str(item.value).lower()
+                   for item in [*app.info, *app.warning])
     watch_section(app, "Precios y monitorización")
+    assert any("planificación periódica general" in str(item.value).lower() for item in app.caption)
     assert app.button(key="monitor_run").disabled
     app.button(key="monitor_enqueue").click().run(timeout=30)
     assert not app.exception
-    assert any(SCHEDULE_ENV in str(item.value) for item in app.warning)
+    assert any("programación periódica general está desactivada" in str(item.value).lower()
+               for item in app.caption)
 
 
 def test_inventory_mixed_five_completed_and_unprocessed_jobs_is_read_only(tmp_path, monkeypatch):
@@ -591,10 +601,10 @@ def test_monitoring_ui_mixed_dates_and_invalid_validity_without_writes(tmp_path,
     monkeypatch.setattr(PriceMonitor, "run", forbidden)
     monkeypatch.setattr(PriceMonitor, "enqueue", forbidden)
     site.calls.clear()
-    app = AppTest.from_string("from app_pages.price_watch import render_admin\n"
-                             "from price_comparator import PriceComparatorStore\n"
-                             "render_admin(PriceComparatorStore(), {})").run(timeout=30)
+    app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
+                              "render_price_comparator_page()").run(timeout=30)
     # The existing admin entry point seeds default configuration on its first opening.
+    PriceLocator(store).seed_sources()
     with store._connect() as con:
         before = "\n".join(con.iterdump())
     from tests.admin_navigation import watch_section

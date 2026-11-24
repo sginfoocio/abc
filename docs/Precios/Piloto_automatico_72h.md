@@ -1,6 +1,17 @@
-# Piloto automático acotado: 100 EAN, seis tiendas, 72 horas
+# Histórico del piloto automático: 100 EAN, seis tiendas, 72 horas
 
-## Alcance e interpretación
+> **Retirado de la operativa actual.** La interfaz ya no permite preparar, activar,
+> reanudar ni detener esta ventana y el trabajador común ya no ejecuta su ciclo.
+> Esta página se conserva para explicar recibos, auditoría y decisiones históricas;
+> sus instrucciones de activación/despliegue no son válidas para la versión actual.
+> El historial se consulta en **Diagnóstico técnico → Históricos y auditoría**.
+>
+> El trabajador actual ejecuta continuidad, diagnósticos y lecturas prioritarias;
+> no avanza el ciclo de 72 horas. Un estado o reserva histórica de ese piloto no
+> bloquea por sí solo consultas actuales. Las reservas propias de continuidad,
+> permisos por método, robots, presupuesto, pausas e incidentes sí siguen vigentes.
+
+## Alcance histórico e interpretación
 
 - [Manifiesto versionado](../../price_trial_manifest.json): los 100 EAN exactos de
   `Diagonal_evidencia_Copilot/Productos_100.csv`, sin selección por límite numérico.
@@ -12,17 +23,14 @@
   oferta comparable. «Sin localizar» no acredita inexistencia.
 - No se corrigen ni reclasifican revisiones o históricos anteriores.
 
-## Activación y disparador real
+## Mecanismo de la versión histórica (retirado; no seguir como procedimiento)
 
-Publicar mediante el flujo habitual, respetando la aprobación de `production`.
-Antes de activar, contrastar commit del recibo de despliegue y pie de Cloud, salud,
-inventario y controles actuales. No ejecutar además un lote manual completo.
+En la versión histórica se publicaba mediante el flujo habitual, respetando la
+aprobación de `production`. Los párrafos siguientes describen ese mecanismo anterior;
+no autorizan publicación, activación ni consultas comerciales.
 
-En **Comparador → Administración → Actualizaciones → Lote supervisado**, abrir
-**Piloto automático de 72 horas · 100 EAN × seis tiendas**. Descargar el manifiesto,
-revisar los límites, marcar la autorización y pulsar **Activar piloto de 72 horas**.
-La acción exige los 100 EAN en vigilancia activa, las seis identidades de tienda,
-un heartbeat reciente del trabajador y una compilación de Actions.
+La antigua pantalla estaba en **Administración → Actualizaciones → Lote supervisado**.
+Esa pantalla y el botón de activación ya no forman parte del recorrido actual.
 
 La imagen inicia el supervisor solo para el comando de la aplicación Streamlit.
 Un trabajador del servidor, independiente de pestañas y sesiones, revisa trabajo
@@ -76,19 +84,20 @@ El trabajador del contenedor permanece disponible para la vigilancia separada
 de continuidad, que está desactivada hasta una preparación y activación explícitas.
 Reiniciar el contenedor no reactiva ni prolonga el piloto.
 
-**Detener piloto ahora** persiste una parada anticipada. Las mismas guardas
-impiden nuevas consultas inmediatamente. No se borran recibos ni se cambian
-permisos o configuraciones ajenas.
+La antigua acción **Detener piloto ahora** persistía una parada anticipada. Sus
+guardas impedían nuevas consultas sin borrar recibos ni cambiar permisos.
 
 Las reservas interrumpidas se cierran como resultado incierto, incluso si el
 reinicio ocurre después de la caducidad: no se repiten para aparentar cobertura.
 Se conservan los segmentos previos y las reservas HTTP recuperables. Una
 sincronización interrumpida tampoco se repite automáticamente.
 
-La propiedad de estos pares se conserva después del cierre para que trabajos
-derivados no escapen a otros programadores. No hay reactivación automática ni
-botón que reinicie las 72 horas; una campaña posterior requiere una decisión
-explícita, no borrar el estado de este experimento.
+En el runtime histórico, la propiedad de estos pares se conservaba después del
+cierre para impedir que los trabajos del piloto escaparan a otros programadores.
+La versión actual ya no usa esa propiedad como bloqueo de consultas no-piloto:
+continuidad se gobierna por su propio manifiesto persistido y mantiene sus
+reservas aunque esté pausada o detenida. No se borra ni reinicia el estado del
+experimento histórico.
 
 ## Historial e informe final
 
@@ -101,10 +110,10 @@ sincronizador y de las peticiones. Ejecutar dos copias del módulo hacía que la
 sincronización propia se rechazase como externa antes de empezar.
 
 Para el error exacto `TrialDenied: EAN reservados al sincronizador filtrado del
-piloto de 72 h`, la sección del piloto ofrece **Reanudar tras corregir el arranque**
-después de desplegar una compilación distinta de la original. Requiere autorización
-manual y vuelve a comprobar, bajo las reservas del trabajador, las seis tiendas y
-la sincronización, que:
+piloto de 72 h`, la interfaz histórica ofrecía **Reanudar tras corregir el arranque**
+después de desplegar una compilación distinta de la original. Esa recuperación UI
+ya no está disponible. Su registro de auditoría se conserva y no se vuelve a activar
+desde esta versión.
 
 - la ventana original sigue vigente y el manifiesto es idéntico;
 - solo quedó la reserva inicial de sincronización, sin recibo ni ejecución Odoo;

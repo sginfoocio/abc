@@ -115,9 +115,9 @@ def test_daily_50_by_six_freshness_order_history_recovery_and_deduplication(tmp_
     odoo.execute("UPDATE product_template SET list_price=180")
     odoo.execute("UPDATE prestashop_pricelist_item_pricelist SET price=126")
     for shop in shops.values():
-        for ean, brand, model, color, _ in rows:
+        for ean, brand, model, color, caliber in rows:
             url = next(url for url in shop.pages if f"{model.lower()}-{color}-" in url)
-            shop.pages[url] = page(name=f"{brand} {model} {color} 58-20", price=100, brand=brand)
+            shop.pages[url] = page(name=f"{brand} {model} {color} {caliber}", price=100, gtin=ean, brand=brand)
     original = monitor._commit_sample
     crashed = False
 
@@ -198,8 +198,13 @@ def test_daily_retry_cooldown_and_new_watched_products(tmp_path):
 
 
 def test_failed_daily_sync_keeps_competitor_updates_but_never_uses_stale_own_price(tmp_path, monkeypatch):
-    store, _, locator, monitor, sync, clock, ids, _, _, _, _ = _daily_env(tmp_path, 1)
+    store, _, locator, monitor, sync, clock, ids, shops, _, rows, _ = _daily_env(tmp_path, 1)
     locator.run(ids, max_jobs=6)
+    for shop in shops.values():
+        for ean, brand, model, color, caliber in rows:
+            url = next(url for url in shop.pages if f"{model.lower()}-{color}-" in url)
+            shop.pages[url] = page(name=f"{brand} {model} {color} {caliber}", price=120,
+                                   gtin=ean, brand=brand)
     sync.set_auto_enabled(True)
     monkeypatch.setenv(SCHEDULE_ENV, "1")
     monitor.tick()

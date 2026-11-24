@@ -197,7 +197,10 @@ cat DEPLOYMENT_GUIDE.md   # Busca "Opción 4"
 
 ## 🎬 Demostración Local (Antes de Desplegar)
 
-**Si quieres probar antes en tu máquina:**
+Antes de integrar o desplegar cambios de Cloud, sigue la
+[guía de validación local obligatoria](docs/CLOUD_LOCAL_VALIDATION.md).
+
+**Para iniciar una demostración en tu máquina:**
 
 ```bash
 # Entrar en directorio

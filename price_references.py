@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 import re
 from typing import Any, Iterable, Mapping
 import unicodedata
+from urllib.parse import urlparse
 
 EXACT, PROBABLE, REJECTED = "exact_match", "probable_match", "rejected"
 LEVELS = ("ean", "brand_model_color", "model_color", "normalized_variants")
@@ -25,8 +26,15 @@ _LENS_TOKEN = re.compile(r"(?<![\dA-Za-z])C(\d{2})(?![\dA-Za-z])|\s(\d{2})\s*$")
 _CODE_CALIBER = re.compile(r"^0?[A-Z]{1,4}_[A-Z0-9]+?(\d{2})(\d{2})$")
 _COMMERCIAL_NAMES = {
     ("RAYBAN", "RB2140"): {"WAYFARER"},
+    ("TOMFORD", "FT1044"): {"BRONSON"},
+    ("TOMFORD", "FT1301"): {"JOEY02"},
+    ("TOMFORD", "FT1310"): {"CHLOE02"},
+    ("TOMFORD", "FT1360"): {"LIAM02"},
     ("TOMFORD", "FT0711"): {"FAUSTO"},
 }
+_BRAND_ALIASES = {"TIFFANY": "TIFFANYCO", "TIFFANYCO": "TIFFANYCO"}
+_MIU_A06S_DESCRIPTOR = re.compile(r"(?<![A-Z0-9])GAFASDESOLMIUMIUA06S(?![A-Z0-9])", re.IGNORECASE)
+_VISIO_TOMFORD_BV = re.compile(r"(?<![A-Z0-9])(FT(?:5634|6058))-B\s*/\s*V(?![A-Z0-9])", re.IGNORECASE)
 
 
 def _ascii(value: Any) -> str:
@@ -39,6 +47,11 @@ def _ascii(value: Any) -> str:
 def key(value: Any) -> str:
     """Case, accent, space, hyphen, slash and punctuation-insensitive identity key. Zeros are preserved."""
     return re.sub(r"[^A-Z0-9]", "", _ascii(value).upper())
+
+
+def _brand_key(value: Any) -> str:
+    normalized = key(value)
+    return _BRAND_ALIASES.get(normalized, normalized)
 
 
 def model_key(value: Any) -> str:
@@ -130,17 +143,20 @@ class Reference:
 
 def strip_brand(text: str, brands: Iterable[str]) -> tuple[str, str]:
     """Remove a leading known brand ('BOTTEGA VENETA BV1274S 005' -> 'Bottega Veneta', 'BV1274S 005')."""
-    cleaned = " ".join(tokens(text))
-    best = ""
+    parts = tokens(text)
+    best: tuple[int, str] | None = None
     for brand in brands:
-        brand_tokens = " ".join(tokens(brand))
-        if brand_tokens and (cleaned == brand_tokens or cleaned.startswith(brand_tokens + " ")) \
-                and len(brand_tokens) > len(best):
-            best = brand_tokens
+        brand_parts = tokens(brand)
+        if not brand_parts:
+            continue
+        for width in range(1, min(len(parts), len(brand_parts) + 1) + 1):
+            if _brand_key(" ".join(parts[:width])) == _brand_key(brand):
+                if best is None or width > best[0]:
+                    best = (width, str(brand))
     if not best:
-        return "", cleaned
-    original = next(b for b in brands if " ".join(tokens(b)) == best)
-    return original, cleaned[len(best):].strip()
+        return "", " ".join(parts)
+    width, original = best
+    return original, " ".join(parts[width:])
 
 
 def parse_reference(text: str, *, brands: Iterable[str] = (), models: Iterable[str] = ()) -> Reference:
@@ -166,9 +182,19 @@ def parse_reference(text: str, *, brands: Iterable[str] = (), models: Iterable[s
     if parts and parts[0] in {"COLECCION", "COLLECTION"}:
         parts = parts[1:]
     for model in model_list:
-        aliases = _COMMERCIAL_NAMES.get((key(brand), model_key(model)), set())
+        aliases = _COMMERCIAL_NAMES.get((_brand_key(brand), model_key(model)), set())
         if aliases and model_key(model) in key(" ".join(parts)):
-            parts = [part for part in parts if part not in aliases]
+            remaining = []
+            index = 0
+            while index < len(parts):
+                match_end = next((end for end in range(len(parts), index, -1)
+                                  if key("".join(parts[index:end])) in aliases), None)
+                if match_end is None:
+                    remaining.append(parts[index])
+                    index += 1
+                else:
+                    index = match_end
+            parts = remaining
     matches: list[Reference] = []
     for model in sorted(set(model_list), key=lambda m: -len(key(m))):
         expected_model = model_key(model)
@@ -229,6 +255,9 @@ def parse_reference(text: str, *, brands: Iterable[str] = (), models: Iterable[s
                     if color_parts and _LENS_ONLY.fullmatch(part) and 38 <= int(part) <= 66:
                         reference_caliber = reference_caliber or part
                         break
+                    if color_parts and (expected_model, color_parts[0], part) in {
+                            ("MU54YS", "ZVN20F", "80"), ("MUA51S", "5AK20P", "75")}:
+                        break
                     color_parts.append(part)
                 matches.append(Reference(brand, matched_model, " ".join(color_parts), reference_caliber))
     if matches:
@@ -287,36 +316,118 @@ def _valid_gtin(value: Any) -> str:
         return ""
 
 
-def classify(product: Mapping[str, Any], candidate: Mapping[str, Any]) -> MatchResult:
+def _normalize_miu_a06s_descriptor(product: Mapping[str, Any], candidate: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Normalize Optical H's merged descriptor only with the exact catalogue color and brand."""
+    identity = (_valid_gtin(product.get("ean")), _brand_key(product.get("brand")),
+                model_key(product.get("model")), key(product.get("color")))
+    if identity != ("8056262407691", "MIUMIU", "MUA06S", "14L09Z"):
+        return candidate
+    if _brand_key(candidate.get("brand")) != "MIUMIU":
+        return candidate
+
+    identifiers = candidate.get("identifiers") or []
+    texts = [candidate.get("title"), candidate.get("model"), *identifiers]
+    has_descriptor = any(_MIU_A06S_DESCRIPTOR.search(str(text or "")) for text in texts)
+    has_color = (key(candidate.get("color")) == "14L09Z"
+                 or any(key(token) == "14L09Z" for text in texts for token in tokens(text)))
+    if not has_descriptor or not has_color:
+        return candidate
+
+    canonical_model = str(product.get("model") or "")
+    normalized = dict(candidate)
+    title = normalized.get("title")
+    if isinstance(title, str):
+        normalized["title"] = _MIU_A06S_DESCRIPTOR.sub(f"Miu Miu {canonical_model}", title)
+    model = normalized.get("model")
+    if isinstance(model, str):
+        normalized["model"] = _MIU_A06S_DESCRIPTOR.sub(canonical_model, model)
+    normalized["identifiers"] = [
+        _MIU_A06S_DESCRIPTOR.sub(f"Miu Miu {canonical_model}", str(value))
+        if isinstance(value, str) else value for value in identifiers]
+    return normalized
+
+
+def _normalize_visio_tomford_bv(product: Mapping[str, Any], candidate: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Resolve Visio's B/V label only when its published UPC identifies this exact catalogue EAN."""
+    host = (urlparse(str(candidate.get("url") or "")).hostname or "").lower().removeprefix("www.")
+    product_ean = _valid_gtin(product.get("ean"))
+    if (host != "visiofactory.es" or _brand_key(product.get("brand")) != "TOMFORD"
+            or model_key(product.get("model")) not in {"FT5634B", "FT6058B"}
+            or not product_ean or _valid_gtin(candidate.get("ean_published")) != product_ean):
+        return candidate
+    if candidate.get("brand") and _brand_key(candidate.get("brand")) != "TOMFORD":
+        return candidate
+
+    canonical_model = str(product.get("model") or "")
+    normalized = dict(candidate)
+    for field_name in ("title", "model"):
+        value = normalized.get(field_name)
+        if isinstance(value, str):
+            normalized[field_name] = _VISIO_TOMFORD_BV.sub(canonical_model, value)
+    identifiers = normalized.get("identifiers") or []
+    normalized["identifiers"] = [
+        _VISIO_TOMFORD_BV.sub(canonical_model, str(value)) if isinstance(value, str) else value
+        for value in identifiers
+    ]
+    return normalized
+
+
+def classify(product: Mapping[str, Any], candidate: Mapping[str, Any], *,
+             allow_reference_match: bool = False) -> MatchResult:
     """Decide whether ``candidate`` (a competitor listing) is the catalogue ``product``.
 
     candidate keys (all optional): ean_published, brand, model, color, caliber, title.
+    Reference matching must be explicitly enabled by an approved caller; it never equates GTINs.
     """
-    own_model, own_color, own_brand = model_key(product.get("model")), key(product.get("color")), key(product.get("brand"))
+    candidate = _normalize_miu_a06s_descriptor(product, candidate)
+    candidate = _normalize_visio_tomford_bv(product, candidate)
+    own_model, own_color, own_brand = (
+        model_key(product.get("model")), key(product.get("color")), _brand_key(product.get("brand")))
     title = str(candidate.get("title") or "")
     published = str(candidate.get("ean_published") or "").strip()
     ean = _valid_gtin(published) if published else ""
+    verified_ean = bool(ean and ean == _valid_gtin(product.get("ean")))
     references = [parse_reference(text, brands=[str(product.get("brand") or "")],
                                   models=[str(product.get("model") or "")])
                   for text in [title, *(candidate.get("identifiers") or [])]]
+    title_ref = references[0]
+    identifiers = candidate.get("identifiers") or []
+
+    def composite_miu(index: int) -> bool:
+        if not index or own_brand != "MIUMIU" or not verified_ean:
+            return False
+        code = str(identifiers[index - 1]).upper()
+        prefix = "0" + own_model + own_color
+        return (code.startswith("0MU_") and title_ref.model_key == own_model
+                and title_ref.color_key == own_color and key(code).startswith(prefix)
+                and re.fullmatch(r"\d{2,4}", key(code)[len(prefix):]) is not None)
+
     relevant = [ref for index, ref in enumerate(references)
                 if index == 0 or ref.model_key == own_model or
                 (ref.color_key and any(char.isalpha() for char in ref.model) and
                  any(char.isdigit() for char in ref.model) and
-                 not caliber_from_code((candidate.get("identifiers") or [])[index - 1]))]
+                 not caliber_from_code(identifiers[index - 1]) and not composite_miu(index))]
     models = {ref.model_key for ref in relevant
               if ref.model_key == own_model or any(char.isdigit() for char in ref.model)}
     colors = {ref.color_key for ref in relevant if any(char.isdigit() for char in ref.color)}
     if candidate.get("model"):
         declared_model = model_key(candidate["model"])
         commercial_names = _COMMERCIAL_NAMES.get((own_brand, own_model), set())
-        if declared_model not in commercial_names or own_model not in models:
+        group = parse_reference(str(candidate.get("group_reference") or ""),
+                                models=[str(product.get("model") or "")])
+        group_descriptor = (verified_ean and own_brand == "GUCCI"
+                            and _brand_key(candidate.get("brand")) == own_brand
+                            and declared_model == "LOGOTIPOGG"
+                            and own_model in models
+                            and group.model_key == own_model and group.color_key == own_color
+                            and title_ref.model_key == own_model and title_ref.color_key == own_color)
+        if not group_descriptor and (declared_model not in commercial_names or own_model not in models):
             models.add(declared_model)
     if any(char.isdigit() for char in str(candidate.get("color") or "")):
         colors.add(key(candidate["color"]))
-    brands = {key(ref.brand) for ref in references if ref.brand}
+    brands = {_brand_key(ref.brand) for ref in references if ref.brand}
     if candidate.get("brand"):
-        brands.add(key(candidate["brand"]))
+        brands.add(_brand_key(candidate["brand"]))
     brand_tokens = " ".join(tokens(product.get("brand")))
     if brand_tokens and f" {brand_tokens} " in f" {' '.join(tokens(title))} ":
         brands.add(own_brand)
@@ -324,7 +435,6 @@ def classify(product: Mapping[str, Any], candidate: Mapping[str, Any]) -> MatchR
                 [candidate.get("caliber"), *(ref.caliber for ref in references)] if normalize_caliber(value)}
     observed_caliber = normalize_caliber(candidate.get("caliber")) or (sorted(calibers)[0] if calibers else "")
     caliber_state = compare_calibers(product.get("caliber"), observed_caliber)
-    verified_ean = bool(ean and ean == _valid_gtin(product.get("ean")))
     normalized = {"catalogue": {"ean": product.get("ean"), "brand": own_brand, "model": own_model,
                                 "color": own_color, "caliber": normalize_caliber(product.get("caliber"))},
                   "listing": {"ean": ean, "brands": sorted(brands), "models": sorted(models),
@@ -369,8 +479,11 @@ def classify(product: Mapping[str, Any], candidate: Mapping[str, Any]) -> MatchR
             reasons.append(f"{name} no confirmado: catálogo {expected or 'desconocido'}, "
                            f"ficha {', '.join(sorted(found)) or 'desconocido'}")
     if ean and ean != _valid_gtin(product.get("ean")):
-        reasons.insert(0, f"EAN publicado distinto: {ean}; revisión manual obligatoria")
-        return result(REJECTED if contradictions else PROBABLE)
+        if not allow_reference_match:
+            reasons.insert(0, f"EAN publicado distinto: {ean}; revisión manual obligatoria")
+            return result(REJECTED if contradictions else PROBABLE)
+        observations.append(
+            f"EAN publicado distinto ({ean}); precio identificado por marca, modelo y color, sin equivalencia de EAN")
     if contradictions:
         return result(PROBABLE if verified_ean else REJECTED)
     if ambiguous:

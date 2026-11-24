@@ -10,6 +10,33 @@ las correcciones acotadas con facts estructurados de FT5634B y MU 11WS.
 No deduce calibre del identificador `FT5634-B@53001#` ni acepta ni
 reclasifica automaticamente revisiones historicas.
 
+## Capturas parciales del 17 de noviembre de 2026
+
+Las tres capturas sanitizadas JSON-LD usadas en las pruebas son parciales, no
+respuestas completas ni evidencia de mercado o vigencia actual. Sus hashes
+se comprueban antes del replay.
+
+La regla para `Logotipo Gg` se limita a Gucci GG1660S cuando el titulo, el
+`productGroupID`, la marca y el EAN vinculado apoyan la referencia y el
+color. El codigo compuesto de Domanci se interpreta solo con titulo y GTIN
+coherentes; sus sufijos siguen sin significado inferido. Los tokens finales
+`80` y `75` se separan de los colores en las dos referencias observadas,
+sin atribuirles calibre. Las contradicciones estructuradas siguen vigentes.
+
+En Visual-Click una oferta unica se puede vincular al Product por SKU
+identico y URL base coherente, sin interpretar el SKU como GTIN. Esta
+vinculacion no acredita el stock del EAN solicitado: se conserva la senal
+original, pero la disponibilidad utilizada queda desconocida.
+
+En Edel, una URL base aceptada solo admite una resolución interna
+`selectedSize` si un único radio marcado, el GTIN exacto y la URL de la
+oferta concuerdan. No se consulta una URL adicional y se conserva la URL
+aceptada junto con la trazabilidad de la selección; diferencias o GTIN
+contradictorios siguen en revisión. Las trazas de lecturas manuales se
+auditan mediante huellas de URL y IDs de recibo, incluso ante rechazo.
+Una lectura contradictoria queda en revision y no se importa como oferta;
+no modifica la ficha verificada por una persona ni su nota de aceptacion.
+
 ## Revision conjunta del 1 de noviembre de 2026
 
 Base cotejada: `9d240daf38ae5a9629d370d32641986cf9ef4cad`. Al iniciar

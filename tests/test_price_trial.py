@@ -67,6 +67,30 @@ def only_pair(store, cid, ean, cycle=0):
                     (cycle, cid, ean))
 
 
+def test_current_worker_cycle_does_not_advance_the_retired_72h_pilot(trial, monkeypatch):
+    service, store, _, _, _, _, _, _, _ = trial
+    calls = []
+    monkeypatch.setattr(PriceTrial, "tick", lambda *_args, **_kwargs: pytest.fail("Legacy pilot tick executed"))
+    monkeypatch.setattr(PriceTrial, "continuity_tick", lambda _self: calls.append("continuity"))
+    monkeypatch.setattr(PriceTrial, "diagnostic_tick", lambda _self: calls.append("diagnostic"))
+    monkeypatch.setattr(PriceMonitor, "review_refresh_tick", lambda _self: calls.append("reviews"))
+
+    price_trial._watch_worker_cycle(store)
+
+    assert calls == ["reviews", "continuity", "diagnostic"]
+
+
+def test_retired_pilot_reservation_does_not_block_current_query_or_odoo_read(trial):
+    _, store, _, _, _, clock, cid, _, _ = trial
+    ean = manifest()["eans"][0]
+    with store._connect() as con, con:
+        con.execute("UPDATE price_trial SET status='active',expires_at=? WHERE id=1",
+                    ((clock() - timedelta(hours=1)).isoformat(),))
+
+    assert price_trial.select_eans(store, cid, [ean], clock()) == [ean]
+    price_trial.require_sync(store, [ean], clock())
+
+
 def test_real_script_entrypoint_uses_canonical_sync_context(trial, monkeypatch):
     service, _, _, _, _, _, _, _, reader = trial
     called = []
@@ -145,25 +169,22 @@ def test_recovery_never_replays_uncertain_work_or_restarts_window(trial, unsafe)
         assert "\n".join(con.iterdump()) == before
 
 
-def test_recovery_ui_requires_explicit_approval_and_does_not_run_queries(trial, monkeypatch):
-    import build_info
+def test_historical_pilot_recovery_controls_are_not_in_current_ui(trial, monkeypatch):
     from streamlit.testing.v1 import AppTest
 
     service, store, _, _, _, _, _, site, reader = trial
     initial_failure(service, store)
     monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
     monkeypatch.setattr(price_trial, "PriceTrial", lambda store: service)
-    monkeypatch.setattr(build_info, "load_build_info", lambda: {"commit": "b" * 40, "build": "actions-test"})
     app = AppTest.from_string(
-        "from price_comparator import PriceComparatorStore\n"
-        "from app_pages.price_watch import _render_trial\n"
-        "_render_trial(PriceComparatorStore())").run(timeout=30)
-    assert not app.exception and app.button(key="trial_resume").disabled
-    app.checkbox(key="trial_resume_approval").set_value(True).run(timeout=30)
-    assert not app.button(key="trial_resume").disabled
-    app.button(key="trial_resume").click().run(timeout=30)
+        "from app_pages.price_comparator import render_price_comparator_page\n"
+        "render_price_comparator_page()").run(timeout=30)
+    app.radio(key="top_level_section").set_value("Diagnóstico técnico").run(timeout=30)
+    app.selectbox(key="price_diagnostic_section").set_value("Históricos y auditoría").run(timeout=30)
+
     assert not app.exception
-    assert service.report()["status"] == "active"
+    assert any("Histórico del piloto de 72 horas" in item.label for item in app.expander)
+    assert not any(button.key.startswith("trial_") for button in app.button)
     assert not reader.calls and not site.calls
 
 
@@ -270,7 +291,9 @@ def test_controls_and_queue_eligibility_still_apply(trial, restriction):
 
 def test_other_triggers_cannot_consume_owned_pairs_but_unrelated_pairs_remain_free(trial):
     service, store, access, locator, monitor, clock, cid, _, reader = trial
-    ean = "0889652494821"
+    active = _activate_continuity(service, clock)
+    ean = manifest()["eans"][0]
+    other_ean = manifest()["eans"][1]
     locator.enqueue([cid], [ean])
     assert locator.run([cid], eans=[ean]).processed == 0
     assert monitor.run([cid], eans=[ean]).processed == 0
@@ -281,14 +304,15 @@ def test_other_triggers_cannot_consume_owned_pairs_but_unrelated_pairs_remain_fr
         access.reserve(cid, "ficha", purpose="manual", ean=ean)
     with pytest.raises(TrialDenied):
         service._sync.run(eans=[ean])
-    with service.execution(0, cid, ean):
+    with service.execution(0, cid, ean, program="continuity", program_id=active["id"]):
         with pytest.raises(TrialDenied):
             require_pair(store, "domanci-com", ean, clock())
         with pytest.raises(TrialDenied):
-            require_pair(store, cid, manifest()["eans"][0], clock())
+            require_pair(store, cid, other_ean, clock())
         limits = access.budget("competitor", cid)
         assert limits["daily_limit"] == 200 and limits["per_minute_limit"] == 10
         assert limits["effective_pause"] >= 3
+        require_pair(store, cid, ean, clock())
     require_pair(store, cid, "8410000000013", clock())
     assert not reader.calls
 
@@ -480,7 +504,7 @@ def test_stop_prevents_new_http_without_changing_saved_controls(trial):
 
 
 @pytest.mark.parametrize("legacy_pair", [True, False])
-def test_existing_legacy_scope_does_not_exclude_additional_trial_pairs_and_keeps_legacy_route(trial, monkeypatch, legacy_pair):
+def test_legacy_pilot_scope_does_not_gate_current_trial_pairs(trial, monkeypatch, legacy_pair):
     from price_pilot import PricePilot, SAMPLE_EANS, pilot_scope
     from tests.test_price_review_fixes import _vytria
     service, store, _, _, _, clock, cid, site, _ = trial
@@ -508,7 +532,7 @@ def test_existing_legacy_scope_does_not_exclude_additional_trial_pairs_and_keeps
     assert service.report()["summary"][f"0:{cid}"]["processed_pairs"] == 1
     assert pilot_scope(store) == scope_before
     with store._connect() as con:
-        assert con.execute("SELECT COUNT(*) FROM pilot_runs WHERE operation='watch_check'").fetchone()[0] == int(legacy_pair)
+        assert con.execute("SELECT COUNT(*) FROM pilot_runs WHERE operation='watch_check'").fetchone()[0] == 0
 
 
 def _activate_continuity(service, clock):
@@ -568,6 +592,27 @@ def test_diagnostic_capture_preserves_reviews_and_offers(trial):
         assert stored["status"] == "captured" and stored["requests"]
         assert "html_base64" not in stored
         assert audit["actor"] == "operator" and audit["note"] == "review"
+
+
+def test_diagnostic_preserves_specific_pilot_refusal(trial, monkeypatch):
+    from price_pilot import PilotError
+
+    service, store, _, cid, ean, url, site = _diagnostic_review(trial)
+
+    def deny(_store):
+        raise PilotError("Piloto desactivado; no se autoriza su comprobación puntual")
+
+    monkeypatch.setattr("price_pilot.pilot_scope", deny)
+    with pytest.raises(PilotError):
+        service.capture_diagnostic(cid, ean, url, actor="operator", note="review",
+                                   build_commit="b" * 40, approved=True)
+    with store._connect() as con:
+        audit = json.loads(con.execute("SELECT current FROM access_audit WHERE action='capture_diagnostic_html'")
+                           .fetchone()[0])
+    assert audit["stage"] == "lock_and_scope"
+    assert audit["reason"] == "Piloto desactivado; no se autoriza su comprobación puntual"
+    assert audit["requests"] == []
+    assert site.calls == []
 
 
 def test_diagnostic_queue_survives_busy_worker_pause_and_session_restart(trial):
@@ -636,7 +681,11 @@ def test_diagnostic_requested_during_normal_check_runs_once_afterward(trial):
             return pd.DataFrame([{"next_check_at": (clock() + timedelta(days=1)).isoformat()}])
 
         def execute(self, eans, competitors, **kwargs):
+            from filelock import Timeout
+
             entered.set()
+            with pytest.raises(Timeout):
+                service.continuity_pair_lock(cid, normal_ean).acquire()
             assert release.wait(10)
             return {"pairs": [{"ean": eans[0], "competitor_id": competitors[0], "processed": True,
                                "category": "checked_now", "requests": 0, "outcomes": []}]}
@@ -737,6 +786,23 @@ def test_diagnostic_rejects_unverifiable_private_storage_before_http(trial, monk
     assert not site.calls
 
 
+def test_diagnostic_oversize_records_fetch_receipt_and_never_automatically_retries(trial, monkeypatch):
+    service, store, _, cid, ean, url, site = _diagnostic_review(trial)
+    monkeypatch.setenv("PRICE_DIAGNOSTIC_BODY_BYTES", "1024")
+    site.pages[url] = "<html>" + "x" * 2048 + "</html>"
+    request = service.request_diagnostic(cid, ean, url, actor="operator", note="size limit",
+                                         build_commit="b" * 40, approved=True)
+    service.diagnostic_tick()
+    service.diagnostic_tick()
+    with store._connect() as con:
+        row = con.execute("SELECT status,reason,result,artifact FROM price_diagnostic_requests WHERE id=?",
+                          (request["id"],)).fetchone()
+    result = json.loads(row["result"])
+    assert row["status"] == "rejected" and "tamaño" in row["reason"]
+    assert result["stage"] == "fetch" and result["requests"]
+    assert row["artifact"] is None and site.calls.count(url) == 1
+
+
 def _privacy_rejected_diagnostic(trial, monkeypatch):
     from price_diagnostic import EvidenceError
 
@@ -755,6 +821,67 @@ def _privacy_rejected_diagnostic(trial, monkeypatch):
         original = dict(con.execute("SELECT * FROM price_diagnostic_requests WHERE id=?", (request["id"],)).fetchone())
     assert original["status"] == "rejected" and json.loads(original["result"])["requests"] == []
     return service, store, clock, cid, ean, url, site, request, kwargs, original
+
+
+def _legacy_captured_diagnostic(trial):
+    service, store, clock, cid, ean, url, site = _diagnostic_review(trial)
+    graph = {"@context": "https://schema.org", "@graph": [
+        {"@type": "ProductGroup", "@id": url + "#group", "name": "Gucci GG1660S",
+         "hasVariant": {"@id": url + "#variant"}},
+        {"@type": "Product", "@id": url + "#variant", "name": "Gucci GG1660S",
+         "gtin13": ean, "offers": {"@id": url + "#offer"}},
+        {"@type": "Offer", "@id": url + "#offer", "price": "120", "priceCurrency": "EUR",
+         "availability": "https://schema.org/InStock"},
+    ]}
+    site.pages[url] = ('<html><head><script type="application/ld+json">' + json.dumps(graph)
+                       + '</script></head><body></body></html>')
+    kwargs = {"actor": "operator", "note": "La captura no acredita la variante seleccionada",
+              "build_commit": "a" * 40, "approved": True}
+    request = service.request_diagnostic(cid, ean, url, **kwargs)
+    service.diagnostic_tick()
+    with store._connect() as con:
+        original = dict(con.execute("SELECT * FROM price_diagnostic_requests WHERE id=?",
+                                    (request["id"],)).fetchone())
+        result = json.loads(original["result"])
+        audit = con.execute("""SELECT id FROM access_audit WHERE action='capture_diagnostic_html'
+            AND json_extract(current,'$.queue_id')=?""", (request["id"],)).fetchone()
+    assert original["status"] == "captured" and original["artifact"] and audit
+    result.pop("capture_version")
+    with store._connect() as con, con:
+        con.execute("""UPDATE price_diagnostic_requests SET capture_version='',result=? WHERE id=?""",
+                    (json.dumps(result, ensure_ascii=False), request["id"]))
+        con.execute("UPDATE access_audit SET current=? WHERE id=?",
+                    (json.dumps(result, ensure_ascii=False), audit["id"]))
+    with store._connect() as con:
+        original = dict(con.execute("SELECT * FROM price_diagnostic_requests WHERE id=?",
+                                    (request["id"],)).fetchone())
+    return service, store, clock, cid, ean, url, site, request, kwargs, original
+
+
+def test_diagnostic_explicit_retry_for_proven_pilot_refusal_without_http(trial, monkeypatch):
+    from price_pilot import PilotError
+
+    service, store, _, cid, ean, url, site = _diagnostic_review(trial)
+    kwargs = {"actor": "operator", "note": "retry pilot refusal", "build_commit": "b" * 40, "approved": True}
+    request = service.request_diagnostic(cid, ean, url, **kwargs)
+    with monkeypatch.context() as patch:
+        def deny(_store):
+            raise PilotError("Reserva del piloto ocupada")
+
+        patch.setattr("price_pilot.pilot_scope", deny)
+        service.diagnostic_tick()
+    with store._connect() as con:
+        original = dict(con.execute("SELECT * FROM price_diagnostic_requests WHERE id=?", (request["id"],)).fetchone())
+    assert json.loads(original["result"])["requests"] == []
+    assert original["reason"] == "Reserva del piloto ocupada"
+    assert not site.calls
+    retry = service.retry_diagnostic(request["id"], **kwargs)
+    assert service.retry_diagnostic(request["id"], **kwargs)["id"] == retry["id"]
+    service.diagnostic_tick()
+    service.diagnostic_tick()
+    assert site.calls.count(url) == 1
+    with store._connect() as con:
+        assert dict(con.execute("SELECT * FROM price_diagnostic_requests WHERE id=?", (request["id"],)).fetchone()) == original
 
 
 def test_diagnostic_privacy_retry_preserves_original_and_runs_once(trial, monkeypatch):
@@ -795,6 +922,92 @@ def test_diagnostic_privacy_retry_preserves_original_and_runs_once(trial, monkey
         service.diagnostic_artifact(retry["id"])
     fresh = service.request_diagnostic(cid, ean, url, **kwargs)
     assert fresh["status"] == "pending" and fresh["id"] != retry["id"]
+
+
+def test_diagnostic_retry_for_captured_artifact_requires_new_version_and_preserves_history(trial):
+    from price_diagnostic import CAPTURE_VERSION
+    from price_trial import DIAGNOSTIC_RETRY_CAPTURE_UPDATE
+
+    service, store, _, cid, ean, url, site, request, kwargs, original = _legacy_captured_diagnostic(trial)
+    assert service.request_diagnostic(cid, ean, url, **kwargs)["id"] == request["id"]
+    with store._connect() as con, con:
+        con.execute("DROP INDEX idx_price_diagnostic_active")
+        con.execute("""CREATE UNIQUE INDEX idx_price_diagnostic_active
+            ON price_diagnostic_requests(continuity_id,competitor_id,ean,url)
+            WHERE status NOT IN ('expired','rejected')""")
+    PriceComparatorStore(store.database_path)
+    with store._connect() as con:
+        index_sql = con.execute("SELECT sql FROM sqlite_master WHERE name='idx_price_diagnostic_active'").fetchone()[0]
+    assert "status IN ('pending','running','deferred')" in index_sql
+
+    retry_kwargs = {"actor": "operator", "note": "Captura anterior sin variante explicita",
+                    "build_commit": "b" * 40, "approved": True,
+                    "retry_reason": DIAGNOSTIC_RETRY_CAPTURE_UPDATE}
+    before = _commercial_snapshot(store)
+    retry = service.retry_diagnostic(request["id"], **retry_kwargs)
+    assert retry["retry_of"] == request["id"] and retry["status"] == "pending"
+    assert retry["retry_reason"] == DIAGNOSTIC_RETRY_CAPTURE_UPDATE
+    assert retry["capture_version"] == CAPTURE_VERSION
+    assert service.retry_diagnostic(request["id"], **retry_kwargs)["id"] == retry["id"]
+    service.diagnostic_tick()
+    with store._connect() as con:
+        parent = dict(con.execute("SELECT * FROM price_diagnostic_requests WHERE id=?",
+                                  (request["id"],)).fetchone())
+        child = dict(con.execute("SELECT * FROM price_diagnostic_requests WHERE id=?",
+                                 (retry["id"],)).fetchone())
+        audit = con.execute("""SELECT current FROM access_audit WHERE action='retry_diagnostic'
+            AND previous=? ORDER BY id DESC LIMIT 1""", (str(request["id"]),)).fetchone()
+        assert con.execute("SELECT COUNT(*) FROM price_diagnostic_requests WHERE retry_of=?",
+                           (request["id"],)).fetchone()[0] == 1
+    assert parent == original
+    assert child["status"] == "captured" and child["retry_reason"] == DIAGNOSTIC_RETRY_CAPTURE_UPDATE
+    assert child["capture_version"] == CAPTURE_VERSION
+    assert json.loads(child["result"])["capture_version"] == CAPTURE_VERSION
+    assert json.loads(audit["current"])["capture_version"] == CAPTURE_VERSION
+    assert _commercial_snapshot(store) == before
+    assert site.calls.count(url) == 2
+
+
+@pytest.mark.parametrize("blocked", ["same_build", "access", "budget", "active", "later_receipt", "expired"])
+def test_diagnostic_captured_retry_revalidates_version_access_and_concurrency(trial, blocked):
+    from price_trial import DIAGNOSTIC_RETRY_CAPTURE_UPDATE
+
+    service, store, clock, cid, ean, url, _, request, _, original = _legacy_captured_diagnostic(trial)
+    build_commit = "a" * 40 if blocked == "same_build" else "b" * 40
+    if blocked == "access":
+        with store._connect() as con, con:
+            con.execute("UPDATE competitor_web_config SET access_status='blocked' WHERE competitor_id=?", (cid,))
+    elif blocked == "budget":
+        with store._connect() as con, con:
+            con.execute("UPDATE access_budgets SET daily_limit=1 WHERE scope='competitor' AND scope_id=?", (cid,))
+            con.execute("""INSERT INTO access_requests(scope,scope_id,competitor_id,method,purpose,ean,url,reserved_at)
+                VALUES('competitor',?,?,'ficha','other','another-ean','',?)""",
+                        (cid, cid, clock().isoformat()))
+    elif blocked == "active":
+        with store._connect() as con, con:
+            con.execute("""INSERT INTO price_diagnostic_requests
+                (continuity_id,competitor_id,ean,url,actor,note,build_commit,status,created_at)
+                VALUES(?,?,?,?,?,?,'c','pending',?)""",
+                        (original["continuity_id"], cid, ean, url + "-other", "operator", "active",
+                         clock().isoformat()))
+    elif blocked == "later_receipt":
+        clock.advance(seconds=1)
+        with store._connect() as con, con:
+            con.execute("""INSERT INTO access_requests(scope,scope_id,competitor_id,method,purpose,ean,url,reserved_at)
+                VALUES('competitor',?,?,'ficha','other',?,?,?)""",
+                        (cid, cid, ean, url, clock().isoformat()))
+    elif blocked == "expired":
+        clock.advance(days=8)
+    with pytest.raises(ValueError):
+        service.retry_diagnostic(
+            request["id"], actor="operator", note="Revalidar evidencia", build_commit=build_commit,
+            approved=True, retry_reason=DIAGNOSTIC_RETRY_CAPTURE_UPDATE,
+        )
+    with store._connect() as con:
+        assert dict(con.execute("SELECT * FROM price_diagnostic_requests WHERE id=?",
+                                (request["id"],)).fetchone()) == original
+        assert con.execute("SELECT COUNT(*) FROM price_diagnostic_requests WHERE retry_of=?",
+                           (request["id"],)).fetchone()[0] == 0
 
 
 def test_diagnostic_retry_is_idempotent_under_concurrent_submissions(trial, monkeypatch):
@@ -1417,6 +1630,17 @@ def test_continuity_ui_keeps_prepared_plan_inactive_until_explicit_approval(tria
     app.checkbox(key="continuity_activation_approval").set_value(True).run(timeout=30)
     assert not app.button(key="continuity_activate").disabled
     assert service.continuity_report()["status"] == "prepared"
+
+
+def test_stale_72h_active_status_does_not_block_current_continuity_pair(trial):
+    service, store, _, _, _, clock, cid, _, _ = trial
+    active = _activate_continuity(service, clock)
+    ean = manifest()["eans"][0]
+    with store._connect() as con, con:
+        con.execute("UPDATE price_trial SET status='active' WHERE id=1")
+
+    with service.execution(0, cid, ean, program="continuity", program_id=active["id"]):
+        assert price_trial.pair_reason(store, cid, ean, clock()) == ""
 
 
 def test_restricted_pair_reevaluation_is_audited_and_never_queries_or_rewrites_history(trial):

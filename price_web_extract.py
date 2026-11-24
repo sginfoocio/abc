@@ -10,11 +10,11 @@ from dataclasses import dataclass, field, replace
 from html.parser import HTMLParser
 import json
 import re
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 from price_comparator import normalize_gtin
-from price_references import (caliber_from_code, compare_calibers, extract_caliber, extract_lens,
+from price_references import (EXACT, caliber_from_code, classify, compare_calibers, extract_caliber, extract_lens,
                               normalize_caliber, parse_reference)
 
 _LD_JSON = re.compile(r"<script[^>]+type=[\"']application/ld\+json[\"'][^>]*>(.*?)</script>", re.I | re.S)
@@ -26,6 +26,7 @@ _AVAILABLE = {"instock", "limitedavailability"}
 _UNAVAILABLE = {"outofstock", "soldout", "discontinued"}
 _VOID = {"meta", "link", "img", "br", "hr", "input", "source", "area", "base", "col", "embed", "wbr"}
 _EDEL_SIZE_CLASS = re.compile(r"(?:^|\s)eoDetailListTileSize(\d+)(?:\s|$)")
+_EDEL_CATEGORY_PATH = re.compile(r"^/gafas-de-sol-[^/]+\.html$", re.I)
 
 
 @dataclass
@@ -36,9 +37,12 @@ class ProductPage:
     title: str = ""
     brand: str = ""
     model: str = ""
+    group_reference: str = ""
     color: str = ""
     caliber: str = ""
     ean_published: str = ""
+    ean_published_raw: list[str] = field(default_factory=list)
+    offer_binding_source: str = ""
     identifiers: list[str] = field(default_factory=list)
     price: float | None = None
     previous_price: float | None = None
@@ -71,8 +75,12 @@ class ProductPage:
 
     def candidate(self) -> dict[str, Any]:
         """The listing as seen by ``price_references.classify``."""
-        return {"brand": self.brand, "model": self.model, "color": self.color, "caliber": self.caliber,
+        return {"url": self.url, "brand": self.brand, "model": self.model,
+                "color": self.color, "caliber": self.caliber,
+                "group_reference": self.group_reference,
                 "ean_published": self.ean_published, "title": self.title,
+                "ean_published_raw": self.ean_published_raw,
+                "offer_binding_source": self.offer_binding_source,
                 "identifiers": self.identifiers, "ambiguous": self.ambiguous,
                 "offer_binding_unresolved": self.offer_binding_unresolved}
 
@@ -108,6 +116,38 @@ def availability_of(value: Any) -> str:
     if token in _UNAVAILABLE:
         return "unavailable"
     return "unknown"
+
+
+def scope_availability_to_ean(page: ProductPage, requested_ean: Any, *,
+                               product: Mapping[str, Any] | None = None) -> ProductPage:
+    """Keep reference-price matching separate from evidence for the requested variant's stock."""
+    if not page.ean_published:
+        match = classify(product, page.candidate()) if product else None
+        product_caliber = normalize_caliber(product.get("caliber")) if product else ""
+        listing_caliber = normalize_caliber(page.caliber)
+        direct_product_offer = (page.offer_binding_source == "product_offer"
+                                and not page.variant_scoped and not page.structured_variants)
+        selected_variant_offer = (page.offer_binding_source == "variant_url" and page.variant_scoped
+                                  and bool(page.variant_id) and bool(page.url_trace.get("selected_variant_url")))
+        if (match is None or match.status != EXACT or match.basis != "reference"
+                or not product_caliber or listing_caliber != product_caliber
+                or page.ambiguous or page.offer_binding_unresolved or page.stock_conflict
+                or not (direct_product_offer or selected_variant_offer)):
+            page.availability = "unknown"
+            note = "Disponibilidad no atribuida: falta vínculo verificable entre la variante y la ficha"
+            if note not in page.notes:
+                page.notes.append(note)
+        return page
+    try:
+        same_ean = normalize_gtin(page.ean_published) == normalize_gtin(requested_ean)
+    except (TypeError, ValueError):
+        same_ean = False
+    if not same_ean:
+        page.availability = "unknown"
+        note = "Disponibilidad no atribuida al EAN solicitado: el EAN publicado es distinto o no válido"
+        if note not in page.notes:
+            page.notes.append(note)
+    return page
 
 
 def _truthy(value: Any) -> bool | None:
@@ -147,6 +187,16 @@ def _gtins(node: dict) -> list[str]:
             except ValueError:
                 continue
     return list(dict.fromkeys(found))
+
+
+def _raw_gtins(node: dict) -> list[str]:
+    found = []
+    for key in ("gtin13", "gtin12", "gtin14", "gtin8", "gtin", "ean"):
+        for value in _as_list(node.get(key)):
+            raw = str(value).strip() if value is not None else ""
+            if raw and raw not in found:
+                found.append(raw)
+    return found
 
 
 def _gtins_consistent(node: dict, expected: str) -> bool:
@@ -225,7 +275,7 @@ def _offer_facts(node: dict, url: str) -> dict[str, Any]:
             for o, _ in variant_offers for key, _ in parse_qsl(urlparse(o["url"]).query))):
         selected_offers = [(o, restrictions) for o, restrictions in variant_offers
                            if _url_key(urljoin(url, o["url"])) == _url_key(url)]
-        if not selected_offers and len(offers) == len(variant_offers) == 1 and len(_gtins(node)) == 1:
+        if not selected_offers and len(offers) == len(variant_offers) == 1:
             offer = variant_offers[0][0]
             offer_url = urljoin(url, offer["url"])
             parts = urlparse(offer_url)
@@ -233,17 +283,24 @@ def _offer_facts(node: dict, url: str) -> dict[str, Any]:
             offer_gtins = _gtins(offer)
             has_offer_gtin = any(offer.get(field) is not None
                                  for field in ("gtin13", "gtin12", "gtin14", "gtin8", "gtin", "ean"))
+            node_gtins = _gtins(node)
+            node_has_gtin = any(node.get(field) is not None
+                                for field in ("gtin13", "gtin12", "gtin14", "gtin8", "gtin", "ean"))
+            sku_binding = (isinstance(node.get("sku"), str) and bool(node["sku"])
+                           and offer.get("sku") == node["sku"] and not has_offer_gtin and not node_has_gtin)
+            gtin_binding = (len(node_gtins) == 1 and _gtins_consistent(node, node_gtins[0])
+                            and (not has_offer_gtin or (offer_gtins == node_gtins
+                                                       and _gtins_consistent(offer, node_gtins[0]))))
             if (isinstance(node.get("url"), str) and _url_key(urljoin(url, node["url"])) == _url_key(url)
                     and not urlparse(url).query
                     and _url_key(parts._replace(query="").geturl()) == _url_key(url)
                     and len(parameters) == 1 and parameters[0][0] == "variant" and parameters[0][1]
-                    and _gtins_consistent(node, _gtins(node)[0])
-                    and (not has_offer_gtin or (offer_gtins == _gtins(node)
-                                                and _gtins_consistent(offer, _gtins(node)[0])))
+                    and (gtin_binding or sku_binding)
                     and (not offer.get("sku") or not node.get("sku") or offer["sku"] == node["sku"])):
                 selected_offers = variant_offers
                 facts["bound_variant_url"] = offer_url
-                facts["notes"].append("Oferta única vinculada al Product con GTIN y URL base publicados")
+                facts["sku_only_binding"] = bool(sku_binding)
+                facts["notes"].append("Oferta única vinculada al Product por GTIN o SKU idéntico y URL base")
         if not selected_offers:
             facts["ambiguous"] = True
             facts["variant_conflict"] = True
@@ -359,24 +416,81 @@ def _color_code(value: str) -> str:
     return value if re.search(r"\d", value) else ""
 
 
+def _mia_main_entity(records: list[dict], nodes: list[dict], url: str) -> tuple[list[dict], str]:
+    if (urlparse(url).hostname or "").lower().removeprefix("www.") != "miaburton.com":
+        return [], ""
+    pages = [node for node in nodes if _is_type(node, "WebPage")
+             and isinstance(node.get("url"), str) and _url_key(urljoin(url, node["url"])) == _url_key(url)
+             and node.get("mainEntity") is not None]
+    if not pages:
+        return [], ""
+    refs = []
+    for page in pages:
+        for entity in _as_list(page["mainEntity"]):
+            ref = entity.get("@id") if isinstance(entity, dict) else None
+            if isinstance(entity, dict) and entity.get("@type") and not _is_type(entity, "Product"):
+                return [], "La entidad principal no es un Product"
+            resolved = urljoin(url, ref) if isinstance(ref, str) else ""
+            parsed = urlparse(resolved)
+            if (_url_key(resolved) != _url_key(url)
+                    or not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", parsed.fragment)):
+                return [], "La selección principal no identifica una variante verificable"
+            refs.append(parsed.fragment)
+    if len(set(refs)) != 1:
+        return [], "La selección principal contiene variantes contradictorias"
+    ref = refs[0]
+    matches = [record for record in records if isinstance(record["product"].get("@id"), str)
+               and _url_key(urljoin(url, record["product"]["@id"])) == _url_key(url)
+               and urlparse(urljoin(url, record["product"]["@id"])).fragment == ref]
+    if len(matches) != 1 or not matches[0].get("from_group"):
+        return [], "La selección principal no corresponde a una única variante estructurada"
+    node = matches[0]["product"]
+    offers = _as_list(node.get("offers"))
+    variant_url = matches[0].get("variant_url")
+    variant_color = matches[0].get("variant_color")
+    group_color = _color_code(_name(matches[0].get("group_color")))
+    if (not isinstance(variant_color, str) or not _color_code(variant_color)
+            or (group_color and re.sub(r"[^A-Z0-9]", "", group_color.upper())
+                != re.sub(r"[^A-Z0-9]", "", variant_color.upper()))
+            or len(offers) != 1 or not isinstance(offers[0], dict)
+            or not isinstance(offers[0].get("url"), str)
+            or _url_key(urljoin(url, offers[0]["url"])) != _url_key(url)
+            or (variant_url and (not isinstance(variant_url, str)
+                                 or _url_key(urljoin(url, variant_url)) != _url_key(url)))):
+        return [], "La selección principal no vincula color y oferta de la variante"
+    offer = offers[0]
+    if offer.get("itemOffered") is not None or (
+            offer.get("sku") and node.get("sku") and offer["sku"] != node["sku"]):
+        return [], "La oferta contradice o no acredita el producto seleccionado"
+    if _raw_gtins(offer):
+        gtins = _gtins(node)
+        if len(gtins) != 1 or not _gtins_consistent(node, gtins[0]) or not _gtins_consistent(offer, gtins[0]):
+            return [], "El EAN de la oferta no coincide con la variante seleccionada"
+    return matches, ""
+
+
 def _from_json_ld(html: str, url: str) -> ProductPage | None:
     records: list[dict[str, Any]] = []
+    nodes: list[dict] = []
     for block in _LD_JSON.findall(html):
         try:
             data = json.loads(block.strip(), strict=False)  # shops often leave raw line breaks inside strings
         except json.JSONDecodeError:
             continue
         for node in _nodes(data):
+            nodes.append(node)
             if _is_type(node, "Product"):
                 records.append({"product": node, "shared_offer": None})
             elif _is_type(node, "ProductGroup"):
                 common_offer = _common_group_offer(node)
-                inherited = {key: node[key] for key in ("name", "brand", "model", "color", "mpn", "sku", "url")
+                inherited = {key: node[key] for key in ("name", "brand", "model", "color", "mpn", "sku", "url",
+                                                         "productGroupID")
                              if node.get(key) is not None}
                 for variant in _as_list(node.get("hasVariant")):
                     if isinstance(variant, dict):
                         records.append({"product": {**inherited, **variant}, "shared_offer": common_offer,
-                                        "from_group": True})
+                                        "from_group": True, "variant_url": variant.get("url"),
+                                        "variant_color": variant.get("color"), "group_color": node.get("color")})
     if not records:
         return None
     products = [record["product"] for record in records]
@@ -393,7 +507,13 @@ def _from_json_ld(html: str, url: str) -> ProductPage | None:
     page.variant_scoped = len(products) > 1 or bool(variants) or any(
         key in {"variant", "selectedSize"}
         for value in page.variant_urls for key, _ in parse_qsl(urlparse(value).query))
-    matching = [record for record in records if _matches_product_url(record["product"], url)]
+    selected, selection_error = _mia_main_entity(records, nodes, url)
+    if selection_error:
+        page.ambiguous = True
+        page.variant_scoped = True
+        page.notes.append(selection_error)
+        return page
+    matching = selected or [record for record in records if _matches_product_url(record["product"], url)]
     matching = list({json.dumps(record, sort_keys=True): record for record in matching}.values())
     if len(matching) == 1:
         record = matching[0]
@@ -402,6 +522,7 @@ def _from_json_ld(html: str, url: str) -> ProductPage | None:
             page.structured_variants = matching
     elif not matching and len(products) == 1 and not page.variant_scoped:
         node = products[0]
+        record = {"product": node, "shared_offer": None}
     else:
         page.ambiguous = True
         page.variant_scoped = True
@@ -414,9 +535,11 @@ def _from_json_ld(html: str, url: str) -> ProductPage | None:
     page.title = _name(node.get("name"))
     page.brand = _name(node.get("brand"))
     page.model = _name(node.get("model"))
+    page.group_reference = _name(node.get("productGroupID"))
     page.color = _color_code(_name(node.get("color")))
     gtins = _gtins(node)
     page.ean_published = gtins[0] if gtins else ""
+    page.ean_published_raw = _raw_gtins(node)
     if len(gtins) > 1:
         page.ambiguous = True
         page.notes.append("EAN publicados contradictorios: " + ", ".join(gtins))
@@ -438,14 +561,28 @@ def _from_json_ld(html: str, url: str) -> ProductPage | None:
             page.variant_id = variant_parameters[0][1]
         page.variant_scoped = True
         page.url_trace["selected_variant_url"] = facts["bound_variant_url"]
+        page.url_trace["offer_variant_url"] = facts["bound_variant_url"]
     page.offer_binding_unresolved = bool(len(matching) == 1 and facts["variant_conflict"] and not page.ambiguous)
     page.ambiguous |= facts["ambiguous"]
     if facts["variant_conflict"]:
         page.ean_published = ""
     page.notes += facts["notes"]
     page.price, page.currency = facts.get("price"), facts.get("currency", "")
+    page.offer_binding_source = (
+        "variant_url" if facts.get("bound_variant_url") else
+        "product_group_offer" if record.get("shared_offer") else
+        "product_offer" if _as_list(node.get("offers")) else ""
+    )
+    if selected:
+        page.variant_id = urlparse(urljoin(url, selected[0]["product"]["@id"])).fragment
+        page.variant_scoped = True
+        page.url_trace["selected_variant_source"] = "webpage_main_entity"
+        page.notes.append("Variante ProductGroup seleccionada explícitamente por WebPage.mainEntity")
     page.previous_price = facts.get("previous_price")
     page.availability = facts.get("availability", "unknown")
+    if facts.get("sku_only_binding"):
+        page.availability = "unknown"
+        page.notes.append("SKU vincula la oferta al Product, pero no acredita stock del EAN solicitado")
     page.includes_tax = facts.get("includes_tax")
     page.tax_conflict = facts.get("tax_conflict", False)
     page.market = facts.get("market", "")
@@ -521,21 +658,13 @@ def select_product_variant(page: ProductPage | None, product: dict[str, Any]) ->
     published_caliber = normalize_caliber(selected.caliber)
     if selected_from_group and target_caliber and published_caliber \
             and compare_calibers(target_caliber, published_caliber) == "different":
-        common_price = bool(record["shared_offer"]) and not selected.ambiguous and selected.price is not None
-        selected.ambiguous = True
-        selected.offer_binding_unresolved = False
-        selected.ean_published = ""
-        if not common_price:
-            selected.price = None
-            selected.currency = ""
         selected.availability = "unknown"
         selected.stock_conflict = True
-        selected.notes.append("El calibre de la variante estructurada contradice el producto objetivo")
-        if common_price:
-            selected.notes.append("Precio común del grupo conservado solo como evidencia; stock e identidad requieren revisión")
+        selected.notes.append(
+            "El calibre difiere: se conserva el precio del modelo/color y se desconoce el stock de la variante")
     elif selected_from_group:
         selected.notes.append("Variante ProductGroup vinculada por EAN normalizado, no por orden de listas")
-    return selected
+    return scope_availability_to_ean(selected, product.get("ean"), product=product)
 
 
 class _EdelSelectedRadios(HTMLParser):
@@ -950,6 +1079,9 @@ def product_page_rejection(html: str, url: str) -> str:
     if (parsed_url.hostname or "").lower().removeprefix("www.") == "optica-optima.com" \
             and parsed_url.path.rstrip("/") in {"/gafas-de-sol", "/gafas-graduadas"}:
         return "no_product: ruta de categoría de Óptica Óptima, no ficha de producto"
+    if (parsed_url.hostname or "").lower().removeprefix("www.") == "edel-optics.es" \
+            and _EDEL_CATEGORY_PATH.fullmatch(parsed_url.path):
+        return "no_product: categoría Edel-Optics, no ficha de producto"
     nodes = []
     for block in _LD_JSON.findall(html):
         try:
@@ -1014,6 +1146,7 @@ def extract_product(html: str, url: str, *, price_selector: str = "", availabili
             if meta.get(key):
                 try:
                     page.ean_published = normalize_gtin(meta[key])
+                    page.ean_published_raw = [str(meta[key]).strip()]
                 except ValueError:
                     page.notes.append("EAN publicado no válido")
                 break
@@ -1065,10 +1198,18 @@ def extract_product(html: str, url: str, *, price_selector: str = "", availabili
         else:
             page.market, page.market_source = explicit, "ficha:product:market"
     bound_variant_url = page.url_trace.get("selected_variant_url", "")
+    offer_variant_url = page.url_trace.get("offer_variant_url", "")
+    selected_variant_source = page.url_trace.get("selected_variant_source", "")
     page.url_trace = {**(url_trace or {}), "final_url": requested_url,
                       "selected_variant_url": url if selected_size else bound_variant_url,
                       "canonical_urls": list(dict.fromkeys(urljoin(requested_url, href)
                                                            for href in parsed.canonicals))}
+    if offer_variant_url:
+        page.url_trace["offer_variant_url"] = offer_variant_url
+    if selected_variant_source:
+        page.url_trace["selected_variant_source"] = selected_variant_source
+    if radio_selected:
+        page.url_trace["selected_variant_source"] = "checked_radio"
     return page
 
 

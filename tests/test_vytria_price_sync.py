@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import hashlib
+import json
 from decimal import Decimal
 from pathlib import Path
 import sqlite3
@@ -15,6 +16,7 @@ from streamlit.testing.v1 import AppTest
 
 import vytria_price_sync
 from price_comparator import PriceComparatorStore, normalize_gtin
+from price_watch import PriceWatch
 from vytria_price_sync import (
     OdooProduct, PriceRow, SqlOdooPriceReader, SyncInProgress, VytriaPriceSync,
     validate_product,
@@ -51,7 +53,7 @@ CREATE TABLE product_pricelist_map(id INTEGER PRIMARY KEY, name TEXT);
 CREATE TABLE product_pricelist_map_product_template_rel(product_template_id INTEGER, product_pricelist_map_id INTEGER);
 CREATE TABLE product_pricelist_item(id INTEGER PRIMARY KEY, pricelist_id INTEGER, applied_on TEXT,
     product_pricelist_map_id INTEGER, product_id INTEGER, product_tmpl_id INTEGER, compute_price TEXT, base TEXT,
-    price_discount NUMERIC, price_surcharge NUMERIC, price_round NUMERIC, min_quantity NUMERIC,
+    price_discount NUMERIC, price_surcharge NUMERIC, price_round NUMERIC, fixed_price NUMERIC, min_quantity NUMERIC,
     date_start TEXT, date_end TEXT, active BOOLEAN);
 INSERT INTO res_currency VALUES (1,'EUR'),(2,'USD');
 """
@@ -105,9 +107,12 @@ class OdooFixture:
             self._maps[name] = self._id()
             self.execute("INSERT INTO product_pricelist_map VALUES(:i,:n)", i=self._maps[name], n=name)
             self.execute("""INSERT INTO product_pricelist_item(id,pricelist_id,applied_on,product_pricelist_map_id,
-                compute_price,base,price_discount,price_surcharge,price_round,min_quantity,active)
-                VALUES(:i,59,'1_pricelist_map',:m,'formula','list_price',:d,:s,1.0,0,1)""",
-                         i=self._id(), m=self._maps[name], d=discount, s=extra.get("surcharge", 0))
+                compute_price,base,price_discount,price_surcharge,price_round,fixed_price,min_quantity,active)
+                VALUES(:i,59,'1_pricelist_map',:m,:compute,:base,:d,:s,1.0,:fixed,0,1)""",
+                         i=self._id(), m=self._maps[name],
+                         compute=extra.get("compute_price", "formula"), base=extra.get("base", "list_price"),
+                         d=discount, s=extra.get("surcharge", 0),
+                         fixed=extra.get("fixed_price"))
         return self._maps[name]
 
     def product(self, ean: str, list_price: float, price: float | None, *, vat: int | None = 21,
@@ -238,14 +243,28 @@ def test_discrepancy_is_recorded_without_altering_source_price(tmp_path) -> None
 
 def test_special_map_65_percent_is_flagged_for_review(tmp_path) -> None:
     store, odoo = _store(tmp_path, ["8056262398043"]), OdooFixture(tmp_path / "odoo.sqlite3")
-    # The 59 pricelist applies 45 % to the map named 65 %: price is consistent but exceptional.
+    # The 59 pricelist applies 45 % to the map named 65 %: the descriptive name is not a rejection.
     odoo.product("8056262398043", 400, 220, maps=(odoo.map_rule("Vytria España (65%)", 45),))
 
     _sync(store, odoo).run()
 
     row = _current(store, "8056262398043")
-    assert (row["price"], row["validation_status"], row["comparable"]) == (220, "exceptional_rule", 0)
-    assert "aplica 45" in row["validation_detail"]
+    assert (row["price"], row["validation_status"], row["comparable"]) == (220, "validated", 1)
+    assert "describe 65" in row["validation_detail"] and "aplica 45" in row["validation_detail"]
+
+
+@pytest.mark.parametrize("ean", [
+    "0889214402530", "0889214402547", "0889214519788", "0889214602701",
+])
+def test_four_audited_eans_accept_received_45_percent_tariff_price(tmp_path, ean) -> None:
+    store, odoo = _store(tmp_path, [ean]), OdooFixture(tmp_path / "odoo.sqlite3")
+    odoo.product(ean, 400, 220, maps=(odoo.map_rule("Vytria España (65%)", 45),))
+
+    result = _sync(store, odoo).run()
+
+    row = _current(store, ean)
+    assert result.status == "ok"
+    assert (row["price"], row["validation_status"], row["comparable"]) == (220, "validated", 1)
 
 
 def test_special_map_ct0649s_negative_discount_is_flagged(tmp_path) -> None:
@@ -260,7 +279,7 @@ def test_special_map_ct0649s_negative_discount_is_flagged(tmp_path) -> None:
     assert "negativo" in row["validation_detail"]
 
 
-def test_product_specific_rule_is_exceptional(tmp_path) -> None:
+def test_product_specific_rule_uses_authoritative_received_price(tmp_path) -> None:
     store, odoo = _store(tmp_path, ["8056262398043"]), OdooFixture(tmp_path / "odoo.sqlite3")
     pid = odoo.product("8056262398043", 360, 252, maps=(odoo.map_rule("Vytria España (30%)", 30),))
     odoo.execute("""INSERT INTO product_pricelist_item(id,pricelist_id,applied_on,product_id,compute_price,base,active)
@@ -268,7 +287,46 @@ def test_product_specific_rule_is_exceptional(tmp_path) -> None:
 
     _sync(store, odoo).run()
 
-    assert _current(store, "8056262398043")["validation_status"] == "exceptional_rule"
+    row = _current(store, "8056262398043")
+    assert (row["price"], row["validation_status"], row["comparable"]) == (252, "validated", 1)
+    assert "importe recibido" in row["validation_detail"]
+
+
+def test_local_formula_limitation_does_not_invalidate_authoritative_received_price(tmp_path) -> None:
+    store, odoo = _store(tmp_path, ["8056262398043"]), OdooFixture(tmp_path / "odoo.sqlite3")
+    odoo.product("8056262398043", 360, 252,
+                 maps=(odoo.map_rule("Vytria España con recargo", 30, surcharge=5),))
+
+    _sync(store, odoo).run()
+
+    row = _current(store, "8056262398043")
+    assert (row["price"], row["validation_status"], row["comparable"]) == (252, "validated", 1)
+    assert "recargo" in row["validation_detail"] and "importe recibido" in row["validation_detail"]
+
+
+def test_fixed_map_uses_authoritative_received_price_not_fixed_label(tmp_path) -> None:
+    store, odoo = _store(tmp_path, ["8056262398043"]), OdooFixture(tmp_path / "odoo.sqlite3")
+    odoo.product("8056262398043", 360, 222,
+                 maps=(odoo.map_rule("Vytria fijo promocional", 30,
+                                     compute_price="fixed", fixed_price=222),))
+
+    _sync(store, odoo).run()
+
+    row = _current(store, "8056262398043")
+    assert (row["price"], row["validation_status"], row["comparable"]) == (222, "validated", 1)
+    assert "precio fijo acreditado" in row["validation_detail"]
+
+
+def test_fixed_map_preserves_received_price_when_label_differs(tmp_path) -> None:
+    store, odoo = _store(tmp_path, ["8056262398043"]), OdooFixture(tmp_path / "odoo.sqlite3")
+    odoo.product("8056262398043", 360, 237,
+                 maps=(odoo.map_rule("Vytria España (65%)", 30,
+                                     compute_price="fixed", fixed_price=237),))
+
+    _sync(store, odoo).run()
+
+    row = _current(store, "8056262398043")
+    assert (row["price"], row["validation_status"], row["comparable"]) == (237, "validated", 1)
 
 
 def test_product_without_map_is_not_comparable(tmp_path) -> None:
@@ -585,9 +643,60 @@ def test_page_shows_odoo_price_section_with_manual_import_as_contingency(tmp_pat
     assert not app.exception
     from tests.admin_navigation import navigate
     navigate(app, "Datos e importaciones")
+    assert not app.exception
     assert "Precio de venta Vytria" in [item.value for item in app.subheader]
     assert any("pendiente (no validado)" in caption.value for caption in app.caption)
     assert [toggle.value for toggle in app.toggle] == [False]
     assert [expander.label for expander in app.expander if "Contingencia" in expander.label]
     navigate(app, "Historial y diagnósticos")
     assert [button.label for button in app.button if button.label == "Sincronizar precios Vytria desde Odoo"]
+
+
+def test_admin_and_product_detail_show_native_price_provenance(tmp_path, monkeypatch) -> None:
+    ean = "8056597435581"
+    now = datetime(2026, 11, 20, 9, tzinfo=timezone.utc)
+    monkeypatch.setenv("PRESTASHOP_PRICE_ENABLED", "1")
+    app = _page(tmp_path, monkeypatch, eans=[ean])
+    store = PriceComparatorStore(tmp_path / "ui.sqlite3")
+    PriceWatch(store).add([ean], actor="test")
+    offer = {
+        "reference": "427094",
+        "conditions": {"type": "percentage", "reduction": "0.15", "fixed_price_ex_tax": "225.6198",
+                       "reduction_tax_included": False, "min_quantity": 1},
+    }
+    payload = {
+        "price": "232.05", "source": "PrestaShop · MySQL", "offer": offer,
+        "active": False, "in_stock": False, "observed_at": now.isoformat(),
+        "valid_until": (now + timedelta(hours=12)).isoformat(),
+    }
+    with store._connect() as con, con:
+        con.execute("""INSERT INTO vytria_prices(ean,market,price,currency,price_includes_tax,source,pricelist_id,
+                    validation_status,comparable,fingerprint,first_seen_at,changed_at,synced_at)
+                    VALUES(?,'ES',273,'EUR',1,'Odoo tarifa 59',59,'validated',1,'prada',?,?,?)""",
+                    (ean, *(now.isoformat(),) * 3))
+        con.execute("""INSERT INTO prestashop_prices(ean,payload,observed_at,valid_until,synced_at,attempted_at,issue)
+                    VALUES(?,?,?,?,?,?, '')""",
+                    (ean, json.dumps(payload), now.isoformat(), payload["valid_until"],
+                     now.isoformat(), now.isoformat()))
+
+    app.run()
+    assert not app.exception
+    details = next(frame.value for frame in app.dataframe if "Precio final Vytria" in frame.value.columns)
+    assert details.loc[0, "Precio Odoo"] == 273
+    assert details.loc[0, "Precio final Vytria"] == 232.05
+    assert details.loc[0, "Descuento/oferta aplicada"] == (
+        "ID 427094 · 15 % · precio fijo sin IVA 225.62 €")
+    assert details.loc[0, "Origen"] == "PrestaShop · MySQL"
+    assert details.loc[0, "Última actualización"] == now.isoformat()
+
+    from tests.admin_navigation import navigate
+    navigate(app, "Datos e importaciones")
+    native = next(frame.value for frame in app.dataframe if "Descuento/oferta aplicada" in frame.value.columns)
+    assert native.loc[native["EAN"] == ean, "Origen"].iloc[0] == "PrestaShop · MySQL"
+    assert native.loc[native["EAN"] == ean, "Precio final en Vytria"].iloc[0] == 232.05
+    from tests.admin_navigation import watch_section
+    watch_section(app, "Precios y monitorización")
+    assert not app.exception
+    assert any("Referencia: Odoo tarifa 59." in caption.value for caption in app.caption)
+    assert app.checkbox(key="watch_vytria_approved").label == (
+        "Autorizo la lectura supervisada de precios Vytria para los EAN vigilados")

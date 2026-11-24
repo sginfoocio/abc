@@ -18,6 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
+import logging
 import os
 import re
 import time
@@ -54,9 +55,9 @@ DEFAULT_BUDGETS = {
 }
 DEFAULT_COMPETITOR_PAUSE = 3.0
 DEFAULT_429_WAIT = timedelta(hours=1)
-MAX_429_WAIT = timedelta(hours=24)
 MAX_INLINE_WAIT_SECONDS = 60.0
 _SCOPE_ID = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
+LOG = logging.getLogger(__name__)
 
 
 def _utc() -> datetime:
@@ -341,7 +342,7 @@ class AccessControl:
             kind = "other"
         now = self._now()
         if kind == "http_429":
-            retry_after = min(retry_after or now + DEFAULT_429_WAIT, now + MAX_429_WAIT)
+            retry_after = retry_after or now + DEFAULT_429_WAIT
         else:
             retry_after = None
         with self.store._connect() as connection, connection:
@@ -392,7 +393,11 @@ def _retry_after(headers: dict, now: datetime) -> datetime | None:
     if not value:
         return None
     if value.isdigit():
-        return now + timedelta(seconds=int(value))
+        try:
+            return now + timedelta(seconds=int(value))
+        except (OverflowError, ValueError):
+            LOG.warning("Retry-After fuera del rango representable; el bloqueo requiere revisión")
+            return datetime.max.replace(tzinfo=timezone.utc)
     try:
         moment = parsedate_to_datetime(value)
     except (TypeError, ValueError):
@@ -430,7 +435,11 @@ class GovernedFetcher(WebFetcher):
                 self.access.finish(request_id, "not_sent: trial_window")
                 raise
             if request_reserved is not None:
-                request_reserved(url, self.ean)
+                try:
+                    request_reserved(url, self.ean)
+                except (ConnectorError, ValueError):
+                    self.access.finish(request_id, "not_sent: request_guard")
+                    raise
             try:
                 status, response_headers, body = inner(url, headers, timeout)
             except ConnectorError as exc:

@@ -136,6 +136,35 @@ def test_comparison_uses_exact_available_fresh_same_market_offers_and_eur_fx(tmp
     assert counts["pending_review"] == 1
 
 
+def test_reference_model_color_price_keeps_other_ean_and_does_not_transfer_stock(tmp_path):
+    store = _store(tmp_path)
+    row = _offer("Tienda EUR", price=100, domain="eur.example")
+    row.update({
+        "EAN publicado": "4006381333931",
+        "Marca": "Marca A",
+        "Modelo": "A1",
+        "Color": "01",
+        "Calibre": "50-22",
+        "Base coincidencia": "reference",
+        "Evidencia": "Marca, modelo y color exactos; EAN publicado distinto",
+    })
+
+    report = store.import_offers(pd.DataFrame([row]))
+
+    assert report.imported == 1 and not report.rejected
+    with store._connect() as con:
+        offer = con.execute("SELECT ean_published,availability,match_basis,evidence FROM offers").fetchone()
+    assert offer["ean_published"] == "4006381333931"
+    assert offer["availability"] == "unknown"
+    assert offer["match_basis"] == "reference"
+    assert "Disponibilidad no atribuida" in offer["evidence"]
+
+    row["Color"] = "02"
+    rejected = store.import_offers(pd.DataFrame([row]))
+    assert rejected.imported == 0
+    assert any("color" in reason.lower() for reason in rejected.rejected)
+
+
 def test_offer_import_is_idempotent_and_history_keeps_price_changes(tmp_path) -> None:
     store = _store(tmp_path)
     first = pd.DataFrame([{
@@ -219,7 +248,9 @@ def test_comparator_page_renders_without_external_services(tmp_path, monkeypatch
     ).run()
 
     assert not app.exception
-    assert [tab.label for tab in app.tabs] == ["Resumen", "Productos", "Pendientes", "Administración"]
+    assert app.radio(key="top_level_section").options == [
+        "Comparativa de precios", "Administración", "Diagnóstico técnico",
+    ]
 
 
 def test_comparator_import_report_survives_page_rerun(tmp_path, monkeypatch) -> None:

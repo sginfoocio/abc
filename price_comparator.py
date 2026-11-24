@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import closing
+from contextlib import closing, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -12,12 +12,13 @@ import os
 from pathlib import Path
 import re
 import sqlite3
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 import pandas as pd
 from filelock import FileLock, Timeout
 
+import prestashop_prices
 
 GTIN_ERROR = "EAN/UPC debe ser GTIN-12 o GTIN-13 válido"
 MATCH_STATES = {"exact_match", "probable_match", "manual_review", "not_found", "error", "rejected"}
@@ -52,7 +53,11 @@ _ADDED_COLUMNS = {
     "pilot_budgets": {"last_http_at": "REAL"},
     "price_pilot": {"last_error": "TEXT NOT NULL DEFAULT ''"},
     "price_trial_pairs": {"next_check_at": "TEXT", "defer_reason": "TEXT NOT NULL DEFAULT ''"},
-    "price_diagnostic_requests": {"retry_of": "INTEGER REFERENCES price_diagnostic_requests(id)"},
+    "price_diagnostic_requests": {
+        "retry_of": "INTEGER REFERENCES price_diagnostic_requests(id)",
+        "retry_reason": "TEXT NOT NULL DEFAULT ''",
+        "capture_version": "TEXT NOT NULL DEFAULT ''",
+    },
     "locate_events": {"metadata": "TEXT NOT NULL DEFAULT '{}'"},
     "offers": {"ean_published": "TEXT NOT NULL DEFAULT ''", "model_code": "TEXT NOT NULL DEFAULT ''",
                "color_code": "TEXT NOT NULL DEFAULT ''", "caliber": "TEXT NOT NULL DEFAULT ''",
@@ -77,8 +82,19 @@ CLOUD_DB_PATH = CLOUD_DATA_DIR / "price_comparator.sqlite3"
 # Default validity of a price for commercial comparisons; configurable through comparator_settings.
 SYNCED_PRICE_MAX_AGE_DAYS = 7
 RETENTION_MONTHS_OPTIONS = (3, 6, 12, 24)
-SETTING_DEFAULTS = {"retention_months": "12", "price_expiry_days": str(SYNCED_PRICE_MAX_AGE_DAYS),
-                    "alert_threshold_pct": "5"}
+SETTING_DEFAULTS = {
+    "retention_months": "12",
+    "price_expiry_days": str(SYNCED_PRICE_MAX_AGE_DAYS),
+    "alert_threshold_pct": "5",
+    "business_competitor_market": "ES",
+    "business_competitor_currency": "EUR",
+    "business_competitor_vat_included": "1",
+    "business_competitor_declaration": (
+        "Los 14 competidores operan para esta comparación en mercado español, euros e IVA incluido; "
+        "declaración expresa del responsable del negocio registrada el 2026-11-12. "
+        "No acredita condiciones externas ni añade porcentajes de IVA."
+    ),
+}
 # Only monitored pairs are gated; the existing supervised pilot and manual imports keep their behaviour.
 _MONITOR_OFFER_GUARD = """AND (NOT EXISTS(
     SELECT 1 FROM monitor_jobs m JOIN watch_products w ON w.ean=m.ean AND w.active=1
@@ -87,12 +103,12 @@ _MONITOR_OFFER_GUARD = """AND (NOT EXISTS(
         ON u.competitor_id=m.competitor_id AND u.ean=m.ean AND u.url=m.url AND u.status='verified'
         WHERE m.ean=o.ean AND m.competitor_id=o.competitor_id AND m.last_offer_id=o.id AND m.eligible=1
           AND m.state NOT IN ('gone','review','blocked','unavailable','inactive')
-          AND julianday(m.valid_until)>=julianday('now')
+          AND julianday(m.valid_until)>=julianday(:evaluation_time)
           AND julianday(m.last_ok_at) + COALESCE(
               (SELECT g.interval_hours FROM watch_products w JOIN watch_groups g ON g.name=w.group_name
                WHERE w.ean=m.ean),
               (SELECT s.interval_hours FROM competitor_schedule s WHERE s.competitor_id=m.competitor_id),
-              24)/24.0 >= julianday('now')))"""
+              24)/24.0 >= julianday(:evaluation_time)))"""
 
 
 def iso_datetimes(values: pd.Series, field: str) -> pd.Series:
@@ -340,6 +356,7 @@ class PriceComparatorStore:
                         changed_at TEXT NOT NULL,
                         synced_at TEXT NOT NULL
                     );
+                    """ + prestashop_prices.SCHEMA + """
                     CREATE TABLE IF NOT EXISTS vytria_price_history (
                         id INTEGER PRIMARY KEY,
                         ean TEXT NOT NULL REFERENCES products(ean),
@@ -857,6 +874,8 @@ class PriceComparatorStore:
                         actor TEXT NOT NULL,
                         note TEXT NOT NULL,
                         build_commit TEXT NOT NULL,
+                        retry_reason TEXT NOT NULL DEFAULT '',
+                        capture_version TEXT NOT NULL DEFAULT '',
                         status TEXT NOT NULL DEFAULT 'pending',
                         reason TEXT NOT NULL DEFAULT '',
                         created_at TEXT NOT NULL,
@@ -868,7 +887,7 @@ class PriceComparatorStore:
                     );
                     CREATE UNIQUE INDEX IF NOT EXISTS idx_price_diagnostic_active
                         ON price_diagnostic_requests(continuity_id,competitor_id,ean,url)
-                        WHERE status NOT IN ('expired','rejected');
+                        WHERE status IN ('pending','running','deferred');
                     CREATE TABLE IF NOT EXISTS price_robots_cache (
                         origin TEXT NOT NULL,
                         agent TEXT NOT NULL,
@@ -951,6 +970,55 @@ class PriceComparatorStore:
                     );
                     CREATE INDEX IF NOT EXISTS manual_review_refreshes_queue_idx
                         ON manual_review_refreshes(status,retry_at,lease_until,id);
+                    CREATE TABLE IF NOT EXISTS manual_review_http_attribution (
+                        refresh_id INTEGER PRIMARY KEY REFERENCES manual_review_refreshes(id),
+                        base_requests INTEGER NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS manual_review_identity (
+                        refresh_id INTEGER PRIMARY KEY REFERENCES manual_review_refreshes(id),
+                        snapshot TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS manual_review_recorded_samples (
+                        refresh_id INTEGER PRIMARY KEY REFERENCES manual_review_refreshes(id),
+                        sampled_at TEXT NOT NULL,
+                        sample_digest TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS manual_review_recorded_sample_events (
+                        refresh_id INTEGER NOT NULL REFERENCES manual_review_refreshes(id),
+                        observation_id TEXT NOT NULL,
+                        sampled_at TEXT NOT NULL,
+                        sample_digest TEXT NOT NULL,
+                        sample_json TEXT,
+                        PRIMARY KEY(refresh_id,observation_id)
+                    );
+                    CREATE TABLE IF NOT EXISTS manual_review_recovery_grants (
+                        refresh_id INTEGER PRIMARY KEY REFERENCES manual_review_refreshes(id),
+                        continuity_id INTEGER NOT NULL REFERENCES price_continuity(id),
+                        actor TEXT NOT NULL,
+                        note TEXT NOT NULL,
+                        build_commit TEXT NOT NULL,
+                        granted_at TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS manual_review_recovery_events (
+                        id INTEGER PRIMARY KEY,
+                        refresh_id INTEGER NOT NULL REFERENCES manual_review_refreshes(id),
+                        continuity_id INTEGER NOT NULL REFERENCES price_continuity(id),
+                        recovery_key TEXT NOT NULL,
+                        rules_version TEXT NOT NULL,
+                        recovery_rule TEXT NOT NULL,
+                        approval_ref TEXT NOT NULL,
+                        identity_digest TEXT NOT NULL,
+                        evidence_digest TEXT NOT NULL,
+                        historical_error TEXT NOT NULL,
+                        outcome TEXT NOT NULL,
+                        actor TEXT NOT NULL,
+                        note TEXT NOT NULL,
+                        build_commit TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        UNIQUE(refresh_id,continuity_id,recovery_key)
+                    );
+                    CREATE INDEX IF NOT EXISTS manual_review_recovery_events_scope_idx
+                        ON manual_review_recovery_events(refresh_id,continuity_id);
                     CREATE TABLE IF NOT EXISTS monitor_schedule (
                         competitor_id TEXT PRIMARY KEY REFERENCES competitors(id),
                         enabled INTEGER NOT NULL DEFAULT 0,
@@ -975,21 +1043,27 @@ class PriceComparatorStore:
                     for name, definition in columns.items():
                         if name not in existing:
                             connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+                connection.execute("""INSERT OR IGNORE INTO manual_review_recorded_sample_events
+                    (refresh_id,observation_id,sampled_at,sample_digest)
+                    SELECT refresh_id,'legacy:' || sampled_at,sampled_at,sample_digest
+                    FROM manual_review_recorded_samples""")
                 index = connection.execute("SELECT sql FROM sqlite_master WHERE name='idx_price_diagnostic_active'").fetchone()
-                if index and "status!='expired'" in index["sql"]:
+                if index and "where status in ('pending','running','deferred')" not in index["sql"].lower():
                     connection.execute("DROP INDEX idx_price_diagnostic_active")
                 connection.execute("""CREATE UNIQUE INDEX IF NOT EXISTS idx_price_diagnostic_active
                     ON price_diagnostic_requests(continuity_id,competitor_id,ean,url)
-                    WHERE status NOT IN ('expired','rejected')""")
+                    WHERE status IN ('pending','running','deferred')""")
                 connection.execute("""CREATE UNIQUE INDEX IF NOT EXISTS idx_price_diagnostic_retry
                     ON price_diagnostic_requests(retry_of) WHERE retry_of IS NOT NULL""")
+                connection.commit()
 
     def seed_defaults(self) -> dict[str, int]:
         """Persist the initial configuration. Idempotent: existing values are never overwritten.
 
         Registers the 14 reference competitors, the general settings and one disabled
         schedule row per competitor with the default limits. Nothing is enabled or queried.
-        Competitor market/currency stay empty until verified: ES/EUR is only the comparison target.
+        The express business declaration configures ES/EUR and IVA included. A contradictory
+        fiche remains visible for review and never overwrites this declaration.
         """
         from competitor_requirements import CHECKED_ON, COMPETITORS, METHOD_STATUS, requirement_for
 
@@ -1001,8 +1075,12 @@ class PriceComparatorStore:
                     competitor_id = re.sub(r"[^a-z0-9]+", "-", domain).strip("-")
                     added["competitors"] += connection.execute(
                         """INSERT OR IGNORE INTO competitors(id,name,url,domain,market,currency)
-                           VALUES(?,?,?,?,'','')""",
+                           VALUES(?,?,?,?,'ES','EUR')""",
                         (competitor_id, name, url, domain)).rowcount
+                    connection.execute("""UPDATE competitors
+                        SET market=CASE WHEN TRIM(COALESCE(market,''))='' THEN 'ES' ELSE market END,
+                            currency=CASE WHEN TRIM(COALESCE(currency,''))='' THEN 'EUR' ELSE currency END
+                        WHERE id=?""", (competitor_id,))
                     method, status = METHOD_STATUS[name]
                     added["coverage"] += connection.execute(
                         """INSERT OR IGNORE INTO competitor_coverage(competitor_id,method,integration_status,
@@ -1208,13 +1286,33 @@ class PriceComparatorStore:
                     errors.append(f"Fila {index + 2}: {exc}")
         return ImportReport(imported, 0, tuple(errors))
 
-    def import_offers(self, frame: pd.DataFrame) -> ImportReport:
+    def import_offers(self, frame: pd.DataFrame, *,
+                      validate: Callable[[sqlite3.Connection], None] | None = None,
+                      review_sample: tuple[int, str, str, str, str] | None = None,
+                      connection: sqlite3.Connection | None = None) -> ImportReport:
         required = {"EAN", "Competidor", "Precio", "Moneda", "Mercado", "URL", "Disponibilidad",
                     "Estado coincidencia", "Evidencia", "Método"}
         _required_columns(frame, required, "Ofertas")
         imported = updated = rejected = 0
         errors: list[str] = []
-        with self._connect() as connection, connection:
+        external = connection is not None
+        context = nullcontext(connection) if external else self._connect()
+        with context as connection, connection:
+            if review_sample is not None and (validate is None or len(frame) != 1):
+                raise ValueError("La muestra de revisión requiere una única oferta y validación")
+            if validate is not None:
+                if not external:
+                    connection.execute("BEGIN IMMEDIATE")
+                validate(connection)
+            if review_sample is not None:
+                recorded = connection.execute("""SELECT sampled_at,sample_digest,sample_json
+                    FROM manual_review_recorded_sample_events
+                    WHERE refresh_id=? AND observation_id=?""", review_sample[:2]).fetchone()
+                if recorded:
+                    if tuple(recorded)[:2] != review_sample[2:4] or (
+                            recorded["sample_json"] is not None and recorded["sample_json"] != review_sample[4]):
+                        raise ValueError("La muestra registrada de esta revisión ha cambiado")
+                    return ImportReport(0, 0, ())
             competitors = {row["name"].casefold(): row for row in connection.execute("SELECT * FROM competitors")}
             competitors.update({row["id"].casefold(): row for row in connection.execute("SELECT * FROM competitors")})
             for index, row in frame.iterrows():
@@ -1302,6 +1400,10 @@ class PriceComparatorStore:
                     availability = _text(row["Disponibilidad"]).lower()
                     if availability not in AVAILABILITY_STATES:
                         raise ValueError("Disponibilidad no válida")
+                    if identity[0] and identity[0] != ean:
+                        availability = "unknown"
+                        evidence += (" | Disponibilidad no atribuida al EAN solicitado: "
+                                     "la ficha publica otro EAN")
                     price = _number(row["Precio"], "Precio")
                     promo = _number(row.get("Precio promocional"), "Precio promocional", optional=True)
                     if promo is not None and promo > price:
@@ -1363,6 +1465,13 @@ class PriceComparatorStore:
                 except ValueError as exc:
                     rejected += 1
                     errors.append(f"Fila {index + 2}: {exc}")
+            if review_sample is not None:
+                if rejected:
+                    connection.rollback()
+                else:
+                    connection.execute("""INSERT INTO manual_review_recorded_sample_events
+                        (refresh_id,observation_id,sampled_at,sample_digest,sample_json)
+                        VALUES(?,?,?,?,?)""", review_sample)
         return ImportReport(imported, updated, tuple(errors))
 
     @staticmethod
@@ -1399,7 +1508,8 @@ class PriceComparatorStore:
                 "ean_published": published, "brand": _text(row.get("Marca")), "model": model,
                 "color": color, "caliber": caliber, "title": _text(row.get("Título")),
                 "identifiers": row.get("Identificadores") if isinstance(row.get("Identificadores"), list) else [],
-                "ambiguous": row.get("Ambigua") is True})
+                "ambiguous": row.get("Ambigua") is True},
+                allow_reference_match=match_status == "exact_match" and basis == "reference")
             if validation is not None:
                 validation.update(result.normalized)
                 validation.update({"reasons": result.reasons, "observations": result.observations})
@@ -1557,7 +1667,7 @@ class PriceComparatorStore:
                 WHERE c.active=1
                 """ + _MONITOR_OFFER_GUARD + """
                 ORDER BY o.captured_at DESC,o.id DESC
-            """, connection)
+            """, connection, params={"evaluation_time": now.isoformat()})
         return _fresh_offers(frame, now, max_age_days).iloc[::-1].reset_index(drop=True)
 
     def current_search_results(self, max_age_days: int = 30) -> pd.DataFrame:
@@ -1590,7 +1700,7 @@ class PriceComparatorStore:
                 WHERE c.active=1
                 """ + _MONITOR_OFFER_GUARD + """
                 ORDER BY o.captured_at DESC,o.id DESC
-            """, connection)
+            """, connection, params={"evaluation_time": now.isoformat()})
             search_results = pd.read_sql_query("""
                 SELECT s.* FROM search_results s
                 JOIN competitors c ON c.id=s.competitor_id
@@ -1600,6 +1710,10 @@ class PriceComparatorStore:
             competitor_count = connection.execute("SELECT COUNT(*) FROM competitors WHERE active=1").fetchone()[0]
             synced = pd.read_sql_query("SELECT * FROM vytria_prices", connection)
             watched = {r[0] for r in connection.execute("SELECT ean FROM watch_products WHERE active=1")}
+            native = {r["ean"]: dict(r) for r in connection.execute("SELECT * FROM prestashop_prices")
+                      if r["ean"] in watched}
+            native_scope = (watched & prestashop_prices.manifest_eans()
+                            if prestashop_prices.enabled() else set(native))
 
         offers = _fresh_offers(offers, now, max_age_days)
         search_results = _chronological(search_results, "captured_at", since=cutoff, until=now)
@@ -1607,6 +1721,7 @@ class PriceComparatorStore:
         # A synchronized Odoo price supersedes the manual contingency import for its EAN. It takes part
         # in comparisons only when validated, not flagged stale by a later incident and recently synced.
         synced = vytria_price_states(synced, self.price_expiry_days(), watched, now=now)
+        odoo_by_ean = {row["ean"]: row for row in synced.to_dict("records")}
         # Manual contingency prices of watched products have the same maximum daily validity.
         own_dates = iso_datetimes(own["captured_at"], "captured_at")
         daily_now = pd.Timestamp(now)
@@ -1621,11 +1736,33 @@ class PriceComparatorStore:
                 "captured_at": confirmed["synced_at"], "source": confirmed["source"],
             })], ignore_index=True)
         synced_by_ean = {row["ean"]: row for row in synced.to_dict("records")}
+        if native_scope:
+            own = own[~own["ean"].isin(native_scope)]
+            current_native = []
+            for ean in native_scope:
+                cached = native.get(ean)
+                usable = cached is not None and prestashop_prices.usable(cached, now)
+                status = ("validated" if usable else "stale" if cached and cached["issue"]
+                          else "expired" if cached and cached["payload"] else "not_synced")
+                synced_by_ean[ean] = {"current_status": status, "source": prestashop_prices.SOURCE,
+                                      "synced_at": cached["observed_at"] if cached else None}
+                if usable and cached is not None:
+                    current_native.append({
+                        "ean": ean, "market": "ES", "price": float(json.loads(cached["payload"])["price"]),
+                        "promotional_price": None, "currency": "EUR", "fx_to_eur": 1.0,
+                        "captured_at": cached["observed_at"], "source": prestashop_prices.SOURCE,
+                    })
+            if current_native:
+                own = pd.concat([own, pd.DataFrame(current_native)], ignore_index=True)
 
         rows: list[dict[str, Any]] = []
         for product in products.to_dict("records"):
+            ean = product["ean"]
             own_rows = own[own["ean"] == product["ean"]]
             own_record = _chronological(own_rows, "captured_at").iloc[-1].to_dict() if not own_rows.empty else None
+            odoo_record = odoo_by_ean.get(ean)
+            native_record = native.get(ean)
+            native_payload = json.loads(native_record["payload"]) if native_record and native_record["payload"] else {}
             valid_product_offers = product_offers = comparable_offers(
                 offers[offers["ean"] == product["ean"]])
             comparable = []
@@ -1680,6 +1817,14 @@ class PriceComparatorStore:
                                          synced_by_ean.get(product["ean"], {}).get("synced_at")),
                 "own_price_status": (synced_by_ean[product["ean"]]["current_status"]
                                      if product["ean"] in synced_by_ean else ""),
+                "odoo_price_eur": float(odoo_record["price"]) if odoo_record and pd.notna(odoo_record["price"]) else None,
+                "odoo_price_source": odoo_record["source"] if odoo_record else "",
+                "odoo_price_checked_at": odoo_record["synced_at"] if odoo_record else None,
+                "odoo_price_status": odoo_record["current_status"] if odoo_record else "",
+                "native_price_eur": float(native_payload["price"]) if native_payload.get("price") is not None else None,
+                "native_offer": native_payload.get("offer"),
+                "native_price_source": native_payload.get("source", ""),
+                "native_price_checked_at": native_record["observed_at"] if native_record and native_payload else None,
             })
         result = pd.DataFrame(rows)
         statuses = {

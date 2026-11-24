@@ -67,7 +67,7 @@ JOB_STATES = {
     "failed": "Fallido tras varios intentos",
     "pilot": "Gestionado por el piloto supervisado",
 }
-CLAIMABLE = ("pending", "waiting", "not_found", "unavailable", "blocked")
+CLAIMABLE = ("pending", "waiting", "not_found", "unavailable", "blocked", "pilot")
 SETTLED = ("done", "review", "not_found", "unavailable", "pilot")
 DISCOVERY_ORDER = ("feed", "sitemap", "catalog", "site_search", "external")
 SOURCE_METHODS = ("catalog", "feed")
@@ -124,14 +124,9 @@ def job_deferral(job: dict, now: datetime, *, point_check: bool = False,
     if state == "running":
         lease = job.get("lease_until")
         return "" if lease and datetime.fromisoformat(lease) <= now else "Reserva activa de otra ejecución"
-    if state == "pilot" and not pilot_authorized:
-        return "Pendiente en piloto: requiere ejecución supervisada del piloto"
-    if point_check and (state == "not_found" or (monitoring and state == "done")
-                        or (state == "pilot" and pilot_authorized)):
+    if point_check and (state in {"not_found", "pilot"} or (monitoring and state == "done")):
         return ""
     claimable = {"pending", "waiting", "blocked", "unavailable"} if monitoring else set(CLAIMABLE)
-    if pilot_authorized and not monitoring:
-        claimable.add("pilot")
     if state not in claimable:
         return f"Estado {state}: sin trabajo pendiente"
     not_before = job.get("not_before")
@@ -493,8 +488,7 @@ class PriceLocator:
             try:
                 rows = connection.execute(f"""SELECT j.* FROM locate_jobs j WHERE j.competitor_id=?
                     AND EXISTS(SELECT 1 FROM watch_products w WHERE w.ean=j.ean AND w.active=1)
-                    AND j.state IN ('pending','waiting','not_found','unavailable','blocked','running'
-                                    {",'pilot'" if point_check or pilot_eans else ""})
+                    AND j.state IN ('pending','waiting','not_found','unavailable','blocked','running','pilot')
                     {selected} ORDER BY j.priority,j.id""", (competitor_id, *(eans or []))).fetchall()
                 for row in rows:
                     lease_active = row["state"] == "running" and (
@@ -505,8 +499,7 @@ class PriceLocator:
                                            (_iso(now), row["id"]))
                         self._event(connection, row["id"], "failed", "", "", "Demasiados intentos", 0)
                         continue
-                    if row["ean"] in completed or job_deferral(dict(row), now, point_check=point_check,
-                                                              pilot_authorized=row["ean"] in pilot_eans):
+                    if row["ean"] in completed or job_deferral(dict(row), now, point_check=point_check):
                         continue
                     if point_check:
                         self._event(connection, row["id"], row["state"], "point_check", row["url"],
@@ -570,10 +563,7 @@ class PriceLocator:
             eans: list[str] | None = None, point_check: bool = False,
             pilot_run_id: int | None = None) -> RunReport:
         """Process a bounded batch. Competitors are taken one after another, each under the shared lock."""
-        from price_pilot import pilot_scope
-
         report = RunReport()
-        scope = pilot_scope(self.store)
         pilot_pairs = set()
         if pilot_run_id is not None:
             from price_pilot import PricePilot
@@ -588,9 +578,9 @@ class PriceLocator:
             from price_trial import select_eans
             selected_eans = select_eans(self.store, competitor_id, eans, self._now())
             if selected_eans == []:
-                report.stopped[competitor_id] = "Par reservado al piloto de 72 h o ventana finalizada"
+                report.stopped[competitor_id] = "Par reservado a la continuidad vigente"
                 continue
-            pilot = set(scope["eans"]) if scope and competitor_id in scope["competitors"] else set()
+            pilot: set[str] = set()
             supervised = {ean for cid, ean in pilot_pairs if cid == competitor_id}
             from price_trial import active_execution
             if supervised and ((not point_check and not active_execution(self.store)) or eans is None
@@ -690,7 +680,7 @@ class PriceLocator:
         actor, note = actor.strip(), note.strip()
         if not actor or not note:
             raise ValueError("Indique quién revisa y el motivo")
-        now = _iso(self._now())
+        now = self._now().astimezone(timezone.utc).isoformat(timespec="microseconds")
         with self.store._connect() as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute("""SELECT u.status AS candidate_status,u.match_status,u.model_code,u.color_code,
@@ -720,6 +710,13 @@ class PriceLocator:
                 WHERE competitor_id=? AND ean=? AND url=?""",
                                ("verified" if accept else "rejected", "user" if accept else "auto_watch",
                                 f"Revisión de {actor}: {note}", now, int(accept), competitor_id, ean, url))
+            connection.execute("""INSERT INTO access_audit(
+                scope,scope_id,action,previous,current,actor,note,at
+            ) VALUES('product_review',?,?,'candidate',?,? ,?,?)""",
+                               (f"{competitor_id}:{ean}:{url}",
+                                "candidate_confirmed" if accept else "candidate_rejected",
+                                "verified" if accept else "rejected",
+                                actor, note, now))
             job = connection.execute("SELECT id FROM locate_jobs WHERE competitor_id=? AND ean=?",
                                      (competitor_id, ean)).fetchone()
             refresh_id = None
@@ -732,7 +729,8 @@ class PriceLocator:
                 self._event(connection, job["id"], state, "review" if not update_price else "review+price",
                             url, f"{actor}: {note}", 0)
             if update_price:
-                from price_monitor import _done_job_restriction
+                from price_monitor import (_done_job_restriction, _review_identity,
+                                           _review_saved_sample_reusable)
 
                 monitor_job = connection.execute("""SELECT * FROM monitor_jobs
                     WHERE competitor_id=? AND ean=?""", (competitor_id, ean)).fetchone()
@@ -748,12 +746,22 @@ class PriceLocator:
                 retry_at = None
                 refresh_state, refresh_detail = "pending", "Lectura solicitada tras confirmar la ficha"
                 monitor_state = monitor_job["state"]
+                saved_sample_reusable = _review_saved_sample_reusable(connection, {
+                    "monitor_state": monitor_state,
+                    "monitor_sample": monitor_job["sample"],
+                    "monitor_sampled_at": monitor_job["sampled_at"],
+                    "monitor_last_ok_at": monitor_job["last_ok_at"],
+                    "monitor_valid_until": monitor_job["valid_until"],
+                    "url": url, "ean": ean, "competitor_id": competitor_id,
+                }, self._now())
+                if saved_sample_reusable:
+                    refresh_detail = "Lectura guardada vigente; se reevaluará localmente"
                 if monitor_state == "running" and monitor_job["lease_until"]:
                     lease = datetime.fromisoformat(monitor_job["lease_until"])
                     if lease > self._now():
                         retry_at = lease
                         refresh_detail = "Otra lectura ya está en curso; se reutilizará su resultado"
-                if monitor_state == "done":
+                if monitor_state == "done" and not saved_sample_reusable:
                     restriction = _done_job_restriction(dict(monitor_job))
                     if restriction and restriction > self._now():
                         retry_at = restriction
@@ -790,6 +798,11 @@ class PriceLocator:
                                                 (job["id"], monitor_job_id, ean, competitor_id, url, actor, note,
                                                  refresh_state, refresh_detail, now,
                                                  _iso(retry_at) if retry_at else None, now)).lastrowid
+                identity = _review_identity(connection, {"id": refresh_id})
+                if identity is None:
+                    raise ValueError("No se pudo conservar la identidad aceptada")
+                connection.execute("INSERT INTO manual_review_identity(refresh_id,snapshot) VALUES(?,?)",
+                                   (refresh_id, json.dumps(identity, ensure_ascii=False)))
                 connection.execute("""INSERT INTO monitor_events(job_id,at,state,detail) VALUES(?,?,?,?)""",
                                    (monitor_job_id, now, refresh_state,
                                     f"Revisión manual {refresh_id}: {refresh_detail}"[:1000]))

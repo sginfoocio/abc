@@ -11,11 +11,12 @@ from datetime import date, timedelta
 from pathlib import Path
 
 import streamlit as st
+from filelock import Timeout
 
 import marcolin_images
 import nuorder_images
 import safilo_images
-from image_repository import ImageRepository
+from image_repository import IMAGE_CLASSIFICATIONS, ImageRepository
 from provider_images import (
     FAILED, NEEDS_REVIEW, PARTIAL, PROVIDERS, ProviderService, ProviderStore, load_settings,
     parse_ean_file, parse_ean_text,
@@ -217,6 +218,8 @@ def _request_actions(connector, rows, engine_factory) -> None:
         try:
             result = connector.import_zip(selected, upload.getvalue())
             st.success(f"Importadas {result['imported']}, reutilizadas {result['reused']}, a revisión {result['review']}.")
+        except Timeout:
+            st.warning("La solicitud ya se está importando. Consulte su estado antes de reintentar.")
         except (ValueError, KeyError) as error:
             st.error(f"ZIP rechazado: {error}")
     if request["state"] in {FAILED, PARTIAL} and st.button("Reintentar", key=f"prov_retry_{selected}"):
@@ -414,7 +417,7 @@ def _review(connector) -> None:
         with st.expander(f"{item['name']} — {item['reason']} (solicitud {item['request_id']})"):
             reviewer = st.session_state.get("auth_user") or st.session_state.get("auth_role") or "admin"
             reason = st.text_input("Motivo de la decisión", key=f"rv_reason_{item['id']}")
-            views = ["frontal", "lateral", "perspectiva", "detalle"]
+            views = list(IMAGE_CLASSIFICATIONS)
             view = st.selectbox("Vista", views, key=f"rv_view_{item['id']}")
             ean = item["ean"]
             if item["record_id"] is None:

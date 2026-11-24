@@ -13,6 +13,8 @@ from math import ceil
 from pathlib import PureWindowsPath
 
 from image_repository import ImageRecord
+from bulk_image_search import group_inputs
+from provider_images import ean_key
 
 # Stored view -> label. "perspectiva" is V2 only when it was really identified upstream.
 CORE_VIEWS = (("frontal", "V1"), ("perspectiva", "V2"), ("lateral", "V3"))
@@ -220,6 +222,34 @@ def group_records(records: list[ImageRecord]) -> list[ProductGroup]:
         ))
     groups.sort(key=lambda g: (g.latest, g.ean), reverse=True)
     return groups
+
+
+def search_eans(groups: list[ProductGroup], values: list[str]) -> dict:
+    """Reuse bulk GTIN validation without its Odoo, order or provider analysis."""
+    parsed = group_inputs(values)
+    indexed: dict[str, list[ProductGroup]] = {}
+    for group in groups:
+        indexed.setdefault(ean_key(group.ean), []).append(group)
+    return {
+        **parsed,
+        "rows": [{"code": literals[0], "groups": tuple(indexed.get(key, ()))}
+                 for key, literals in parsed["groups"].items()],
+    }
+
+
+def variant_identity(records: list[ImageRecord]) -> dict[str, tuple[str, ...]]:
+    models, colors = set(), set()
+    for record in records:
+        identity = record.metadata.get("identity")
+        identity = identity if isinstance(identity, dict) else {}
+        model = str(record.metadata.get("modelo") or identity.get("model") or "").strip()
+        color = str(record.metadata.get("color_proveedor") or record.metadata.get("color")
+                    or identity.get("color") or "").strip()
+        if model and not is_technical_value(model, records):
+            models.add(model)
+        if color.casefold() not in {"", "unknown", "desconocido", "n/a"}:
+            colors.add(color)
+    return {"models": tuple(sorted(models)), "colors": tuple(sorted(colors))}
 
 
 def _matches_query(group: ProductGroup, query: str) -> bool:

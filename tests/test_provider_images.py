@@ -185,6 +185,47 @@ def test_unknown_view_review_updates_repository_view(env):
     assert repo.records(EANS[0])[0].view == "lateral" and store.get(rid)["state"] == IMPORTED
 
 
+def test_lifestyle_does_not_count_as_core_coverage(env):
+    store, repo, settings, _, service = env
+    rid = store.plan(settings, EANS[:2])["created"][0]
+    lifestyle_bytes = photo()
+    unclassified_bytes = photo()
+    result = service.import_package(
+        rid,
+        PortalPackage(
+            files=[
+                pfile("model-shot.png", lifestyle_bytes),
+                pfile(f"{EANS[1]}.png", unclassified_bytes),
+            ],
+            manifest=(
+                f"filename,ean,view\nmodel-shot.png,{EANS[0]},"
+                "lifestyle\n"
+            ).encode(),
+        ),
+    )
+
+    assert result["imported"] == 2 and result["review"] == 1
+    records = {record.ean: record for record in repo.records()}
+    direct = records[EANS[0]]
+    assert direct.view == "lifestyle"
+    assert direct.metadata["evidence"] == "manifest"
+    assert direct.checksum == hashlib.sha256(lifestyle_bytes).hexdigest()
+    assert direct.path.read_bytes() == lifestyle_bytes
+    assert repo.valid_views(EANS[0]) == {}
+
+    (item,) = store.review_items()
+    service.resolve_review(
+        item["id"], reviewer="ana", reason="Fotografia de modelo revisada",
+        view="lifestyle",
+    )
+    reviewed = next(record for record in repo.records(EANS[1]))
+    review_reason = reviewed.metadata["view_review"]["reason"]
+    assert reviewed.view == "lifestyle"
+    assert review_reason == "Fotografia de modelo revisada"
+    assert reviewed.path.read_bytes() == unclassified_bytes
+    assert repo.valid_views(EANS[1]) == {}
+
+
 def test_partial_and_failed_finalization_and_retry(env):
     store, _, settings, _, service = env
     rid = store.plan(settings, EANS[:2])["created"][0]

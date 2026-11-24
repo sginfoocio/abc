@@ -913,6 +913,31 @@ def test_admin_settings_ui_password_not_prefilled(tmp_path, monkeypatch):
     assert not restricted.text_input
 
 
+def test_admin_must_confirm_cutoff_change(tmp_path, monkeypatch):
+    import kering_images_ui as ui
+    from streamlit.testing.v1 import AppTest
+
+    monkeypatch.setenv("KERING_DATA_ROOT", str(tmp_path))
+    monkeypatch.setenv("KERING_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    store = ConfigStore(tmp_path)
+    store.save(dict(url=PORTAL_URL, username="", password="", supplier_id=7, cutoff_date="2026-10-05"))
+    monkeypatch.setattr(ui, "read_suppliers", lambda _: [{"id": 7, "name": "Offline supplier"}])
+    app = AppTest.from_string(
+        "import streamlit as st\nfrom kering_images_ui import render_kering_settings\n"
+        "st.session_state['auth_role']='admin'\nrender_kering_settings(None)"
+    ).run()
+    app.date_input[0].set_value(date(2026, 10, 6))
+    next(b for b in app.button if b.label == "Guardar procesamiento").click().run()
+    assert not app.exception
+    assert any("Confirma el cambio" in error.value for error in app.error)
+    assert store.load()["cutoff_date"] == "2026-10-05"
+    next(box for box in app.checkbox if box.label.startswith("Confirmo el cambio")).check()
+    next(b for b in app.button if b.label == "Guardar procesamiento").click().run()
+    assert not app.exception
+    assert store.load()["cutoff_date"] == "2026-10-06"
+    assert store.load()["auto_enabled"] is False
+
+
 def test_history_filters_and_local_dates():
     from kering_images_ui import filter_history, local_order_time
     row = dict(number="PO001", status="Parcial", order_date="2026-03-28 23:00:00",
