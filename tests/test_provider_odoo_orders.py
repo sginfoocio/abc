@@ -1,10 +1,11 @@
 import json
+import re
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from datetime import date, datetime, timezone
 
 import pytest
 from filelock import FileLock
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.exc import OperationalError
 
 import provider_odoo_orders as po
@@ -96,6 +97,25 @@ def test_read_confirmed_skus_is_read_only_and_includes_supplier_contacts():
     assert result[0]["status"] == "confirmed" and result[0]["sku"] == "MCL-1"
     assert result[1]["status"] == "confirmed" and result[1]["sku"] == "MCL-3"
     assert result[2]["status"] == "pending"
+
+
+def test_odoo_purchase_queries_only_execute_read_statements():
+    engine = odoo_fixture()
+    statements = []
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def capture(_conn, _cursor, statement, _parameters, _context, _executemany):
+        statements.append(statement)
+
+    po.propose_partners(engine, "marcolin")
+    po.read_order_lines(engine, [573], *RANGE, max_lines=10)
+    po.read_confirmed_skus(engine, [573], [EANS[0]])
+    po.read_purchase_page(engine, [("marcolin", 573, True)], ("marcolin",), *RANGE)
+    assert len(statements) == 4
+    for sql in statements:
+        assert re.match(r"\s*(SELECT|WITH)\b", sql, re.IGNORECASE)
+        assert not re.search(r"\b(INSERT|UPDATE|DELETE|MERGE|CREATE|ALTER|DROP|TRUNCATE|CALL)\b",
+                             sql, re.IGNORECASE)
 
 
 def test_association_must_be_configured_and_reviewed(env, tmp_path):

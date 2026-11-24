@@ -4,6 +4,10 @@ Diseño y auditoría: PR #69 (`docs/PROVIDER_INTEGRATIONS_59.md`). La matriz de 
 **offline** con portales y Odoo simulados; no acredita el estado de los servicios en producción.
 Verifica el runtime y los recibos por separado según la guía de validación local Cloud.
 
+## POLÍTICA OBLIGATORIA — ODOO READ ONLY
+
+Para todos los proveedores, Odoo solo se consulta; las asociaciones y solicitudes se guardan en Cloud. La [política permanente](../AGENTS.md#política-obligatoria--odoo-read-only) prohíbe toda escritura o cambio de estructura, permisos o configuración en Odoo.
+
 ## Decisión: Cloud es independiente de Odoo
 
 Flujo principal, sin Odoo ni `supplier_ids`: elegir proveedor → pegar/importar EAN (CSV/TXT) → validación y

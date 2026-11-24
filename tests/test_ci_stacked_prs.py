@@ -85,6 +85,7 @@ def test_production_deploy_is_only_triggered_by_a_successful_push_run_on_main():
     }, set()),
     (["image_repository.py"], {"test_repository_multi_export.py"}, {ROOT_TESTS[0]}),
     (["db_config.py"], {"tests"}, set(ROOT_TESTS)),
+    (["backup_odoo_tables.py"], {"test_engine.py"}, set()),
     (["pytest.ini"], {"test_ci_stacked_prs.py", "test_price_monitor.py"}, set()),
     (["requirements.txt"], {"test_dockerfile_provider_modules.py", "test_prestashop_prices.py",
                             "test_vytria_price_sync.py"}, set()),

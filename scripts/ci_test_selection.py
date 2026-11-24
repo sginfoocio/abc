@@ -107,6 +107,7 @@ PRICE_SOURCE_TESTS = {
 }
 SCOPED_DEPENDENCY_TESTS = {
     "pytest.ini": ("tests/test_ci_stacked_prs.py", "tests/test_price_monitor.py"),
+    "backup_odoo_tables.py": ("tests/test_engine.py",),
     "app_enhanced.py": (
         "tests/test_app_exports.py",
         "tests/test_auth_session.py",

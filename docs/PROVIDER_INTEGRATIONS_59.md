@@ -7,6 +7,10 @@ asociaciones comerciales vigentes ni producción. No se han hecho descargas, acc
 consultas productivas a Odoo. Nunca incluir credenciales, tokens ni URLs con token en el repositorio,
 issues, logs ni fixtures.
 
+## POLÍTICA OBLIGATORIA — ODOO READ ONLY
+
+Odoo es exclusivamente fuente de consulta para todos los proveedores. La [política permanente](../AGENTS.md#política-obligatoria--odoo-read-only) prohíbe cualquier escritura, migración o cambio de permisos, incluso mediante agentes o API. Asociaciones, solicitudes, trazabilidad y auditorías se guardan en Cloud.
+
 ## 1. Auditoría del código existente
 
 | Pieza | Ubicación | Reutilización |
