@@ -474,7 +474,9 @@ def test_product_detail_does_not_expose_a_duplicate_price_refresh(pilot, monkeyp
     ({"name": "Prada PR 27ZS ZVN09T 54-21"}, "Color"),
     ({"brand": "Gucci"}, "Marca"),
 ])
-def test_noncomparable_observations_visible(pilot, override, reason):
+def test_noncomparable_observations_visible(pilot, override, reason, monkeypatch):
+    if "market" in override and not override["market"]:
+        monkeypatch.setattr("price_web_extract.business_market_policy_for", lambda *args: None)
     service, store, search, site, cid, extras = pilot
     known(pilot, **override)
     service.enable()
