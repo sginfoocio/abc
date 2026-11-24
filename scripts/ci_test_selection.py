@@ -160,6 +160,7 @@ SCOPED_DEPENDENCY_TESTS = {
         "tests/test_prestashop_prices.py",
         "tests/test_vytria_price_sync.py",
     ),
+    "scripts/dependency_locks.py": ("tests/test_dependency_locks.py",),
 }
 GLOBAL_DEPENDENCIES = ("db_config.py", "pyproject.toml", "setup.cfg", "conftest.py",
                        "tests/conftest.py")

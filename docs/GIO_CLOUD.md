@@ -114,6 +114,9 @@ componentes y tema Cloud existentes.
   y contraseña se cifran juntos en `config.enc`. La contraseña no se muestra
   al recargar; dejar el campo vacio conserva la guardada y hay eliminacion
   explicita.
+- Destinatarios diarios y destinatario de prueba se guardan en el mismo
+  `config.enc`, pero son campos separados. El destinatario de prueba solo se
+  usa en el envio manual confirmado y no habilita los destinatarios diarios.
 - **Probar conexion** realiza GET al portal y POST al `/login_check` observado,
   con los campos publicados `_username`, `_password` e idioma. Solo acepta una
   respuesta JSON de autenticacion exitosa. No sigue redirects del POST ni llama
@@ -221,6 +224,12 @@ Un identificador externo repetido puede actualizar un asiento al reimportarlo:
   permite descargar el original general y candidatos compatibles para revision.
   Es local y no llama al remitente; el boton no crea una generacion de envio.
   Los descuadres se muestran por fila y tipo de operacion, sin datos de cliente.
+- El envio de prueba es una accion separada de la cola diaria. Requiere un
+  destinatario de prueba guardado, centros terminados, adjuntos disponibles y
+  una confirmacion en la interfaz. Usa solo ese destinatario, no modifica el
+  estado de correo diario y registra el intento sin guardar direcciones ni
+  contenido. Solo se permite un intento por fecha; un resultado incierto
+  requiere revisar Elementos enviados y no se reintenta automaticamente.
 - **Reintentar centro** reutiliza el original general sin repetir descarga;
   puede incorporar un original corregido, conservando ambas versiones y sus huellas.
   Regenera solo ese centro con el contrato actual. **No reenvia el correo**.
@@ -268,14 +277,46 @@ inofensivos y no se purgan automaticamente.
    drenaje y rollback, incluyendo ahora directorio/clave GIO y variables M365.
    El Compose privado real debe reflejar montajes, `GIO_DATA_ROOT`, clave y
    Graph del worker; cambiar el Compose del repositorio no lo despliega.
-5. Autorizar un destinatario de prueba y un unico envio explicito. Comprobar
-   adjuntos, aceptacion y entrega, sin importar nada en Odoo.
+5. Configurar y revisar el destinatario de prueba en **Configuracion -> GIO**.
+   Tras revisar localmente la vista previa y los adjuntos, autorizar un unico
+   envio explicito desde el boton de prueba. Comprobar aceptacion y entrega,
+   sin importar nada en Odoo.
 6. Revisar toda la cola pendiente antes de permitir envios. Configurar hora,
    destinatarios y automatico solo despues de superar todas las puertas.
 
 Rollback de codigo: detener consumo GIO y envios con mantenimiento autorizado,
 conservar directorio, clave, originales y estados. No borrar la DB para
 recuperar la automatizacion: perderia la proteccion de duplicados.
+
+### Secuencia controlada de fusion, despliegue y rollback
+
+Este procedimiento es una preparacion; no autoriza fusion, despliegue ni
+activacion:
+
+1. Antes de fusionar, completar las pruebas locales pertinentes, la descarga
+   real autorizada, el CI del SHA exacto y la revision/aprobacion expresa. No
+   fusionar mientras el importador Odoo, el correo de prueba o cualquier
+   comprobacion obligatoria siga bloqueada.
+2. Despues de la aprobacion de fusion, registrar el SHA integrado y el digest
+   de imagen que genera el pipeline. Ejecutar el despliegue Cloud app-only
+   aprobado siguiendo `deployment/cloud/README.md`; no usar un push de feature
+   como despliegue ni cambiar la configuracion productiva para probar.
+3. La app y `kering_jobs.py` comparten el worker. El despliegue de la app no
+   actualiza el worker: en una ventana de mantenimiento autorizada, actualizar
+   solo el servicio worker existente al mismo digest compatible, conservando
+   identidad, comando, usuario, red, montajes, `GIO_DATA_ROOT` y el mecanismo
+   de clave. Seguir `deployment/cloud/KERING_WORKER_RELEASE.md`; no ejecutar un
+   `compose up` global ni iniciar un segundo scheduler.
+4. Verificar por separado SHA/digest y salud de app y worker; que ambos lean el
+   mismo almacén cifrado y volumen GIO; que automatizacion y correo sigan
+   desactivados; que no haya reintentos, duplicados ni escrituras Odoo; y que
+   la interfaz, el historico y las descargas sigan disponibles. Registrar
+   resultados agregados sin destinatarios, IDs, importes ni originales.
+5. Para rollback, detener el consumo GIO y cualquier envio con mantenimiento
+   autorizado; volver la app y el worker a sus imagenes/digests previos como
+   operaciones separadas. Conservar SQLite, WAL, originales y clave; no borrar
+   la base ni cambiar la configuracion de automatizacion/correo para ocultar el
+   fallo. Verificar el estado y la ausencia de duplicados antes de reanudar.
 
 ## Pruebas y controles
 

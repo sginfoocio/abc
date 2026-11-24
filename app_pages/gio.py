@@ -9,8 +9,8 @@ import streamlit as st
 
 from cloud_design import page_title
 from gio_cloud import (
-    CENTRES, STATES, GioConfigStore, GioConnectionError, GioStore,
-    check_gio_connection, current_result, data_root, prepare_mail_payload,
+    CENTRES, STATES, GioConfigStore, GioConnectionError, GioStore, TestMailUncertain,
+    check_gio_connection, current_result, data_root, prepare_mail_payload, send_test_mail,
 )
 from gio_reports import MADRID, previous_day
 
@@ -61,6 +61,7 @@ def render_settings():
             "recipients": [
                 value.strip() for value in st.session_state["gio_recipients"].split(";") if value.strip()
             ],
+            "test_recipient": st.session_state["gio_test_recipient"].strip(),
             "enabled": False,
             "send_enabled": False,
             "mapping": mapping,
@@ -106,6 +107,12 @@ def render_settings():
             "Destinatarios del correo (separados por punto y coma)",
             value="; ".join(config["recipients"]),
             key="gio_recipients",
+        )
+        st.text_input(
+            "Destinatario del correo de prueba",
+            value=config.get("test_recipient", ""),
+            key="gio_test_recipient",
+            help="Solo recibe el envio manual de prueba; no cambia los destinatarios diarios.",
         )
         st.toggle(
             "Activar automatización diaria",
@@ -287,7 +294,12 @@ def render_history(store, config):
             batch = store.batch(row["day"])
             if batch:
                 preview = prepare_mail_payload(store, batch, config, include_candidates=True)
-                st.write("Destinatarios:", "; ".join(preview["recipients"]) or "No configurados")
+                st.write(
+                    "Destinatarios diarios:",
+                    "; ".join(preview["recipients"]) or "No configurados",
+                )
+                test_recipient = config.get("test_recipient", "")
+                st.write("Destinatario de prueba:", test_recipient or "No configurado")
                 st.subheader(preview["subject"])
                 st.markdown(preview["body"], unsafe_allow_html=True)
                 if preview["attachments"]:
@@ -299,6 +311,47 @@ def render_history(store, config):
                         )
                 else:
                     st.info("No hay adjuntos disponibles para esta fecha.")
+                attempted_test = store.test_mail_attempted(row["day"])
+                if attempted_test:
+                    st.warning("Ya existe un intento de prueba para esta fecha. Revise Elementos enviados antes de cualquier reenvio.")
+                elif not test_recipient:
+                    st.info("Configure un destinatario de prueba en Configuracion para habilitar el envio manual.")
+                elif not preview["attachments"]:
+                    st.info("El envio de prueba requiere al menos un adjunto disponible.")
+                elif not preview["terminal"]:
+                    st.info("El envio de prueba se habilitara cuando terminen los centros registrados.")
+                st.warning(
+                    "El original puede contener datos personales. El boton envia una sola prueba al destinatario "
+                    "configurado y no activa la automatizacion diaria."
+                )
+                with st.form(f"gio_test_mail_{row['day']}"):
+                    confirmed = st.checkbox(
+                        "Confirmo enviar una unica prueba al destinatario configurado con estos adjuntos",
+                        key=f"gio_test_mail_confirm_{row['day']}",
+                    )
+                    submitted = st.form_submit_button(
+                        "Enviar correo de prueba",
+                        key=f"gio_test_mail_submit_{row['day']}",
+                        type="primary",
+                        disabled=(
+                            attempted_test or not test_recipient or not preview["attachments"]
+                            or not preview["terminal"]
+                        ),
+                    )
+                if submitted:
+                    try:
+                        send_test_mail(
+                            store, batch, config, confirmed=confirmed,
+                            role=st.session_state.get("auth_role"),
+                            actor=st.session_state.get("auth_user", ""),
+                        )
+                    except (TestMailUncertain, ValueError, PermissionError, Timeout, OSError, sqlite3.Error) as exc:
+                        st.error(str(exc))
+                    else:
+                        st.success(
+                            "El servicio acepto el correo de prueba; la entrega no esta confirmada. "
+                            "La automatizacion y los envios diarios siguen desactivados."
+                        )
     artifacts = store.artifacts(row["day"], row["centre"])
     if artifacts:
         def artifact_label(index):

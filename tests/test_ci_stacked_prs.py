@@ -81,6 +81,7 @@ def test_production_deploy_is_only_triggered_by_a_successful_push_run_on_main():
     (["pytest.ini"], {"test_ci_stacked_prs.py", "test_price_monitor.py"}, set()),
     (["requirements.txt"], {"test_dockerfile_provider_modules.py", "test_prestashop_prices.py",
                             "test_vytria_price_sync.py"}, set()),
+    (["scripts/dependency_locks.py"], {"test_dependency_locks.py"}, set()),
     (["Dockerfile"], {"test_dockerfile_provider_modules.py"}, set()),
     (["price_comparator.py"], {"test_price_comparator.py", "test_price_analytics.py",
                                "test_price_analytics_dates.py", "test_prestashop_prices.py",

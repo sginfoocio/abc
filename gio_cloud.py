@@ -42,7 +42,8 @@ STATES = {
     "download_error": "Error de descarga", "internal_error": "Error interno",
 }
 DEFAULTS = {
-    "enabled": False, "daily_time": "07:00", "recipients": [], "send_enabled": False,
+    "enabled": False, "daily_time": "07:00", "recipients": [], "test_recipient": "",
+    "send_enabled": False,
     "portal_url": PORTAL_URL, "username": "", "password": "",
     "last_connection_status": "not_checked", "last_connection_check": "",
     "operations_approved": False,
@@ -50,6 +51,8 @@ DEFAULTS = {
     "mapping": {"company": 0, "journals": dict.fromkeys(CENTRES, 0),
                 "accounts": dict.fromkeys(("43000000", "47700000", "70000001", "70000002", "70000005"), 0)},
 }
+RECIPIENT_PATTERN = re.compile(r"[^@\s;,<>]+@[^@\s;,<>]+\.[^@\s;,<>]+")
+MAIL_SIZE_LIMIT = 2_500_000
 ERRORS = {
     "portal_not_verified": "Acceso al portal GIO rechazado; revise credenciales y permisos.",
     "transient_download": "Fallo transitorio de descarga; reintentos limitados a tres.",
@@ -92,10 +95,13 @@ class GioConfigStore(ConfigStore):
             raise ValueError("La hora debe tener formato HH:MM (Europe/Madrid)")
         config["portal_url"] = validate_portal_url(config["portal_url"])
         if not isinstance(config["recipients"], list) or any(
-            not isinstance(value, str) or not re.fullmatch(r"[^@\s;,<>]+@[^@\s;,<>]+\.[^@\s;,<>]+", value)
+            not isinstance(value, str) or not RECIPIENT_PATTERN.fullmatch(value)
             for value in config["recipients"]
         ):
             raise ValueError("Destinatarios no validos")
+        if (not isinstance(config["test_recipient"], str)
+                or (config["test_recipient"] and not RECIPIENT_PATTERN.fullmatch(config["test_recipient"]))):
+            raise ValueError("Destinatario de prueba no valido")
         if config["send_enabled"]:
             raise ValueError("Envios reales bloqueados hasta validar el funcionamiento completo de GIO")
         if config["enabled"]:
@@ -109,6 +115,10 @@ class GioConfigStore(ConfigStore):
 
 
 class GioConnectionError(Exception):
+    pass
+
+
+class TestMailUncertain(Exception):
     pass
 
 
@@ -347,6 +357,12 @@ class GioStore:
             return [dict(row) for row in conn.execute(
                 "SELECT * FROM events WHERE day=? ORDER BY id DESC LIMIT 300", (day,))]
 
+    def test_mail_attempted(self, day: str) -> bool:
+        with self.connect() as conn:
+            return conn.execute(
+                "SELECT 1 FROM events WHERE day=? AND stage LIKE 'test_mail_%' LIMIT 1", (day,),
+            ).fetchone() is not None
+
     def update(self, day: str, centre: str, **values):
         allowed = {"state", "attempts", "next_attempt", "original", "result", "summary", "error"}
         if not values.keys() <= allowed:
@@ -494,7 +510,8 @@ def current_result(job: dict, config: dict) -> bool:
 
 
 def prepare_mail_payload(store: GioStore, batch: dict, config: dict, *,
-                         include_candidates=False, require_terminal=False) -> dict:
+                         include_candidates=False, require_terminal=False,
+                         include_preview_notice=True) -> dict:
     day = batch["day"]
     with store.connect() as conn:
         jobs = [dict(row) for row in conn.execute("SELECT * FROM centres WHERE day=? ORDER BY centre", (day,))]
@@ -543,7 +560,7 @@ def prepare_mail_payload(store: GioStore, batch: dict, config: dict, *,
     subject = f"GIO {day} - {label} - envio {batch['generation']}"
     body = "<p>" + "</p><p>".join(escape(value) for value in statuses) + "</p>"
     body += "<p>Aceptacion por Graph no acredita entrega. CSV solo para importacion manual, nunca publicados en Odoo.</p>"
-    if include_candidates:
+    if include_candidates and include_preview_notice:
         body += "<p>VISTA PREVIA: no se envia. Los CSV candidatos no deben importarse hasta validar el importador.</p>"
     return {
         "subject": subject,
@@ -605,6 +622,64 @@ def verify_odoo_mapping(engine, mapping: dict) -> dict:
                     "checked_at": datetime.now(timezone.utc).isoformat(), "import_tested": False}
         finally:
             transaction.rollback()
+
+
+def _mail_payload_too_large(body: str, attachments: list[tuple[str, bytes]]) -> bool:
+    encoded_attachments = sum(4 * ((len(content) + 2) // 3) for _, content in attachments)
+    return encoded_attachments + len(body.encode()) > MAIL_SIZE_LIMIT
+
+
+def send_test_mail(store: GioStore, batch: dict, config: dict, *, confirmed: bool,
+                   role: str | None, actor: str, sender=None) -> None:
+    admin(role, actor)
+    if not confirmed:
+        raise ValueError("Confirme expresamente el envio del correo de prueba")
+    recipient = config.get("test_recipient", "")
+    if not isinstance(recipient, str):
+        raise ValueError("Configure un destinatario de prueba valido")
+    recipient = recipient.strip()
+    if not RECIPIENT_PATTERN.fullmatch(recipient):
+        raise ValueError("Configure un destinatario de prueba valido")
+
+    day = batch["day"]
+    with store.lock():
+        if store.test_mail_attempted(day):
+            raise ValueError("Ya existe un intento de prueba para esta fecha; revise Elementos enviados antes de repetir")
+        payload = prepare_mail_payload(
+            store, batch, config, include_candidates=True, require_terminal=True,
+            include_preview_notice=False,
+        )
+        if not payload.get("terminal"):
+            raise ValueError("Espere a que terminen los centros registrados antes de enviar la prueba")
+        attachments = payload["attachments"]
+        if not attachments:
+            raise ValueError("No hay adjuntos disponibles para el correo de prueba")
+
+        subject = f"[PRUEBA] {payload['subject']}"
+        body = (
+            "<p>Correo de prueba solicitado manualmente. No se han importado ni publicado asientos. "
+            "Si el resultado del envio es incierto, revise Elementos enviados antes de repetir.</p>"
+            + payload["body"]
+        )
+        if _mail_payload_too_large(body, attachments):
+            raise ValueError("Adjuntos demasiado grandes para envio simple Graph; descarguelos desde Cloud.")
+        if sender is None:
+            from graph_mail_downloader import send_alert_email
+            sender = send_alert_email
+
+        store.event(
+            day, "", "test_mail_sending",
+            json.dumps({"recipient_count": 1, "attachment_count": len(attachments)}), actor,
+        )
+        try:
+            sender(subject, body, [recipient], attachments=attachments)
+        except Exception as exc:
+            LOGGER.error("gio stage=test_mail day=%s exception_type=%s", day, type(exc).__name__)
+            store.event(day, "", "test_mail_uncertain", type(exc).__name__, actor)
+            raise TestMailUncertain(
+                "Resultado de envio incierto; revise Elementos enviados antes de repetir."
+            ) from None
+        store.event(day, "", "test_mail_accepted", "Aceptado por el servicio; entrega no confirmada", actor)
 
 
 class GioWorker:
@@ -802,7 +877,7 @@ class GioWorker:
         manifest = json.dumps({"recipients": payload["recipients"], "subject": subject,
                                "files": [(name, hashlib.sha256(content).hexdigest()) for name, content in attachments]})
         # Fail before marking 'sending' for the known Graph simple-message size limit.
-        if sum(4 * ((len(content) + 2) // 3) for _, content in attachments) + len(body.encode()) > 2_500_000:
+        if _mail_payload_too_large(body, attachments):
             self.mail_state(day, "blocked", "Adjuntos demasiado grandes para envio simple Graph; descarguelos desde Cloud.")
             self.store.event(day, "", "mail_blocked", "attachment_size")
             return

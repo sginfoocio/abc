@@ -842,14 +842,19 @@ render_settings()
     assert not app.exception
     app.text_input(key="gio_username").set_value("SYNTHETIC_USER")
     app.text_input(key="gio_password").set_value("SYNTHETIC_PASSWORD")
+    app.text_input(key="gio_recipients").set_value("daily@example.test")
+    app.text_input(key="gio_test_recipient").set_value("test@example.test")
     app.button[0].click().run()
 
     config_store = cloud.GioConfigStore(tmp_path)
     saved = config_store.load()
     assert saved["username"] == "SYNTHETIC_USER"
     assert saved["password"] == "SYNTHETIC_PASSWORD"
+    assert saved["recipients"] == ["daily@example.test"]
+    assert saved["test_recipient"] == "test@example.test"
     assert saved["enabled"] is False and saved["send_enabled"] is False
     assert b"SYNTHETIC_PASSWORD" not in (tmp_path / "config.enc").read_bytes()
+    assert b"test@example.test" not in (tmp_path / "config.enc").read_bytes()
     assert app.text_input(key="gio_password").value == ""
     assert app.toggle(key="gio_automation_enabled").disabled
     assert app.toggle(key="gio_mail_enabled").disabled
@@ -867,6 +872,93 @@ render_settings()
     changed = config_store.load()
     assert changed["last_connection_status"] == "not_checked"
     assert changed["last_connection_check"] == ""
+
+
+def test_gio_config_rejects_invalid_test_recipient(tmp_path, monkeypatch):
+    monkeypatch.setenv("KERING_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    config = settings()
+    config["send_enabled"] = False
+    config["test_recipient"] = "not-an-address"
+    with pytest.raises(ValueError, match="Destinatario de prueba"):
+        cloud.GioConfigStore(tmp_path).save(config)
+
+
+def test_test_mail_requires_confirmation_uses_only_test_recipient_and_never_changes_daily_state(tmp_path):
+    config = settings()
+    config.update(
+        send_enabled=False,
+        recipients=["daily@example.test"],
+        test_recipient="test@example.test",
+        operations_approved=False,
+        odoo_import_evidence="",
+    )
+    downloader, sender = Mock(), Mock()
+    downloader.fetch.return_value = report(movement(), movement(TIENDA="2"))
+    w = worker(tmp_path, Config(config), downloader=downloader, sender=sender)
+    w.store.enqueue(DAY, list(cloud.CENTRES), send=False, **ACTOR)
+    w.tick(NOW)
+    batch = w.store.batch(DAY.isoformat())
+    mail_state = batch["mail_state"]
+
+    with pytest.raises(ValueError, match="Confirme expresamente"):
+        cloud.send_test_mail(
+            w.store, batch, config, confirmed=False, **ACTOR, sender=sender,
+        )
+    assert sender.call_count == 0
+    assert not w.store.test_mail_attempted(DAY.isoformat())
+
+    cloud.send_test_mail(w.store, batch, config, confirmed=True, **ACTOR, sender=sender)
+    subject, body, recipients = sender.call_args.args
+    assert subject.startswith("[PRUEBA]")
+    assert "Correo de prueba solicitado manualmente" in body
+    assert "VISTA PREVIA: no se envia" not in body
+    assert "CSV candidato adjunto solo para revision" in body
+    assert recipients == ["test@example.test"]
+    assert sender.call_args.kwargs["attachments"]
+    assert w.store.batch(DAY.isoformat())["mail_state"] == mail_state
+    assert config["send_enabled"] is False
+    assert w.store.test_mail_attempted(DAY.isoformat())
+    assert sender.call_count == 1
+    with pytest.raises(ValueError, match="intento de prueba"):
+        cloud.send_test_mail(w.store, batch, config, confirmed=True, **ACTOR, sender=sender)
+    assert sender.call_count == 1
+    test_events = [event for event in w.store.events(DAY.isoformat())
+                   if event["stage"].startswith("test_mail_")]
+    assert [event["stage"] for event in test_events] == ["test_mail_accepted", "test_mail_sending"]
+    assert all("test@example.test" not in event["detail"] for event in test_events)
+
+
+def test_test_mail_uncertain_result_is_recorded_without_automatic_retry(tmp_path):
+    config = settings()
+    config.update(
+        send_enabled=False,
+        test_recipient="test@example.test",
+        operations_approved=False,
+        odoo_import_evidence="",
+    )
+    downloader = Mock()
+    downloader.fetch.return_value = report(movement())
+    sender = Mock(side_effect=RuntimeError("synthetic transport failure"))
+    w = worker(tmp_path, Config(config), downloader=downloader, sender=sender)
+    w.store.enqueue(DAY, list(cloud.CENTRES), send=False, **ACTOR)
+    w.tick(NOW)
+    batch = w.store.batch(DAY.isoformat())
+    mail_state = batch["mail_state"]
+
+    with pytest.raises(cloud.TestMailUncertain, match="Resultado de envio incierto"):
+        cloud.send_test_mail(w.store, batch, config, confirmed=True, **ACTOR, sender=sender)
+
+    assert w.store.test_mail_attempted(DAY.isoformat())
+    assert w.store.batch(DAY.isoformat())["mail_state"] == mail_state
+    test_events = [event for event in w.store.events(DAY.isoformat())
+                   if event["stage"].startswith("test_mail_")]
+    assert [event["stage"] for event in test_events] == [
+        "test_mail_uncertain", "test_mail_sending",
+    ]
+    assert test_events[0]["detail"] == "RuntimeError"
+    with pytest.raises(ValueError, match="intento de prueba"):
+        cloud.send_test_mail(w.store, batch, config, confirmed=True, **ACTOR, sender=sender)
+    assert sender.call_count == 1
 
 
 def test_ui_reads_only_explicitly_prepared_artifact(tmp_path, monkeypatch):
@@ -900,6 +992,8 @@ def test_mail_preview_ui_only_builds_local_attachment_downloads(tmp_path, monkey
     config = settings()
     config["send_enabled"] = False
     config["odoo_import_evidence"] = ""
+    config["recipients"] = ["daily@example.test"]
+    config["test_recipient"] = "test@example.test"
     cloud.GioConfigStore(tmp_path).save(config)
     content = report(
         movement(OPERACION="FACTURA", BIMPONIBLE_10="100", CUOTA_10="10", TOTAL_10="110",
@@ -923,6 +1017,9 @@ render_history(GioStore(data_root()), GioConfigStore(data_root()).load())
     assert not app.exception and not sender.called
     app.button(key=f"gio_prepare_mail_preview_{DAY.isoformat()}").click().run()
     assert not app.exception and len(app.get("download_button")) == 2
+    test_button = app.button(key=f"gio_test_mail_submit_{DAY.isoformat()}")
+    assert not test_button.disabled
+    assert app.checkbox(key=f"gio_test_mail_confirm_{DAY.isoformat()}").value is False
     assert not sender.called
     assert w.store.batch(DAY.isoformat())["mail_state"] == "pending"
     assert not any(event["stage"] == "sending" for event in w.store.events(DAY.isoformat()))
