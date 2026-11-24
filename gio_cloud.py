@@ -6,6 +6,7 @@ from datetime import date, datetime, time, timezone
 from decimal import Decimal
 import hashlib
 from html import escape
+from itertools import groupby
 import json
 import logging
 import os
@@ -20,13 +21,19 @@ import requests
 from sqlalchemy import text
 
 from adyen_reconciliation import ReportError
-from gio_reports import CENTRES, MADRID, MAX_REPORT_BYTES, DownloadResponseError, Group, candidate_csv, daily_group, previous_day
+from gio_reports import (
+    CENTRES, MADRID, MAX_REPORT_BYTES, DownloadResponseError, Group, candidate_csv,
+    daily_group, daily_groups, previous_day,
+)
 from kering_images import ConfigStore, atomic_write
 
 
 LOGGER = logging.getLogger(__name__)
 PORTAL_URL = "https://opticadiagonal-gioweb.deipe.com/"
 PORTAL_HOST = "opticadiagonal-gioweb.deipe.com"
+REPORT_ID = 57
+REPORT_TYPE = "4"
+REPORT_TIME_LIMIT = 210
 TERMINAL = {"blocked", "ready", "candidate", "no_movements", "download_error", "internal_error"}
 STATES = {
     "pending": "Pendiente", "downloading": "Descargando", "downloaded": "Descargado",
@@ -44,7 +51,7 @@ DEFAULTS = {
                 "accounts": dict.fromkeys(("43000000", "47700000", "70000001", "70000002", "70000005"), 0)},
 }
 ERRORS = {
-    "portal_not_verified": "Descarga autenticada GIO pendiente de implementar y verificar; no se ha intentado iniciar sesion.",
+    "portal_not_verified": "Acceso al portal GIO rechazado; revise credenciales y permisos.",
     "transient_download": "Fallo transitorio de descarga; reintentos limitados a tres.",
     "internal_error": "Error interno; revise almacenamiento y el codigo del evento con soporte.",
     "mail_uncertain": "Resultado de envio incierto. Compruebe Elementos enviados antes de autorizar un reenvio.",
@@ -105,6 +112,14 @@ class GioConnectionError(Exception):
     pass
 
 
+class PortalNotVerified(Exception):
+    pass
+
+
+class TransientDownload(Exception):
+    """A confirmed network or server failure eligible for a bounded retry."""
+
+
 def validate_portal_url(value: str) -> str:
     if not isinstance(value, str):
         raise ValueError("La URL GIO debe ser el portal HTTPS oficial")
@@ -120,7 +135,7 @@ def validate_portal_url(value: str) -> str:
     return PORTAL_URL
 
 
-def check_gio_connection(config: dict) -> None:
+def _authenticated_gio_session(config: dict) -> requests.Session:
     username = config.get("username", "")
     password = config.get("password", "")
     if not isinstance(username, str) or not username.strip() or not isinstance(password, str) or not password:
@@ -128,13 +143,14 @@ def check_gio_connection(config: dict) -> None:
     username = username.strip()
 
     portal_url = validate_portal_url(config.get("portal_url", PORTAL_URL))
-    with requests.Session() as session:
+    session = requests.Session()
+    try:
         try:
             response = session.get(portal_url, timeout=(5, 15), allow_redirects=False)
         except requests.Timeout:
-            raise GioConnectionError("El portal GIO agotó el tiempo de espera.") from None
+            raise TransientDownload() from None
         except requests.RequestException:
-            raise GioConnectionError("No se pudo acceder al portal GIO por HTTPS.") from None
+            raise TransientDownload() from None
 
         if response.is_redirect:
             destination = urljoin(portal_url, response.headers.get("Location", ""))
@@ -149,9 +165,9 @@ def check_gio_connection(config: dict) -> None:
             try:
                 response = session.get(destination, timeout=(5, 15), allow_redirects=False)
             except requests.Timeout:
-                raise GioConnectionError("El portal GIO agotó el tiempo de espera.") from None
+                raise TransientDownload() from None
             except requests.RequestException:
-                raise GioConnectionError("No se pudo acceder al portal GIO por HTTPS.") from None
+                raise TransientDownload() from None
 
         if response.status_code != 200 or "gioweb_login.js" not in response.text:
             raise GioConnectionError("La respuesta no corresponde a la pantalla de acceso GIO esperada.")
@@ -160,35 +176,103 @@ def check_gio_connection(config: dict) -> None:
             response = session.post(
                 urljoin(PORTAL_URL, "login_check"),
                 data={"_username": username, "_password": password, "idioma": "Español"},
+                headers={
+                    "X-Requested-With": "XMLHttpRequest",
+                    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                },
                 timeout=(5, 15),
                 allow_redirects=False,
             )
         except requests.Timeout:
-            raise GioConnectionError("La comprobación de credenciales GIO agotó el tiempo de espera.") from None
+            raise TransientDownload() from None
         except requests.RequestException:
-            raise GioConnectionError("No se pudo completar la comprobación de credenciales GIO.") from None
+            raise TransientDownload() from None
 
         if response.status_code != 200:
-            raise GioConnectionError("GIO no aceptó la comprobación de acceso.")
+            raise GioConnectionError(
+                f"El portal GIO devolvió HTTP {response.status_code} al comprobar el acceso."
+            )
         try:
             result = response.json()
         except ValueError:
             raise GioConnectionError("GIO devolvió una respuesta de acceso no reconocida.") from None
         if not isinstance(result, dict) or result.get("success") is not True:
             raise GioConnectionError("GIO rechazó las credenciales o requiere una acción adicional.")
+    except (GioConnectionError, TransientDownload):
+        session.close()
+        raise
+    return session
 
 
-class PortalNotVerified(Exception):
-    pass
+def check_gio_connection(config: dict) -> None:
+    try:
+        with _authenticated_gio_session(config):
+            pass
+    except TransientDownload:
+        raise GioConnectionError("No se pudo completar la comprobación del acceso GIO.") from None
 
 
-class TransientDownload(Exception):
-    """An authenticated adapter may classify only confirmed transient failures here."""
+class GioReportDownloader:
+    """Fetch the observed all-stores official report without registering a portal session."""
 
+    def fetch(self, day: date, config: dict) -> bytes:
+        try:
+            session = _authenticated_gio_session(config)
+        except GioConnectionError as exc:
+            raise PortalNotVerified(str(exc)) from None
 
-class UnverifiedDownloader:
-    def fetch(self, day: date, centre: str, config: dict) -> bytes:
-        raise PortalNotVerified()
+        criteria = {
+            "id": REPORT_ID,
+            "fecha_ini": day.isoformat(),
+            "fecha_fin": day.isoformat(),
+            "id_tienda": None,
+            "tipo_listado_oficial": REPORT_TYPE,
+        }
+        try:
+            try:
+                response = session.get(
+                    urljoin(PORTAL_URL, "Informesinformesestadisticos/descargar"),
+                    params={
+                        "id": str(REPORT_ID),
+                        "criterios": json.dumps(criteria, separators=(",", ":")),
+                        "timeLimit": str(REPORT_TIME_LIMIT),
+                        "_dc": str(int(clock.time() * 1000)),
+                    },
+                    headers={
+                        "X-Requested-With": "XMLHttpRequest",
+                        "Referer": PORTAL_URL + "#listados_oficiales",
+                    },
+                    timeout=(10, 60),
+                    stream=True,
+                )
+            except requests.Timeout:
+                raise TransientDownload() from None
+            except requests.RequestException:
+                raise TransientDownload() from None
+
+            try:
+                if response.status_code == 429 or response.status_code >= 500:
+                    raise TransientDownload()
+                if response.status_code in {401, 403}:
+                    raise PortalNotVerified("El portal GIO no autorizó la descarga del informe.")
+                content_type = response.headers.get("Content-Type", "").split(";", 1)[0].lower()
+                if response.status_code != 200 or content_type not in {"application/csv", "text/csv"}:
+                    raise DownloadResponseError("GIO no devolvió el CSV oficial esperado.")
+                content = bytearray()
+                for block in response.iter_content(64 * 1024):
+                    if block:
+                        content.extend(block)
+                        if len(content) > MAX_REPORT_BYTES:
+                            raise DownloadResponseError("El informe supera el límite de 15 MiB.")
+                if not content:
+                    raise DownloadResponseError("GIO devolvió un CSV vacío.")
+                return bytes(content)
+            except requests.RequestException:
+                raise TransientDownload() from None
+            finally:
+                response.close()
+        finally:
+            session.close()
 
 
 class GioStore:
@@ -202,7 +286,8 @@ class GioStore:
                 CREATE TABLE IF NOT EXISTS batches (
                     day TEXT PRIMARY KEY, created REAL NOT NULL, origin TEXT NOT NULL,
                     mail_state TEXT NOT NULL, generation INTEGER NOT NULL DEFAULT 0,
-                    mail_detail TEXT NOT NULL DEFAULT '', mail_manifest TEXT NOT NULL DEFAULT ''
+                    mail_detail TEXT NOT NULL DEFAULT '', mail_manifest TEXT NOT NULL DEFAULT '',
+                    original TEXT NOT NULL DEFAULT ''
                 );
                 CREATE TABLE IF NOT EXISTS centres (
                     day TEXT NOT NULL REFERENCES batches(day), centre TEXT NOT NULL,
@@ -222,6 +307,9 @@ class GioStore:
                     PRIMARY KEY(day,centre,kind,digest)
                 );
             """)
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(batches)")}
+            if "original" not in columns:
+                conn.execute("ALTER TABLE batches ADD COLUMN original TEXT NOT NULL DEFAULT ''")
 
     @contextmanager
     def connect(self):
@@ -249,6 +337,11 @@ class GioStore:
                 + ("WHERE day=? " if day else "") + "ORDER BY day DESC,centre LIMIT 300",
                 (day,) if day else ())]
 
+    def batch(self, day: str) -> dict | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM batches WHERE day=?", (day,)).fetchone()
+        return dict(row) if row else None
+
     def events(self, day: str) -> list[dict]:
         with self.connect() as conn:
             return [dict(row) for row in conn.execute(
@@ -270,7 +363,31 @@ class GioStore:
     def artifacts(self, day: str, centre: str) -> list[dict]:
         with self.connect() as conn:
             return [dict(row) for row in conn.execute(
-                "SELECT * FROM artifacts WHERE day=? AND centre=? ORDER BY created DESC", (day, centre))]
+                "SELECT * FROM artifacts WHERE day=? AND centre IN (?, '') ORDER BY created DESC",
+                (day, centre))]
+
+    def batch_original(self, day: str) -> str:
+        with self.connect() as conn:
+            row = conn.execute("SELECT original FROM batches WHERE day=?", (day,)).fetchone()
+        return row["original"] if row else ""
+
+    def set_batch_original(self, day: str, content: bytes) -> str:
+        digest = hashlib.sha256(content).hexdigest()
+        with self.connect() as conn:
+            row = conn.execute("SELECT original FROM batches WHERE day=?", (day,)).fetchone()
+            if not row:
+                raise ValueError("Fecha sin lote GIO")
+            if row["original"] and row["original"] != digest:
+                raise ValueError("El original general de esta fecha es inmutable")
+        self.save_blob(content)
+        with self.connect() as conn:
+            row = conn.execute("SELECT original FROM batches WHERE day=?", (day,)).fetchone()
+            if row["original"] and row["original"] != digest:
+                raise ValueError("El original general de esta fecha es inmutable")
+            conn.execute("UPDATE batches SET original=? WHERE day=?", (digest, day))
+            conn.execute("INSERT OR IGNORE INTO artifacts VALUES(?,?,?,?,?)",
+                         (day, "", "original_general", digest, clock.time()))
+        return digest
 
     def enqueue(self, day: date, centres: list[str], *, role: str, actor: str,
                 send: bool = False, originals: dict[str, bytes] | None = None):
@@ -376,6 +493,68 @@ def current_result(job: dict, config: dict) -> bool:
                 and json.loads(job["summary"]).get("contract") == contract_digest(config))
 
 
+def prepare_mail_payload(store: GioStore, batch: dict, config: dict, *,
+                         include_candidates=False, require_terminal=False) -> dict:
+    day = batch["day"]
+    with store.connect() as conn:
+        jobs = [dict(row) for row in conn.execute("SELECT * FROM centres WHERE day=? ORDER BY centre", (day,))]
+    terminal = bool(jobs) and all(job["state"] in TERMINAL for job in jobs)
+    if require_terminal and not terminal:
+        return {"terminal": False}
+    attachments = []
+    statuses = []
+    complete = set(job["centre"] for job in jobs) == set(CENTRES)
+    if batch.get("original"):
+        attachments.append((f"GIO-{day}-original-general.csv", store.blob(batch["original"])))
+    for job in jobs:
+        centre, state = job["centre"], job["state"]
+        if state not in {"ready", "no_movements"}:
+            complete = False
+        summary = json.loads(job["summary"])
+        totals = "; ".join(f"{key}={value}" for key, value in summary.get("totals", {}).items())
+        issues = summary.get("issues", [])
+        incidents = "; ".join(
+            f"fila {issue.get('row', '?')}: "
+            f"{issue['operation'] + '; ' if issue.get('operation') else ''}"
+            f"{issue['code']} ({issue.get('difference', '-')})"
+            for issue in issues[:10])
+        if summary.get("totals_complete") is False:
+            totals = "TOTALES INCOMPLETOS, NO UTILIZABLES: " + totals
+        statuses.append(f"{CENTRES[centre][0]}: {STATES[state]}; filas={summary.get('rows', '-')}; "
+                        f"{totals}; {job['error']}; incidencias={len(issues)} {incidents}")
+        if job["original"] and state == "download_error":
+            statuses.append("Respuesta web rechazada conservada en Cloud, no adjunta como informe.")
+        elif job["original"] and job["original"] != batch.get("original"):
+            attachments.append((f"GIO-{day}-{centre}-original.csv", store.blob(job["original"])))
+        if current_result(job, config):
+            attachments.append((f"GIO-{day}-{centre}-odoo.csv", store.blob(job["result"])))
+        elif (include_candidates and state == "candidate" and job["result"]
+              and summary.get("contract") == contract_digest(config)):
+            attachments.append((f"GIO-{day}-{centre}-odoo-candidato.csv", store.blob(job["result"])))
+            statuses.append(
+                f"{CENTRES[centre][0]}: CSV candidato adjunto solo para revision; importador Odoo no validado.")
+        elif state == "ready":
+            complete = False
+            statuses.append("CSV retenido: aprobaciones de configuracion retiradas")
+    for centre in CENTRES:
+        if centre not in {job["centre"] for job in jobs}:
+            statuses.append(f"{CENTRES[centre][0]}: no solicitado en esta fecha")
+    label = "COMPLETO" if complete else "PARCIAL / REVISION"
+    subject = f"GIO {day} - {label} - envio {batch['generation']}"
+    body = "<p>" + "</p><p>".join(escape(value) for value in statuses) + "</p>"
+    body += "<p>Aceptacion por Graph no acredita entrega. CSV solo para importacion manual, nunca publicados en Odoo.</p>"
+    if include_candidates:
+        body += "<p>VISTA PREVIA: no se envia. Los CSV candidatos no deben importarse hasta validar el importador.</p>"
+    return {
+        "subject": subject,
+        "body": body,
+        "recipients": list(config["recipients"]),
+        "attachments": attachments,
+        "complete": complete,
+        "terminal": terminal,
+    }
+
+
 def verify_odoo_mapping(engine, mapping: dict) -> dict:
     """Schema/identity check only. Never calls load/create/write or an import."""
     validate_mapping(mapping)
@@ -422,9 +601,8 @@ def verify_odoo_mapping(engine, mapping: dict) -> dict:
             }
             if any(fields.get(key) != value for key, value in required.items()):
                 raise ValueError("El esquema Odoo difiere del contrato de campos")
-            return {"version": version, "company": mapping["company"], "currency": currency,
-                    "checked_at": datetime.now(timezone.utc).isoformat(),
-                    "import_tested": False}
+            return {"version": version, "company_verified": True, "currency": currency,
+                    "checked_at": datetime.now(timezone.utc).isoformat(), "import_tested": False}
         finally:
             transaction.rollback()
 
@@ -432,7 +610,7 @@ def verify_odoo_mapping(engine, mapping: dict) -> dict:
 class GioWorker:
     def __init__(self, store: GioStore, config_store: GioConfigStore, downloader=None, sender=None, odoo_checker=None):
         self.store, self.config_store = store, config_store
-        self.downloader = downloader or UnverifiedDownloader()
+        self.downloader = downloader or GioReportDownloader()
         if sender is None:
             from graph_mail_downloader import send_alert_email
             sender = send_alert_email
@@ -460,8 +638,8 @@ class GioWorker:
                         "SELECT * FROM centres WHERE state NOT IN "
                         "('blocked','ready','candidate','no_movements','download_error','internal_error') "
                         "AND next_attempt<=? ORDER BY day,centre LIMIT 30", (now.timestamp(),))]
-                for job in jobs:
-                    self.process(job, config, now.timestamp())
+                for _, grouped_jobs in groupby(jobs, key=lambda job: job["day"]):
+                    self.process_day(list(grouped_jobs), config, now.timestamp())
                 with self.store.connect() as conn:
                     batches = [dict(row) for row in conn.execute("SELECT * FROM batches WHERE mail_state='pending'")]
                 for batch in batches:
@@ -470,34 +648,96 @@ class GioWorker:
             return "busy"
         return "idle"
 
-    def process(self, job: dict, config: dict, timestamp: float):
+    def process_day(self, jobs: list[dict], config: dict, timestamp: float):
+        if not jobs:
+            return
+        store, day = self.store, jobs[0]["day"]
+        portal_jobs = [job for job in jobs if not job["original"]]
+        general_content = None
+        general_digest = store.batch_original(day) if portal_jobs else ""
+
+        def fail_download(state, error, stage, attempts=None, next_attempt=None):
+            for job in portal_jobs:
+                values = {"state": state, "error": error}
+                if attempts is not None:
+                    values["attempts"] = attempts
+                if next_attempt is not None:
+                    values["next_attempt"] = next_attempt
+                store.update(day, job["centre"], **values)
+                store.event(day, job["centre"], stage)
+
+        if portal_jobs:
+            attempts = max(job["attempts"] for job in portal_jobs) + 1
+            try:
+                if general_digest:
+                    general_content = store.blob(general_digest)
+                else:
+                    for job in portal_jobs:
+                        store.update(day, job["centre"], state="downloading", attempts=attempts)
+                    general_content = self.downloader.fetch(date.fromisoformat(day), config)
+                    if not general_content or len(general_content) > MAX_REPORT_BYTES:
+                        raise DownloadResponseError("Descarga vacia o demasiado grande")
+                    general_digest = store.set_batch_original(day, general_content)
+                    store.event(day, "", "downloaded_general", general_digest)
+            except TransientDownload:
+                state = "download_error" if attempts >= 3 else "pending"
+                fail_download(state, ERRORS["transient_download"],
+                              "download_error" if attempts >= 3 else "download_retry",
+                              attempts=attempts, next_attempt=timestamp + 60 * attempts)
+                general_content = None
+            except PortalNotVerified as exc:
+                fail_download("download_error", str(exc) or ERRORS["portal_not_verified"],
+                              "portal_not_verified", attempts=attempts)
+                general_content = None
+            except DownloadResponseError as exc:
+                fail_download("download_error", str(exc), "rejected_web_response", attempts=attempts)
+                general_content = None
+            except Exception as exc:
+                LOGGER.error("gio stage=download day=%s exception_type=%s", day, type(exc).__name__)
+                fail_download("internal_error", ERRORS["internal_error"], "internal_error", attempts=attempts)
+                general_content = None
+
+        groups, encoding = None, None
+        if general_content is not None:
+            try:
+                groups, encoding = daily_groups(general_content, date.fromisoformat(day))
+            except DownloadResponseError as exc:
+                fail_download("download_error", str(exc), "rejected_web_response")
+                general_content = None
+            except ReportError as exc:
+                fail_download("blocked", str(exc), "blocked")
+                general_content = None
+
+        for job in jobs:
+            try:
+                if job["original"]:
+                    content = store.blob(job["original"])
+                    self.process_centre(job, config, content, job["original"])
+                elif general_content is not None:
+                    self.process_centre(job, config, general_content, general_digest, groups, encoding)
+            except Exception as exc:
+                LOGGER.error("gio stage=source day=%s centre=%s exception_type=%s",
+                             day, job["centre"], type(exc).__name__)
+                store.update(day, job["centre"], state="internal_error",
+                             error=ERRORS["internal_error"], result="")
+                store.event(day, job["centre"], "internal_error", type(exc).__name__)
+
+    def process_centre(self, job: dict, config: dict, content: bytes, source_digest: str,
+                       groups: dict | None = None, encoding: str | None = None):
         store, day, centre = self.store, job["day"], job["centre"]
         try:
-            if not job["original"]:
-                attempts = job["attempts"] + 1
-                store.update(day, centre, state="downloading", attempts=attempts)
-                try:
-                    content = self.downloader.fetch(date.fromisoformat(day), centre, config)
-                    if not content or len(content) > MAX_REPORT_BYTES:
-                        raise DownloadResponseError("Descarga vacia o demasiado grande")
-                except TransientDownload:
-                    store.update(day, centre, state="download_error" if attempts >= 3 else "pending",
-                                 next_attempt=timestamp + 60 * attempts, error=ERRORS["transient_download"])
-                    store.event(day, centre, "download_retry" if attempts < 3 else "download_error")
-                    return
-                job["original"] = store.save_blob(content)
-                store.update(day, centre, state="downloaded", original=job["original"])
-                store.event(day, centre, "downloaded", job["original"])
-            content = store.blob(job["original"])
             summary = json.loads(job["summary"])
-            if job["state"] == "validated" and summary.get("source_sha256") == job["original"]:
+            if job["state"] == "validated" and summary.get("source_sha256") == source_digest:
                 group = Group(date.fromisoformat(day), centre, rows=summary["rows"],
                               totals={key: Decimal(value) for key, value in summary["totals"].items()},
                               issues=summary["issues"])
             else:
                 store.update(day, centre, state="validating")
-                group, encoding = daily_group(content, date.fromisoformat(day), centre)
-                summary = {**group.summary(), "encoding": encoding, "source_sha256": job["original"]}
+                if groups is None:
+                    group, encoding = daily_group(content, date.fromisoformat(day), centre)
+                else:
+                    group = groups[centre]
+                summary = {**group.summary(), "encoding": encoding, "source_sha256": source_digest}
                 store.update(day, centre, state=group.status, summary=json.dumps(summary), error="", result="")
                 store.event(day, centre, group.status, json.dumps(group.issues))
             if group.status in {"blocked", "no_movements"}:
@@ -525,8 +765,8 @@ class GioWorker:
                          summary=json.dumps(summary),
                          error="" if allowed else "CSV candidato: faltan aprobaciones o comprobacion del esquema Odoo")
             store.event(day, centre, "generated", json.dumps({
-                "sha256": digest, "released": allowed, "mapping": config["mapping"],
-                "odoo_evidence": config["odoo_import_evidence"], "business_evidence": config["business_evidence"],
+                "sha256": digest, "released": allowed,
+                "odoo_schema_checked": bool(summary.get("odoo_schema")),
             }))
         except PortalNotVerified:
             store.update(day, centre, state="download_error", error=ERRORS["portal_not_verified"])
@@ -552,45 +792,14 @@ class GioWorker:
 
     def send_prepared(self, batch: dict, config: dict):
         day = batch["day"]
-        with self.store.connect() as conn:
-            jobs = [dict(row) for row in conn.execute("SELECT * FROM centres WHERE day=? ORDER BY centre", (day,))]
-        if not jobs or any(job["state"] not in TERMINAL for job in jobs):
-            return
         if not config["send_enabled"] or not config["recipients"]:
             return
-        attachments = []
-        statuses = []
-        complete = set(job["centre"] for job in jobs) == set(CENTRES)
-        for job in jobs:
-            centre, state = job["centre"], job["state"]
-            if state not in {"ready", "no_movements"}:
-                complete = False
-            summary = json.loads(job["summary"])
-            totals = "; ".join(f"{key}={value}" for key, value in summary.get("totals", {}).items())
-            issues = summary.get("issues", [])
-            incidents = "; ".join(
-                f"fila {issue['row']}: {issue['code']} ({issue.get('difference', '-')})" for issue in issues[:10])
-            if summary.get("totals_complete") is False:
-                totals = "TOTALES INCOMPLETOS, NO UTILIZABLES: " + totals
-            statuses.append(f"{CENTRES[centre][0]}: {STATES[state]}; filas={summary.get('rows', '-')}; "
-                            f"{totals}; {job['error']}; incidencias={len(issues)} {incidents}")
-            if job["original"] and state != "download_error":
-                attachments.append((f"GIO-{day}-{centre}-original.csv", self.store.blob(job["original"])))
-            elif job["original"]:
-                statuses.append("Respuesta web rechazada conservada en Cloud, no adjunta como informe.")
-            if current_result(job, config):
-                attachments.append((f"GIO-{day}-{centre}-odoo.csv", self.store.blob(job["result"])))
-            elif state == "ready":
-                complete = False
-                statuses.append("CSV retenido: aprobaciones de configuracion retiradas")
-        for centre in CENTRES:
-            if centre not in {job["centre"] for job in jobs}:
-                statuses.append(f"{CENTRES[centre][0]}: no solicitado en esta fecha")
-        label = "COMPLETO" if complete else "PARCIAL / REVISION"
-        subject = f"GIO {day} - {label} - envio {batch['generation']}"
-        body = "<p>" + "</p><p>".join(escape(value) for value in statuses) + "</p>"
-        body += "<p>Aceptacion por Graph no acredita entrega. CSV solo para importacion manual, nunca publicados en Odoo.</p>"
-        manifest = json.dumps({"recipients": config["recipients"], "subject": subject,
+        payload = prepare_mail_payload(self.store, batch, config, require_terminal=True)
+        if not payload["terminal"]:
+            return
+        attachments = payload["attachments"]
+        subject, body = payload["subject"], payload["body"]
+        manifest = json.dumps({"recipients": payload["recipients"], "subject": subject,
                                "files": [(name, hashlib.sha256(content).hexdigest()) for name, content in attachments]})
         # Fail before marking 'sending' for the known Graph simple-message size limit.
         if sum(4 * ((len(content) + 2) // 3) for _, content in attachments) + len(body.encode()) > 2_500_000:
@@ -601,7 +810,7 @@ class GioWorker:
             conn.execute("UPDATE batches SET mail_state='sending',mail_manifest=? WHERE day=?", (manifest, day))
         self.store.event(day, "", "sending", manifest)
         try:
-            self.sender(subject, body, config["recipients"], attachments=attachments)
+            self.sender(subject, body, payload["recipients"], attachments=attachments)
         except Exception as exc:
             LOGGER.error("gio stage=mail day=%s exception_type=%s", day, type(exc).__name__)
             self.mail_state(day, "uncertain", ERRORS["mail_uncertain"])

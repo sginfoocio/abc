@@ -4,6 +4,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from io import StringIO
 import json
+import sqlite3
 from unittest.mock import MagicMock, Mock
 
 from cryptography.fernet import Fernet
@@ -14,8 +15,9 @@ from streamlit.testing.v1 import AppTest
 import gio_cloud as cloud
 from gio_reports import (
     AMOUNTS, COLUMNS, ODOO_COLUMNS, ReportError, accounting_lines, candidate_csv,
-    daily_group, previous_day, read_report, spanish_money,
+    daily_group, daily_groups, previous_day, read_report, spanish_money,
 )
+from app_pages.gio import display_state
 
 
 DAY = date(2026, 10, 31)
@@ -62,6 +64,9 @@ class Config:
 
 def worker(tmp_path, config=None, downloader=None, sender=None):
     store = cloud.GioStore(tmp_path)
+    if downloader is None:
+        downloader = Mock()
+        downloader.fetch.side_effect = cloud.PortalNotVerified()
     return cloud.GioWorker(store, config or Config(), downloader=downloader, sender=sender or Mock(),
                            odoo_checker=lambda _: {"import_tested": False, "synthetic": True})
 
@@ -100,6 +105,17 @@ def test_grouping_is_by_date_and_centre_not_client_or_order():
         daily_group(report(movement(), movement(TIENDA="1")), DAY, "0")
 
 
+def test_daily_general_report_separates_centres_and_fills_missing_centre():
+    groups, encoding = daily_groups(report(movement(), movement(TIENDA="1")), DAY)
+
+    assert encoding == "utf-8-sig"
+    assert set(groups) == set(cloud.CENTRES)
+    assert groups["0"].rows == groups["1"].rows == 1
+    assert groups["2"].status == "no_movements" and groups["2"].rows == 0
+    with pytest.raises(ReportError, match="fechas"):
+        daily_groups(report(movement(FECHA="30/10/2026")), DAY)
+
+
 @pytest.mark.parametrize("content", [
     b"<html>login</html>", b"<!DOCTYPE html><body>login</body>",
     report(movement()).replace(b";", b"\t"), report(movement()).replace(b"ENCARGOS", b"NEW_COLUMN"),
@@ -111,13 +127,16 @@ def test_changed_schema_html_and_invalid_scope_fail_closed(content):
         read_report(content)
 
 
-def test_known_1642_mismatch_blocks_entire_centre_not_other_centres():
-    bad = movement(BIMPONIBLE_10="116,89", CUOTA_10="11,69", TOTAL_10="128,58",
-                   BIMPONIBLE_21="0", CUOTA_21="0", TOTAL_21="0", TOTAL="145")
+def test_accounting_discrepancy_blocks_only_its_centre():
+    bad = movement(BIMPONIBLE_10="100", CUOTA_10="10", TOTAL_10="110",
+                   BIMPONIBLE_21="0", CUOTA_21="0", TOTAL_21="0", TOTAL="115",
+                   OPERACION="FACTURA")
     parsed = read_report(report(bad, movement(), movement(TIENDA="1")))
     group = parsed.groups[(DAY, "0")]
     assert group.status == "blocked"
-    assert group.issues == [{"row": 2, "code": "descuadre_total", "difference": "16.42"}]
+    assert group.issues == [{
+        "row": 2, "code": "descuadre_total", "operation": "FACTURA", "difference": "5.00",
+    }]
     with pytest.raises(ReportError):
         accounting_lines(group)
     assert parsed.groups[(DAY, "1")].status == "validated"
@@ -127,7 +146,10 @@ def test_unescaped_delimiters_are_not_repaired_and_block_only_identified_group()
     malformed = report(movement()).replace(b"134,20;", b"134,20;extra;")
     group = read_report(malformed).groups[(DAY, "0")]
     assert group.status == "blocked" and group.rows == 1
-    assert group.issues == [{"row": 2, "code": "numero_columnas", "expected": 20, "actual": 21}]
+    assert group.issues == [{
+        "row": 2, "code": "numero_columnas", "operation": "F.SIMPLIFICADA",
+        "expected": 20, "actual": 21,
+    }]
     assert group.totals["TOTAL"] == 0  # no guessed column alignment
     with pytest.raises(ReportError):
         candidate_csv(group, settings()["mapping"])
@@ -138,6 +160,8 @@ def test_invalid_amount_unknown_operation_and_rate_total_are_incidents():
                                movement(TOTAL_21="25", TOTAL="135"))).groups[(DAY, "0")]
     assert {issue["code"] for issue in group.issues} == {
         "operacion_no_reconocida", "importe_invalido", "descuadre_iva_21"}
+    assert next(issue for issue in group.issues if issue["code"] == "descuadre_iva_21")["operation"] == \
+        "F.SIMPLIFICADA"
 
 
 @pytest.mark.parametrize("operation", [
@@ -199,6 +223,115 @@ def test_empty_header_report_is_no_movements_not_failed_download(tmp_path):
         daily_group(b"", DAY, "0")
 
 
+def test_general_download_is_shared_and_centres_process_independently(tmp_path):
+    discrepancy = movement(BIMPONIBLE_10="116,89", CUOTA_10="11,69", TOTAL_10="128,58",
+                           BIMPONIBLE_21="0", CUOTA_21="0", TOTAL_21="0", TOTAL="145")
+    content = report(discrepancy, movement(TIENDA="1"))
+    downloader = Mock()
+    downloader.fetch.return_value = content
+    sender = Mock()
+    w = worker(tmp_path, downloader=downloader, sender=sender)
+    w.store.enqueue(DAY, list(cloud.CENTRES), send=True, **ACTOR)
+
+    w.tick(NOW)
+
+    rows = {row["centre"]: row for row in w.store.history(DAY.isoformat())}
+    assert {centre: row["state"] for centre, row in rows.items()} == {
+        "0": "blocked", "1": "ready", "2": "no_movements",
+    }
+    assert downloader.fetch.call_count == 1
+    assert downloader.fetch.call_args.args[0] == DAY
+    assert w.store.blob(w.store.batch_original(DAY.isoformat())) == content
+    assert not rows["0"]["result"] and rows["1"]["result"] and not rows["2"]["result"]
+    results = list(csv.DictReader(StringIO(
+        w.store.blob(rows["1"]["result"]).decode("utf-8-sig")), delimiter=";"))
+    assert len(results) == 5
+    assert sum(Decimal(row["line_ids/debit"]) for row in results) == \
+        sum(Decimal(row["line_ids/credit"]) for row in results)
+    shared = [w.store.artifacts(DAY.isoformat(), centre) for centre in cloud.CENTRES]
+    assert all(any(item["kind"] == "original_general" and
+                   w.store.blob(item["digest"]) == content for item in artifacts)
+               for artifacts in shared)
+    attachments = dict(sender.call_args.kwargs["attachments"])
+    assert set(attachments) == {
+        f"GIO-{DAY.isoformat()}-original-general.csv",
+        f"GIO-{DAY.isoformat()}-1-odoo.csv",
+    }
+    with w.store.connect() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM artifacts WHERE day=? AND kind='original_general'",
+            (DAY.isoformat(),),
+        ).fetchone()[0] == 1
+
+    w.store.enqueue(DAY, list(cloud.CENTRES), **ACTOR)
+    w.tick(NOW + timedelta(minutes=5))
+
+    assert downloader.fetch.call_count == 1
+    assert len(w.store.history(DAY.isoformat())) == 3
+    assert sender.call_count == 1
+
+
+def test_mail_preview_includes_general_original_candidate_and_incident_without_sending(tmp_path):
+    discrepancy = movement(OPERACION="FACTURA", BIMPONIBLE_10="100", CUOTA_10="10", TOTAL_10="110",
+                           BIMPONIBLE_21="0", CUOTA_21="0", TOTAL_21="0", TOTAL="115")
+    content = report(discrepancy, movement(TIENDA="1"))
+    config = settings()
+    config["send_enabled"] = False
+    config["odoo_import_evidence"] = ""
+    downloader, sender = Mock(), Mock()
+    downloader.fetch.return_value = content
+    w = worker(tmp_path, Config(config), downloader=downloader, sender=sender)
+    w.store.enqueue(DAY, list(cloud.CENTRES), send=True, **ACTOR)
+    w.tick(NOW)
+
+    batch = w.store.batch(DAY.isoformat())
+    preview = cloud.prepare_mail_payload(w.store, batch, config, include_candidates=True)
+    names = [name for name, _ in preview["attachments"]]
+    assert names.count(f"GIO-{DAY.isoformat()}-original-general.csv") == 1
+    assert names == [
+        f"GIO-{DAY.isoformat()}-original-general.csv",
+        f"GIO-{DAY.isoformat()}-1-odoo-candidato.csv",
+    ]
+    assert "FACTURA; descuadre_total (5.00)" in preview["body"]
+    assert "CLIENTE SINTETICO" not in preview["body"]
+    assert "Respuesta web rechazada" not in preview["body"]
+    assert "no se envia" in preview["body"]
+    assert preview["terminal"] and not preview["complete"]
+    assert sender.call_count == 0
+    assert w.store.batch(DAY.isoformat())["mail_state"] == "pending"
+    generated = [json.loads(event["detail"]) for event in w.store.events(DAY.isoformat())
+                 if event["stage"] == "generated"]
+    assert generated and all("mapping" not in event and "business_evidence" not in event for event in generated)
+
+
+@pytest.mark.parametrize("state,summary,expected", [
+    ("blocked", {"issues": [{"code": "descuadre_total"}]}, "Descuadre contable"),
+    ("blocked", {"issues": [{"code": "numero_columnas"}]}, "Incidencia del CSV"),
+    ("download_error", {}, "Error técnico"),
+    ("internal_error", {}, "Error técnico"),
+    ("no_movements", {}, "Sin movimientos"),
+    ("candidate", {}, "Procesado correctamente (configuración contable pendiente)"),
+])
+def test_operational_status_labels_are_centre_specific(state, summary, expected):
+    assert display_state({"state": state, "summary": json.dumps(summary)}, settings()) == expected
+
+
+def test_released_csv_displays_as_processed_successfully():
+    config = settings()
+    row = {"state": "ready", "result": "synthetic-digest",
+           "summary": json.dumps({"contract": cloud.contract_digest(config)})}
+
+    assert display_state(row, config) == "Procesado correctamente"
+
+
+def test_candidate_csv_display_mentions_pending_odoo_validation():
+    row = {"state": "candidate", "result": "synthetic-digest", "summary": "{}"}
+
+    assert display_state(row, settings()) == (
+        "Procesado correctamente (CSV candidato; pendiente de validar Odoo)"
+    )
+
+
 def test_login_html_is_download_error_preserved_but_never_emailed_as_report(tmp_path):
     send = Mock()
     w = worker(tmp_path, sender=send)
@@ -232,7 +365,7 @@ def test_partial_results_attach_originals_and_only_released_csv_once(tmp_path):
     assert "CLIENTE SINTETICO" not in json.dumps(w.store.events(DAY.isoformat()))
 
 
-def test_transient_download_retries_bounded_per_centre_and_survive_restart(tmp_path):
+def test_transient_general_download_retries_bounded_per_date_and_survive_restart(tmp_path):
     downloader = Mock()
     downloader.fetch.side_effect = cloud.TransientDownload()
     w = worker(tmp_path, downloader=downloader)
@@ -372,6 +505,7 @@ def test_odoo_mapping_check_uses_readonly_transaction_and_rollback(wrong_company
     else:
         result = cloud.verify_odoo_mapping(engine, settings()["mapping"])
         assert result["version"] == "15.0.1.3" and result["import_tested"] is False
+        assert result["company_verified"] is True and "company" not in result
     assert queries[0] == "SET TRANSACTION READ ONLY"
     assert all(query.startswith(("SELECT", "SET")) for query in queries)
     conn.begin.return_value.rollback.assert_called_once()
@@ -430,7 +564,7 @@ def test_automatic_schedule_uses_local_time_and_does_not_duplicate(tmp_path):
     config = Config()
     config.value.update(enabled=True, daily_time="07:00", send_enabled=False)
     downloader = Mock()
-    downloader.fetch.side_effect = lambda day, centre, config: report()
+    downloader.fetch.side_effect = lambda day, config: report()
     w = worker(tmp_path, config, downloader)
     w.tick(datetime(2026, 11, 1, 5, 59, tzinfo=timezone.utc))
     assert not w.store.history()
@@ -438,7 +572,7 @@ def test_automatic_schedule_uses_local_time_and_does_not_duplicate(tmp_path):
     assert len(w.store.history()) == 3
     assert all(row["day"] == "2026-10-31" for row in w.store.history())
     w.tick(NOW)
-    assert downloader.fetch.call_count == 3
+    assert downloader.fetch.call_count == 1
 
 
 def test_config_encrypted_admin_only_and_unverified_automation_cannot_be_enabled(tmp_path, monkeypatch):
@@ -479,6 +613,25 @@ def test_config_store_keeps_legacy_automation_and_mail_disabled(tmp_path, monkey
     assert loaded["send_enabled"] is False
 
 
+def test_existing_batch_schema_migrates_general_original_without_losing_rows(tmp_path):
+    database = tmp_path / "history.sqlite3"
+    with sqlite3.connect(database) as conn:
+        conn.execute(
+            "CREATE TABLE batches (day TEXT PRIMARY KEY, created REAL NOT NULL, origin TEXT NOT NULL, "
+            "mail_state TEXT NOT NULL, generation INTEGER NOT NULL DEFAULT 0, "
+            "mail_detail TEXT NOT NULL DEFAULT '', mail_manifest TEXT NOT NULL DEFAULT '')")
+        conn.execute("INSERT INTO batches(day,created,origin,mail_state) VALUES(?,?,?,?)",
+                     (DAY.isoformat(), 1, "synthetic", "draft"))
+
+    store = cloud.GioStore(tmp_path)
+
+    assert store.batch_original(DAY.isoformat()) == ""
+    with store.connect() as conn:
+        row = conn.execute("SELECT origin,mail_state,original FROM batches WHERE day=?",
+                           (DAY.isoformat(),)).fetchone()
+    assert tuple(row) == ("synthetic", "draft", "")
+
+
 @pytest.mark.parametrize("url", [
     "http://opticadiagonal-gioweb.deipe.com/",
     "https://other.example/",
@@ -513,6 +666,10 @@ def test_gio_connection_check_uses_observed_login_form_without_registering_sessi
     assert session.post.call_args.kwargs["data"] == {
         "_username": "SYNTHETIC_USER", "_password": "SYNTHETIC_PASSWORD", "idioma": "Español",
     }
+    assert session.post.call_args.kwargs["headers"] == {
+        "X-Requested-With": "XMLHttpRequest",
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+    }
     assert session.post.call_args.kwargs["allow_redirects"] is False
     assert session.get.call_count == 2
     session.__exit__.assert_called_once()
@@ -544,6 +701,70 @@ def test_gio_connection_check_rejects_external_redirect_and_bad_login(monkeypatc
     monkeypatch.setattr(cloud.requests, "Session", Mock(return_value=session))
     with pytest.raises(cloud.GioConnectionError, match="rechazó"):
         cloud.check_gio_connection(config)
+
+    error_session = Mock()
+    error_session.__enter__ = Mock(return_value=error_session)
+    error_session.__exit__ = Mock(return_value=False)
+    error_session.get.return_value = Mock(
+        status_code=200, is_redirect=False, text='<script src="gioweb_login.js"></script>',
+    )
+    error_session.post.return_value = Mock(status_code=500)
+    monkeypatch.setattr(cloud.requests, "Session", Mock(return_value=error_session))
+    with pytest.raises(cloud.GioConnectionError, match="HTTP 500"):
+        cloud.check_gio_connection(config)
+
+
+def test_report_downloader_uses_observed_all_stores_request_without_registering_session(monkeypatch):
+    content = report(movement(), movement(TIENDA="1"))
+    session = Mock()
+    redirect = Mock(status_code=302, is_redirect=True, headers={"Location": "/login"})
+    login_page = Mock(status_code=200, is_redirect=False, text='<script src="gioweb_login.js"></script>')
+    login = Mock(status_code=200)
+    login.json.return_value = {"success": True}
+    downloaded = Mock(status_code=200, headers={"Content-Type": "application/csv; charset=utf-8"})
+    downloaded.iter_content.return_value = [content]
+    session.get.side_effect = [redirect, login_page, downloaded]
+    session.post.return_value = login
+    monkeypatch.setattr(cloud.requests, "Session", Mock(return_value=session))
+
+    result = cloud.GioReportDownloader().fetch(
+        DAY, {"portal_url": cloud.PORTAL_URL, "username": "SYNTHETIC_USER", "password": "SYNTHETIC_PASSWORD"})
+
+    assert result == content
+    assert session.get.call_count == 3 and session.post.call_count == 1
+    assert all("sesionesweb/registrar" not in call.args[0]
+               for call in [*session.get.call_args_list, *session.post.call_args_list])
+    download = session.get.call_args_list[-1]
+    assert download.args[0] == cloud.PORTAL_URL + "Informesinformesestadisticos/descargar"
+    criteria = json.loads(download.kwargs["params"]["criterios"])
+    assert criteria == {
+        "id": 57, "fecha_ini": DAY.isoformat(), "fecha_fin": DAY.isoformat(),
+        "id_tienda": None, "tipo_listado_oficial": "4",
+    }
+    assert download.kwargs["params"]["timeLimit"] == "210"
+    assert download.kwargs["headers"]["X-Requested-With"] == "XMLHttpRequest"
+    downloaded.close.assert_called_once()
+    session.close.assert_called_once()
+
+
+def test_report_downloader_retries_interrupted_stream(monkeypatch):
+    session = Mock()
+    redirect = Mock(status_code=302, is_redirect=True, headers={"Location": "/login"})
+    login_page = Mock(status_code=200, is_redirect=False, text='<script src="gioweb_login.js"></script>')
+    login = Mock(status_code=200)
+    login.json.return_value = {"success": True}
+    downloaded = Mock(status_code=200, headers={"Content-Type": "application/csv"})
+    downloaded.iter_content.side_effect = requests.exceptions.ChunkedEncodingError()
+    session.get.side_effect = [redirect, login_page, downloaded]
+    session.post.return_value = login
+    monkeypatch.setattr(cloud.requests, "Session", Mock(return_value=session))
+
+    with pytest.raises(cloud.TransientDownload):
+        cloud.GioReportDownloader().fetch(
+            DAY, {"portal_url": cloud.PORTAL_URL, "username": "SYNTHETIC_USER", "password": "SYNTHETIC_PASSWORD"})
+
+    downloaded.close.assert_called_once()
+    session.close.assert_called_once()
 
 
 def test_download_and_control_permissions(tmp_path):
@@ -671,6 +892,40 @@ render()
     assert not app.exception and download.call_count == 1 and app.get("download_button")
     app.run()
     assert download.call_count == 1
+
+
+def test_mail_preview_ui_only_builds_local_attachment_downloads(tmp_path, monkeypatch):
+    monkeypatch.setenv("GIO_DATA_ROOT", str(tmp_path))
+    monkeypatch.setenv("KERING_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    config = settings()
+    config["send_enabled"] = False
+    config["odoo_import_evidence"] = ""
+    cloud.GioConfigStore(tmp_path).save(config)
+    content = report(
+        movement(OPERACION="FACTURA", BIMPONIBLE_10="100", CUOTA_10="10", TOTAL_10="110",
+                 BIMPONIBLE_21="0", CUOTA_21="0", TOTAL_21="0", TOTAL="115"),
+        movement(TIENDA="1"),
+    )
+    downloader, sender = Mock(), Mock()
+    downloader.fetch.return_value = content
+    w = worker(tmp_path, Config(config), downloader=downloader, sender=sender)
+    w.store.enqueue(DAY, list(cloud.CENTRES), send=True, **ACTOR)
+    w.tick(NOW)
+
+    app = AppTest.from_string("""
+import streamlit as st
+st.session_state["auth_role"] = "admin"
+st.session_state["auth_user"] = "synthetic-admin"
+from app_pages.gio import render_history
+from gio_cloud import GioConfigStore, GioStore, data_root
+render_history(GioStore(data_root()), GioConfigStore(data_root()).load())
+""").run()
+    assert not app.exception and not sender.called
+    app.button(key=f"gio_prepare_mail_preview_{DAY.isoformat()}").click().run()
+    assert not app.exception and len(app.get("download_button")) == 2
+    assert not sender.called
+    assert w.store.batch(DAY.isoformat())["mail_state"] == "pending"
+    assert not any(event["stage"] == "sending" for event in w.store.events(DAY.isoformat()))
 
 
 def test_navigation_only_exposes_gio_to_admin():

@@ -1,36 +1,34 @@
-# GIO en Cloud: procesamiento offline y puertas de activacion
+# GIO en Cloud: descarga diaria y puertas de activacion
 
 ## Estado de entrega
 
-**No activar en produccion todavia.** Esta entrega implementa y prueba el
-procesamiento offline, la cola persistente, la pantalla de administracion y
-la preparacion del correo. No acredita una integracion real completa.
+**No fusionar ni desplegar todavia.** La descarga diaria esta verificada
+localmente contra GIO. Siguen pendientes confirmar la persistencia del mapeo,
+consumir el reintento de Vigo, validar el importador y preparar la vista previa
+real del correo.
 
 | Componente | Evidencia |
 |---|---|
-| Excel y CSV locales | Leidos programaticamente; originales intactos |
-| CSV, decimales, signos, agrupacion y equilibrio | Pruebas sinteticas y muestra real, sin publicar datos personales |
-| Portal publico | GET `/login` y JavaScript publico observados; sin autenticar |
-| Exportacion autenticada | **Pendiente: no hay credenciales GIO disponibles** |
-| Odoo | Esquema e IDs contrastados por SELECT en transaccion READ ONLY y rollback |
-| Importacion manual Odoo | **Pendiente: no se ha probado el importador, sus permisos ni la agrupacion real** |
-| Correo | Payload, adjuntos, duplicados y estados probados con dobles; **sin envio real de prueba** |
-| Produccion | Sin despliegue, reinicio, activacion, merge ni escrituras Odoo |
+| Portal GIO | GET autenticado del informe general devolvio CSV y coincidio byte a byte con la exportacion manual local |
+| Procesamiento | El worker descarga una vez por fecha, conserva el original general y separa los estados por centro |
+| Interfaz local | Configuracion e historico revisados con sesion local autenticada; no se reprodujo la perdida de sesion al navegar. La vista previa real sigue pendiente porque Vigo no tiene CSV generado |
+| CSV para Odoo | El mapeo real se verifico mediante lectura Odoo. La UI confirmo el guardado, pero no se pudo verificar su persistencia cifrada; no se reescribio para evitar sustituir valores por controles reiniciados |
+| Odoo y correo | Sin escrituras, importaciones ni envios reales; automatizacion y correo siguen desactivados |
+| Produccion | Sin despliegue, reinicio, activacion, merge ni cambios remotos |
 
-No se encontro `AGENTS.md` en el repositorio ni en sus directorios ascendientes.
-Se han seguido README, workflows, configuracion cifrada de proveedores, permisos
-admin, diseno Cloud, SQLite/FileLock y worker existentes.
+No se encontro el worker local `kering_jobs.py` en ejecucion y el reintento de
+Vigo permanece en cola. Esta terminal de validacion no dispone de la clave
+Fernet, por lo que no se pudo descifrar la configuracion ni verificar el mapeo.
+
+Se han seguido las instrucciones `AGENTS.md`, README, workflows, configuracion
+cifrada de proveedores, permisos admin, diseno Cloud, SQLite/FileLock y worker
+existentes.
 
 ## Evidencia local y privacidad
 
-Las referencias originales permanecen en la carpeta local `docs/Gio/`.
-No estan en el arbol de `origin/main` ni en la rama de esta PR. La inspeccion
-de **todas** las referencias locales encontro ademas una instantanea previa
-del agente en `refs/agents/.../checkpoints/turn/0` que contiene los cuatro
-originales. Esa instantanea no es antecesora de esta rama. No se ha borrado,
-reescrito ni publicado; no usar `git push --mirror` ni publicar esas referencias.
-La PR solo debe publicar la rama de integracion. Se ignora `docs/Gio/` para
-evitar incorporaciones accidentales; Docker ya excluye esa documentacion.
+Los originales reales y la evidencia se conservan en almacenamiento local
+restringido, no se incorporan a esta rama ni se publican. No se deben incluir
+copias reales en Git, documentación, logs ni fixtures.
 
 Las fixtures son sinteticas y no incorporan nombres, NIF, encargos, facturas
 ni sesiones reales. Los errores conservan fecha/centro, fila del original,
@@ -38,101 +36,47 @@ campo, codigo y diferencia, no los datos de cliente. Los originales adjuntos
 **si contienen datos personales**: restringir destinatarios y acceso a
 administradores. No se modifica ni se repara automaticamente ningun original.
 
-### Excel
+### Contrato contable
 
-`asientos ventas.xlsx`: una hoja (`Hoja1`), 34 filas, 9 columnas; se leyo con
-`data_only=False` y `True`. **No contiene formulas**. Los tres ejemplos tienen
-las mismas cifras: clientes 1.621,40; IVA 21% 50,65; IVA 10% 120,87; base 21%
-241,20; base 10% 1.208,68. Estan equilibrados.
+El mapeo de cuentas y diarios se configura localmente en Cloud y se conserva
+cifrado. No se guardan IDs Odoo, importaciones ni cifras de ventas en esta
+documentacion. Los CSV son candidatos para `account.move` y requieren validar
+el importador y el contrato contable antes de cualquier uso.
 
-| Tienda indicada por negocio | Centro | Diario por nombre | Cuenta ventas |
-|---|---|---|---|
-| 0 | Ourense | VENTAS OU | 70000001 |
-| 1 | Vigo | VENTAS VI | 70000002 |
-| 2 | Coruna | VENTAS CO | 70000005 |
+### Muestra real
 
-El Excel confirma **nombres, cuentas y orden de las cinco lineas**, no los
-IDs numericos de tienda; estos proceden de la especificacion y la captura
-asocia Ourense a tienda 0. Clientes usa 43000000; ambos IVA usan 47700000,
-pero se mantienen como lineas separadas.
+La muestra se procesa sin deduplicar filas ni inferir importes a partir del
+tipo de operacion. Las filas mal formadas y los descuadres bloquean solo el
+centro afectado; no se corrigen ni se generan asientos vacios. Los resultados
+detallados se conservan unicamente en el almacenamiento local restringido.
 
-OZ1, VZ1 y CZ1 aparecen como documentos y dentro de conceptos de ejemplo.
-No hay formula ni secuencia que permita extrapolarlos. El campo asiento dice
-`COGE PROGRAMA`: no se genera numeracion Odoo ni se inventa una factura.
-Se propone una referencia descriptiva `GIO fecha centro`, sujeta a aprobacion
-contable antes de liberar CSV.
+## Portal: descarga autenticada
 
-### CSV real
+En local se observó el flujo de **Consultas -> Listados Oficiales -> Detallado
+Extendido**, con Desde/Hasta iguales y Tienda vacía. La UI ejecutó la búsqueda
+real y el endpoint autenticado de exportación devolvió HTTP 200 con
+`application/csv`. Se implementó el mismo GET HTTP observado, reutilizando el
+`login_check` ya comprobado; no se llama a `/sesionesweb/registrar`.
 
-UTF-8 sin BOM, separador `;`, cabecera de 20 columnas. 796 registros,
-70 combinaciones fecha/tienda de octubre de 2026:
+El worker ejecutó el informe general de una fecha una sola vez. El original
+inmutable se conserva una vez por SHA-256 en el almacenamiento local; las tres
+filas de centro apuntan al mismo artefacto general en el histórico. Una segunda
+ejecución no volvió a descargar ni duplicó registros. El CSV automático coincidió
+byte a byte con la exportación manual facilitada por el usuario.
 
-| Operacion | Filas | Signo observado de TOTAL |
-|---|---:|---|
-| F.SIMPLIFICADA | 681 | positivo |
-| FACTURA | 26 | positivo |
-| F.SIMPL.RECTIFICATIVA S1 | 37 | negativo |
-| F.SIMPL.RECTIFICATIVA S2 | 50 | negativo |
-| RECTIFICATIVA | 2 | negativo |
+Resultado separado por centro en el historico local: Ourense, **descuadre
+contable**; Vigo, **pendiente**; Coruña, **sin movimientos**, sin asiento vacío.
+El reintento de Vigo sigue encolado porque no hay worker local activo y no se
+confirmo el mapeo cifrado; no se genero su CSV. Un candidato anterior se comprobo
+solo en memoria con IDs sinteticos; no se guardo ni se importo.
+No se incluyen aquí filas, clientes, importes, NIF, credenciales ni huellas del
+archivo original.
 
-Se conservan todas las filas y sus signos; no se deduplica por encargo,
-cliente, importe ni por igualdad de filas. No se vuelve negativo un importe
-por el nombre de la operacion. Las operaciones desconocidas bloquean su grupo.
-El tratamiento de las cinco operaciones conocidas es **provisional** hasta
-que contabilidad confirme su inclusion y la relacion entre originales,
-rectificativas y facturas. No se interpreta `MODO_PAGO` como nueva venta.
-
-El procesador identifica:
-
-- **14 descuadres de TOTAL respecto a los dos totales de IVA.**
-- **11 filas con longitud irregular**: ocho con 21 campos, dos con 22 y una
-  con 27, frente a los 20 declarados. En la inspeccion aparecen fragmentos
-  de pagos en las posiciones adicionales del final. No se recombinan ni
-  se supone que el resto de columnas este alineado: se bloquea el grupo
-  identificable por fecha/tienda, sin sumar esa fila. Sus totales se etiquetan
-  como incompletos.
-- Resultado: **51 grupos sin incidencias y 19 bloqueados**. Se generaron
-  51 CSV candidatos solo en memoria; no son una certificacion de importacion.
-
-La incidencia pedida es identificable como **fila CSV 3, 2026-10-31, tienda 0**:
-145,00 - (116,89 + 11,69) = **16,42 EUR**. TOTAL_10 es 128,58 y el desglose
-21% es cero. La captura del portal muestra la misma diferencia. La cabecera
-exportada no contiene otra columna monetaria que la explique. Las otras
-columnas y el Excel tampoco acreditan una causa. **Sigue sin resolver**:
-no se atribuye a descuentos, exentos, anticipos ni errores concretos de GIO.
-Pedir al proveedor el detalle y significado de esa operacion y una exportacion
-con cabecera y quoting consistentes. El CSV de Ourense/2026-10-31 queda bloqueado;
-no se ajusta ni se crea contrapartida por 16,42.
-
-## Portal: observado frente a pendiente
-
-Origen fijo solicitado: `https://opticadiagonal-gioweb.deipe.com/`.
-El GET publico redirige a `/login`; se observo GIOweb 1.84.15. El HTML carga
-Ext JS desde `/gwcore/production/gioweb_login.js?vg=1.84.15`.
-El JavaScript publico define `login_check_url="/login_check"` y los campos
-`_username` / `_password`, con IDs `loginInputUsuario` / `loginInputPassword`.
-El flujo tambien consulta/registra sesiones web. Esto **no demuestra** el
-contrato de cookies, controles adicionales ni la exportacion tras autenticar.
-No se enviaron credenciales, no se invocaron acciones de registro de sesion.
-
-Las capturas confirman Consultas -> Listados Oficiales, Detallado Extendido,
-Desde/Hasta/Tienda, Buscar y Descargar. Sin acceso autenticado no se han observado
-las peticiones de Buscar/Descargar ni selectores estables de esa pantalla.
-Por ello `UnverifiedDownloader` falla explicitamente sin conectarse, y la
-configuracion y UI rechazan activar el automatico. **No hay endpoints ni
-selectores de exportacion inventados**.
-
-Al disponer de credenciales mediante Cloud:
-
-1. Inspeccionar acceso y exportacion con autorizacion, sin guardar cookies,
-   passwords, HAR con datos personales ni respuestas en Git/PR/logs.
-2. Preferir `requests.Session` si el contrato real lo permite; si requiere
-   navegador, reutilizar Playwright y Chromium ya presentes en la imagen.
-3. Implementar `fetch(day, centre, config) -> bytes` con filtros exactos
-   Desde=Hasta y tienda, timeout y clasificacion explicita de fallos transitorios.
-4. Verificar los tres centros, sesion caducada/HTML, dia sin movimientos y
-   recuperacion. Mantener el limite de tres intentos y la validacion de alcance.
-5. Retirar la puerta de activacion solo junto con esa evidencia y pruebas.
+Las credenciales se leyeron del almacén cifrado local. No se hicieron escrituras
+en Odoo, envíos de correo ni registros/cierres de sesión del portal. La
+configuración de automatización y correo siguió desactivada. La configuración
+contable real no está completa, así que el worker conserva el centro válido como
+candidato y no publica un CSV importable.
 
 ## Configuracion y arquitectura Cloud
 
@@ -177,28 +121,13 @@ configurada no existe en el cambio a verano, ejecuta en el primer tick posterior
 Tras una parada de varios dias **no rellena dias antiguos automaticamente**:
 recuperarlos explicitamente desde Cloud.
 
-### Odoo: IDs reales y formato candidato
+### Odoo: mapeo configurable y formato candidato
 
-Consulta del 17/11/2026: Odoo base **15.0.1.3**, sociedad **2**, moneda EUR.
-Los nombres de diario NO son IDs ni sus codigos:
-
-| Centro | ID diario | Codigo | Nombre |
-|---|---:|---|---|
-| Ourense | 181 | VOU | VENTAS OU |
-| Vigo | 182 | VVI | VENTAS VI |
-| Coruna | 183 | VCO | VENTAS CO |
-
-IDs de cuentas **de esa sociedad**: 43000000 -> 11138; 47700000 -> 11150;
-70000001 -> 11268; 70000002 -> 11269; 70000005 -> 11335.
-Existen cuentas con los mismos codigos en otras sociedades: **no resolver
-solo por codigo**. No se precargan estos IDs como valores universales.
-Los diarios observados no tienen identificadores externos registrados.
-
-La pantalla permite configurar sociedad e IDs tecnicos. Para liberar un
-CSV, ademas de aprobaciones documentadas de contabilidad y del importador,
-el worker comprueba con SELECT/READ ONLY/rollback que version, moneda,
-diarios, cuentas y relaciones de campos siguen coincidiendo. Un fallo conserva
-el candidato y registra la incidencia; no recurre a nombres ambiguos.
+La sociedad, los diarios y las cuentas se configuran localmente desde Cloud;
+no se incluyen IDs de registros Odoo en esta documentacion. Antes de liberar
+un CSV, el worker requiere aprobaciones y comprueba con SELECT/READ ONLY/rollback
+que el mapeo y el esquema siguen coincidiendo. Un fallo conserva el candidato
+sin recurrir a nombres ambiguos.
 
 Formato candidato: UTF-8 BOM, `;`, decimales con punto, cabeceras tecnicas:
 
@@ -229,23 +158,24 @@ Un identificador externo repetido puede actualizar un asiento al reimportarlo:
 1. La cola usa SQLite WAL local en almacenamiento persistente, con PK
    `(fecha, centro)` y lock de proceso compartido entre worker y acciones
    mutantes. Una seleccion repetida no vuelve a descargar ni enviar.
-2. Cada centro descarga independientemente. Solo `TransientDownload` admite
+2. Se descarga un informe general por fecha. Solo `TransientDownload` admite
    reintento automatico: tres intentos persistidos como maximo, con esperas
    de 60/120 segundos antes de los siguientes ticks. Acceso no verificado
    es error final, distinto de sin movimientos.
-3. Se guarda el original exacto bajo SHA-256 antes de validar. La cabecera,
-   encoding (UTF-8/CP1252), separador, longitud de filas, fechas, centros,
-   operaciones, importes y sumas se validan. En descarga diaria, cualquier
-   fecha/centro fuera del solicitado bloquea el archivo, no se filtra en silencio.
-   Solo cabecera valida sin filas significa sin movimientos; un archivo vacio
+3. El original general exacto se guarda una vez bajo SHA-256 antes de validar.
+   La cabecera, encoding (UTF-8/CP1252), separador, longitud de filas, fechas,
+   centros, operaciones, importes y sumas se validan. Fechas fuera del dia
+   solicitado bloquean el archivo; las tiendas del informe general se separan
+   internamente y no se descarta ninguna fila en silencio. Solo una cabecera
+   valida sin filas para un centro significa sin movimientos; un archivo vacio
    o HTML no lo significa.
-   Una respuesta HTML se conserva privada como evidencia del error de descarga,
-   pero no se adjunta al correo como si fuera un informe.
+   Una respuesta HTML se rechaza y nunca se adjunta como si fuera un informe.
 4. Los centros con incidencias no generan CSV. Los restantes generan un candidato
    equilibrado. Solo pasa a `ready` tras aprobaciones y comprobacion SQL real.
    IVA10 e IVA21 nunca se fusionan por usar la misma cuenta.
 5. El correo se prepara cuando todos los centros registrados de esa fecha son
-   finales. Adjunta todos los originales disponibles y solo los CSV `ready`
+   finales. Adjunta el original general una sola vez, los originales corregidos
+   disponibles y solo los CSV `ready`
    cuyo contrato no haya cambiado. Incluye fecha, centro, estado, filas,
    bases/cuotas/totales e incidencias identificables. Totales de filas ilegibles
    se marcan incompletos; se indican centros no solicitados.
@@ -259,16 +189,21 @@ Un identificador externo repetido puede actualizar un asiento al reimportarlo:
 
 ### Uso manual
 
-- Elegir fecha y centros y **Encolar**. Opcionalmente subir un CSV original
-  separado por fecha/centro para procesamiento offline. Un CSV mensual completo
-  no cumple esos filtros diarios: no se seleccionan filas en silencio.
+- Elegir fecha y centros y **Encolar**. Si no se suben originales separados por
+  centro, el worker descarga una vez el informe general para esa fecha. Un CSV
+  mensual completo no cumple esos filtros diarios: no se seleccionan filas en
+  silencio.
 - La opcion de solicitar correo es explicita y esta sin marcar. Solo se envia
   si, ademas, se han permitido envios reales en configuracion.
 - Actualizar el historico para ver estado, incidencias, intentos, originales,
   candidatos/resultados y eventos con actor. Los originales no se muestran
   como tablas con clientes. Cada version se puede descargar como admin.
-- **Reintentar centro** reutiliza su original sin repetir descarga; puede
-  incorporar un original corregido, conservando el anterior y su huella.
+- La vista previa muestra destinatarios, asunto, estados e incidencias, y
+  permite descargar el original general y candidatos compatibles para revision.
+  Es local y no llama al remitente; el boton no crea una generacion de envio.
+  Los descuadres se muestran por fila y tipo de operacion, sin datos de cliente.
+- **Reintentar centro** reutiliza el original general sin repetir descarga;
+  puede incorporar un original corregido, conservando ambas versiones y sus huellas.
   Regenera solo ese centro con el contrato actual. **No reenvia el correo**.
   No usarlo para ignorar un descuadre: hay que resolver los datos de origen.
 - **Solicitar envio/reenvio** crea una nueva generacion registrada para esa
@@ -302,10 +237,10 @@ inofensivos y no se purgan automaticamente.
 ### Activacion (fuera de esta PR)
 
 1. La comprobacion de acceso de Configuracion solo prueba las credenciales.
-   Resolver la descarga autenticada y obtener evidencia por los tres centros;
-   no habilitar automatizacion ni envios solo por el login.
-2. Acordar operaciones/conceptos y resolver exportaciones irregulares y el
-   descuadre de 16,42 con GIO/contabilidad, sin ajustar cifras.
+   La descarga general ya se ha validado localmente; no habilitar automatizacion
+   ni envios solo por el login o esa descarga.
+2. Acordar operaciones/conceptos y resolver las incidencias y descuadres con
+   GIO/contabilidad, sin ajustar cifras.
 3. Validar el importador en una copia autorizada de Odoo y registrar evidencia.
 4. Preparar directorio persistente protegido, backup/retencion y secretos.
    Aplicar cambios de app **y worker** en mantenimiento autorizado. El
@@ -325,13 +260,11 @@ recuperar la automatizacion: perderia la proteccion de duplicados.
 
 ## Pruebas y controles
 
-Las 61 pruebas GIO sinteticas cubren codificaciones y esquema, coma decimal,
-filas repetidas, fecha/centro, signos/abonos, equilibrio y cinco lineas,
-16,42, sin movimientos, fallos parciales, HTML de login, limites de reintento,
-recuperacion entre etapas, exclusiones mutuas, correo incierto/duplicado,
-retirada de aprobaciones, comprobacion SQL readonly, permisos, UI y cambio
-de mes/ano/horario Madrid. El conjunto focalizado con correo, navegacion,
-Cloud, imagenes y worker existente pasa **263 pruebas**.
+Las 85 pruebas GIO cubren codificaciones y esquema, coma decimal, filas
+repetidas, fecha/centro, signos/abonos, equilibrio, descuadres, descarga general,
+centro sin movimientos, fallos parciales, limites de reintento, recuperacion,
+correo incierto/duplicado, comprobacion SQL readonly, permisos y UI. La prueba
+real contra el portal se registra por separado y no se sustituye por mocks.
 
 Comando general exigido por CI (sin servicios de produccion):
 

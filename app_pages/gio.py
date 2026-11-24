@@ -10,7 +10,7 @@ import streamlit as st
 from cloud_design import page_title
 from gio_cloud import (
     CENTRES, STATES, GioConfigStore, GioConnectionError, GioStore,
-    check_gio_connection, current_result, data_root,
+    check_gio_connection, current_result, data_root, prepare_mail_payload,
 )
 from gio_reports import MADRID, previous_day
 
@@ -203,8 +203,23 @@ def identity():
 
 
 def display_state(row, config):
+    if row["state"] == "blocked":
+        issues = json.loads(row["summary"]).get("issues", [])
+        if any(issue.get("code", "").startswith("descuadre_") for issue in issues):
+            return "Descuadre contable"
+        return "Incidencia del CSV"
+    if row["state"] in {"download_error", "internal_error"}:
+        return "Error técnico"
+    if row["state"] == "no_movements":
+        return "Sin movimientos"
+    if row["state"] == "candidate":
+        if not row.get("result"):
+            return "Procesado correctamente (configuración contable pendiente)"
+        return "Procesado correctamente (CSV candidato; pendiente de validar Odoo)"
     if row["state"] == "ready" and not current_result(row, config):
         return "Contrato modificado: revalidar CSV"
+    if row["state"] == "ready":
+        return "Procesado correctamente"
     return STATES.get(row["state"], row["state"])
 
 
@@ -252,14 +267,49 @@ def render_history(store, config):
     selection = st.selectbox("Resultado", range(len(rows)),
                              format_func=lambda index: f"{rows[index]['day']} - {CENTRES[rows[index]['centre']][0]}")
     row = rows[selection]
-    st.json(json.loads(row["summary"]))
+    summary = json.loads(row["summary"])
+    st.json(summary)
+    discrepancies = [
+        {"Fila": issue.get("row", ""), "Operación": issue.get("operation") or "No identificada",
+         "Incidencia": issue["code"], "Diferencia (EUR)": issue.get("difference", "")}
+        for issue in summary.get("issues", []) if issue.get("code", "").startswith("descuadre_")
+    ]
+    if discrepancies:
+        st.subheader("Operaciones con descuadre")
+        st.dataframe(discrepancies, hide_index=True)
+
+    preview_key = f"gio_mail_preview_{row['day']}"
+    with st.expander("Vista previa del correo diario (no se envía)"):
+        st.caption("Vista local de asunto, resumen y adjuntos. No registra ni realiza ningún envío.")
+        if st.button("Preparar vista previa", key=f"gio_prepare_mail_preview_{row['day']}"):
+            st.session_state[preview_key] = True
+        if st.session_state.get(preview_key):
+            batch = store.batch(row["day"])
+            if batch:
+                preview = prepare_mail_payload(store, batch, config, include_candidates=True)
+                st.write("Destinatarios:", "; ".join(preview["recipients"]) or "No configurados")
+                st.subheader(preview["subject"])
+                st.markdown(preview["body"], unsafe_allow_html=True)
+                if preview["attachments"]:
+                    st.write("Adjuntos de la vista previa")
+                    for index, (filename, content) in enumerate(preview["attachments"]):
+                        st.download_button(
+                            f"Descargar {filename}", content, file_name=filename, mime="text/csv",
+                            key=f"gio_mail_preview_attachment_{row['day']}_{index}",
+                        )
+                else:
+                    st.info("No hay adjuntos disponibles para esta fecha.")
     artifacts = store.artifacts(row["day"], row["centre"])
     if artifacts:
         def artifact_label(index):
             artifact = artifacts[index]
             current = current_result(row, config) and artifact["digest"] == row["result"]
-            label = ("CSV validado" if current else "CSV candidato o historico (NO importar sin revision)") \
-                if artifact["kind"] == "result" else "original"
+            if artifact["kind"] == "result":
+                label = "CSV validado" if current else "CSV candidato o historico (NO importar sin revision)"
+            elif artifact["kind"] == "original_general":
+                label = "original general (todas las tiendas)"
+            else:
+                label = "original por centro"
             return f"{label} - {artifact['digest'][:10]}"
         selected = st.selectbox("Archivo y version", range(len(artifacts)), format_func=artifact_label)
         artifact = artifacts[selected]
@@ -268,9 +318,12 @@ def render_history(store, config):
                 "digest": artifact["digest"], "content": store.download(artifact["digest"], **identity())}
         prepared = st.session_state.get("gio_prepared_file", {})
         if prepared.get("digest") == artifact["digest"]:
+            filename = (f"GIO-{row['day']}-original-general-{artifact['digest'][:10]}.csv"
+                        if artifact["kind"] == "original_general"
+                        else f"GIO-{row['day']}-{row['centre']}-{artifact['kind']}-{artifact['digest'][:10]}.csv")
             st.download_button(
                 f"Descargar {artifact_label(selected)}", prepared["content"],
-                file_name=f"GIO-{row['day']}-{row['centre']}-{artifact['kind']}-{artifact['digest'][:10]}.csv",
+                file_name=filename,
                 mime="text/csv", key=f"gio_download_{artifact['kind']}_{artifact['digest']}",
             )
     with st.form("gio_retry"):

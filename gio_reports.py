@@ -112,18 +112,21 @@ def read_report(content: bytes) -> Report:
                 raise ReportError(f"Fila {number}: fecha o tienda invalida") from exc
             group = groups.setdefault((day, row["TIENDA"]), Group(day, row["TIENDA"]))
             group.rows += 1
+            operation = row["OPERACION"].strip()
             if len(values) != len(COLUMNS):
                 group.issues.append({"row": number, "code": "numero_columnas",
-                                     "expected": len(COLUMNS), "actual": len(values)})
+                                     "operation": operation, "expected": len(COLUMNS), "actual": len(values)})
                 continue
             if row["OPERACION"] not in OPERATIONS:
-                group.issues.append({"row": number, "code": "operacion_no_reconocida"})
+                group.issues.append({"row": number, "code": "operacion_no_reconocida",
+                                     "operation": operation})
             amounts = {}
             for name in AMOUNTS:
                 try:
                     amounts[name] = spanish_money(row[name])
                 except ReportError:
-                    group.issues.append({"row": number, "code": "importe_invalido", "field": name})
+                    group.issues.append({"row": number, "code": "importe_invalido",
+                                         "operation": operation, "field": name})
             if len(amounts) != len(AMOUNTS):
                 continue
             for name, amount in amounts.items():
@@ -131,10 +134,12 @@ def read_report(content: bytes) -> Report:
             for rate in ("10", "21"):
                 delta = amounts[f"TOTAL_{rate}"] - amounts[f"BIMPONIBLE_{rate}"] - amounts[f"CUOTA_{rate}"]
                 if delta:
-                    group.issues.append({"row": number, "code": f"descuadre_iva_{rate}", "difference": str(delta)})
+                    group.issues.append({"row": number, "code": f"descuadre_iva_{rate}",
+                                         "operation": operation, "difference": str(delta)})
             delta = amounts["TOTAL"] - amounts["TOTAL_10"] - amounts["TOTAL_21"]
             if delta:
-                group.issues.append({"row": number, "code": "descuadre_total", "difference": str(delta)})
+                group.issues.append({"row": number, "code": "descuadre_total",
+                                     "operation": operation, "difference": str(delta)})
     except csv.Error as exc:
         raise ReportError(f"CSV mal formado cerca de la fila {reader.line_num}") from exc
     return Report(encoding, groups)
@@ -147,6 +152,14 @@ def daily_group(content: bytes, day: date, centre: str) -> tuple[Group, str]:
     if set(report.groups) - {(day, centre)}:
         raise ReportError("La descarga contiene fechas o centros fuera de los filtros solicitados")
     return report.groups.get((day, centre), Group(day, centre)), report.encoding
+
+
+def daily_groups(content: bytes, day: date) -> tuple[dict[str, Group], str]:
+    report = read_report(content)
+    if {report_day for report_day, _ in report.groups} - {day}:
+        raise ReportError("La descarga contiene fechas fuera del filtro solicitado")
+    return ({centre: report.groups.get((day, centre), Group(day, centre)) for centre in CENTRES},
+            report.encoding)
 
 
 def accounting_lines(group: Group) -> list[dict]:
