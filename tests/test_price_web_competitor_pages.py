@@ -30,6 +30,35 @@ def load(name, url):
     return extract_product((FIXTURES / f"{name}.html").read_text(encoding="utf-8"), url)
 
 
+@pytest.mark.parametrize("name,url,product", [
+    ("otticait", "https://www.otticait.com/en/prada-pr-27zs-16k08z", PR27),
+    ("blickers", "https://www.blickers.com/en-es/glasses/prada-pr-27zs-c54/5649966192263168/", PR27),
+    ("visual_click", "https://visual-click.com/", PR27),
+])
+def test_confirmed_business_market_is_policy_not_observed_country(name, url, product):
+    from competitor_requirements import BUSINESS_MARKET_DECISION
+    from price_web import Outcome, WebPriceSearch
+    from price_web_extract import ProductPage, resolve_market
+    from urllib.parse import urlsplit
+
+    # Otticait and Blickers use retained reduced HTML; Visual-Click is a synthetic extension.
+    page = load(name, url) if name != "visual_click" else ProductPage(url=url, price=198.0, currency="EUR")
+    assert page.market == "" and page.market_source == ""
+    config = {"name": name, "domain": urlsplit(url).hostname.removeprefix("www."),
+              "site_url": url, "currency": "EUR", "market": "ES",
+              "market_verified": 0, "sales_market": ""}
+    market, evidence, conflict = resolve_market(page, config)
+    assert market == "ES" and not conflict
+    assert BUSINESS_MARKET_DECISION["id"] in evidence and "no país observado" in evidence
+    outcome = Outcome(product["ean"], name, name, "exact", url=url, page=page, method="web:fixture")
+    row = WebPriceSearch.frame_row(product, config, outcome, "2026-10-30T12:00:00+00:00")
+    assert row["Mercado"] == "ES" and row["Fecha consulta"] == "2026-10-30T12:00:00+00:00"
+    assert page.market == "" and page.market_source == ""
+    page.market, page.market_source = "FR", "synthetic explicit destination"
+    assert resolve_market(page, config)[2]
+    assert WebPriceSearch.frame_row(product, config, outcome, row["Fecha consulta"])["Estado coincidencia"] == "manual_review"
+
+
 @pytest.mark.parametrize("number,url,product,digest,price,stock", [
     (7, "https://www.amevista.com/es/gucci-gg1660s-001",
      {"ean": "0889652494821", "brand": "Gucci", "model": "GG1660S", "color": "001"},

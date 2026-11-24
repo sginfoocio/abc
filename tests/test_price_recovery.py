@@ -10,7 +10,8 @@ import requests
 
 from price_comparator import PriceComparatorStore
 from price_recovery import (EXPECTED_COUNTS, REASON, apply, apply_selected, load_allowlist, preview,
-                            preview_selected)
+                            preview_selected, RETIRED_PILOT_REASON, preview_retired_pilot_gate,
+                            apply_retired_pilot_gate)
 from price_trial import manifest
 
 
@@ -78,6 +79,153 @@ def recovery(tmp_path):
 def dump(store):
     with store._connect() as con:
         return "\n".join(con.iterdump())
+
+
+@pytest.fixture
+def retired_gate(recovery):
+    from price_access import AccessControl
+    from price_watch import PriceWatch
+    from price_web import WebPriceSearch
+    from price_web_fetch import user_agent
+
+    store, _, _, entries, started = recovery
+    entry = entries[0]
+    cid, ean = entry["competitor_id"], entry["ean"]
+    now = started + timedelta(days=10)
+    with store._connect() as con, con:
+        site = con.execute("SELECT url FROM competitors WHERE id=?", (cid,)).fetchone()[0].rstrip("/")
+        con.execute("UPDATE products SET brand='Synthetic',model='TEST01',color='001' WHERE ean=?", (ean,))
+        con.execute("UPDATE competitors SET active=1 WHERE id=?", (cid,))
+        limits = {r[0]: {"daily_limit": 10, "per_minute_limit": 6, "effective_pause": 3}
+                  for r in con.execute("SELECT id FROM competitors")}
+        con.execute("UPDATE price_continuity SET limits=?", (json.dumps(limits),))
+    url = site + "/synthetic-original-product"
+    search = WebPriceSearch(store, clock=lambda: now)
+    search.ensure_config()
+    search.update_config(cid, terms_reviewed=True, terms_note="Synthetic permission",
+                         access_status="robots_allowed", pause_seconds=1)
+    access = AccessControl(store, clock=lambda: now)
+    access.set_method(cid, "ficha", "authorized", actor="synthetic", note="Synthetic original authorization")
+    access.set_budget("competitor", cid, daily_limit=10, per_minute_limit=6, pause_seconds=1,
+                      actor="synthetic")
+    assert PriceWatch(store, clock=lambda: now).add([ean], actor="synthetic", source="manual").added == [ean]
+    receipt_pair = {"ean": ean, "competitor_id": cid, "processed": False,
+                    "requests": 0, "category": "not_executed", "outcomes": [],
+                    "reason": RETIRED_PILOT_REASON}
+    with store._connect() as con, con:
+        con.execute("""INSERT INTO price_trial(id,status,actor,build_commit,manifest,limits,
+            started_at,expires_at) VALUES(1,'expired','synthetic',?,'{}','{}',?,?)""",
+                    ("a" * 40, started.isoformat(), (started + timedelta(days=3)).isoformat()))
+        con.execute("UPDATE price_continuity_pairs SET defer_reason=? WHERE id=?",
+                    (RETIRED_PILOT_REASON, entry["pair_id"]))
+        con.execute("""UPDATE price_continuity_checks SET category='not_executed',defer_reason=?,
+            receipt=? WHERE id=?""", (RETIRED_PILOT_REASON,
+                                     json.dumps({"pair": receipt_pair, "result": {"pairs": [receipt_pair]}}),
+                                     entry["expected_latest_check_id"]))
+        con.execute("""INSERT INTO competitor_product_urls(competitor_id,ean,url,status,source,
+            match_status,note,verified_at,ean_published) VALUES(?,?,?,'verified','known_urls','exact_match',?,?,?)""",
+                    (cid, ean, url, "Synthetic recorded original literal-EAN verification", started.isoformat(), ean))
+        con.execute("""INSERT INTO monitor_jobs(competitor_id,ean,url,state,updated_at)
+            VALUES(?,?,?,'pending',?)""", (cid, ean, url, started.isoformat()))
+        con.execute("""INSERT INTO price_robots_cache(origin,agent,status,rules_text,fetched_at,expires_at)
+            VALUES(?,?,200,'User-agent: *\nDisallow:\n',?,?)""",
+                    (site, user_agent(), now.isoformat(), (now + timedelta(hours=1)).isoformat()))
+    ids = {"continuity_id": 1, "pair_id": entry["pair_id"], "check_id": entry["expected_latest_check_id"]}
+    return store, ids, now, cid, ean
+
+
+def test_retired_gate_reuses_job_and_preserves_dates_history_and_approval(retired_gate):
+    store, ids, now, cid, ean = retired_gate
+    before = dump(store)
+    plan = preview_retired_pilot_gate(store.database_path, **ids, now=now)
+    assert plan["eligible"], plan
+    assert not plan["approval_refs"] and plan["verification_refs"] and plan["http_requests"] == 0
+    assert dump(store) == before
+    with store._connect() as con:
+        job_before = dict(con.execute("SELECT * FROM monitor_jobs WHERE competitor_id=? AND ean=?", (cid, ean)).fetchone())
+        pair_before = dict(con.execute("SELECT * FROM price_continuity_pairs WHERE id=?", (ids["pair_id"],)).fetchone())
+    options = {"actor": "synthetic", "note": "Reviewed exact plan", "approved": True,
+               "build_commit": "b" * 40, "plan_hash": plan["plan_hash"], "now": now}
+    assert apply_retired_pilot_gate(store.database_path, **ids, **options)["applied"]
+    assert apply_retired_pilot_gate(store.database_path, **ids, **options)["already_applied"]
+    with store._connect() as con:
+        pair = dict(con.execute("SELECT * FROM price_continuity_pairs WHERE id=?", (ids["pair_id"],)).fetchone())
+        job = dict(con.execute("SELECT * FROM monitor_jobs WHERE competitor_id=? AND ean=?", (cid, ean)).fetchone())
+        assert con.execute("SELECT COUNT(*) FROM access_audit WHERE action='reconcile_retired_pilot_gate'").fetchone()[0] == 1
+    assert job == job_before
+    assert pair["state"] == "pending"
+    assert {k: v for k, v in pair.items() if k not in {"state", "defer_reason"}} == {
+        k: v for k, v in pair_before.items() if k not in {"state", "defer_reason"}}
+
+
+@pytest.mark.parametrize("control", ["uncertain", "lease", "exhausted", "robots", "approval", "pilot", "receipt",
+                                     "job_error", "attempts"])
+def test_retired_gate_keeps_legitimate_controls(retired_gate, control):
+    store, ids, now, cid, ean = retired_gate
+    with store._connect() as con, con:
+        if control == "uncertain":
+            con.execute("""INSERT INTO access_requests(scope,scope_id,competitor_id,method,purpose,ean,reserved_at,result)
+                VALUES('competitor',?,?,'ficha','synthetic',?,?,'reserved')""", (cid, cid, ean, now.isoformat()))
+        elif control == "lease":
+            con.execute("UPDATE monitor_jobs SET state='running',lease_until=?",
+                        ((now + timedelta(minutes=5)).isoformat(),))
+        elif control == "exhausted":
+            con.execute("UPDATE access_budgets SET daily_limit=0 WHERE scope='competitor' AND scope_id=?", (cid,))
+        elif control == "robots":
+            con.execute("UPDATE price_robots_cache SET rules_text='User-agent: *\nDisallow: /\n'")
+        elif control == "approval":
+            con.execute("UPDATE competitor_product_urls SET note='' WHERE competitor_id=? AND ean=?", (cid, ean))
+        elif control == "receipt":
+            con.execute("UPDATE price_continuity_checks SET receipt='{}' WHERE id=?", (ids["check_id"],))
+        elif control == "job_error":
+            con.execute("UPDATE monitor_jobs SET state='error',attempts=4,detail='Synthetic identity contradiction'")
+        elif control == "attempts":
+            from price_locator import MAX_ATTEMPTS
+            con.execute("UPDATE monitor_jobs SET attempts=?", (MAX_ATTEMPTS,))
+        else:
+            con.execute("UPDATE price_trial SET status='active'")
+    before = dump(store)
+    plan = preview_retired_pilot_gate(store.database_path, **ids, now=now)
+    assert not plan["eligible"], plan
+    if control == "exhausted":
+        assert "presupuesto" in plan["reason"].lower()
+    assert dump(store) == before
+
+
+def test_retired_gate_rejects_changed_plan_and_busy_pair_without_writes(retired_gate):
+    from price_recovery import _ReadOnlyStore
+    from price_trial import PriceTrial
+
+    store, ids, now, cid, ean = retired_gate
+    plan = preview_retired_pilot_gate(store.database_path, **ids, now=now)
+    options = {"actor": "synthetic", "note": "Reviewed plan", "approved": True,
+               "build_commit": "b" * 40, "plan_hash": plan["plan_hash"], "now": now}
+    with PriceTrial(_ReadOnlyStore(store.database_path)).continuity_pair_lock(cid, ean):
+        before = dump(store)
+        with pytest.raises(Timeout):
+            apply_retired_pilot_gate(store.database_path, **ids, **options)
+        assert dump(store) == before
+    with store._connect() as con, con:
+        con.execute("UPDATE monitor_jobs SET detail='Concurrent change' WHERE competitor_id=? AND ean=?", (cid, ean))
+    before = dump(store)
+    with pytest.raises(ValueError, match="Plan obsoleto"):
+        apply_retired_pilot_gate(store.database_path, **ids, **options)
+    assert dump(store) == before
+
+
+def test_retired_gate_preview_does_not_expire_incidents_or_expose_config(retired_gate):
+    store, ids, now, cid, _ = retired_gate
+    secret = "synthetic-private-config-marker"
+    with store._connect() as con, con:
+        con.execute("UPDATE competitor_web_config SET market_note=? WHERE competitor_id=?", (secret, cid))
+        con.execute("""INSERT INTO access_incidents(scope,scope_id,kind,detected_at,retry_after)
+            VALUES('competitor',?,'http_429',?,?)""",
+                    (cid, (now - timedelta(hours=2)).isoformat(), (now - timedelta(hours=1)).isoformat()))
+    before = dump(store)
+    plan = preview_retired_pilot_gate(store.database_path, **ids, now=now)
+    assert plan["eligible"], plan
+    assert secret not in json.dumps(plan)
+    assert dump(store) == before
 
 
 def test_preview_is_read_only_and_validates_snapshot_and_scope(recovery):

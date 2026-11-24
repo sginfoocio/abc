@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 import base64
-from contextlib import ExitStack, closing
+from contextlib import ExitStack, closing, nullcontext
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 from filelock import FileLock
 
 from competitor_requirements import COMPETITORS
+from price_comparator import PriceComparatorStore
 from price_trial import manifest
 
 REASON = "Trabajador interrumpido; no se repite una reserva incierta"
@@ -24,6 +25,7 @@ EXPECTED_COUNTS = {
 }
 MANUAL_ERROR_RECOVERY_RULES = "approved-read-errors-1"
 MANUAL_CORRECTED_ERROR_RECOVERY_VERSION = "approved-read-errors-2"
+RETIRED_PILOT_REASON = "Piloto desactivado o con ejecución pendiente: no se inicia otra"
 _AMEVISTA_ERROR_RULES = (
     (re.compile(r"Distinto modelo: catálogo FT1044, ficha BRONSON, FT1044", re.IGNORECASE),
      "tomford-bronson-ft1044"),
@@ -315,11 +317,249 @@ def apply(database, allowlist_path, report_path, *, actor, note, build_commit, a
     return rows
 
 
-class _ReadOnlyStore:
-    def __init__(self, path):
+def _retired_gate_plan(con, path, *, continuity_id, pair_id, check_id, now):
+    from price_batch import WatchBatch
+    from price_locator import MAX_ATTEMPTS
+    from price_monitor import PriceMonitor
+    from price_trial import PriceTrial
+    from price_web_fetch import RobotsRules, user_agent
+
+    def rows(sql, args=()):
+        return [dict(row) for row in con.execute(sql, args)]
+
+    _scope(con, [{"continuity_id": continuity_id}])
+    continuity = dict(con.execute("SELECT * FROM price_continuity WHERE id=?", (continuity_id,)).fetchone())
+    pair = con.execute("SELECT * FROM price_continuity_pairs WHERE id=? AND continuity_id=?",
+                       (pair_id, continuity_id)).fetchone()
+    if not pair:
+        raise ValueError("Par inexistente en la continuidad indicada")
+    pair = dict(pair)
+    cid, ean = pair["competitor_id"], pair["ean"]
+    checks = rows("""SELECT * FROM price_continuity_checks
+        WHERE continuity_id=? AND competitor_id=? AND ean=? ORDER BY id DESC LIMIT 1""",
+                  (continuity_id, cid, ean))
+    if not checks or checks[0]["id"] != check_id:
+        raise ValueError("El último check cambió; se requiere una nueva previsualización")
+    check = checks[0]
+    trial = rows("SELECT id,status,started_at,expires_at FROM price_trial WHERE id=1")
+    active_pilots = rows("SELECT id,status FROM pilot_runs WHERE status IN ('pending','running')")
+    jobs = rows("SELECT * FROM monitor_jobs WHERE competitor_id=? AND ean=?", (cid, ean))
+    locators = rows("SELECT * FROM locate_jobs WHERE competitor_id=? AND ean=?", (cid, ean))
+    urls = rows("""SELECT * FROM competitor_product_urls WHERE competitor_id=? AND ean=?
+        ORDER BY url""", (cid, ean))
+    requests = rows("""SELECT * FROM manual_review_refreshes WHERE competitor_id=? AND ean=?
+        ORDER BY id""", (cid, ean))
+    receipts = rows("""SELECT * FROM access_requests
+        WHERE (competitor_id=? OR (scope='competitor' AND scope_id=?)
+            OR ((competitor_id='' OR competitor_id IS NULL)
+                AND (scope!='competitor' OR scope_id='' OR scope_id IS NULL)))
+        AND (ean=? OR ean='' OR ean IS NULL) ORDER BY id""", (cid, cid, ean))
+    config = rows("""SELECT w.*,c.active,c.domain,c.market,c.currency FROM competitor_web_config w
+        JOIN competitors c ON c.id=w.competitor_id WHERE competitor_id=?""", (cid,))
+    methods = rows("SELECT * FROM access_methods WHERE competitor_id=? ORDER BY method", (cid,))
+    budgets = rows("SELECT * FROM access_budgets ORDER BY scope,scope_id")
+    incidents = rows("SELECT * FROM access_incidents ORDER BY id")
+    try:
+        receipt = json.loads(check["receipt"])
+    except (TypeError, json.JSONDecodeError):
+        receipt = None
+    receipt_pair = receipt.get("pair") if isinstance(receipt, dict) else None
+    result = receipt.get("result") if isinstance(receipt, dict) else None
+    result_pairs = result.get("pairs") if isinstance(result, dict) else None
+    matching_pairs = [p for p in result_pairs
+                      if isinstance(p, dict) and p.get("ean") == ean and p.get("competitor_id") == cid
+                      ] if isinstance(result_pairs, list) else []
+    receipt_verified = (
+        isinstance(receipt_pair, dict) and receipt_pair.get("ean") == ean
+        and receipt_pair.get("competitor_id") == cid and receipt_pair.get("processed") is False
+        and receipt_pair.get("category") == "not_executed" and receipt_pair.get("requests") == 0
+        and receipt_pair.get("outcomes") == [] and receipt_pair.get("reason") == RETIRED_PILOT_REASON
+        and matching_pairs == [receipt_pair]
+    )
+    reason = ""
+    if continuity["status"] != "active":
+        reason = "Continuidad no activa"
+    elif not trial or trial[0]["status"] not in {"expired", "stopped"} or active_pilots:
+        reason = "El piloto histórico no está cerrado o tiene una ejecución pendiente"
+    elif pair["state"] != "review" or pair["defer_reason"] != RETIRED_PILOT_REASON:
+        reason = "El par no conserva el bloqueo histórico concreto"
+    elif (check["category"] != "not_executed" or check["state"] != "review"
+          or check["defer_reason"] != RETIRED_PILOT_REASON
+          or check["finished_at"] != pair["checked_at"]
+          or not receipt_verified
+          or any(check[field] != 0 for field in
+                 ("requests", "http_commercial", "http_robots", "unconfirmed_http"))):
+        reason = "El check no acredita el intento histórico sin HTTP"
+    elif any(r["result"] in (None, "", "reserved") for r in receipts):
+        reason = "Reserva HTTP incierta; reconciliar sin repetirla"
+    elif any(_time(check["started_at"]) <= _time(r["reserved_at"]) <= _time(check["finished_at"])
+             for r in receipts):
+        reason = "Hay una petición durante el intento que figura como no ejecutado"
+    elif any(r["status"] in {"pending", "deferred", "running"} for r in requests):
+        reason = "Solicitud manual pendiente o en curso; se conserva, no se duplica"
+    elif any(j["state"] == "running" or (j["lease_until"] and _time(j["lease_until"]) > now)
+             for j in jobs + locators):
+        reason = "Lectura en curso o lease pendiente de reconciliación; no se duplica"
+    elif not jobs:
+        reason = "No existe un trabajo de monitorización que reutilizar"
+    elif any(j["state"] not in {"done", "pending", "waiting"} for j in jobs):
+        reason = "El trabajo tiene un bloqueo propio; el bloqueo histórico no autoriza a borrarlo"
+    elif any(j["attempts"] >= MAX_ATTEMPTS for j in jobs + locators):
+        reason = "Máximo de intentos alcanzado; la reconciliación no los reinicia"
+    elif any(j["state"] == "done" and j["attempts"] for j in jobs):
+        reason = "El trabajo conserva intentos; reconciliar antes de una renovación que los reinicie"
+    approved_urls = [u for u in urls if jobs and u["url"] == jobs[0]["url"]
+                     and u["status"] == "verified" and u["match_status"] == "exact_match"
+                     and u["source"] in {"user", "auto_watch", "known_urls"}
+                     and u["verified_at"] and _time(u["verified_at"]) <= now and u["note"]]
+    approval_refs = []
+    verification_refs = []
+    if not reason and not approved_urls:
+        reason = "Falta la ficha verificada y su procedencia original para la URL del trabajo"
+    if not reason:
+        for url in approved_urls:
+            if url["source"] == "user":
+                originals = [r for r in requests if r["url"] == url["url"]
+                             and r["requested_at"] == url["verified_at"]]
+                proofs = [_manual_review_evidence(con, r) for r in originals]
+                approval_refs.extend(p["approval_ref"] for p in proofs if p["approval_audits"] == 1)
+                if not approval_refs:
+                    reason = "La aprobación manual original no puede acreditarse"
+            else:
+                from price_comparator import normalize_gtin
+
+                try:
+                    same_ean = normalize_gtin(url["ean_published"]) == normalize_gtin(ean)
+                except (TypeError, ValueError):
+                    same_ean = False
+                if not same_ean:
+                    reason = "La procedencia automática no acredita el EAN literal; falta aprobación original"
+                else:
+                    verification_refs.append(
+                        f"competitor_product_urls:{cid}:{ean}:{url['source']}:{url['verified_at']}")
+    preview = {}
+    robots = []
+    if not reason:
+        store = _ReadOnlyStore(path, connection=con)
+        service = PriceTrial(store, clock=lambda: now)
+        with service.execution(0, cid, ean, program="continuity", program_id=continuity_id):
+            frame = WatchBatch(store, monitor=PriceMonitor(store, clock=lambda: now)).preview([ean], [cid])
+        if len(frame) != 1:
+            raise ValueError("No se pudo previsualizar el único par seleccionado")
+        preview = json.loads(frame.to_json(orient="records"))[0]
+        if not preview["ready"] or not preview["located"]:
+            reason = (preview.get("defer_reason") or preview.get("access")
+                      or "El trabajo existente no es ejecutable con los controles actuales")
+        parsed = urlsplit(jobs[0]["url"])
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        robots = rows("SELECT * FROM price_robots_cache WHERE origin=? AND agent=?", (origin, user_agent()))
+        fresh = robots and _time(robots[0]["expires_at"]) > now
+        if not reason and fresh:
+            if robots[0]["status"] != 200 or not RobotsRules.parse(robots[0]["rules_text"]).allowed(jobs[0]["url"]):
+                reason = "robots.txt vigente no acredita acceso a esta ruta"
+        if not reason and preview["remaining_http"] < (1 if fresh else 2):
+            reason = "Presupuesto insuficiente para ficha y robots si su caché ha vencido"
+    reference = {
+        "rule": "retired-pilot-gate-1",
+        "script_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "continuity": {field: continuity[field] for field in
+                       ("id", "status", "started_at", "manifest", "limits", "interval_hours")},
+        "pair": pair, "check": check, "trial": trial, "active_pilots": active_pilots,
+        "jobs": jobs, "locators": locators, "urls": urls, "requests": requests,
+        "receipts": receipts, "config": config, "methods": methods,
+        "budgets": budgets, "incidents": incidents, "robots": robots,
+        "preview": preview, "approval_refs": approval_refs, "verification_refs": verification_refs,
+        "eligible": not reason, "reason": reason,
+    }
+    plan_hash = hashlib.sha256(json.dumps(
+        reference, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return {
+        "continuity_id": continuity_id, "pair_id": pair_id, "check_id": check_id,
+        "competitor_id": cid, "ean": ean, "monitor_job_id": jobs[0]["id"] if jobs else None,
+        "eligible": not reason, "action": "reconcile_existing_job" if not reason else "unchanged",
+        "reason": reason or "Piloto cerrado; trabajo e identidad originales, autorización vigente de continuidad",
+        "approval_refs": approval_refs, "verification_refs": verification_refs,
+        "http_requests": 0, "plan_hash": plan_hash,
+    }
+
+
+def preview_retired_pilot_gate(database, *, continuity_id, pair_id, check_id, now=None):
+    with closing(_connect(database, readonly=True)) as con:
+        con.execute("BEGIN")
+        result = _retired_gate_plan(con, database, continuity_id=continuity_id, pair_id=pair_id,
+                                   check_id=check_id, now=_time(now or datetime.now(timezone.utc)))
+        con.rollback()
+    return result
+
+
+def apply_retired_pilot_gate(database, *, continuity_id, pair_id, check_id, plan_hash,
+                            actor, note, build_commit, approved=False, now=None):
+    if not approved or not actor.strip() or not note.strip():
+        raise ValueError("Confirmación explícita, responsable y motivo obligatorios")
+    if not re.fullmatch(r"[0-9a-f]{40}", build_commit) or not re.fullmatch(r"[0-9a-f]{64}", plan_hash):
+        raise ValueError("Commit y huella de previsualización válidos obligatorios")
+    from price_trial import PriceTrial
+
+    path = Path(database).resolve()
+    service = PriceTrial(_ReadOnlyStore(path))
+    at = _time(now or datetime.now(timezone.utc))
+    recovery_key = f"retired-pilot-gate-1:{pair_id}:{check_id}"
+    with service.continuity_lock():
+        with closing(_connect(path, readonly=True)) as con:
+            pair = con.execute("SELECT competitor_id,ean FROM price_continuity_pairs WHERE id=? AND continuity_id=?",
+                               (pair_id, continuity_id)).fetchone()
+            if not pair:
+                raise ValueError("Par inexistente en la continuidad indicada")
+        with FileLock(f"{path}.competitor-{pair['competitor_id']}.lock", timeout=0), \
+                service.continuity_pair_lock(pair["competitor_id"], pair["ean"]):
+            with closing(_connect(path, readonly=False)) as con:
+                con.execute("BEGIN IMMEDIATE")
+                prior = con.execute("""SELECT current FROM access_audit WHERE scope='price_continuity'
+                    AND scope_id=? AND action='reconcile_retired_pilot_gate' ORDER BY id""",
+                                    (str(continuity_id),)).fetchall()
+                if any(json.loads(row["current"])["recovery_key"] == recovery_key for row in prior):
+                    con.rollback()
+                    return {"pair_id": pair_id, "applied": False, "already_applied": True, "http_requests": 0}
+                con.execute("PRAGMA query_only=ON")
+                result = _retired_gate_plan(con, path, continuity_id=continuity_id, pair_id=pair_id,
+                                           check_id=check_id, now=at)
+                con.execute("PRAGMA query_only=OFF")
+                if result["plan_hash"] != plan_hash:
+                    raise ValueError("Plan obsoleto o estado concurrente distinto; no se aplica")
+                if not result["eligible"]:
+                    con.rollback()
+                    return {**result, "applied": False}
+                previous = dict(con.execute("SELECT * FROM price_continuity_pairs WHERE id=?",
+                                            (pair_id,)).fetchone())
+                updated = con.execute("""UPDATE price_continuity_pairs SET state='pending',defer_reason=?
+                    WHERE id=? AND continuity_id=? AND state='review' AND defer_reason=?""",
+                                      ("Bloqueo del piloto cerrado reconciliado; trabajo original, controles vigentes",
+                                       pair_id, continuity_id, RETIRED_PILOT_REASON))
+                if updated.rowcount != 1:
+                    raise ValueError("El par cambió durante la reconciliación")
+                current = {"state": "pending", "next_check_at": previous["next_check_at"],
+                           "recovery_key": recovery_key, "monitor_job_id": result["monitor_job_id"],
+                           "approval_refs": result["approval_refs"],
+                           "verification_refs": result["verification_refs"], "plan_hash": plan_hash}
+                con.execute("""INSERT INTO access_audit(scope,scope_id,action,previous,current,actor,note,at)
+                    VALUES('price_continuity',?,'reconcile_retired_pilot_gate',?,?,?,?,?)""",
+                            (str(continuity_id), json.dumps(previous, ensure_ascii=False),
+                             json.dumps(current, ensure_ascii=False), actor.strip(),
+                             json.dumps({"reason": note.strip(), "build_commit": build_commit,
+                                         "original_check_id": check_id, "http_requests": 0}, ensure_ascii=False),
+                             at.isoformat()))
+                con.commit()
+    return {**result, "applied": True}
+
+
+class _ReadOnlyStore(PriceComparatorStore):
+    def __init__(self, path, *, connection=None):
         self.database_path = Path(path).resolve()
+        self._connection = connection
 
     def _connect(self):
+        if self._connection is not None:
+            return nullcontext(self._connection)
         return _connect(self.database_path, readonly=True)
 
 
@@ -377,6 +617,7 @@ def _manual_review_rows(con, path, now):
         reconcile_reason = ""
         related_request_id = None
         error_rule = ""
+        corrected_recovery_reason = ""
         identity = None
         identity_ok = False
         evidence = _manual_review_evidence(con, task)
@@ -469,14 +710,15 @@ def _manual_review_rows(con, path, now):
                         elif task["continuity_pair_state"] not in {"pending", "review"}:
                             reason = f"Restricción del par: {task['continuity_pair_state']}"
                         else:
-                            category, action = "recoverable", "recover_corrected_error"
+                            action = "recover_corrected_error"
                             offline_exact = any(item["result"] == "exact_identity"
                                                 for item in artifact_evaluations)
                             evidence_note = ("Artefacto guardado reevaluado como identidad exacta; "
                                              if offline_exact else
                                              "Sin artefacto reevaluable suficiente; ")
-                            reason = (f"Rechazo histórico cubierto por {error_rule}; {evidence_note}"
-                                      "requiere lectura gobernada actual")
+                            corrected_recovery_reason = (
+                                f"Rechazo histórico cubierto por {error_rule}; {evidence_note}"
+                                "requiere lectura gobernada actual")
                 elif task["monitor_state"] in {"pending", "waiting", "running"}:
                     if (task["monitor_state"] != "running"
                             or (task["monitor_lease_until"] and _time(task["monitor_lease_until"]) > now)):
@@ -612,7 +854,9 @@ def _manual_review_rows(con, path, now):
                     if not RobotsRules.parse(robots["rules_text"]).allowed(task["url"]):
                         reason = "robots.txt vigente prohíbe esta ruta"
             if not reason:
-                if action != "recover_corrected_error":
+                if action == "recover_corrected_error":
+                    category, reason = "recoverable", corrected_recovery_reason
+                else:
                     if action == "reconcile":
                         category, reason = "recoverable", reconcile_reason
                     else:
@@ -623,6 +867,8 @@ def _manual_review_rows(con, path, now):
                         reason = ("Aplazamiento de reserva acreditado" if action == "requeue"
                                   else "Solicitud pendiente; requiere autorización auditada" if action == "authorize"
                                   else "Solicitud pendiente; ya está en la cola")
+        if action == "recover_corrected_error" and category != "recoverable":
+            action = ""
         result.append({"id": task["id"], "ean": ean, "competitor_id": cid, "url": task["url"],
                        "category": category, "action": action, "reason": reason,
                        "status": task["status"], "requested_at": task["requested_at"],
@@ -1455,6 +1701,11 @@ def main(argv=None):
     parser.add_argument("--allowlist", help="Lista auditada con IDs esperados")
     parser.add_argument("--report", help="Informe histórico cuya huella consta en la lista")
     parser.add_argument("--manual-reviews", action="store_true", help="Inventario completo de lecturas manuales")
+    parser.add_argument("--retired-pilot-gate", action="store_true", help="Reconciliar un bloqueo histórico exacto")
+    parser.add_argument("--continuity-id", type=int)
+    parser.add_argument("--pair-id", type=int)
+    parser.add_argument("--check-id", type=int)
+    parser.add_argument("--plan-hash", default="")
     parser.add_argument("--request-id", type=int, action="append", help="Limitar aplicación a solicitudes concretas")
     parser.add_argument("--approval-id", type=int, action="append", help="Recuperar aprobación por ID de auditoría")
     parser.add_argument("--competitor", action="append", help="Filtrar por ID de competidor")
@@ -1466,6 +1717,22 @@ def main(argv=None):
     parser.add_argument("--note", default="")
     parser.add_argument("--commit", default="")
     args = parser.parse_args(argv)
+    if args.retired_pilot_gate:
+        if (args.manual_reviews or args.allowlist or args.report or args.request_id or args.approval_id
+                or args.competitor or args.ean or args.reason
+                or not all((args.continuity_id, args.pair_id, args.check_id))):
+            parser.error("La reconciliación requiere exclusivamente continuidad, par y check exactos")
+        ids = {"continuity_id": args.continuity_id, "pair_id": args.pair_id, "check_id": args.check_id}
+        if args.apply:
+            result = apply_retired_pilot_gate(args.database, **ids, plan_hash=args.plan_hash,
+                                             actor=args.actor, note=args.note, build_commit=args.commit,
+                                             approved=args.approved)
+        else:
+            result = preview_retired_pilot_gate(args.database, **ids)
+        print(json.dumps({"mode": "apply" if args.apply else "preview", **result}, ensure_ascii=False))
+        return
+    if args.continuity_id or args.pair_id or args.check_id or args.plan_hash:
+        parser.error("Los IDs de par y la huella requieren --retired-pilot-gate")
     if args.manual_reviews:
         if args.apply:
             if (args.competitor or args.ean or args.reason) and not (args.request_id or args.approval_id):

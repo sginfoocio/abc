@@ -24,7 +24,12 @@ precio con el sistema existente (`import_offers`, histórico, gráficos). Códig
   (1,21 / 1,10 / 1,04), o si el competidor tiene «IVA incluido» verificado. Si no, la oferta se guarda pero no compara.
 - **Mercado y moneda**: mercado comercial explicito (`eligibleRegion`, destino
   de entrega o `product:market`) o configuracion de mercado verificada con URL,
-  nota y fecha. Nunca dominio, ruta ni idioma/locale. Contradicciones requieren
+  nota y fecha. Para los 14 competidores registrados, la decisión comercial
+  `business-es-eur-market-14-2026-11-24` de Rubén acredita el contexto objetivo
+  ES/EUR/IVA incluido cuando no hay país publicado ni configuración verificada.
+  Se conserva como política, nunca como atributo observado en la ficha; una
+  configuración extranjera verificada o una contradicción publicada no se
+  convierten a ES. Nunca dominio, ruta ni idioma/locale. Contradicciones requieren
   revision. La moneda se toma de `priceCurrency` o configuracion existente.
   Mercado desconocido no entra en comparativas.
   [Mercado y localizacion supervisada](../PRICE_PILOT_DISCOVERY.md).

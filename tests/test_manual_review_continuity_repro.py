@@ -479,6 +479,26 @@ def test_corrected_error_replays_exact_saved_html_and_is_idempotent(trial):
     assert site.calls == []
 
 
+@pytest.mark.parametrize("control", ["budget", "retry_after"])
+def test_corrected_error_preview_respects_current_access_before_admitting_recovery(trial, control):
+    from price_access import AccessControl
+
+    review = _accepted_ft1044_review(trial)
+    url = review[6].product("Tom Ford", "Bronson", "001", gtin=review[4])
+    store, clock, cid, _, _, site, task = _record_corrected_amevista_error(review, review[6].pages[url])
+    now = clock() + timedelta(seconds=2)
+    if control == "budget":
+        with store._connect() as con, con:
+            con.execute("UPDATE access_budgets SET daily_limit=0 WHERE scope='competitor' AND scope_id=?", (cid,))
+    else:
+        AccessControl(store, clock=lambda: now).report_block(
+            "competitor", cid, "http_429", retry_after=now + timedelta(hours=1))
+    item = preview_manual_reviews(store.database_path, request_ids=[task], now=now)["requests"][0]
+    assert item["category"] == "excluded" and item["action"] == "", item
+    assert ("Presupuesto" in item["reason"] if control == "budget" else "429" in item["reason"])
+    assert site.calls == []
+
+
 def test_versioned_corrected_error_can_follow_legacy_grant_once(trial):
     review = _accepted_ft1044_review(trial)
     alias_url = review[6].product("Tom Ford", "Bronson", "001", gtin=review[4])

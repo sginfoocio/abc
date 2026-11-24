@@ -107,7 +107,7 @@ class SavedSampleReevaluation:
         if market and market != "ES":
             return self._result(case, "commercial", f"Mercado observado {market}; se requiere ES",
                                 expires=expires, current_market=market)
-        if not commercial.get("market_verified") or commercial.get("sales_market") != "ES":
+        if market != "ES":
             return self._result(case, "commercial", "Mercado ES no confirmado para esta reevaluación",
                                 expires=expires, current_market=market)
         policy = "included"
@@ -223,6 +223,7 @@ class SavedSampleReevaluation:
                                             "sampled_at": case["sampled_at"], "eligible": job["eligible"]},
                                            ensure_ascii=False),
                                 json.dumps({"market": "ES", "tax_policy": "included",
+                                            "market_evidence": market_reason,
                                             "sampled_at": case["sampled_at"], "expires_at": expires.isoformat(),
                                             "sample_digest": digest, "eligible": monitor_eligible,
                                             "availability": page_obj.availability, "offer_imported": True},
