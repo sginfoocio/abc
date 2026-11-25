@@ -507,13 +507,16 @@ def _confirmed_order_products():
         """, (LUXOTTICA_ORDER_MODE, LUXOTTICA_CONFIRMATION_PREFIX + "%"))
         for (payload,) in rows:
             item = json.loads(payload)
-            yield {"modelo": item["model"], "color": item["color"], "ean": item["ean"]}
+            yield {"modelo": item["model"], "color": item["color"], "ean": item["ean"],
+                   "product_id": item.get("product_id")}
 
 
 def _load_eans_by_image_key() -> dict[tuple[str, str], str]:
     """Carga la relación modelo/color/EAN de manifiestos y envíos confirmados."""
     manifest_root = Path(__file__).resolve().parent / "docs" / "Luxoptica"
     matches: dict[tuple[str, str], set[str]] = {}
+    variants: dict[tuple[str, str], set[str]] = {}
+    unverified: set[tuple[str, str]] = set()
     def manifest_products():
         for manifest_path in manifest_root.glob("upc-products-images-request-*.manifest.json"):
             try:
@@ -527,7 +530,14 @@ def _load_eans_by_image_key() -> dict[tuple[str, str], str]:
         ean = str(product.get("ean", "")).strip()
         if key[0] and key[1] and ean:
             matches.setdefault(key, set()).add(ean)
-    return {key: next(iter(eans)) for key, eans in matches.items() if len(eans) == 1}
+            if "product_id" in product:
+                product_id = product["product_id"]
+                if product_id:
+                    variants.setdefault(key, set()).add(str(product_id))
+                else:
+                    unverified.add(key)
+    return {key: next(iter(eans)) for key, eans in matches.items()
+            if len(eans) == 1 and len(variants.get(key, ())) <= 1 and key not in unverified}
 
 
 def _get_market_ids_by_ean(eans: set[str]) -> dict[str, dict[str, str]]:

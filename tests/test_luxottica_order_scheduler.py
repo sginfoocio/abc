@@ -287,7 +287,7 @@ def test_scheduler_sends_once_and_keeps_ambiguous_requests_for_review(tmp_path, 
     request = ProviderStore(root).list_requests("luxottica")[0]
     assert request["state"] == (SUBMITTED if confirmed else NEEDS_REVIEW)
     assert list(mail._confirmed_order_products()) == (
-        [{"modelo": "RB3547", "color": "00153", "ean": EAN}] if confirmed else [])
+        [{"modelo": "RB3547", "color": "00153", "ean": EAN, "product_id": 45}] if confirmed else [])
     scheduler.run_cycle(object(), root, images, Event(), config=Config(), submit=submit)
     assert submissions == [f"{EAN}\r\n".encode("ascii")]
 

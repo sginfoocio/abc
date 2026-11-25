@@ -97,8 +97,9 @@ Graph ni descargues correo real sin autorización específica.
 
 El monitor conserva el ZIP y valida tamaños y límites de descompresión. Para los envíos nuevos,
 puede resolver el EAN desde la evidencia de pedido de una solicitud cuyo envío tenga confirmación,
-además de los manifiestos anteriores. Si el mismo modelo y color tienen códigos distintos o
-falta evidencia, conserva el archivo para revisión. La confirmación de envío y la importación
+además de los manifiestos anteriores. Si el mismo modelo y color tienen códigos distintos,
+apuntan a varias variantes de Odoo o falta la identidad de la variante, conserva el archivo
+para revisión. La confirmación de envío y la importación
 al NAS son comprobaciones distintas. El monitor solo marca el correo como procesado tras
 completar su tratamiento. Un original importado por coincidencia de modelo y color no acredita
 por sí solo la entrega de un identificador de lote remoto.
