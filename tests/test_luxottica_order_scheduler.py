@@ -1,11 +1,14 @@
 from dataclasses import replace
+from pathlib import Path
+import sys
 from threading import Event
+from unittest.mock import MagicMock
 
 from cryptography.fernet import Fernet
 import pytest
 
 import graph_mail_downloader as mail
-from luxoptica_auto_upload import CONFIRMATION
+from luxoptica_auto_upload import CONFIRMATION, ViewTypeUnavailable, _choose_all_views
 from luxottica_config import LuxotticaConfig, LuxotticaSettings, PORTAL_URL
 import luxottica_order_scheduler as scheduler
 from provider_images import NEEDS_REVIEW, SUBMITTED, ProviderStore, ean_key
@@ -18,6 +21,38 @@ def test_confirmation_requires_explicit_portal_acknowledgement():
     assert CONFIRMATION.search("Tu solicitud se ha enviado.")
     for text in ("Success", "Éxito", "Enviar solicitud", "Your request has been sent?"):
         assert not CONFIRMATION.search(text)
+
+
+def test_missing_views_stops_without_switching_to_manual_entry(tmp_path):
+    page = MagicMock()
+    views = page.get_by_text.return_value
+    views.wait_for.side_effect = TimeoutError
+    request = tmp_path / "request.txt"
+    request.write_text(EAN, encoding="ascii")
+
+    with pytest.raises(ViewTypeUnavailable):
+        _choose_all_views(page, request, TimeoutError)
+
+    page.locator.assert_called_once_with("input[type='file']")
+    page.get_by_role.assert_called_once()
+    page.get_by_text.assert_called_once()
+    views.click.assert_not_called()
+
+
+def test_preflight_uses_historical_file_unchanged(monkeypatch):
+    request = (Path(__file__).resolve().parents[1] / "docs" / "Luxoptica"
+               / "upc-products-images-request-20260819_102506-50-eans.txt")
+    original = request.read_bytes()
+    settings = LuxotticaSettings(PORTAL_URL, "user", "secret", "images@example.com")
+    monkeypatch.setattr(scheduler, "LuxotticaConfig", lambda root: MagicMock(load=lambda: settings))
+    monkeypatch.setattr(sys, "argv", ["scheduler", "--preflight-file", str(request)])
+    submit = MagicMock(return_value=(True, "Vista previa lista sin enviar"))
+    monkeypatch.setattr(scheduler, "_upload_to_luxoptica", submit)
+
+    assert scheduler.main() == 0
+    assert submit.call_args.args[3] == request
+    assert submit.call_args.kwargs["preview_only"] is True
+    assert request.read_bytes() == original
 
 
 def test_credentials_change_persists_encrypted_and_keeps_secret_when_blank(tmp_path, monkeypatch):

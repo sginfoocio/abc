@@ -15,11 +15,14 @@ from luxottica_config import LOGIN_HOST, PORTAL_HOST, PORTAL_URL, validate_porta
 from provider_images import LUXOTTICA_CONFIRMATION_PREFIX
 from urllib.parse import urlsplit
 
-MAX_MANUAL_CODES = 10
 CONFIRMATION = re.compile(
     r"^(?:tu solicitud se ha enviado|su solicitud se ha enviado|your request has been sent"
     r"|solicitud enviada|request sent)(?:[.!]|\s|$)", re.I
 )
+
+
+class ViewTypeUnavailable(Exception):
+    pass
 
 
 def write_luxottica_upload_file(path: Path, codes: list[str]) -> None:
@@ -32,28 +35,8 @@ def _choose_all_views(page, ean_file, timeout_error):
     page.get_by_role("button", name=re.compile(r"^continuar$|^continue$", re.I)).click()
     try:
         views.wait_for(state="visible", timeout=15000)
-    except timeout_error:
-        # A verified alternative for up to 10 codes when the file wizard has no views.
-        codes = ean_file.read_text(encoding="utf-8-sig").split()
-        step = page.get_by_role("heading", name=re.compile(r"^ver tipo$|^view type$", re.I))
-        if (urlsplit(page.url).hostname != PORTAL_HOST or not step.is_visible()
-                or not 1 <= len(codes) <= MAX_MANUAL_CODES):
-            raise
-        previous_step = page.get_by_text(re.compile(r"^selecciona productos$|^select products$", re.I))
-        previous_step.locator("xpath=..").get_by_role("button").click()
-        page.get_by_role("button", name=re.compile(r"añadir elementos manualmente|add items manually", re.I)).click()
-        change = page.get_by_text(re.compile(r"^método de solicitud de cambio$|^change request method$", re.I))
-        if change.is_visible():
-            page.get_by_role("button", name=re.compile(r"^continuar$|^continue$", re.I)).first.click()
-        page.get_by_text(re.compile(r"^upc$", re.I)).last.click()
-        field = page.get_by_role("spinbutton")
-        save = page.get_by_role("button", name=re.compile(r"^guardar$|^save$", re.I))
-        for code in codes:
-            field.fill(code)
-            save.click()
-            page.locator(f"input[disabled][value='{code}']").wait_for(timeout=5000)
-        page.get_by_role("button", name=re.compile(r"^continuar$|^continue$", re.I)).click()
-        views.wait_for(state="visible", timeout=15000)
+    except timeout_error as error:
+        raise ViewTypeUnavailable from error
     views.click()
     page.get_by_role("heading", name=re.compile(r"^enviar solicitud$|^send request$", re.I)).wait_for(timeout=15000)
 
@@ -175,6 +158,8 @@ def _upload_to_luxoptica(
             def _count(selector: str) -> int:
                 try:
                     return page.locator(selector).count()
+                except ViewTypeUnavailable:
+                    return False, "ver_tipo_sin_todas_las_vistas"
                 except Exception:
                     return 0
             

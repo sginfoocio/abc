@@ -16,7 +16,7 @@ from app_pages.provider_order_snapshot import MADRID, NONE, associations, image_
 from db_config import load_db_config
 from image_repository import repository_root
 from kering_images import data_root as kering_root
-from luxoptica_auto_upload import MAX_MANUAL_CODES, _upload_to_luxoptica, write_luxottica_upload_file
+from luxoptica_auto_upload import _upload_to_luxoptica, write_luxottica_upload_file
 from luxottica_config import LuxotticaConfig, validate_portal_url
 from process_activity import record_process
 from provider_images import (
@@ -31,7 +31,9 @@ from repository_storage import state_root
 
 PROVIDER = "luxottica"
 SUPPLIER_ID = 570
-SETTINGS = ProviderSettings(PROVIDER, max_eans_per_request=MAX_MANUAL_CODES)
+MAX_ORDER_BATCH_CODES = 10
+MAX_PREFLIGHT_CODES = 250
+SETTINGS = ProviderSettings(PROVIDER, max_eans_per_request=MAX_ORDER_BATCH_CODES)
 ACTOR = "programador_luxottica"
 HEALTHY_RESULTS = {"desactivado", "sin_referencias_pendientes", "limite_diario", "otro_ciclo_activo",
                    "enviado_confirmado"}
@@ -170,10 +172,10 @@ def _run_locked(engine, root, images, stopping, config, submit):
     if not ready:
         for page in order_pages(engine, links, cutoff, today):
             for order, groups in eligible_orders(page, images, live | legacy):
-                for offset in range(0, len(groups), MAX_MANUAL_CODES):
+                for offset in range(0, len(groups), MAX_ORDER_BATCH_CODES):
                     if stopping.is_set() or not config.load().enabled:
                         return "desactivado"
-                    batch = groups[offset:offset + MAX_MANUAL_CODES]
+                    batch = groups[offset:offset + MAX_ORDER_BATCH_CODES]
                     items = order_request_evidence({**order, "lines": [line for group in batch for line in group]})
                     ready = store.plan(SETTINGS, items, mode=LUXOTTICA_ORDER_MODE,
                                        order_evidence=items, reviewer=ACTOR)["created"]
@@ -223,14 +225,12 @@ def main():
     config = LuxotticaConfig(root)
     if args.preflight_file:
         settings = config.load()
-        codes, invalid = normalize_eans(args.preflight_file.read_text(encoding="utf-8-sig").splitlines())
-        if invalid or not 1 <= len(codes) <= MAX_MANUAL_CODES:
-            parser.error("Indica un TXT con entre 1 y 10 UPC/EAN válidos.")
-        with TemporaryDirectory(prefix="luxottica-preflight-") as temp:
-            path = Path(temp) / "upc-products-images-request-preflight.txt"
-            write_luxottica_upload_file(path, codes)
-            ok, message = _upload_to_luxoptica(settings.url, settings.username, settings.password,
-                                              path, settings.email, True, False, preview_only=True)
+        lines = args.preflight_file.read_text(encoding="utf-8-sig").splitlines()
+        codes, invalid = normalize_eans(lines)
+        if invalid or not codes or sum(bool(line.strip()) for line in lines) > MAX_PREFLIGHT_CODES:
+            parser.error("Indica un TXT con entre 1 y 250 UPC/EAN válidos.")
+        ok, message = _upload_to_luxoptica(settings.url, settings.username, settings.password,
+                                          args.preflight_file, settings.email, True, False, preview_only=True)
         print(message)
         return 0 if ok else 1
     stopping = Event()

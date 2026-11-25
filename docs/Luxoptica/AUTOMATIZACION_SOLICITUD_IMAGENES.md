@@ -61,17 +61,19 @@ registra la acción declarada por el operador y requiere evidencia aparte.
   de configuración existente del servicio. El usuario y la contraseña vigentes del entorno se
   usan al abrir la configuración por primera vez.
 - Se procesa un lote de hasta 10 EAN por ciclo, con el límite diario del almacén de solicitudes.
-  El archivo se escribe como texto ASCII sin cabecera, con un código por línea. Si el portal queda
-  en «Ver tipo» sin opciones tras cargarlo, se intenta la entrada UPC de esos mismos códigos,
-  verificando que cada valor literal quede en el formulario. Si se pierde la sesión o el portal
-  pide aceptar condiciones, el proceso se detiene.
+  El archivo se escribe como texto ASCII sin cabecera, con un código por línea y finales CRLF.
+  Si el portal queda en «Ver tipo» sin opciones tras cargarlo, el proceso se detiene sin cambiar
+  a entrada manual. Antes de cambiar el fichero o reintentar, registra el paso y comprueba la
+  sesión, el formato y la respuesta del portal. Si se pierde la sesión o el portal pide aceptar
+  condiciones, el proceso se detiene.
 - Se registra «Enviada» únicamente tras observar una confirmación explícita en el portal. Un
   resultado incierto, incluido un reinicio durante el envío, conserva el lote activo en revisión
   y bloquea nuevos envíos automáticos. Antes de reintentar, comprueba en el portal si el lote se
   aceptó y reconcilia su estado de forma explícita.
 - Verifica el acceso y la pantalla previa con `python -B luxottica_order_scheduler.py --preflight-file ARCHIVO.txt`,
-  en el entorno autorizado y con el envío automático desactivado. Este modo no pulsa el botón
-  de envío y no crea una solicitud en Cloud. Verifica por separado que un envío autorizado
+  en el entorno autorizado y con el envío automático desactivado. Este modo carga el archivo
+  indicado sin reescribirlo (hasta 250 códigos), no pulsa el botón de envío y no crea una
+  solicitud en Cloud. Verifica por separado que un envío autorizado
   produce una confirmación real antes de habilitar el alcance general.
 - El despliegue protegido solo actualiza `abcd-app`. La instalación del remitente y la
   actualización del monitor requieren mantenimiento de sus servicios con la imagen de la misma
