@@ -6,6 +6,7 @@ Automatiza: Login → Ir a Imágenes → Cargar fichero → Enviar solicitud
 
 from pathlib import Path
 from datetime import datetime
+from hashlib import sha256
 import sys
 import time
 import re
@@ -19,6 +20,7 @@ CONFIRMATION = re.compile(
     r"^(?:tu solicitud se ha enviado|su solicitud se ha enviado|your request has been sent"
     r"|solicitud enviada|request sent)(?:[.!]|\s|$)", re.I
 )
+REVIEWED_IMAGE_NOTICE_SHA256 = "8d52805679b5bc7fc1c6f20dda27b8cee030d32a131384e8ce20522d76a4490e"
 
 
 class ViewTypeUnavailable(Exception):
@@ -26,6 +28,14 @@ class ViewTypeUnavailable(Exception):
 
 
 class CookieConsentUnavailable(Exception):
+    pass
+
+
+class ImageNoticeUnverified(Exception):
+    pass
+
+
+class RecipientNotConfigured(Exception):
     pass
 
 
@@ -49,9 +59,13 @@ def _legal_notice(page):
     return page.get_by_role("button", name=re.compile(r"^acepto$|^i agree$|^aceptar y continuar$", re.I)).first
 
 
-def _pending_conditions(page):
+def _pending_documents(page):
     sign_documents = page.get_by_role("button", name=re.compile(r"^firmar ahora$|^sign now$", re.I)).first
-    return sign_documents.is_visible() or _legal_notice(page).is_visible()
+    return sign_documents.is_visible()
+
+
+def _pending_conditions(page):
+    return _pending_documents(page) or _legal_notice(page).is_visible()
 
 
 def _accept_cookie_consent(page, timeout_error):
@@ -67,11 +81,51 @@ def _accept_cookie_consent(page, timeout_error):
     )
     if not accept.is_visible():
         raise CookieConsentUnavailable
-    accept.click()
     try:
+        accept.click(timeout=10000)
         notice.wait_for(state="hidden", timeout=10000)
     except timeout_error as error:
         raise CookieConsentUnavailable from error
+
+
+def _accept_reviewed_image_notice(page, timeout_error):
+    heading = page.get_by_role("heading", name="Aviso legal de descarga de recursos digitales", exact=True)
+    if heading.count() == 0:
+        return
+    if heading.count() != 1 or not heading.is_visible():
+        raise ImageNoticeUnverified
+    notice = heading.locator("xpath=../..")
+    text = " ".join(notice.inner_text().split())
+    if sha256(text.encode("utf-8")).hexdigest() != REVIEWED_IMAGE_NOTICE_SHA256:
+        raise ImageNoticeUnverified
+    accept = notice.get_by_role("button", name=re.compile(r"^acepto$", re.I))
+    if accept.count() != 1 or not accept.is_visible() or not accept.is_enabled():
+        raise ImageNoticeUnverified
+    try:
+        accept.click(timeout=10000)
+        heading.wait_for(state="hidden", timeout=10000)
+    except timeout_error as error:
+        raise ImageNoticeUnverified from error
+
+
+def _ensure_recipient(page, email_destino, timeout_error):
+    email_inputs = page.get_by_role("textbox", name=re.compile(r"dirección de email|email address", re.I))
+    add_email = page.get_by_role("button", name=re.compile(r"^añadir dirección de email$|^add email address$", re.I))
+    save = page.get_by_role("button", name=re.compile(r"^guardar$|^save$", re.I))
+    try:
+        if email_destino not in [field.input_value() for field in email_inputs.all()]:
+            add_email.click(timeout=15000)
+            editable = [field for field in email_inputs.all() if field.is_editable()]
+            if len(editable) != 1:
+                raise RecipientNotConfigured
+            editable[0].fill(email_destino)
+        if save.is_visible():
+            save.click(timeout=15000)
+        add_email.wait_for(state="visible", timeout=15000)
+    except timeout_error as error:
+        raise RecipientNotConfigured from error
+    if save.is_visible() or email_destino not in [field.input_value() for field in email_inputs.all()]:
+        raise RecipientNotConfigured
 
 
 def upload_to_luxoptica(
@@ -182,7 +236,7 @@ def _upload_to_luxoptica(
         with sync_playwright() as playwright:
             print(f"\n🌐 Iniciando navegador...")
             browser = playwright.chromium.launch(headless=headless)
-            page = browser.new_page()
+            page = browser.new_page(viewport={"width": 1600, "height": 1200})
 
             def _count(selector: str) -> int:
                 try:
@@ -315,6 +369,9 @@ def _upload_to_luxoptica(
             time.sleep(3)
 
             _accept_cookie_consent(page, PlaywrightTimeoutError)
+            if _pending_documents(page):
+                return False, "condiciones_pendientes"
+            _accept_reviewed_image_notice(page, PlaywrightTimeoutError)
             if _pending_conditions(page):
                 return False, "condiciones_pendientes"
 
@@ -323,25 +380,7 @@ def _upload_to_luxoptica(
             # 6. Especificar email
             print(f"📧 Configurando email: {email_destino}")
 
-            # El portal deja info@diagonaleyewear.com por defecto y exige
-            # añadir explícitamente cada dirección adicional.
-            email_inputs = page.get_by_role("textbox", name=re.compile(r"dirección de email|email address", re.I))
-            if email_destino not in [field.input_value() for field in email_inputs.all()]:
-                add_email = page.get_by_text(
-                    re.compile(r"añadir dirección de email|add email address", re.I)
-                ).first
-                try:
-                    add_email.click(timeout=15000)
-                    time.sleep(1)
-                except PlaywrightTimeoutError:
-                    browser.close()
-                    return False, "correo_destino_no_configurable"
-
-                editable = [field for field in email_inputs.all() if field.is_editable()]
-                if len(editable) != 1:
-                    browser.close()
-                    return False, "No apareció el campo para añadir la dirección de email"
-                editable[0].fill(email_destino)
+            _ensure_recipient(page, email_destino, PlaywrightTimeoutError)
             
             # Mark even a click timeout as uncertain; the click may already have reached the server.
             send = page.get_by_role("button", name=re.compile(r"^enviar solicitud$|^send request$", re.I))
@@ -370,6 +409,10 @@ def _upload_to_luxoptica(
         return False, "ver_tipo_sin_todas_las_vistas"
     except CookieConsentUnavailable:
         return False, "cookie_consent_no_resuelto"
+    except ImageNoticeUnverified:
+        return False, "condiciones_pendientes"
+    except RecipientNotConfigured:
+        return False, "correo_destino_no_configurable"
     except Exception:
         return False, "envio_sin_confirmacion" if clicked else "preparacion_portal_fallida"
 

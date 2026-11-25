@@ -1,4 +1,5 @@
 from dataclasses import replace
+from hashlib import sha256
 from pathlib import Path
 import sys
 from threading import Event
@@ -41,7 +42,7 @@ def test_cookie_consent_clicks_accept_only_inside_identified_cookie_notice():
     )
     assert not notice_text.search("Acepto los términos y condiciones.")
     notice.locator.assert_called_once_with("xpath=..")
-    accept.click.assert_called_once_with()
+    accept.click.assert_called_once_with(timeout=10000)
     notice.wait_for.assert_called_once_with(state="hidden", timeout=10000)
 
 
@@ -84,6 +85,58 @@ def test_pending_documents_are_not_dismissed(monkeypatch):
     legal.assert_not_called()
 
 
+@pytest.mark.parametrize("changed", [False, True])
+def test_reviewed_image_notice_requires_exact_content(monkeypatch, changed):
+    page = MagicMock()
+    heading = page.get_by_role.return_value
+    heading.count.return_value = 1
+    heading.is_visible.return_value = True
+    notice = heading.locator.return_value
+    reviewed = "Reviewed notice Acepto"
+    monkeypatch.setattr(upload, "REVIEWED_IMAGE_NOTICE_SHA256", sha256(reviewed.encode()).hexdigest())
+    notice.inner_text.return_value = reviewed + (" changed" if changed else "")
+    accept = notice.get_by_role.return_value
+    accept.count.return_value = 1
+    accept.is_visible.return_value = True
+    accept.is_enabled.return_value = True
+
+    if changed:
+        with pytest.raises(upload.ImageNoticeUnverified):
+            upload._accept_reviewed_image_notice(page, TimeoutError)
+        accept.click.assert_not_called()
+    else:
+        upload._accept_reviewed_image_notice(page, TimeoutError)
+        accept.click.assert_called_once_with(timeout=10000)
+        heading.wait_for.assert_called_once_with(state="hidden", timeout=10000)
+
+
+@pytest.mark.parametrize("saved", [True, False])
+def test_recipient_must_be_saved_before_proceeding(saved):
+    page = MagicMock()
+    inputs, add, save = MagicMock(), MagicMock(), MagicMock()
+    existing, editable = MagicMock(), MagicMock()
+    existing.input_value.return_value = "info@example.com"
+    existing.is_editable.return_value = False
+    editable.input_value.return_value = "images@example.com"
+    editable.is_editable.return_value = True
+    inputs.all.side_effect = [[existing], [existing, editable], [existing, editable]]
+    save.is_visible.side_effect = [True, not saved]
+
+    def role(role_name, *, name):
+        if role_name == "textbox":
+            return inputs
+        return add if "añadir" in name.pattern else save
+
+    page.get_by_role.side_effect = role
+    if saved:
+        upload._ensure_recipient(page, "images@example.com", TimeoutError)
+    else:
+        with pytest.raises(upload.RecipientNotConfigured):
+            upload._ensure_recipient(page, "images@example.com", TimeoutError)
+    editable.fill.assert_called_once_with("images@example.com")
+    save.click.assert_called_once_with(timeout=15000)
+
+
 def test_missing_views_stops_without_switching_to_manual_entry(tmp_path):
     page = MagicMock()
     views = page.get_by_text.return_value
@@ -117,6 +170,8 @@ def test_missing_views_reports_step_from_upload(tmp_path, monkeypatch):
     monkeypatch.setattr(playwright.sync_api, "sync_playwright", lambda: context)
     monkeypatch.setattr(upload.time, "sleep", lambda _: None)
     monkeypatch.setattr(upload, "_pending_conditions", lambda _: False)
+    monkeypatch.setattr(upload, "_pending_documents", lambda _: False)
+    monkeypatch.setattr(upload, "_accept_reviewed_image_notice", lambda *_: None)
     monkeypatch.setattr(upload, "_accept_cookie_consent", lambda *_: None)
     monkeypatch.setattr(upload, "_choose_all_views", MagicMock(side_effect=ViewTypeUnavailable))
     request = tmp_path / "request.txt"
