@@ -4,6 +4,18 @@ import pytest
 from engine import run_abcd_engine
 
 
+def test_odoo_backup_does_not_generate_restore_commands(tmp_path, monkeypatch):
+    from contextlib import nullcontext
+    import backup_odoo_tables as backup
+
+    monkeypatch.setattr(backup, "BACKUP_DIR", tmp_path)
+    monkeypatch.setattr(backup, "TABLES_TO_BACKUP", ["product_product"])
+    monkeypatch.setattr(backup, "connect", lambda: nullcontext(object()))
+    monkeypatch.setattr(backup, "dump_table_to_csv", lambda table, connection: tmp_path / f"{table}.csv")
+    backup.main()
+    assert not (tmp_path / "restore_commands.txt").exists()
+
+
 @pytest.mark.parametrize("factory", ["application", "kering"])
 def test_postgresql_factory_uses_installed_driver_without_network(factory, monkeypatch):
     import ast

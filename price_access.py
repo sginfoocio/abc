@@ -327,7 +327,7 @@ class AccessControl:
         row = connection.execute("""SELECT * FROM access_incidents WHERE scope=? AND scope_id=? AND status='open'
             ORDER BY id DESC LIMIT 1""", (scope, scope_id)).fetchone()
         if row is not None and row["retry_after"] is not None and _parse(row["retry_after"]) <= now:
-            if connection.in_transaction:
+            if connection.in_transaction and not connection.execute("PRAGMA query_only").fetchone()[0]:
                 connection.execute("""UPDATE access_incidents SET status='expired',resolved_by='system',
                     resolved_at=?,resolution_note='Plazo de espera cumplido' WHERE id=?""", (_iso(now), row["id"]))
             return None

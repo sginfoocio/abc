@@ -1,14 +1,18 @@
 import json
-from datetime import date
+import re
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+from datetime import date, datetime, timezone
 
 import pytest
-from sqlalchemy import create_engine, text
+from filelock import FileLock
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.exc import OperationalError
 
 import provider_odoo_orders as po
 from image_repository import ImageRepository
 from marcolin_images import MarcolinConnector, DEFAULTS
 from provider_images import ProviderService, ProviderStore
+from provider_order_policy import set_order_start_date
 from provider_support import EANS, photo
 
 BAD_EAN = "8400000000999"
@@ -55,6 +59,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("IMAGE_REPOSITORY_STATE_ROOT", str(tmp_path / "r"))
     monkeypatch.setenv("IMAGE_REPOSITORY_ROOT", str(tmp_path / "i"))
     root = tmp_path / "s"
+    set_order_start_date(root, date(2026, 9, 1), actor="test")
     service = ProviderService(ProviderStore(root), repo, DEFAULTS)
     return MarcolinConnector(service), repo, root
 
@@ -94,6 +99,25 @@ def test_read_confirmed_skus_is_read_only_and_includes_supplier_contacts():
     assert result[2]["status"] == "pending"
 
 
+def test_odoo_purchase_queries_only_execute_read_statements():
+    engine = odoo_fixture()
+    statements = []
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def capture(_conn, _cursor, statement, _parameters, _context, _executemany):
+        statements.append(statement)
+
+    po.propose_partners(engine, "marcolin")
+    po.read_order_lines(engine, [573], *RANGE, max_lines=10)
+    po.read_confirmed_skus(engine, [573], [EANS[0]])
+    po.read_purchase_page(engine, [("marcolin", 573, True)], ("marcolin",), *RANGE)
+    assert len(statements) == 4
+    for sql in statements:
+        assert re.match(r"\s*(SELECT|WITH)\b", sql, re.IGNORECASE)
+        assert not re.search(r"\b(INSERT|UPDATE|DELETE|MERGE|CREATE|ALTER|DROP|TRUNCATE|CALL)\b",
+                             sql, re.IGNORECASE)
+
+
 def test_association_must_be_configured_and_reviewed(env, tmp_path):
     connector, _, root = env
     with pytest.raises(po.AssociationNotConfigured):
@@ -106,6 +130,49 @@ def test_association_must_be_configured_and_reviewed(env, tmp_path):
     assert link["confirmed"] and po.confirmed_partner_ids(root, "marcolin") == (573,)
     with pytest.raises(po.AssociationNotConfigured):  # other portals are not implied
         po.confirmed_partner_ids(root, "safilo")
+
+
+def test_luxottica_association_is_persistent_idempotent_and_preserves_other_links(tmp_path, monkeypatch):
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 11, 24, 10, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(po, "datetime", Clock)
+    other = po.save_link(tmp_path, "marcolin", [573], reviewer="ana")
+    link = po.save_link(tmp_path, "luxottica", [570, 570], reviewer="Ruben",
+                        note="LUXOTTICA SPAIN,S.L.U.; confirmado por el responsable")
+    original = (tmp_path / po.LINKS_FILE).read_bytes()
+
+    class LaterClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 11, 25, 10, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(po, "datetime", LaterClock)
+    assert po.save_link(tmp_path, "luxottica", [570], reviewer="Ruben",
+                        note="LUXOTTICA SPAIN,S.L.U.; confirmado por el responsable") == link
+    assert (tmp_path / po.LINKS_FILE).read_bytes() == original
+    assert po.confirmed_partner_ids(tmp_path, "luxottica") == (570,)
+    assert po.load_links(tmp_path)["marcolin"] == other
+    with pytest.raises(ValueError, match="proveedor_desconocido"):
+        po.save_link(tmp_path, "unknown", [570], reviewer="Ruben")
+
+
+def test_association_saves_serialize_across_writers(tmp_path):
+    lock = FileLock(tmp_path / ".provider_odoo_links.lock", timeout=5)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        with lock:
+            first = executor.submit(po.save_link, tmp_path, "luxottica", [570], reviewer="Ruben")
+            second = executor.submit(po.save_link, tmp_path, "marcolin", [573], reviewer="ana")
+            with pytest.raises(FutureTimeout):
+                first.result(timeout=0.3)
+            with pytest.raises(FutureTimeout):
+                second.result(timeout=0.3)
+        first.result(timeout=5)
+        second.result(timeout=5)
+    assert po.confirmed_partner_ids(tmp_path, "luxottica") == (570,)
+    assert po.confirmed_partner_ids(tmp_path, "marcolin") == (573,)
 
 
 def test_name_candidates_are_proposals_not_associations(env):
@@ -126,7 +193,8 @@ def test_preview_statuses_images_and_duplicates(env):
     connector.plan_eans([EANS[0]])  # already has a live request
     preview = po.demand_preview(odoo_fixture(), connector, root, *RANGE)
     by = {(r["EAN"], r["Pedido"]): r for r in preview["rows"]}
-    assert by[(EANS[1], "P00001")]["Imágenes"] == po.IMAGES_PARTIAL and by[(EANS[1], "P00001")]["Estado"] == po.ELIGIBLE
+    assert by[(EANS[1], "P00001")]["Imágenes"] == po.IMAGES_PARTIAL
+    assert by[(EANS[1], "P00001")]["Estado"] == po.PARTIAL
     assert by[(EANS[2], "P00002")]["Imágenes"] == po.IMAGES_COMPLETE and by[(EANS[2], "P00002")]["Estado"] == po.COMPLETE
     assert by[(EANS[0], "P00002")]["Estado"] == po.DUPLICATE or by[(EANS[0], "P00001")]["Estado"] == po.DUPLICATE
     reviews = [r for r in preview["rows"] if r["Estado"] == po.REVIEW]
@@ -135,14 +203,13 @@ def test_preview_statuses_images_and_duplicates(env):
     assert sum(1 for r in preview["rows"] if r["EAN"] == EANS[0] and r["Estado"] == po.DUPLICATE) >= 1
 
 
-def test_pilot_proposal_prefers_missing_then_partial_recent_first_and_caps_at_ten(env):
+def test_pilot_proposal_uses_only_absent_eans_and_caps_at_ten(env):
     connector, repo, root = env
     po.save_link(root, "marcolin", [573], reviewer="ana")
     repo.save(EANS[1], "a.png", photo(), provider="kering", origin="t", view="frontal")
     preview = po.demand_preview(odoo_fixture(), connector, root, *RANGE)
     picks = po.pick_pilot(preview["rows"], size=50)
-    assert picks[-1] == EANS[1]  # partial last
-    assert set(picks) == {EANS[0], EANS[1], EANS[2]} and len(po.pick_pilot(preview["rows"], 2)) == 2
+    assert picks == [EANS[2], EANS[0]]
     many = [{"EAN": f"{i}", "Estado": po.ELIGIBLE, "Imágenes": po.IMAGES_NONE, "Fecha": "2026-09-01"} for i in range(30)]
     assert len(po.pick_pilot(many, 99)) == 10
 
@@ -150,13 +217,14 @@ def test_pilot_proposal_prefers_missing_then_partial_recent_first_and_caps_at_te
 def test_create_requests_only_planner_only_eligible_no_portal_and_logged(env):
     connector, repo, root = env
     po.save_link(root, "marcolin", [573], reviewer="ana")
+    repo.save(EANS[1], "a.png", photo(), provider="kering", origin="t", view="frontal")
     preview = po.demand_preview(odoo_fixture(), connector, root, *RANGE)
     result = po.create_requests(connector, root, preview["rows"], [EANS[0], EANS[1], BAD_EAN, EANS[3]], approved_by="ana")
-    assert result["not_eligible"] == [BAD_EAN, EANS[3]]  # invalid and cancelled-order EANs cannot be forced in
+    assert result["not_eligible"] == [EANS[1], BAD_EAN, EANS[3]]
     requests = connector.service.store.list_requests("marcolin")
     assert len(requests) == 1 and requests[0]["state"] == "ready" and requests[0]["remote_id"] is None
     log = [json.loads(l) for l in (root / po.SELECTION_LOG).read_text(encoding="utf-8").splitlines()]
-    assert log[0]["approved_by"] == "ana" and {e["ean"] for e in log[0]["eans"]} == {EANS[0], EANS[1]}
+    assert log[0]["approved_by"] == "ana" and {e["ean"] for e in log[0]["eans"]} == {EANS[0]}
     again = po.create_requests(connector, root, preview["rows"], [EANS[0]], approved_by="ana")
     assert again["created"] == [] and len(connector.service.store.list_requests("marcolin")) == 1
     with pytest.raises(ValueError):

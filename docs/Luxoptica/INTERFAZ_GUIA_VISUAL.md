@@ -1,240 +1,45 @@
-# 📱 Interfaz de la Aplicación - Qué Vas a Ver
+# Guía de interfaz: solicitudes Luxottica
 
-## 1️⃣ Pantalla de Login
+> Esta guía describe el flujo local actual. Las capturas y ejemplos de botones anteriores no
+> acreditan la disponibilidad ni el estado de sistemas productivos.
 
-```
-┌─────────────────────────────────────────────┐
-│                                             │
-│        DIAGONAL EYEWEAR                    │
-│                                             │
-│        Usuario: [diagonal_________]        │
-│        Contraseña: [***********]           │
-│                                             │
-│        [ Iniciar Sesión ]                  │
-│                                             │
-└─────────────────────────────────────────────┘
-```
+## Importador MASTERDATA
 
----
+1. Carga el fichero origen y revisa las advertencias de transformación.
+2. En **Solicitud de imágenes (Luxottica)**, revisa la vista previa por EAN.
+3. Solo se pueden preparar EAN válidos sin imágenes ni solicitud activa. EAN completos,
+   parciales, con archivos sin catalogar o con cobertura desconocida se excluyen o requieren
+   revisión.
+4. Si el catálogo, el repositorio de imágenes, el almacén compartido o el historial de lotes
+   no están disponibles, la preparación se bloquea.
+5. Confirma la selección para crear la solicitud en el almacén compartido y descargar el TXT
+   y manifiesto. Cada lote contiene como máximo 250 EAN.
 
-## 2️⃣ Menú Principal (Sidebar)
+La app no envía lotes al portal. El envío es manual y requiere autorización específica; una
+marca local de estado no acredita que el portal recibiera o procesara el lote.
 
-Verás este menú a la izquierda:
+## Pedidos Odoo
 
-```
-┌─────────────────────────────────────┐
-│  📊 Diagonal Eyewear                │
-│                                     │
-│  ☰ NAVEGACIÓN PRINCIPAL             │
-│  ├─ 📊 ABCD                         │
-│  ├─ 📈 Análisis                     │
-│  ├─ 🔧 Configuración                │
-│  └─ ℹ️  Ayuda                       │
-│                                     │
-│  ☰ SECCIÓN MASTERDATA (cuando       │
-│     seleccionas ABCD):              │
-│  ├─ 📥 Importador Masterdata        │
-│  └─ 🧪 Dry-run Odoo                │
-│                                     │
-└─────────────────────────────────────┘
-```
+La consulta Odoo es explícita y de solo lectura. Las solicitudes preparadas desde pedidos usan
+el mismo almacén y deduplicación UPC/EAN que MASTERDATA, conservan evidencia de línea/pedido
+y solo admiten códigos sin registros de imagen. Los parciales o no verificables no se proponen.
 
----
+La fecha común inicial es `2026-11-01`, configurable con auditoría. Cambiarla no reprocesa
+pedidos; los pedidos piloto Kering explícitamente permitidos conservan su excepción acotada.
 
-## 3️⃣ Pantalla de Masterdata (Importador)
+## Recepción e importación
 
-### 📊 Sección 1: Transformación
+El monitor Graph es independiente de las solicitudes. Su presencia en el repositorio o un
+contenedor iniciado no demuestra actividad o éxito. Verifica runtime, recibos y errores según
+la [guía de validación local Cloud](../CLOUD_LOCAL_VALIDATION.md). No ejecutes lectura de correo
+ni descargas reales sin autorización específica.
 
-```
-╔════════════════════════════════════════════╗
-║  1. CARGAR EXCEL ORIGEN LUXOTTICA         ║
-╚════════════════════════════════════════════╝
+Las imágenes canónicas se guardan por EAN en `IMAGE_REPOSITORY_ROOT/<EAN>`. La biblioteca y
+los aliases de mercado no activan por sí mismos una publicación remota.
 
-[ 📂 Sube el Excel origen ]  ← Click aquí
+## Sesión recordada
 
-(Mostrará archivos si ya existen)
-```
-
-**Después de subir**, verás:
-
-```
-╔════════════════════════════════════════════╗
-║  ⚠️  ADVERTENCIAS DE TRANSFORMACIÓN        ║
-╠════════════════════════════════════════════╣
-║  • Registros procesados: 14,176            ║
-║  • Registros exportados: 12,782            ║
-║  • Registros descartados: 1,394            ║
-║                                            ║
-║  ✓ Pérdida de ceros iniciales: 0           ║
-║  ✓ Filas inválidas SI/NO: 0                ║
-║  ! Marcas no resueltas: 1 (GENERICS)       ║
-║                                            ║
-║  Status: ✅ LISTO PARA USAR                ║
-╚════════════════════════════════════════════╝
-```
-
----
-
-### 📥 Sección 2: Descargar Resultados
-
-```
-╔════════════════════════════════════════════╗
-║  2. DESCARGAR RESULTADOS                  ║
-╚════════════════════════════════════════════╝
-
-[ 📥 Excel transformado ]
-   └─ MASTERDATA_transformado.xlsx (18 cols)
-
-[ 📥 JSON de validación ]
-   └─ MASTERDATA_validacion.json
-
-[ 📥 Resumen ejecutivo ]
-   └─ MASTERDATA_resumen_ejecutivo.md
-
-[ 📥 Auditoria descartes ]
-   └─ *_descartes_auditoria.csv
-
-[ 📥 Auditoria marcas ]
-   └─ *_marcas_auditoria.csv
-
-[ 📥 Resumen ceros iniciales ]
-   └─ *_ceros_iniciales_resumen.csv
-```
-
----
-
-### 🎁 Sección 3: Solicitud de Imágenes Luxoptica
-
-```
-╔════════════════════════════════════════════╗
-║  3. SOLICITUD DE IMÁGENES (LUXOPTICA)     ║
-╚════════════════════════════════════════════╝
-
-Email para la solicitud:
-[ images@diagonaleyewear.com________]
-  (ya está predeterminado)
-
-Seleccionar whitelist de accesorios:
-[✓] Aplicar whitelist de accesorios local
-
-[ 🎁 GENERAR ARCHIVOS PARA PEDIR IMÁGENES ]
-   
-   Cuando hagas click, verás:
-   ✅ Generados 1 archivo(s) en docs/Luxoptica/
-   
-   Si hubiera 500 EAN: Generaría 2 archivos (250 + 250)
-   Si hubiera 1000 EAN: Generaría 4 archivos (250+250+250+250)
-```
-
-**Tabla de Lotes Generados:**
-
-```
-╔════════════════════════════════════════════════════════════╗
-║  LOTES GENERADOS                                          ║
-╠════════════════════════════════════════════════════════════╣
-║                                                            ║
-║  📄 upc-products-images-request-20260819_102506-50-e...   ║
-║     │                                                      ║
-║     ├─ EAN totales: 50                                    ║
-║     ├─ [ 📥 Descargar lote 1 (50 EAN) ]                   ║
-║     └─ [ ✅ Marcar como procesado ]                       ║
-║                                                            ║
-║  Progreso: 0/1 lotes procesados                           ║
-║                                                            ║
-╚════════════════════════════════════════════════════════════╝
-```
-
----
-
-## ✅ Flujo en Tiempo Real
-
-### Paso 1: Subir Excel
-```
-Usuario: Click en "Sube el Excel origen"
-Sistema: Selecciona archivo
-Sistema: Muestra barra de progreso
-Usuario: Espera 30-60 segundos
-Sistema: Muestra advertencias
-```
-
-### Paso 2: Generar Lotes
-```
-Usuario: Verifica email (images@diagonaleyewear.com)
-Usuario: Click "Generar archivos"
-Sistema: Procesa datos (5-10 segundos)
-Sistema: Crea archivos .txt
-Sistema: Muestra tabla de lotes
-```
-
-### Paso 3: Descargar Lotes
-```
-Usuario: Click "Descargar lote 1"
-Sistema: Descarga archivo .txt
-Usuario: Guarda archivo
-```
-
-### Paso 4: Marcar Procesado
-```
-Usuario: Click "Marcar como procesado"
-Sistema: Registra en estado interno
-Sistema: Actualiza progreso (1/1)
-```
-
----
-
-## 🌍 Después de Enviar a Luxoptica
-
-Vuelve a la app en 24-48h. Verás:
-
-```
-╔════════════════════════════════════════════╗
-║  🤖 DESCARGA AUTOMÁTICA                   ║
-╚════════════════════════════════════════════╝
-
-Si hay imágenes descargadas:
-
-[ 🧪 DRY-RUN ODOO ]
-   └─ Botón para validar importación
-
-[✅] Imágenes descargadas: 50
-[ ] Ubicación: docs/Luxoptica/descargas/
-               2026-08-19/lote-001/
-```
-
----
-
-## 💡 Tips Importantes
-
-1. **Email es crítico**: `images@diagonaleyewear.com`
-   - Sin este, no recibirás las imágenes
-
-2. **Tamaño de lotes**: Máximo 250 EAN por archivo
-   - Luxoptica requiere esto
-
-3. **Descargas automáticas**: Cada hora
-   - No necesitas hacer nada
-   - Log: `.mail_download_state.json`
-
-4. **Revisa advertencias**:
-   - Si ves marcas no resueltas: revisar auditoria
-   - Si ves pérdida de ceros: investigar
-
----
-
-## 🎯 Resumen Ejecutivo
-
-| Acción | Tiempo | Manual/Automático |
-|--------|--------|-------------------|
-| Subir Excel | 30-60s | Manual |
-| Transformar | 5-10s | Automático |
-| Generar lotes | 5-10s | Manual |
-| Descargar .txt | 5s | Manual |
-| Enviar a Luxoptica | 2-3min | Manual |
-| Marcar procesado | 1s | Manual |
-| **Luxoptica procesa** | **24-48h** | **Manual (Luxoptica)** |
-| Descarga imágenes | 1-5min | Automático (Graph API) |
-| **Total** | **~24-48h** | **80% automático** |
-
----
-
-**🚀 ¡Ahora abre http://localhost:8501 en tu navegador y comienza el flujo!**
+La restauración de la sesión tras recrear la app está cubierta por pruebas offline. Requiere
+`AUTH_COOKIE_SECRET` de al menos 32 caracteres y persistencia del almacén de revocaciones.
+La persistencia real tras F5 en Cloud sigue pendiente de validación autorizada; si falta el
+secreto, la opción **Recordarme** se deshabilita.

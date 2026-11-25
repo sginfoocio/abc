@@ -85,6 +85,41 @@ def _persist_sample(store, evidence):
                     (json.dumps(sample, ensure_ascii=False),))
 
 
+@pytest.mark.parametrize("expired", [False, True])
+def test_business_policy_reevaluation_keeps_original_sample_dates_and_config(tmp_path, expired):
+    evidence = _evidence(tmp_path)
+    data = json.loads(evidence.read_text(encoding="utf-8"))
+    data["cases"][0]["commercial_config"] = {}
+    evidence.write_text(json.dumps(data), encoding="utf-8")
+    store = _store(tmp_path)
+    with store._connect() as con, con:
+        con.execute("UPDATE competitor_web_config SET sales_market='',market_verified=0,"
+                    "market_evidence_url='',market_note=''")
+    _persist_sample(store, evidence)
+    original = data["cases"][0]["sampled_at"]
+    now = datetime.fromisoformat(original) + timedelta(hours=25 if expired else 1)
+    service = SavedSampleReevaluation(store, evidence, clock=lambda: now)
+    assert service.preview(1)["category"] == ("expired" if expired else "eligible")
+    if expired:
+        with pytest.raises(ValueError, match="caducada"):
+            service.apply(1, actor="synthetic", note="Policy-only regression",
+                          build_commit="a" * 40, approved=True)
+    else:
+        assert service.apply(1, actor="synthetic", note="Policy-only regression",
+                             build_commit="a" * 40, approved=True)["applied"]
+    with store._connect() as con:
+        job = con.execute("SELECT * FROM monitor_jobs WHERE id=1").fetchone()
+        assert json.loads(job["sample"])["at"] == original
+        assert con.execute("SELECT market_verified FROM competitor_web_config "
+                           "WHERE competitor_id='opticalh-com'").fetchone()[0] == 0
+        if not expired:
+            audit = con.execute("SELECT current FROM access_audit "
+                                "WHERE action='reevaluate_saved_sample'").fetchone()
+            assert "business-es-eur-market-14-2026-11-24" in json.loads(audit[0])["market_evidence"]
+            offer = con.execute("SELECT captured_at FROM offers").fetchone()
+            assert datetime.fromisoformat(offer[0]) == datetime.fromisoformat(original)
+
+
 def test_optical_h_local_preview_and_apply_are_audited_without_http(tmp_path):
     evidence = _evidence(tmp_path)
     store = _store(tmp_path)

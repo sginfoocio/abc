@@ -1,5 +1,7 @@
 # Registro de Solicitudes Luxoptica
 
+> **Registro histórico.** Las fechas, estado, ubicación y estimaciones siguientes no acreditan el estado actual del buzón, portal, monitor ni de la entrega. No uses este registro para reenviar o atribuir una solicitud sin reconciliar evidencia autorizada.
+
 ## Solicitud 001 - 50 Imágenes (2026-08-19)
 
 | Campo | Valor |

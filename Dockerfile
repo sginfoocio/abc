@@ -48,6 +48,7 @@ COPY image_thumbnails.py .
 COPY image_library.py bulk_image_search.py cloud_design.py .
 COPY provider_images.py provider_images_ui.py provider_odoo_orders.py repository_catalog_readonly.py .
 COPY marcolin_images.py safilo_images.py nuorder_images.py .
+COPY provider_order_policy.py .
 COPY scripts/provider_requests_migrate.py ./scripts/provider_requests_migrate.py
 COPY migrate_image_repository.py .
 COPY scripts/nfs_repository_guard.py ./scripts/nfs_repository_guard.py
@@ -91,6 +92,7 @@ COPY db_loader.py .
 COPY engine.py .
 COPY abcd_snapshots.py .
 COPY auth_session.py .
+COPY auth_cookie_component ./auth_cookie_component
 COPY db_config.py .
 COPY transform_luxottica_masterdata.py .
 COPY validate_masterdata_odoo_dryrun.py .

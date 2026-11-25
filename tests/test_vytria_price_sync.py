@@ -668,6 +668,12 @@ def test_admin_and_product_detail_show_native_price_provenance(tmp_path, monkeyp
         "price": "232.05", "source": "PrestaShop · MySQL", "offer": offer,
         "active": False, "in_stock": False, "observed_at": now.isoformat(),
         "valid_until": (now + timedelta(hours=12)).isoformat(),
+        "price_validation": {"mode": "native_rules_confirmed", "php_inspected": False},
+        "connection_security": {
+            "account_permissions": "broad", "tls_required": True,
+            "server_identity_verified": False, "transaction_read_only": True,
+            "authorization": {"id": "approved-test"},
+        },
     }
     with store._connect() as con, con:
         con.execute("""INSERT INTO vytria_prices(ean,market,price,currency,price_includes_tax,source,pricelist_id,
@@ -693,7 +699,14 @@ def test_admin_and_product_detail_show_native_price_provenance(tmp_path, monkeyp
     navigate(app, "Datos e importaciones")
     native = next(frame.value for frame in app.dataframe if "Descuento/oferta aplicada" in frame.value.columns)
     assert native.loc[native["EAN"] == ean, "Origen"].iloc[0] == "PrestaShop · MySQL"
+    assert native.loc[native["EAN"] == ean, "Validación del precio"].iloc[0] == (
+        "Reglas nativas confirmadas; PHP no inspeccionado")
     assert native.loc[native["EAN"] == ean, "Precio final en Vytria"].iloc[0] == 232.05
+    assert native.loc[native["EAN"] == ean, "Permisos MySQL"].iloc[0] == "Amplios; uso autorizado"
+    assert native.loc[native["EAN"] == ean, "TLS"].iloc[0] == "Cifrado"
+    assert native.loc[native["EAN"] == ean, "Transacción"].iloc[0] == "READ ONLY"
+    assert native.loc[native["EAN"] == ean, "Identidad del servidor"].iloc[0] == "No verificada"
+    assert native.loc[native["EAN"] == ean, "Autorización MySQL"].iloc[0] == "approved-test"
     from tests.admin_navigation import watch_section
     watch_section(app, "Precios y monitorización")
     assert not app.exception

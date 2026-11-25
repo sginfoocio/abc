@@ -113,6 +113,155 @@ def _mysql_tls_options() -> dict:
     raise QuoteError("Configurar TLS de MySQL: VERIFY_IDENTITY con CA o REQUIRED explícito sin CA")
 
 
+def _account_authorization(config: dict, port: int) -> dict | None:
+    policy = os.getenv("PRESTASHOP_MYSQL_ACCOUNT_POLICY", "select_only")
+    if policy == "select_only":
+        return None
+    if policy != "authorized_broad":
+        raise QuoteError("Política de cuenta MySQL no reconocida")
+    try:
+        receipt = json.loads(os.environ["PRESTASHOP_MYSQL_ACCOUNT_AUTHORIZATION"])
+        required = {"id", "actor", "at", "host", "port", "user", "database"}
+        if (type(receipt) is not dict or set(receipt) != required
+                or any(not isinstance(receipt[key], str) or not receipt[key].strip()
+                       or len(receipt[key]) > 200 for key in required - {"port"})
+                or type(receipt["port"]) is not int or receipt["port"] != port
+                or any(receipt[key] != config[key] for key in ("host", "user", "database"))
+                or receipt["user"] != "ps_user_vytria_lect"
+                or receipt["database"] != "ps_vytria"
+                or _time(receipt["at"]) > datetime.now(timezone.utc)):
+            raise ValueError
+    except (KeyError, TypeError, ValueError, OverflowError):
+        raise QuoteError("Falta autorización válida y acotada para la cuenta MySQL de permisos amplios") from None
+    return {key: receipt[key] for key in ("id", "actor", "at")}
+
+
+def _authorized_database_grant(grant: str) -> bool:
+    match = re.match(r"^GRANT (.+?) ON (.+?) TO ", grant)
+    if not match or "WITH GRANT OPTION" in grant:
+        return False
+    privileges, scope = match.groups()
+    if privileges == "USAGE" and scope == "*.*":
+        return True
+    scope = scope.replace("\\\\", "\\")
+    allowed = {"SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "REFERENCES", "INDEX",
+               "ALTER", "CREATE TEMPORARY TABLES", "LOCK TABLES", "EXECUTE", "CREATE VIEW",
+               "SHOW VIEW", "CREATE ROUTINE", "ALTER ROUTINE", "EVENT", "TRIGGER"}
+    return scope == r"`ps\_vytria`.*" and set(privileges.split(", ")) <= allowed
+
+
+def _connection_security(cur, config: dict, cipher: str, authorization: dict | None) -> dict:
+    cur.execute("SHOW GRANTS")
+    grants = [grant for (grant,) in cur.fetchall()]
+    restricted = all(re.match(r"^GRANT (USAGE|SELECT) ON ", grant)
+                     and "WITH GRANT OPTION" not in grant for grant in grants)
+    if not grants or (not restricted and authorization is None):
+        raise QuoteError("La cuenta de PrestaShop no tiene permisos exclusivamente de lectura")
+    if authorization is not None:
+        if not all(_authorized_database_grant(grant) for grant in grants):
+            raise QuoteError("Permisos MySQL fuera del ámbito autorizado")
+        cur.execute("SELECT CURRENT_USER(), DATABASE()")
+        identity = cur.fetchone()
+        if (not identity or len(identity) != 2 or not isinstance(identity[0], str)
+                or identity[0].rpartition("@")[0] != config["user"]
+                or identity[1] != config["database"]):
+            raise QuoteError("La sesión MySQL no corresponde a la cuenta y base autorizadas")
+    security = {
+        "account_policy": "authorized_broad" if authorization is not None else "select_only",
+        "account_permissions": "select_only" if restricted else "broad",
+        "tls_required": True, "tls_cipher": cipher,
+        "certificate_verified": os.getenv("PRESTASHOP_MYSQL_SSL_MODE", "VERIFY_IDENTITY") == "VERIFY_IDENTITY",
+        "server_identity_verified": os.getenv("PRESTASHOP_MYSQL_SSL_MODE", "VERIFY_IDENTITY") == "VERIFY_IDENTITY",
+    }
+    if authorization is not None:
+        security["authorization"] = authorization
+    return security
+
+
+def _price_validation(context: dict, *, audit: bool = False) -> dict:
+    if audit:
+        return {"mode": "audit_only", "php_inspected": False}
+    mode = os.getenv("PRESTASHOP_PRICE_VALIDATION_MODE", "php_review")
+    if mode == "php_review":
+        if os.getenv("PRESTASHOP_PRICE_CODE_AUDITED") != "1":
+            raise QuoteError("Pendiente auditar overrides PHP y módulos de presentación de precios")
+        return {"mode": mode, "php_inspected": True}
+    if mode != "native_rules_confirmed":
+        raise QuoteError("Modo de validación de precios no soportado")
+    expected = {"shop_id": 1, "group_id": 1, "country_id": 6, "currency_id": 1, "market": "ES",
+                "currency": "EUR", "customer_id": 0, "quantity": 1, "tax_included": True,
+                "shipping_included": False, "cart_discount": False}
+    try:
+        config = {key: os.environ[f"PRESTASHOP_MYSQL_{key.upper()}"]
+                  for key in ("host", "user", "database")}
+        account = _account_authorization(config, int(os.getenv("PRESTASHOP_MYSQL_PORT", "3306")))
+        receipt = json.loads(os.environ["PRESTASHOP_PRICE_NATIVE_CONFIRMATION"])
+        if (account is None or type(receipt) is not dict
+                or set(receipt) != {"id", "actor", "at", "account_authorization_id", "context", "claim"}
+                or any(not isinstance(receipt[key], str) or not receipt[key].strip()
+                       or len(receipt[key]) > 200 for key in ("id", "actor", "at", "account_authorization_id"))
+                or receipt["account_authorization_id"] != account["id"]
+                or receipt["claim"] != "native_prestashop_catalog_rules"
+                or type(receipt["context"]) is not dict or receipt["context"] != expected
+                or context != expected
+                or any(type(receipt["context"][key]) is not type(value) for key, value in expected.items())
+                or _time(receipt["at"]) > datetime.now(timezone.utc)):
+            raise ValueError
+    except (KeyError, TypeError, ValueError, OverflowError):
+        raise QuoteError("Falta confirmación acotada del responsable para el cálculo nativo") from None
+    return {"mode": mode, "php_inspected": False,
+            "basis": "responsible_confirmation_and_native_database_checks",
+            "authorization": {key: receipt[key] for key in ("id", "actor", "at")},
+            "account_authorization_id": account["id"]}
+
+
+def _catalog_origin(product_id: int, row: tuple, parents: dict, conditions: list, categories: dict) -> dict:
+    sid, _, rule_id, *_ = row
+    if not rule_id:
+        return {"specific_price_id": sid, "catalog_rule_id": 0, "kind": "specific_offer"}
+    parent = parents.get(rule_id)
+    if parent is None:
+        raise QuoteError(f"Precio específico {sid} sin regla nativa de origen {rule_id}")
+    # Catalog percentages are stored as 15; materialized specific prices store 0.15.
+    reduction = Decimal(parent[6]) / 100 if parent[7] == "percentage" else Decimal(parent[6])
+    expected = (parent[0], parent[1], parent[2], parent[3], parent[4], parent[5],
+                reduction, parent[7], parent[8], parent[9], parent[10])
+    actual = (row[3], row[5], row[6], row[7], row[8], row[9], row[10], row[11],
+              row[12], row[13], row[14])
+    if actual != expected:
+        raise QuoteError(f"Precio específico {sid} discrepa de su regla nativa {rule_id}")
+    groups = defaultdict(set)
+    for rid, group, kind, value in conditions:
+        if rid != rule_id:
+            continue
+        if kind != "category" or not isinstance(value, str) or not value.isdecimal() or int(value) < 1:
+            raise QuoteError(f"Condición no soportada en regla nativa {rule_id}: {kind}")
+        groups[group].add(int(value))
+    if groups and not any(group <= categories.get(product_id, set()) for group in groups.values()):
+        raise QuoteError(f"Producto {product_id} fuera de las categorías de la regla nativa {rule_id}")
+    return {"specific_price_id": sid, "catalog_rule_id": rule_id, "kind": "materialized_catalog_rule",
+            "condition_groups": {str(group): sorted(values) for group, values in groups.items()},
+            "catalog_reduction": str(parent[6]), "materialized_reduction": str(row[10])}
+
+
+def _validate_price_hooks(hooks: list, validation: dict) -> None:
+    for hook, module in hooks:
+        if validation["mode"] == "native_rules_confirmed":
+            if hook in {"actionproductpricecalculation", "actiontaxmanager", "actiongetproductpropertiesafter"}:
+                raise QuoteError(f"Cálculo no soportado: {module}/{hook}; revisar modules/{module}/{module}.php")
+        elif (hook, module) not in {("actionpresentproduct", "altautofiller"),
+                                    ("displayproductpriceblock", "revolutpayment")}:
+            raise QuoteError("Hay un módulo de cálculo o presentación de precios no auditado")
+
+
+def _database_id(value: int | Decimal) -> int:
+    if (type(value) not in (int, Decimal)
+            or isinstance(value, Decimal) and (not value.is_finite() or value != value.to_integral_value())
+            or not 0 <= value <= 0xFFFFFFFF):
+        raise QuoteError("Identificador MySQL no entero o fuera de rango")
+    return int(value)
+
+
 def _mysql_rows(eans: list[str], context: dict) -> tuple[list[tuple], list[tuple]]:
     import pymysql
 
@@ -122,7 +271,10 @@ def _mysql_rows(eans: list[str], context: dict) -> tuple[list[tuple], list[tuple
             ("database", "DATABASE"))}
         port = int(os.getenv("PRESTASHOP_MYSQL_PORT", "3306"))
     except (KeyError, ValueError):
-        raise QuoteError("Falta configurar la conexión MySQL de solo lectura") from None
+        raise QuoteError("Falta configurar la conexión MySQL de PrestaShop") from None
+    authorization = _account_authorization(config, port)
+    if not eans or len(eans) != len(set(eans)) or not set(eans) <= manifest_eans():
+        raise QuoteError("La lectura MySQL debe limitarse al manifiesto autorizado de 100 EAN")
     with closing(pymysql.connect(**config, port=port, **_mysql_tls_options(),
                                  connect_timeout=5, read_timeout=15, write_timeout=15,
                                  charset="utf8mb4")) as con, con.cursor() as cur:
@@ -130,19 +282,31 @@ def _mysql_rows(eans: list[str], context: dict) -> tuple[list[tuple], list[tuple
         cipher = cur.fetchone()
         if not cipher or not cipher[1]:
             raise QuoteError("La sesión MySQL de PrestaShop no tiene TLS activo")
-        cur.execute("SHOW GRANTS")
-        for (grant,) in cur.fetchall():
-            if not re.match(r"^GRANT (USAGE|SELECT) ON ", grant) or "WITH GRANT OPTION" in grant:
-                raise QuoteError("La cuenta de PrestaShop no tiene permisos exclusivamente de lectura")
+        security = _connection_security(cur, config, cipher[1], authorization)
+        cur.execute("SET SESSION TRANSACTION READ ONLY")
         cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
         cur.execute("START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY")
-        return read_batch(cur, eans, context)
+        try:
+            if authorization is not None:
+                cur.execute("SELECT @@tx_read_only")
+                read_only = cur.fetchone()
+                if not read_only or read_only[0] != 1:
+                    raise QuoteError("La sesión MySQL autorizada no está en modo READ ONLY")
+                security["transaction_read_only"] = True
+            identities, quotes = read_batch(cur, eans, context)
+            return identities, [(ean, json.dumps({**json.loads(raw), "connection_security": security})
+                                 if isinstance(raw, str) else raw) for ean, raw in quotes]
+        finally:
+            con.rollback()
 
 
 def read_batch(cur, eans: list[str], context: dict, *, audit: bool = False) -> tuple[list[tuple], list[tuple]]:
     shop, country, currency, group = (context[k] for k in ("shop_id", "country_id", "currency_id", "group_id"))
 
     def select(sql, args=()):
+        if (not sql.lstrip().upper().startswith("SELECT ")
+                or re.search(r";|--|/\*|#|\b(?:INTO|LOAD_FILE|SLEEP|BENCHMARK)\b", sql, re.I)):
+            raise QuoteError("El lector de precios solo admite sus consultas SELECT parametrizadas")
         sql = re.sub(r"\{([a-z_]+)\}", lambda m: _identifier("PRESTASHOP_MYSQL_PREFIX", m[1]), sql)
         cur.execute(sql, args)
         return list(cur.fetchall())
@@ -167,29 +331,39 @@ def read_batch(cur, eans: list[str], context: dict, *, audit: bool = False) -> t
                 ON ats.id_product_attribute=a.id_product_attribute AND ats.id_shop=%s
                 JOIN {product_shop} ps ON ps.id_product=a.id_product AND ps.id_shop=ats.id_shop
                 WHERE a.ean13 IN (MARKS)""".replace("MARKS", identity_marks), (shop, *forms, shop, *forms))
+    # MySQL can promote the literal-zero/unsigned-ID UNION column to DECIMAL.
+    identities = [(ean, _database_id(pid), _database_id(aid), unresolved)
+                  for ean, pid, aid, unresolved in identities]
     reference_links = {}
+    literal_reference_links = {}
     reference_issues = {}
-    pending = {ean: ref for ean, ref in references.items()
-               if not any(row[0].zfill(13) == ean for row in identities)}
-    if pending:
-        refs = sorted({row[6] for row in pending.values()})
+    if references:
+        refs = sorted({row[6] for row in references.values()})
         reference_rows = select("""SELECT p.id_product,m.name,p.reference FROM {product} p
             JOIN {manufacturer} m ON m.id_manufacturer=p.id_manufacturer
             JOIN {product_shop} ps ON ps.id_product=p.id_product AND ps.id_shop=%s
             WHERE p.reference IN (MARKS)""".replace("MARKS", ",".join(["%s"] * len(refs))), (shop, *refs))
-        for ean, ref in pending.items():
+        for ean, ref in references.items():
             original, pid, aid, brand, _, _, reference = ref
             matching_rows = {row for row in identities if row[0].zfill(13) == original.zfill(13)}
             expected_rows = {(original, pid, aid, 0), (original, pid, 0, bool(aid))}
             live = {row[0] for row in reference_rows if row[1:] == (brand, reference)}
-            if live == {pid} and (original, pid, aid, 0) in matching_rows and matching_rows <= expected_rows:
+            literal = {row for row in identities if row[0].zfill(13) == ean}
+            if literal:
+                if live == {pid} and {row[1] for row in literal} == {pid}:
+                    literal_reference_links[ean] = ref
+                else:
+                    reference_issues[ean] = QuoteError(
+                        "La ficha de referencia auditada cambió, no pertenece a la tienda o es ambigua")
+            elif live == {pid} and (original, pid, aid, 0) in matching_rows and matching_rows <= expected_rows:
                 reference_links[ean] = ref
                 identities.append((ean, pid, aid, 0))
             else:
                 reference_issues[ean] = QuoteError(
                     "La ficha de referencia auditada cambió, no pertenece a la tienda o es ambigua")
     requested = set(eans)
-    identities = [row for row in identities if row[0].zfill(13) in requested]
+    identities = [row for row in identities if row[0].zfill(13) in requested
+                  and row[0].zfill(13) not in reference_issues]
     products = sorted({row[1] for row in identities})
     if not products:
         return identities, list(reference_issues.items())
@@ -220,12 +394,10 @@ def read_batch(cur, eans: list[str], context: dict, *, audit: bool = False) -> t
         WHERE hm.id_shop=%s AND m.active=1 AND LOWER(h.name) IN
         ('actionproductpricecalculation','actiontaxmanager','actionpresentproduct',
          'actiongetproductpropertiesafter','displayproductpriceblock')""", (shop,))
-    if any(tuple(hook) not in {("actionpresentproduct", "altautofiller"),
-                               ("displayproductpriceblock", "revolutpayment")} for hook in hooks):
-        raise QuoteError("Hay un módulo de cálculo o presentación de precios no auditado")
-    # This gate is set only after reviewing deployed PHP overrides and presentation hooks.
-    if not audit and os.getenv("PRESTASHOP_PRICE_CODE_AUDITED") != "1":
-        raise QuoteError("Pendiente auditar overrides PHP y módulos de presentación de precios")
+    validation = _price_validation(context, audit=audit)
+    _validate_price_hooks(hooks, validation)
+    if validation["mode"] == "native_rules_confirmed":
+        validation["presentation_hooks"] = [{"hook": hook, "module": module} for hook, module in hooks]
     if select("SELECT 1 FROM {group_reduction} WHERE id_group=%s LIMIT 1", (group,)):
         raise QuoteError("Grupo público con descuentos por categoría no soportados")
     bases = {r[0]: r[1:] for r in select("""SELECT id_product,price,ecotax,id_tax_rules_group,active,show_price,
@@ -249,10 +421,27 @@ def read_batch(cur, eans: list[str], context: dict, *, audit: bool = False) -> t
         for row in select("""SELECT id_product,id_specific_price,id_product_attribute,id_specific_price_rule,
             id_shop,id_shop_group,id_currency,id_country,id_group,from_quantity,price,reduction,reduction_type,
             reduction_tax,CAST(`from` AS CHAR),CAST(`to` AS CHAR)
-            FROM {specific_price} WHERE id_product IN (0,MARKS) AND id_shop IN (0,%s) AND id_currency IN (0,%s)
+            FROM {specific_price} WHERE id_product IN (0,MARKS) AND id_shop IN (0,%s)
+            AND id_shop_group IN (0,%s) AND id_currency IN (0,%s)
             AND id_country IN (0,%s) AND id_group IN (0,%s) AND id_cart=0 AND id_customer=0 AND from_quantity<=1"""
-                          .replace("MARKS", marks), (*products, shop, currency, country, group)):
+                          .replace("MARKS", marks), (*products, shop, shop_group, currency, country, group)):
             rules[row[0]].append(row[1:])
+    parents, conditions, categories = {}, [], defaultdict(set)
+    if validation["mode"] == "native_rules_confirmed":
+        rule_ids = sorted({row[2] for rows in rules.values() for row in rows if row[2]})
+        if rule_ids:
+            rule_marks = ",".join(["%s"] * len(rule_ids))
+            parents = {row[0]: row[1:] for row in select("""SELECT id_specific_price_rule,id_shop,id_currency,
+                id_country,id_group,from_quantity,price,reduction,reduction_type,reduction_tax,
+                CAST(`from` AS CHAR),CAST(`to` AS CHAR) FROM {specific_price_rule}
+                WHERE id_specific_price_rule IN (MARKS)""".replace("MARKS", rule_marks), rule_ids)}
+            conditions = select("""SELECT g.id_specific_price_rule,g.id_specific_price_rule_condition_group,
+                c.type,c.value FROM {specific_price_rule_condition_group} g
+                LEFT JOIN {specific_price_rule_condition} c USING(id_specific_price_rule_condition_group)
+                WHERE g.id_specific_price_rule IN (MARKS)""".replace("MARKS", rule_marks), rule_ids)
+            for pid, category in select("""SELECT id_product,id_category FROM {category_product}
+                WHERE id_product IN (MARKS)""".replace("MARKS", marks), products):
+                categories[pid].add(category)
     stock = defaultdict(list)
     stock_scope = (0, shop_group) if market[0][6] else (shop, 0)
     for pid, aid, quantity in select("""SELECT id_product,id_product_attribute,quantity
@@ -278,8 +467,22 @@ def read_batch(cur, eans: list[str], context: dict, *, audit: bool = False) -> t
                                   context, now, tz)
 
             payload = _with_other_calibres(calculate, aid, variants[pid])
+            if validation["mode"] == "native_rules_confirmed":
+                if any(price != payload["price"] for price in payload["other_calibres"].values()):
+                    raise QuoteError("Importes contradictorios entre combinaciones: verificar modelo/color/calibre")
+                eligible = set(payload["eligible_specific_price_ids"])
+                payload["discount_trace"] = {
+                    "authority": "specific_price_materialized_rows",
+                    "selected_specific_price_id": int(payload["offer"]["reference"]) if payload["offer"] else None,
+                    "eligible_sources": [_catalog_origin(pid, row, parents, conditions, categories)
+                                         for row in rules[0] + rules[pid] if row[0] in eligible],
+                    "catalog_discount_reapplied": False,
+                }
+            payload["price_validation"] = validation
             if ean in reference_links:
                 _annotate_reference(payload, ean, reference_links[ean])
+            elif ean in literal_reference_links:
+                _annotate_reference(payload, ean, literal_reference_links[ean], literal=True)
             quantities = stock[pid, aid]
             payload.update(context, product_id=pid, combination_id=aid, engine=ENGINE,
                            observed_at=now.isoformat())
@@ -292,9 +495,9 @@ def read_batch(cur, eans: list[str], context: dict, *, audit: bool = False) -> t
     return identities, quotes
 
 
-def _annotate_reference(payload: dict, ean: str, link: tuple) -> None:
-    original, _, _, brand, model, colour, reference = link
-    payload["price_reference"] = {
+def _annotate_reference(payload: dict, ean: str, link: tuple, *, literal: bool = False) -> None:
+    original, pid, aid, brand, model, colour, reference = link
+    association = {
         "kind": "marca/modelo/color", "requested_ean": ean, "original_barcode": original,
         "brand": brand, "model": model, "colour": colour, "reference": reference,
         "evidence": "Auditoría PR #145: catálogo vigilado, ps_manufacturer, ps_product.reference, "
@@ -302,6 +505,15 @@ def _annotate_reference(payload: dict, ean: str, link: tuple) -> None:
         "reason": "Mismo modelo y color; el calibre no modifica el precio. El código coincide solo con la ficha de referencia. "
                   "No acredita variante ni disponibilidad del EAN solicitado.",
     }
+    if literal:
+        association.update(
+            original_reference_product_id=pid, original_reference_combination_id=aid,
+            literal_ean_verified=True,
+            reason="Asociación de precio conservada: mismo producto, marca y referencia completa auditados. "
+                   "La identidad actual procede de la coincidencia literal UPC-12/EAN-13, no del código anterior. "
+                   "La disponibilidad se consulta sólo para la combinación actual.",
+        )
+    payload["price_association" if literal else "price_reference"] = association
 
 
 def _with_other_calibres(calculate: Callable[[int], dict], combination: int, siblings: Iterable[int]) -> dict:
@@ -402,6 +614,7 @@ def _calculate(base, variant, combination, taxes, rules, priority, context, now,
             "base_price_ex_tax": str(base_price), "combination_impact_ex_tax": str(impact),
             "taxable_base": str(net), "vat_rate": str(rate), "rounding": "half-up/2",
             "offer": offer, "valid_until": until.isoformat(),
+            "eligible_specific_price_ids": [row[0] for _, row in contenders],
             "fiscal_context": f"ES peninsular · grupo fiscal {tax_group} · IVA {rate}%"}
 
 
@@ -452,6 +665,11 @@ def _decode(raw: str, identity: tuple[int, int], context: dict, now: datetime) -
         snapshot["other_calibre_issues"] = payload["other_calibre_issues"]
     if payload.get("price_reference"):
         snapshot["price_reference"] = payload["price_reference"]
+    if payload.get("connection_security"):
+        snapshot["connection_security"] = payload["connection_security"]
+    for key in ("price_validation", "discount_trace", "price_association"):
+        if payload.get(key):
+            snapshot[key] = payload[key]
     for key in ("active", "in_stock"):
         if type(payload.get(key)) is bool:
             snapshot[key] = payload[key]

@@ -8,14 +8,15 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 import csv
 from functools import lru_cache
+from html.parser import HTMLParser
 import json
 from pathlib import Path
 import re
 from typing import Any, Mapping
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from price_comparator import normalize_gtin
-from price_references import compare_calibers, extract_caliber, key, model_key, normalize_caliber, tokens
+from price_references import compare_calibers, extract_caliber, key, model_key, normalize_caliber, parse_reference, tokens
 
 REVIEW_DATE = "2026-11-04"
 REVIEW_BASE = "92243628b4e925ba9d549b076580726c383a43ac"
@@ -102,6 +103,149 @@ def _measurement_evidence() -> dict[str, dict[str, str]]:
 def documented_measurement_records() -> dict[str, dict[str, str]]:
     """Return a copy of the validated, EAN-scoped measurement evidence registry."""
     return {ean: dict(record) for ean, record in _measurement_evidence().items()}
+
+
+def documentary_route_records(
+    payload: Any, *, products: Mapping[str, Mapping[str, Any]],
+    domains: Mapping[str, str], source: str,
+) -> list[dict[str, Any]]:
+    """Separate scoped route hypotheses from general sources and unrelated examples; no HTTP."""
+    from price_locator import link_matches, signature
+
+    records: list[dict[str, Any]] = []
+    url_pattern = re.compile(r'https?://[^\s<>"\']+')
+    ean_fields = ("EAN", "UPC", "EANUPC", "TARGETEAN")
+    known_models = {str(p["model"]) for p in products.values() if p.get("model")}
+    known_model_keys = {model_key(model) for model in known_models}
+    known_brands = {str(p["brand"]) for p in products.values() if p.get("brand")}
+
+    class TableRows(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.rows = []
+            self.row = None
+            self.cell = None
+
+        def handle_starttag(self, tag, attrs):
+            if tag == "tr":
+                self.row = {"cells": [], "urls": []}
+            elif tag in {"td", "th"} and self.row is not None:
+                self.cell = []
+            elif tag == "a":
+                href = dict(attrs).get("href")
+                if href:
+                    if self.row is not None:
+                        self.row["urls"].append(href)
+                    else:
+                        self.rows.append({"urls": [href]})
+
+        def handle_data(self, text):
+            if self.cell is not None:
+                self.cell.append(text)
+
+        def handle_endtag(self, tag):
+            if tag in {"td", "th"} and self.row is not None and self.cell is not None:
+                self.row["cells"].append("".join(self.cell).strip())
+                self.cell = None
+            elif tag == "tr" and self.row is not None:
+                eans = {cell for cell in self.row["cells"] if re.fullmatch(r"\d{12,13}", cell)}
+                self.rows.append({"ean": next(iter(eans)) if len(eans) == 1 else None,
+                                  "urls": self.row["urls"]})
+                self.row = None
+                self.cell = None
+
+    @lru_cache(maxsize=None)
+    def url_reference(path: str):
+        return parse_reference(unquote(path), brands=known_brands, models=known_models)
+
+    def scoped_ean(value: Any) -> str | None:
+        text = str(value).strip()
+        text = "0" + text if len(text) == 12 and text.isdigit() else text
+        return text if text in products else None
+
+    def append(text: str, ean: str | None, context: Mapping[str, Any]) -> None:
+        for found in url_pattern.findall(text):
+            url = found.rstrip(".,;)]}")
+            parsed = urlparse(url)
+            cid = domains.get((parsed.hostname or "").lower().removeprefix("www."))
+            if (not cid or parsed.username or parsed.password or "{" in url
+                    or re.search(r"\.(?:jpg|jpeg|png|webp|svg|css|js)$", parsed.path, re.I)):
+                continue
+            fields = {key(name): value for name, value in context.items()}
+            sig = signature(url)
+            product = products.get(ean or "", {})
+            model, color = str(product.get("model") or ""), str(product.get("color") or "")
+            model_in_url = bool(model and link_matches(sig, model, color))
+            reference = url_reference(parsed.path)
+            other_model = (reference.model_key != model_key(model) and (
+                reference.model_key in known_model_keys
+                or reference.model_key == model_key(model) + "OPT"
+            ))
+            explicit_codes = re.findall(r"\b[A-Z]{1,4}\s*\d{2,4}[A-Z]*\b", sig.upper())
+            other_code = (not model_in_url and reference.model_key != model_key(model)
+                          and any(model_key(code) != model_key(model) for code in explicit_codes))
+            redirect = fields.get("EVIDENCE") == "redirect_to_catalogue"
+            general = redirect or (not model_in_url and (
+                (parsed.path.endswith("/") and not re.search(r"\d", parsed.path)) or not parsed.path
+                or re.search(r"(?:sitemap|(?:^|/)search(?:/|$)|(?:^|/)buscar(?:/|$))", parsed.path, re.I)
+                or {"q", "query", "search", "s"} & set(parse_qs(parsed.query))
+            ))
+            declared = {
+                "brand": fields.get("BRAND", fields.get("MARCA")),
+                "model": fields.get("MODELCODE", fields.get("MODELO", fields.get("MODEL"))),
+                "color": fields.get("COLORCODE", fields.get("COLOR")),
+            }
+            identity = all(declared.values()) and (
+                key(declared["brand"]) == key(product.get("brand"))
+                and model_key(declared["model"]) == model_key(model)
+                and key(declared["color"]) == key(color)
+            )
+            contradiction = any(
+                declared[name] and normalize(declared[name]) != normalize(product.get(name))
+                for name, normalize in (("brand", key), ("model", model_key), ("color", key))
+            ) if product else False
+            published = scoped_ean(fields.get("EANPUBLISHED", fields.get("PUBLISHEDEAN", "")))
+            if general:
+                category, reason = "general_source", "Discovery source or recorded catalogue redirect, not a fiche"
+            elif not product or contradiction or other_model or other_code or reference.ambiguous:
+                category, reason = "unrelated_source", "Missing target association or contradictory model/color"
+            elif published == ean and identity:
+                category, reason = "specific_fiche", "Published EAN and explicit brand/model/color association"
+            elif model_in_url or identity:
+                category, reason = "variant_candidate", "Documentary hypothesis; identity and availability unverified"
+            else:
+                category, reason = "unrelated_source", "Competitor or inherited EAN alone does not associate this URL"
+            records.append({
+                "ean": ean, "competitor_id": cid, "url": url, "source": source,
+                "category": category, "reason": reason, "documentary_not_approval": True,
+            })
+
+    def visit(obj: Any, inherited_ean: str | None = None) -> None:
+        if isinstance(obj, dict):
+            fields = {key(name): value for name, value in obj.items()}
+            explicit = next((name for name in ean_fields if name in fields), None)
+            ean = scoped_ean(fields[explicit]) if explicit else inherited_ean
+            for name, value in obj.items():
+                child_ean = scoped_ean(name) or ean
+                if isinstance(value, str):
+                    direct_url = key(name) in {"URL", "PRIMARYURL", "PRODUCTURL", "CANDIDATEURL"}
+                    append(value, child_ean, obj if direct_url else {})
+                else:
+                    visit(value, child_ean)
+        elif isinstance(obj, list):
+            for value in obj:
+                visit(value, inherited_ean)
+        elif isinstance(obj, str):
+            append(obj, inherited_ean, {})
+
+    if isinstance(payload, str) and re.search(r"<tr\b", payload, re.I):
+        parser = TableRows()
+        parser.feed(payload)
+        parser.close()
+        visit(parser.rows)
+    else:
+        visit(payload)
+    return records
 
 
 def resolve_product_attributes(product: Mapping[str, Any]) -> AttributeResolution:

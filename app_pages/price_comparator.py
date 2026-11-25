@@ -251,8 +251,10 @@ def _render_native_prices(store: PriceComparatorStore, prices: pd.DataFrame) -> 
     for ean in sorted(scope):
         quote = quotes.get(ean)
         payload = json.loads(quote["payload"]) if quote and quote["payload"] else {}
+        security = payload.get("connection_security", {})
         offer = payload.get("offer")
         reference = payload.get("price_reference")
+        association = payload.get("price_association")
         price = payload.get("price")
         alternative = payload.get("other_calibres", {})
         issue = quote["issue"] if quote else "Sin lectura de PrestaShop"
@@ -269,8 +271,20 @@ def _render_native_prices(store: PriceComparatorStore, prices: pd.DataFrame) -> 
             "EAN": ean, "Precio Odoo": odoo.get(ean), "Precio final en Vytria": float(price) if price else None,
             "Descuento/oferta aplicada": _native_offer_label(offer) if payload else "—",
             "Vinculación": (f"Referencia marca/modelo/color · {reference['original_barcode']}"
-                            if reference else "EAN exacto" if payload else "—"),
+                            if reference else "EAN exacto · asociación comercial conservada" if association
+                            else "EAN exacto" if payload else "—"),
             "Origen": payload.get("source", "") if payload else "—",
+            "Validación del precio": {
+                "native_rules_confirmed": "Reglas nativas confirmadas; PHP no inspeccionado",
+                "php_review": "Revisión PHP declarada",
+            }.get(payload.get("price_validation", {}).get("mode"), "Sin verificar"),
+            "Permisos MySQL": {"broad": "Amplios; uso autorizado",
+                              "select_only": "Solo lectura"}.get(security.get("account_permissions"), "Sin verificar"),
+            "TLS": "Cifrado" if security.get("tls_required") is True else "Sin verificar",
+            "Transacción": "READ ONLY" if security.get("transaction_read_only") is True else "Sin verificar",
+            "Identidad del servidor": {True: "Verificada", False: "No verificada"}.get(
+                security.get("server_identity_verified"), "Sin verificar"),
+            "Autorización MySQL": security.get("authorization", {}).get("id", "—"),
             "Estado en tienda": {True: "Activo", False: "Inactivo"}.get(payload.get("active"), "Sin verificar"),
             "Stock": {True: "Con stock", False: "Sin stock"}.get(payload.get("in_stock"), "Sin verificar"),
             "Última actualización": quote["observed_at"] if quote else None,

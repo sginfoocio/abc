@@ -64,7 +64,8 @@ def exact_page(market=""):
 
 
 @pytest.mark.parametrize("verified,market,expected", [(True, "ES", "ES"), (False, "ES", ""), (False, "", "")])
-def test_market_config_requires_manual_evidence_and_never_updates_products(pilot, verified, market, expected):
+def test_market_config_requires_manual_evidence_and_never_updates_products(pilot, verified, market, expected, monkeypatch):
+    monkeypatch.setattr("competitor_requirements.business_market_policy_for", lambda url: None)
     _, store, search, site, cid, _ = pilot
     before = commerce(store)
     search.update_config(cid, sales_market=market, market_verified=verified,
@@ -132,7 +133,8 @@ def test_explicit_jsonld_and_metadata_markets_and_contradictions():
     assert resolve_market(contradictory, {})[2]
 
 
-def test_unknown_market_stored_noncomparable_and_verified_fallback_is_deduplicated(pilot):
+def test_unknown_market_stored_noncomparable_and_verified_fallback_is_deduplicated(pilot, monkeypatch):
+    monkeypatch.setattr("competitor_requirements.business_market_policy_for", lambda url: None)
     service, store, search, _, cid, _ = pilot
     with store._connect() as connection, connection:
         connection.execute("UPDATE competitors SET market='' WHERE id=?", (cid,))

@@ -16,21 +16,49 @@ precio con el sistema existente (`import_offers`, histórico, gráficos). Códig
 ## Reglas de fiabilidad
 
 - **Coincidencia**: EAN publicado idéntico verificado con marca, modelo y código de color confirmados → *exacta*;
-  el calibre vacío o distinto se registra como información, no bloquea. Sin EAN verificado se exige marca +
-  modelo + código de color + calibre coincidentes. EAN distinto, modelo/color incorrectos o identificación
-  ambigua → *probable* o *descartada*. Las denominaciones comerciales no sustituyen códigos de fabricante.
+  el calibre vacío o distinto se registra como información, no cambia el precio.
+  Cuando el contrato permite marca, modelo completo y color con aprobación trazable,
+  se reconoce el precio comercial sin exigir equivalencia de calibre. Se conservan
+  el EAN publicado y la evidencia de variante: reconocer ese precio no transfiere
+  EAN ni stock entre variantes. Modelo/color incorrectos o identificación ambigua
+  requieren revisión o descarte. Las denominaciones comerciales no sustituyen códigos de fabricante.
   [Regla y trazabilidad](../PRICE_IDENTITY.md).
 - **IVA**: solo «incluido» si la ficha lo declara, si publica el precio sin IVA y la proporción es un tipo español
   (1,21 / 1,10 / 1,04), o si el competidor tiene «IVA incluido» verificado. Si no, la oferta se guarda pero no compara.
 - **Mercado y moneda**: mercado comercial explicito (`eligibleRegion`, destino
   de entrega o `product:market`) o configuracion de mercado verificada con URL,
-  nota y fecha. Nunca dominio, ruta ni idioma/locale. Contradicciones requieren
+  nota y fecha. Para los 14 competidores registrados, la decisión comercial
+  `business-es-eur-market-14-2026-11-24` de Rubén acredita el contexto objetivo
+  ES/EUR/IVA incluido cuando no hay país publicado ni configuración verificada.
+  Se conserva como política, nunca como atributo observado en la ficha; una
+  configuración extranjera verificada o una contradicción publicada no se
+  convierten a ES. Nunca dominio, ruta ni idioma/locale. Contradicciones requieren
   revision. La moneda se toma de `priceCurrency` o configuracion existente.
   Mercado desconocido no entra en comparativas.
   [Mercado y localizacion supervisada](../PRICE_PILOT_DISCOVERY.md).
 - **Precio**: el precio de venta efectivo; el tachado/anterior se guarda aparte.
 - **Sin stock** o precio caducado: se muestran, no comparan, y no se recupera un precio antiguo.
 - **Bloqueo** (401/403/407/429/CAPTCHA): se detiene la ejecución, el competidor queda `blocked` y no se vuelve a consultar.
+
+### Cruce documental por identidad
+
+`price_url_candidates.documentary_route_records` separa fichas con EAN publicado
+y referencia explícita, candidatas de variante, fuentes generales y ejemplos
+ajenos. El EAN heredado de un objeto, el competidor o el archivo no acreditan la
+asociación de sus URLs: las listas de ejemplos no se multiplican por todos los
+EAN. Las categorías, sitemaps y redirecciones documentadas al catálogo conservan
+su procedencia, pero no son fichas localizadas. Las hipótesis del slug nunca
+acreditan identidad observada, aprobación, mercado, stock ni oferta.
+El HTML se lee por filas, no por líneas: una tabla minificada puede contener
+los 600 pares en una sola línea. Las filas sin un EAN único y los enlaces
+generales quedan sin asignación a un producto; nunca forman un producto cartesiano.
+
+Los informes deben conservar esas categorías por separado. `route_localized`
+solo corresponde a una ficha vinculada por identidad, no a la existencia de una
+fuente general o una candidata. El índice operativo 11x14 se valida por EAN,
+competidor y referencia completa; no consume el cruce documental del informe.
+La regresión del par 90 conserva las candidatas RB2140 90158 y excluye de ellas
+BV1274S y FT1026 sin borrar las fuentes originales.
 
 ## Estados de un conector
 

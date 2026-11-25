@@ -1,8 +1,12 @@
 # Proveedores de imágenes: matriz de estado (#59)
 
-Diseño y auditoría: PR #69 (`docs/PROVIDER_INTEGRATIONS_59.md`). Este documento refleja lo **implementado y probado
-offline** (portales y Odoo simulados). No se ha accedido a ningún portal, no se ha descargado nada real, no hay
-credenciales en el repositorio y los schedulers siguen desactivados.
+Diseño y auditoría: PR #69 (`docs/PROVIDER_INTEGRATIONS_59.md`). La matriz de esta sección refleja pruebas
+**offline** con portales y Odoo simulados; no acredita el estado de los servicios en producción.
+Verifica el runtime y los recibos por separado según la guía de validación local Cloud.
+
+## POLÍTICA OBLIGATORIA — ODOO READ ONLY
+
+Para todos los proveedores, Odoo solo se consulta; las asociaciones y solicitudes se guardan en Cloud. La [política permanente](../AGENTS.md#política-obligatoria--odoo-read-only) prohíbe toda escritura o cambio de estructura, permisos o configuración en Odoo.
 
 ## Decisión: Cloud es independiente de Odoo
 
@@ -77,7 +81,9 @@ Secundario y de solo lectura (`SET TRANSACTION READ ONLY`, timeout de sentencia,
 
 1. **Asociación explícita proveedor Odoo ↔ portal** (`provider_odoo_links.json` en `PROVIDER_DATA_ROOT`, sin secretos).
    Sin asociación confirmada la consulta se rechaza (`asociacion_proveedor_portal_no_configurada`). «Buscar candidatos»
-   por nombre solo propone; hay que confirmar los ids y queda registrado el revisor y la fecha. Las marcas son
+   por nombre solo propone; hay que confirmar los ids y queda registrado el revisor, la fecha y la evidencia indicada.
+   En el panel de pedidos, la asociación de Luxottica se administra desde su sección de asociación. Las escrituras
+   concurrentes se serializan y confirmar de nuevo los mismos datos conserva la fecha original. Las marcas son
    informativas: el filtrado por marca requiere conocer el campo real de marca en Odoo y no se ha implementado.
 2. **Consulta**: pedidos en estado `purchase` o `done` (se excluyen `draft`, `sent` y `cancel`), contactos comerciales del
    partner agrupados, líneas con producto, `default_code`, `barcode`, proveedor, pedido y fecha, más recientes primero.
@@ -89,11 +95,33 @@ Secundario y de solo lectura (`SET TRANSACTION READ ONLY`, timeout de sentencia,
    procede de metadatos del catálogo (por defecto, archivos no verificados) o de archivos verificados. Un UPC-12 y su
    EAN-13 con cero inicial cuentan como el mismo producto (se conserva el código original). Duplicado = repetido o con
    solicitud en curso.
-4. **Lote piloto**: «Proponer lote piloto» preselecciona 5–10 EAN elegibles (primero sin imágenes, luego parciales, pedidos
-   recientes); el usuario ajusta la tabla, marca «Apruebo la selección definitiva» y pulsa «Crear solicitudes…».
+4. **Lote piloto**: «Proponer lote piloto» preselecciona hasta 10 EAN elegibles sin registros de imágenes,
+   con pedidos recientes primero; los parciales quedan en revisión. El usuario ajusta la tabla, marca
+   «Apruebo la selección definitiva» y pulsa «Crear solicitudes…».
    Solo se planifican EAN *Elegibles* de la vista previa (da igual lo marcado), mediante `plan_eans` del núcleo; no se
    contacta con ningún portal. Cada selección se anota en `provider_odoo_selections.jsonl` (aprobador, pedido, referencia).
 5. Odoo solo prueba el origen del EAN: la imagen descargada sigue necesitando manifiesto, metadatos o revisión.
+
+### MASTERDATA y pedidos Luxottica (cambio local)
+
+- La vista previa MASTERDATA usa el catálogo y el árbol de imágenes existentes en modo de solo lectura.
+  Solo se preparan EAN válidos sin registros ni archivos de imagen. Cobertura completa/parcial,
+  archivos sin catalogar, solicitudes activas o cobertura no verificable se excluyen o bloquean.
+- Tras confirmación, las solicitudes manuales se guardan en el mismo `provider_requests.sqlite`
+  que usan los demás conectores; la identidad UPC/EAN deduplica solicitudes activas entre MASTERDATA
+  y Odoo. Los orígenes acreditados se conservan de forma idempotente en ese almacén y se muestran
+  en el detalle administrativo; registros históricos sin identidad suficiente quedan en revisión.
+  Los lotes TXT/manifiesto, de hasta 250 EAN, no contactan con Luxottica.
+- Desde pedidos Odoo solo son elegibles los EAN sin registros de imagen. Las líneas parciales o con
+  cobertura desconocida no se proponen. La asociación con el pedido conserva evidencia por línea;
+  recibos Graph globales no se atribuyen a pedidos por coincidencia de EAN.
+- La fecha común inicial de pedidos es `2026-11-01`, persistida en `provider_order_policy.sqlite`
+  dentro de `PROVIDER_DATA_ROOT`. Los cambios quedan auditados y no inician reprocesamientos.
+  Kering conserva una excepción limitada a los pedidos piloto explícitamente permitidos.
+- La preparación, la política de fecha y la restauración de sesión recordada tienen pruebas offline.
+  El login recordado requiere `AUTH_COOKIE_SECRET` de al menos 32 caracteres y persistencia del
+  almacén de revocaciones. Consulta la evidencia local del SHA para distinguir las pruebas reales
+  realizadas de las pendientes; no declarar operativo el monitor por la existencia del código.
 
 ### Contrato Odoo contrastado (17/11/2026)
 

@@ -12,7 +12,8 @@ from app_pages.provider_order_snapshot import (
 from app_pages.provider_order_media import render_order_export, render_photos
 from kering_images import ConfigStore, data_root as kering_root
 from provider_images import ean_key, ean_valid
-from provider_images_ui import data_root
+from provider_images_ui import _odoo_association, data_root
+from provider_order_policy import OrderPolicyUnavailable, get_order_start_date
 from provider_odoo_orders import MAX_ORDER_DAYS, OdooUnavailable
 from repository_storage import state_root
 
@@ -211,6 +212,10 @@ def render_order_panel(engine_factory, legacy_renderer, library_page=None):
                           for key, label in PROVIDERS.items()))
     for notice in association_notices:
         st.warning(notice)
+    try:
+        _odoo_association("luxottica", data_root(), engine_factory)
+    except (OSError, ValueError):
+        st.error("No se pudo leer la asociación local de Luxottica.")
     if (kering_root() / "config.enc").is_file():
         try:
             cutoff = date.fromisoformat(ConfigStore(kering_root()).load()["cutoff_date"])
@@ -222,12 +227,21 @@ def render_order_panel(engine_factory, legacy_renderer, library_page=None):
     else:
         st.caption("Kering: corte de procesamiento no configurado.")
     today = datetime.now(MADRID).date()
+    try:
+        order_start_date = get_order_start_date(data_root())
+    except OrderPolicyUnavailable as error:
+        st.error(str(error))
+        return
+    st.caption(
+        f"Inicio común para preparar pedidos: {order_start_date:%d/%m/%Y}. "
+        "Los intervalos históricos siguen disponibles en solo lectura."
+    )
     with st.form("supplier_orders_odoo"):
         provider_col, start_col, end_col = st.columns(3)
         provider = provider_col.selectbox("Proveedor", ["", *PROVIDERS],
                                           format_func=lambda key: PROVIDERS.get(key, "Todos configurados"),
                                           key="sup_provider")
-        start = start_col.date_input("Desde", today - timedelta(days=30), key="sup_start")
+        start = start_col.date_input("Desde", order_start_date, key="sup_start")
         end = end_col.date_input("Hasta", today, key="sup_end")
         submitted = st.form_submit_button("Consultar pedidos de Odoo")
     if submitted:

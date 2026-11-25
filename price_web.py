@@ -167,8 +167,12 @@ class WebPriceSearch:
 
     # configuration ----------------------------------------------------------------------------
     def ensure_config(self) -> None:
-        with self.store._connect() as connection, connection:
-            connection.execute("INSERT OR IGNORE INTO competitor_web_config(competitor_id) SELECT id FROM competitors")
+        with self.store._connect() as connection:
+            missing = connection.execute("""SELECT id FROM competitors
+                EXCEPT SELECT competitor_id FROM competitor_web_config LIMIT 1""").fetchone()
+            if missing:
+                with connection:
+                    connection.execute("INSERT OR IGNORE INTO competitor_web_config(competitor_id) SELECT id FROM competitors")
 
     def config(self, competitor_id: str, *, initialize: bool = True) -> dict:
         if initialize:
@@ -930,7 +934,7 @@ class WebPriceSearch:
         if outcome.match_status == "manual_review":
             status = "manual_review"
         market, market_note, conflict = resolve_market(page, config) if page else ("", "", False)
-        if conflict or (page and page.tax_conflict):
+        if (page and not market and status != "rejected") or conflict or (page and page.tax_conflict):
             status = "manual_review"
         priced = page is not None and page.has_price and status != "rejected"
         tax = "" if page is None or page.includes_tax is None else ("sí" if page.includes_tax else "no")

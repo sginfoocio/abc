@@ -37,6 +37,16 @@ BUSINESS_TAX_DECISION = {
     "scope": "Precios publicados por los 14 competidores registrados; no acredita mercado, stock ni acceso.",
 }
 
+BUSINESS_MARKET_DECISION = {
+    "id": "business-es-eur-market-14-2026-11-24",
+    "recorded_on": "2026-11-24",
+    "market": "ES",
+    "currency": "EUR",
+    "source": "Confirmación de Rubén en la recuperación auditada de los 11 EAN",
+    "statement": "Contexto comercial objetivo: España, EUR, IVA incluido.",
+    "scope": "Los 14 competidores registrados; política comercial, no país observado, stock ni acceso.",
+}
+
 
 def business_tax_policy_for(url: str) -> dict | None:
     """Explicit business decision, not an inference from domain, language or currency."""
@@ -54,6 +64,13 @@ def business_tax_policy_for(url: str) -> dict | None:
 
 def business_tax_evidence(policy: dict) -> str:
     return f"{policy['id']}: {policy['source']}; {policy['recorded_on']}; {policy['statement']}"
+
+
+def business_market_policy_for(url: str) -> dict | None:
+    scope = business_tax_policy_for(url)
+    if scope is None:
+        return None
+    return {**BUSINESS_MARKET_DECISION, "competitor": scope["competitor"], "domain": scope["domain"]}
 
 
 _ROBOTS = ("robots.txt prohíbe la búsqueda interna; sin buscador no se pueden localizar fichas.")

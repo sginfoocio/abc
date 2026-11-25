@@ -24,6 +24,7 @@ from sqlalchemy import bindparam, text
 from image_repository import ImageRepository, image_fingerprint, validate_ean
 from image_naming import kering_filename, classified_view
 from kering_media import REVIEW_CONFLICT
+from provider_order_policy import get_order_start_date, provider_data_root
 
 
 PORTAL_URL = "https://my.keringeyewear.com/keringeyewear/es/login"
@@ -154,6 +155,8 @@ def purchase_line(row, barcode):
 
 def configured_orders(engine, config, start: date, end: date, order_ids=None):
     cutoff = date.fromisoformat(config.get("cutoff_date", DEFAULT_SETTINGS["cutoff_date"]))
+    if order_ids is None:
+        cutoff = max(cutoff, get_order_start_date(provider_data_root()))
     start = max(start, cutoff)
     if end < start:
         return []
