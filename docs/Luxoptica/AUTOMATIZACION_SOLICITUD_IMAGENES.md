@@ -1,6 +1,6 @@
 # Solicitud de imágenes Luxottica
 
-> **Estado operativo:** la preparación de solicitudes es manual y requiere validación/autorización antes de cualquier envío o descarga real. El monitor Graph puede existir en Cloud, pero su estado actual no se ha verificado. No uses instrucciones históricas de subida automática, tareas horarias ni rutas por fecha.
+> **Activación en Cloud:** el servicio de envío desde pedidos se instala por separado y su configuración inicial está desactivada. La instalación y la verificación real en `s2026` son necesarias antes de habilitarlo.
 
 ## Almacenamiento canónico
 
@@ -22,8 +22,8 @@ raíz de fotografías distinta. Antes de cualquier migración, seguir el [plan d
 5. Tras confirmación, se registra una solicitud manual en el almacén compartido y se crean
    archivos TXT/manifiesto locales. El lote tiene como máximo 250 EAN.
 
-La app no inicia sesión ni envía solicitudes al portal. Los archivos TXT y su estado local no
-son evidencia de envío remoto, recepción ni entrega de imágenes.
+Los lotes preparados desde Masterdata conservan su flujo manual. Los archivos TXT y su estado
+local no son evidencia de envío remoto, recepción ni entrega de imágenes.
 
 ## Pedidos Odoo y duplicados
 
@@ -46,10 +46,38 @@ en el detalle administrativo de la solicitud. Una vista previa no escribe.
 
 ## Envío manual autorizado
 
-Una persona autorizada revisa el lote y lo envía manualmente conforme al procedimiento vigente
-del portal. No se debe automatizar la carga ni reenviar una solicitud con resultado remoto ambiguo.
-La marca de envío en la app solo registra la acción declarada por el operador; debe conservarse
-por separado la evidencia autorizada del portal.
+Una persona autorizada revisa y envía los lotes de Masterdata. La marca de envío manual en la app
+registra la acción declarada por el operador y requiere evidencia aparte.
+
+## Envío programado desde pedidos de compra
+
+- El servicio `abcd-luxottica-sender` usa pedidos confirmados o completados del proveedor 570, desde
+  el inicio común, con mínimo 01/11/2026. El lector usa PostgreSQL en solo lectura. Se excluyen
+  imágenes presentes o no verificables, identidades dudosas y EAN/UPC equivalentes ya solicitados.
+- En **Configuración → Essilor Luxottica**, un administrador puede cambiar el usuario y la
+  contraseña, el correo de recepción, el intervalo y el estado del envío. La contraseña nunca
+  se muestra ni se guarda en el repositorio. El archivo cifrado vive en el volumen de proveedores
+  y el servicio comparte su clave con la aplicación. Usa `LUXOPTICA_ENCRYPTION_KEY_FILE` o la clave
+  de configuración existente del servicio. El usuario y la contraseña vigentes del entorno se
+  usan al abrir la configuración por primera vez.
+- Se procesa un lote de hasta 10 EAN por ciclo, con el límite diario del almacén de solicitudes.
+  El archivo se escribe como texto ASCII sin cabecera, con un código por línea. Si el portal queda
+  en «Ver tipo» sin opciones tras cargarlo, se intenta la entrada UPC de esos mismos códigos,
+  verificando que cada valor literal quede en el formulario. Si se pierde la sesión o el portal
+  pide aceptar condiciones, el proceso se detiene.
+- Se registra «Enviada» únicamente tras observar una confirmación explícita en el portal. Un
+  resultado incierto, incluido un reinicio durante el envío, conserva el lote activo en revisión
+  y bloquea nuevos envíos automáticos. Antes de reintentar, comprueba en el portal si el lote se
+  aceptó y reconcilia su estado de forma explícita.
+- Verifica el acceso y la pantalla previa con `python -B luxottica_order_scheduler.py --preflight-file ARCHIVO.txt`,
+  en el entorno autorizado y con el envío automático desactivado. Este modo no pulsa el botón
+  de envío y no crea una solicitud en Cloud. Verifica por separado que un envío autorizado
+  produce una confirmación real antes de habilitar el alcance general.
+- El despliegue protegido solo actualiza `abcd-app`. La instalación del remitente y la
+  actualización del monitor requieren mantenimiento de sus servicios con la imagen de la misma
+  revisión, el almacén de proveedores compartido y los montajes verificados. Para detener nuevos
+  envíos, desmarca la activación en **Configuración**. Comprueba en Cloud cualquier lote que
+  hubiese iniciado el envío.
 
 ## Recepción y Graph
 
@@ -58,6 +86,14 @@ repositorio o un contenedor iniciado no demuestra que la configuración, el buz�
 descargas funcionen actualmente. Verifica el runtime, los recibos, los errores y los permisos
 siguiendo la [validación local de Cloud](../CLOUD_LOCAL_VALIDATION.md). No ejecutes pruebas de
 Graph ni descargues correo real sin autorización específica.
+
+El monitor conserva el ZIP y valida tamaños y límites de descompresión. Para los envíos nuevos,
+puede resolver el EAN desde la evidencia de pedido de una solicitud cuyo envío tenga confirmación,
+además de los manifiestos anteriores. Si el mismo modelo y color tienen códigos distintos o
+falta evidencia, conserva el archivo para revisión. La confirmación de envío y la importación
+al NAS son comprobaciones distintas. El monitor solo marca el correo como procesado tras
+completar su tratamiento. Un original importado por coincidencia de modelo y color no acredita
+por sí solo la entrega de un identificador de lote remoto.
 
 Los scripts y listas de configuración existentes son referencias técnicas, no una autorización
 para registrar aplicaciones, conceder permisos, crear tareas programadas o modificar servicios.

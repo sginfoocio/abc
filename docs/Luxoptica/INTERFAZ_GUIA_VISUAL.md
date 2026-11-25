@@ -15,7 +15,7 @@
 5. Confirma la selección para crear la solicitud en el almacén compartido y descargar el TXT
    y manifiesto. Cada lote contiene como máximo 250 EAN.
 
-La app no envía lotes al portal. El envío es manual y requiere autorización específica; una
+El envío de estos lotes de Masterdata es manual y requiere autorización específica; una
 marca local de estado no acredita que el portal recibiera o procesara el lote.
 
 ## Pedidos Odoo
@@ -26,6 +26,9 @@ y solo admiten códigos sin registros de imagen. Los parciales o no verificables
 
 La fecha común inicial es `2026-11-01`, configurable con auditoría. Cambiarla no reprocesa
 pedidos; los pedidos piloto Kering explícitamente permitidos conservan su excepción acotada.
+
+La configuración del envío automático de Luxottica está en **Configuración → Essilor Luxottica**.
+Consulta el [procedimiento de puesta en marcha](./AUTOMATIZACION_SOLICITUD_IMAGENES.md#envío-programado-desde-pedidos-de-compra).
 
 ## Recepción e importación
 
