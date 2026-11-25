@@ -158,8 +158,6 @@ def _upload_to_luxoptica(
             def _count(selector: str) -> int:
                 try:
                     return page.locator(selector).count()
-                except ViewTypeUnavailable:
-                    return False, "ver_tipo_sin_todas_las_vistas"
                 except Exception:
                     return 0
             
@@ -344,6 +342,8 @@ def _upload_to_luxoptica(
                 except (KeyboardInterrupt, PlaywrightTimeoutError):
                     pass
             return True, LUXOTTICA_CONFIRMATION_PREFIX + " ".join(confirmation.inner_text().split())[:200]
+    except ViewTypeUnavailable:
+        return False, "ver_tipo_sin_todas_las_vistas"
     except Exception:
         return False, "envio_sin_confirmacion" if clicked else "preparacion_portal_fallida"
 

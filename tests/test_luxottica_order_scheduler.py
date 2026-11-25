@@ -2,14 +2,15 @@ from dataclasses import replace
 from pathlib import Path
 import sys
 from threading import Event
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, PropertyMock
 
 from cryptography.fernet import Fernet
 import pytest
 
 import graph_mail_downloader as mail
+import luxoptica_auto_upload as upload
 from luxoptica_auto_upload import CONFIRMATION, ViewTypeUnavailable, _choose_all_views
-from luxottica_config import LuxotticaConfig, LuxotticaSettings, PORTAL_URL
+from luxottica_config import LOGIN_HOST, PORTAL_HOST, LuxotticaConfig, LuxotticaSettings, PORTAL_URL
 import luxottica_order_scheduler as scheduler
 from provider_images import NEEDS_REVIEW, SUBMITTED, ProviderStore, ean_key
 
@@ -37,6 +38,32 @@ def test_missing_views_stops_without_switching_to_manual_entry(tmp_path):
     page.get_by_role.assert_called_once()
     page.get_by_text.assert_called_once()
     views.click.assert_not_called()
+
+
+def test_missing_views_reports_step_from_upload(tmp_path, monkeypatch):
+    import playwright.sync_api
+
+    page = MagicMock()
+    type(page).url = PropertyMock(side_effect=[
+        f"https://{LOGIN_HOST}", f"https://{LOGIN_HOST}", f"https://{PORTAL_HOST}",
+    ])
+    page.locator.return_value.count.return_value = 1
+    page.get_by_text.return_value.first.count.return_value = 1
+    page.get_by_role.return_value.count.return_value = 1
+    driver = MagicMock()
+    driver.chromium.launch.return_value.new_page.return_value = page
+    context = MagicMock()
+    context.__enter__.return_value = driver
+    monkeypatch.setattr(playwright.sync_api, "sync_playwright", lambda: context)
+    monkeypatch.setattr(upload.time, "sleep", lambda _: None)
+    monkeypatch.setattr(upload, "_legal_notice", lambda _: MagicMock(is_visible=lambda: False))
+    monkeypatch.setattr(upload, "_choose_all_views", MagicMock(side_effect=ViewTypeUnavailable))
+    request = tmp_path / "request.txt"
+    request.write_text(EAN, encoding="ascii")
+
+    assert upload._upload_to_luxoptica(PORTAL_URL, "user", "secret", request, "images@example.com",
+                                       True, False, preview_only=True) == (
+        False, "ver_tipo_sin_todas_las_vistas")
 
 
 def test_preflight_uses_historical_file_unchanged(monkeypatch):
