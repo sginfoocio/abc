@@ -25,6 +25,10 @@ class ViewTypeUnavailable(Exception):
     pass
 
 
+class CookieConsentUnavailable(Exception):
+    pass
+
+
 def write_luxottica_upload_file(path: Path, codes: list[str]) -> None:
     path.write_bytes(("\r\n".join(codes) + "\r\n").encode("ascii"))
 
@@ -43,6 +47,31 @@ def _choose_all_views(page, ean_file, timeout_error):
 
 def _legal_notice(page):
     return page.get_by_role("button", name=re.compile(r"^acepto$|^i agree$|^aceptar y continuar$", re.I)).first
+
+
+def _pending_conditions(page):
+    sign_documents = page.get_by_role("button", name=re.compile(r"^firmar ahora$|^sign now$", re.I)).first
+    return sign_documents.is_visible() or _legal_notice(page).is_visible()
+
+
+def _accept_cookie_consent(page, timeout_error):
+    notice = page.get_by_text(re.compile(
+        r"(?:utilizamos cookies necesarias|we use necessary cookies).*"
+        r"(?:cookies opcionales|optional cookies)", re.I | re.S
+    )).first
+    if not notice.is_visible():
+        return
+
+    accept = notice.locator("xpath=..").get_by_role(
+        "button", name=re.compile(r"^aceptar$|^accept$", re.I)
+    )
+    if not accept.is_visible():
+        raise CookieConsentUnavailable
+    accept.click()
+    try:
+        notice.wait_for(state="hidden", timeout=10000)
+    except timeout_error as error:
+        raise CookieConsentUnavailable from error
 
 
 def upload_to_luxoptica(
@@ -250,14 +279,8 @@ def _upload_to_luxoptica(
             time.sleep(5)
             if urlsplit(page.url).hostname != PORTAL_HOST:
                 return False, "sesion_no_verificada"
-            reject_cookies = page.get_by_role("button", name=re.compile(r"^rechazar$|^reject$", re.I))
-            if reject_cookies.is_visible():
-                reject_cookies.click()
-            remind_later = page.get_by_role("button", name=re.compile(r"recu[eé]rdamelo m[aá]s tarde|remind me later", re.I))
-            if remind_later.is_visible():
-                remind_later.click()
-
-            if _legal_notice(page).is_visible():
+            _accept_cookie_consent(page, PlaywrightTimeoutError)
+            if _pending_conditions(page):
                 return False, "condiciones_pendientes"
 
             # 3. Navegar a Imágenes de Producto
@@ -291,7 +314,8 @@ def _upload_to_luxoptica(
             page.wait_for_load_state("domcontentloaded", timeout=30000)
             time.sleep(3)
 
-            if _legal_notice(page).is_visible():
+            _accept_cookie_consent(page, PlaywrightTimeoutError)
+            if _pending_conditions(page):
                 return False, "condiciones_pendientes"
 
             _choose_all_views(page, ean_file, PlaywrightTimeoutError)
@@ -344,6 +368,8 @@ def _upload_to_luxoptica(
             return True, LUXOTTICA_CONFIRMATION_PREFIX + " ".join(confirmation.inner_text().split())[:200]
     except ViewTypeUnavailable:
         return False, "ver_tipo_sin_todas_las_vistas"
+    except CookieConsentUnavailable:
+        return False, "cookie_consent_no_resuelto"
     except Exception:
         return False, "envio_sin_confirmacion" if clicked else "preparacion_portal_fallida"
 

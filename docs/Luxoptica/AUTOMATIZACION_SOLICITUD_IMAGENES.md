@@ -64,8 +64,10 @@ registra la acción declarada por el operador y requiere evidencia aparte.
   El archivo se escribe como texto ASCII sin cabecera, con un código por línea y finales CRLF.
   Si el portal queda en «Ver tipo» sin opciones tras cargarlo, el proceso se detiene sin cambiar
   a entrada manual. Antes de cambiar el fichero o reintentar, registra el paso y comprueba la
-  sesión, el formato y la respuesta del portal. Si se pierde la sesión o el portal pide aceptar
-  condiciones, el proceso se detiene.
+  sesión, el formato y la respuesta del portal. El proceso acepta el botón «Aceptar» únicamente
+  cuando identifica el aviso de cookies por su texto; si falta el botón, se detiene. Los avisos
+  de condiciones o documentos para firmar detienen el proceso para revisión humana y no se
+  posponen automáticamente.
 - Se registra «Enviada» únicamente tras observar una confirmación explícita en el portal. Un
   resultado incierto, incluido un reinicio durante el envío, conserva el lote activo en revisión
   y bloquea nuevos envíos automáticos. Antes de reintentar, comprueba en el portal si el lote se

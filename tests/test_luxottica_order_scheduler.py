@@ -24,6 +24,66 @@ def test_confirmation_requires_explicit_portal_acknowledgement():
         assert not CONFIRMATION.search(text)
 
 
+def test_cookie_consent_clicks_accept_only_inside_identified_cookie_notice():
+    page = MagicMock()
+    notice = MagicMock()
+    notice.is_visible.return_value = True
+    accept = MagicMock()
+    accept.is_visible.return_value = True
+    notice.locator.return_value.get_by_role.return_value = accept
+    page.get_by_text.return_value.first = notice
+
+    upload._accept_cookie_consent(page, TimeoutError)
+
+    notice_text = page.get_by_text.call_args.args[0]
+    assert notice_text.search(
+        "Utilizamos cookies necesarias y tecnologías similares. También cookies opcionales."
+    )
+    assert not notice_text.search("Acepto los términos y condiciones.")
+    notice.locator.assert_called_once_with("xpath=..")
+    accept.click.assert_called_once_with()
+    notice.wait_for.assert_called_once_with(state="hidden", timeout=10000)
+
+
+def test_cookie_consent_does_not_click_without_cookie_notice():
+    page = MagicMock()
+    notice = MagicMock()
+    notice.is_visible.return_value = False
+    page.get_by_text.return_value.first = notice
+
+    upload._accept_cookie_consent(page, TimeoutError)
+
+    notice.locator.assert_not_called()
+
+
+def test_cookie_consent_fails_closed_when_accept_button_is_missing():
+    page = MagicMock()
+    notice = MagicMock()
+    notice.is_visible.return_value = True
+    accept = MagicMock()
+    accept.is_visible.return_value = False
+    notice.locator.return_value.get_by_role.return_value = accept
+    page.get_by_text.return_value.first = notice
+
+    with pytest.raises(upload.CookieConsentUnavailable):
+        upload._accept_cookie_consent(page, TimeoutError)
+
+    accept.click.assert_not_called()
+
+
+def test_pending_documents_are_not_dismissed(monkeypatch):
+    page = MagicMock()
+    sign = page.get_by_role.return_value.first
+    sign.is_visible.return_value = True
+    legal = MagicMock()
+    monkeypatch.setattr(upload, "_legal_notice", legal)
+
+    assert upload._pending_conditions(page)
+    sign.click.assert_not_called()
+    page.get_by_role.assert_called_once()
+    legal.assert_not_called()
+
+
 def test_missing_views_stops_without_switching_to_manual_entry(tmp_path):
     page = MagicMock()
     views = page.get_by_text.return_value
@@ -56,7 +116,8 @@ def test_missing_views_reports_step_from_upload(tmp_path, monkeypatch):
     context.__enter__.return_value = driver
     monkeypatch.setattr(playwright.sync_api, "sync_playwright", lambda: context)
     monkeypatch.setattr(upload.time, "sleep", lambda _: None)
-    monkeypatch.setattr(upload, "_legal_notice", lambda _: MagicMock(is_visible=lambda: False))
+    monkeypatch.setattr(upload, "_pending_conditions", lambda _: False)
+    monkeypatch.setattr(upload, "_accept_cookie_consent", lambda *_: None)
     monkeypatch.setattr(upload, "_choose_all_views", MagicMock(side_effect=ViewTypeUnavailable))
     request = tmp_path / "request.txt"
     request.write_text(EAN, encoding="ascii")
