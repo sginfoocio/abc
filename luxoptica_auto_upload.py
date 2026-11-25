@@ -76,10 +76,10 @@ def _accept_cookie_consent(page, timeout_error):
     if not notice.is_visible():
         return
 
-    accept = notice.locator("xpath=..").get_by_role(
+    accept = notice.locator("xpath=../..").get_by_role(
         "button", name=re.compile(r"^aceptar$|^accept$", re.I)
     )
-    if not accept.is_visible():
+    if accept.count() != 1 or not accept.is_visible():
         raise CookieConsentUnavailable
     try:
         accept.click(timeout=10000)

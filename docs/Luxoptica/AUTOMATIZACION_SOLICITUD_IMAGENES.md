@@ -65,7 +65,8 @@ registra la acción declarada por el operador y requiere evidencia aparte.
   Si el portal queda en «Ver tipo» sin opciones tras cargarlo, el proceso se detiene sin cambiar
   a entrada manual. Antes de cambiar el fichero o reintentar, registra el paso y comprueba la
   sesión, el formato y la respuesta del portal. El proceso acepta el botón «Aceptar» únicamente
-  cuando identifica el aviso de cookies por su texto; si falta el botón, se detiene. Tras revisión
+  cuando identifica el aviso de cookies por su texto y encuentra un único botón en su contenedor;
+  si falta o es ambiguo, se detiene. Tras revisión
   y autorización del usuario el 25/11/2026, acepta el aviso legal de descarga solo si coincide
   íntegramente con la huella SHA-256 del texto revisado. Si cambia, falta el botón o aparecen
   otros avisos legales o documentos para firmar, se detiene para revisión humana; no los pospone.

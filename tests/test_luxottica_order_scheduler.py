@@ -30,6 +30,7 @@ def test_cookie_consent_clicks_accept_only_inside_identified_cookie_notice():
     notice = MagicMock()
     notice.is_visible.return_value = True
     accept = MagicMock()
+    accept.count.return_value = 1
     accept.is_visible.return_value = True
     notice.locator.return_value.get_by_role.return_value = accept
     page.get_by_text.return_value.first = notice
@@ -41,7 +42,7 @@ def test_cookie_consent_clicks_accept_only_inside_identified_cookie_notice():
         "Utilizamos cookies necesarias y tecnologías similares. También cookies opcionales."
     )
     assert not notice_text.search("Acepto los términos y condiciones.")
-    notice.locator.assert_called_once_with("xpath=..")
+    notice.locator.assert_called_once_with("xpath=../..")
     accept.click.assert_called_once_with(timeout=10000)
     notice.wait_for.assert_called_once_with(state="hidden", timeout=10000)
 
@@ -62,6 +63,7 @@ def test_cookie_consent_fails_closed_when_accept_button_is_missing():
     notice = MagicMock()
     notice.is_visible.return_value = True
     accept = MagicMock()
+    accept.count.return_value = 0
     accept.is_visible.return_value = False
     notice.locator.return_value.get_by_role.return_value = accept
     page.get_by_text.return_value.first = notice
@@ -70,6 +72,38 @@ def test_cookie_consent_fails_closed_when_accept_button_is_missing():
         upload._accept_cookie_consent(page, TimeoutError)
 
     accept.click.assert_not_called()
+
+
+@pytest.mark.parametrize("cookie_buttons", [0, 1, 2])
+def test_cookie_consent_respects_observed_nested_banner(cookie_buttons):
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
+
+    buttons = "".join(
+        '<button onclick="this.closest(\'#cookies\').remove()">Aceptar</button>'
+        for _ in range(cookie_buttons)
+    )
+    with sync_playwright() as playwright:
+        if not Path(playwright.chromium.executable_path).exists():
+            pytest.skip("Playwright Chromium is not installed")
+        browser = playwright.chromium.launch(headless=True)
+        try:
+            page = browser.new_page()
+            page.set_content(
+                '<div id="legal"><button onclick="this.dataset.clicked=\'yes\'">Aceptar</button></div>'
+                '<div id="cookies"><div><span>Utilizamos cookies necesarias. '
+                'También cookies opcionales.</span></div><div>'
+                f'{buttons}<button>Rechazar</button></div></div>'
+            )
+            if cookie_buttons == 1:
+                upload._accept_cookie_consent(page, PlaywrightTimeoutError)
+                assert page.locator("#cookies").count() == 0
+            else:
+                with pytest.raises(upload.CookieConsentUnavailable):
+                    upload._accept_cookie_consent(page, PlaywrightTimeoutError)
+                assert page.locator("#cookies").count() == 1
+            assert page.locator("#legal button").get_attribute("data-clicked") is None
+        finally:
+            browser.close()
 
 
 def test_pending_documents_are_not_dismissed(monkeypatch):
