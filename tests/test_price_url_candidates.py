@@ -19,7 +19,7 @@ from price_comparator import PriceComparatorStore, normalize_gtin
 from price_monitor import PriceMonitor
 from price_url_candidates import (
     EXAMPLES, ROUTE_EXAMPLES, _route_11_index, candidate_plan,
-    resolve_product_attributes, route_market_hint,
+    documentary_route_records, resolve_product_attributes, route_market_hint,
 )
 from tests.test_price_locator import Site, _env, _jobs, _urls, _watch
 from tests.web_fixtures import page
@@ -61,6 +61,111 @@ def test_documentary_registry_is_complete_and_contains_no_offers_or_permissions(
     for example in EXAMPLES:
         assert example.url.startswith("https://")
         assert not {"price", "availability", "market", "authorized", "caliber"} & asdict(example).keys()
+
+
+def test_documentary_pair90_does_not_inherit_unrelated_competitor_examples():
+    product = {"ean": "0805289126591", "brand": "Ray-Ban", "model": "RB2140", "color": "90158"}
+    payload = {product["ean"]: {
+        "primary": "https://optica-optima.com/gafas-de-sol/ray-ban-rb2140-901-58-original-wayfarer.html",
+        "examples": [
+            "https://optica-optima.com/gafas-de-sol/bottega-veneta-bv1274s-001.html",
+            "https://optica-optima.com/gafas-de-sol/tom-ford-ft1026-01a.html",
+            "https://optica-optima.com/gafas-de-sol/",
+            "https://optica-optima.com/gafas-de-sol/ray-ban-rb2140-90158.html",
+        ],
+    }}
+    rows = documentary_route_records(
+        payload, products={product["ean"]: product}, domains={"optica-optima.com": "optima"},
+        source="pair90 regression; real documentary URLs, synthetic nested layout",
+    )
+    candidates = [r for r in rows if r["category"] == "variant_candidate"]
+    assert len(candidates) == 2 and all("rb2140" in r["url"] for r in candidates)
+    assert len([r for r in rows if r["category"] == "unrelated_source"]) == 2
+    assert len([r for r in rows if r["category"] == "general_source"]) == 1
+    assert not any(r["category"] == "specific_fiche" for r in rows)
+    plan = candidate_plan(product, "optica-optima.com")
+    assert not any("bv1274s" in c.url or "ft1026" in c.url for c in plan.candidates)
+
+
+def test_documentary_pair90_real_source_keeps_general_catalogue_separate():
+    # Sanitized excerpt of Matriz_600_pares.html, minified on one line; no captured shop response.
+    payload = (
+        '<table><tr><td>0805289126591</td><td>Ray Ban RB2140 90158</td>'
+        '<td>Descubrir href del catalogo</td></tr>'
+        '<tr><td>Bottega Veneta BV1274S 005</td><td>'
+        '<a href="https://optica-optima.com/gafas-de-sol/bottega-veneta-bv1274s-005.html">BV1274S</a>'
+        '</td></tr><tr><td>Tom Ford FT1026 05E</td><td>'
+        '<a href="https://optica-optima.com/gafas-de-sol/tom-ford-ft1026-05e.html">FT1026</a>'
+        '</td></tr></table><a href="https://optica-optima.com/gafas-de-sol/">Catalogo</a>'
+    )
+    product = {"ean": "0805289126591", "brand": "Ray Ban", "model": "RB2140", "color": "90158"}
+    rows = documentary_route_records(
+        payload, products={product["ean"]: product}, domains={"optica-optima.com": "optima"},
+        source="Matriz_600_pares.html; sanitized row excerpt",
+    )
+    scoped = [r for r in rows if r["ean"] == product["ean"]]
+    candidates = [r for r in scoped if r["category"] == "variant_candidate"]
+    assert not candidates
+    assert any(r["category"] == "general_source" and r["ean"] is None for r in rows)
+    assert not any("bv1274s" in r["url"] or "ft1026" in r["url"] for r in candidates)
+    assert not any(r["category"] == "specific_fiche" for r in scoped)
+
+
+def test_documentary_published_identity_is_not_an_offer_or_variant_stock_transfer():
+    product = {"ean": "0805289126591", "brand": "Ray Ban", "model": "RB2140", "color": "90158"}
+    rows = documentary_route_records(
+        {"ean": product["ean"], **product, "ean_published": "805289126591",
+         "url": "https://example.com/ray-ban-rb2140-90158.html",
+         "caliber": "54", "availability": "in_stock", "price": 100},
+        products={product["ean"]: product}, domains={"example.com": "example"},
+        source="synthetic published-identity extension",
+    )
+    assert rows[0]["category"] == "specific_fiche" and rows[0]["documentary_not_approval"]
+    assert not {"availability", "price", "caliber", "comparable"} & rows[0].keys()
+
+
+def test_documentary_metadata_cannot_override_another_models_url():
+    product = {"ean": "0805289126591", "brand": "Ray Ban", "model": "RB2140", "color": "90158"}
+    rows = documentary_route_records(
+        {**product, "ean_published": product["ean"],
+         "url": "https://example.com/bottega-veneta-bv1274s-005.html",
+         "notes": "See https://example.com/tom-ford-ft1026-05e.html"},
+        products={product["ean"]: product}, domains={"example.com": "example"},
+        source="synthetic conflicting record metadata",
+    )
+    assert len(rows) == 2 and all(r["category"] == "unrelated_source" for r in rows)
+
+
+@pytest.mark.parametrize("url", [
+    "https://example.com/ray-ban-rb2140-901.html",
+    "https://example.com/saint-laurent-sl-596-dune-opt-003.html",
+])
+def test_documentary_model_color_hypotheses_do_not_remove_color_or_model_suffixes(url):
+    product = ({"ean": "0805289126591", "brand": "Ray-Ban", "model": "RB2140", "color": "90158"}
+               if "ray-ban" in url else
+               {"ean": "0889652429687", "brand": "Saint Laurent", "model": "SL 596 DUNE", "color": "003"})
+    rows = documentary_route_records(
+        {"ean": product["ean"], "url": url}, products={product["ean"]: product},
+        domains={"example.com": "example"}, source="synthetic suffix regression",
+    )
+    assert rows[0]["category"] == "unrelated_source"
+
+
+def test_documentary_general_sources_and_foreign_ean_do_not_become_target_fiches():
+    product = {"ean": "0805289126591", "brand": "Ray-Ban", "model": "RB2140", "color": "90158"}
+    rows = documentary_route_records(
+        {"scope": {"eans": [product["ean"]]},
+         "sources": ["https://example.com/sitemap.xml"],
+         product["ean"]: {"child": {"ean": "9999999999999", "url": "https://example.com/product.html"},
+                          "redirect": {"url": "https://example.com/ray-ban-rb2140-90158.html",
+                                       "final_url": "https://example.com/catalogue/",
+                                       "evidence": "redirect_to_catalogue"}}},
+        products={product["ean"]: product}, domains={"example.com": "example"},
+        source="synthetic scope and redirect regression",
+    )
+    assert rows[0]["ean"] is None and rows[0]["category"] == "general_source"
+    assert rows[1]["ean"] is None and rows[1]["category"] == "unrelated_source"
+    assert all(r["category"] == "general_source" for r in rows[2:])
 
 
 def test_38_product_routes_are_scoped_documentary_candidates_only():

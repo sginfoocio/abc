@@ -178,7 +178,10 @@ def test_registered_business_vat_is_stored_without_a_per_page_statement(tmp_path
     assert "IVA sin confirmar (no comparable)" not in set(frame["Estado"])
 
 
-def test_market_not_verified_on_page_means_stored_noncomparable(tmp_path):
+@pytest.mark.parametrize("business_policy_present", [False, True])
+def test_unpublished_market_requires_audited_business_policy(tmp_path, monkeypatch, business_policy_present):
+    if not business_policy_present:
+        monkeypatch.setattr("competitor_requirements.business_market_policy_for", lambda url: None)
     site = FakeSite()
     store, search = make_search(tmp_path, site)
     cid = competitor_id(store)
@@ -187,10 +190,14 @@ def test_market_not_verified_on_page_means_stored_noncomparable(tmp_path):
     index_url(store, cid, ean, url_of(PRADA[ean]["slug"]))
     _open_access(search, cid)
     outcome = search.run([ean], [cid])[0]
-    assert "Mercado sin evidencia comercial verificada" in outcome.detail
+    assert outcome.page.market == ""
+    if business_policy_present:
+        assert "business-es-eur-market-14-2026-11-24" in outcome.detail
+    else:
+        assert "Mercado sin evidencia comercial verificada" in outcome.detail
     with store._connect() as connection:
         assert connection.execute("SELECT COUNT(*) FROM offers").fetchone()[0] == 1
-    assert store.dashboard()[0].set_index("ean").loc[ean, "competitor_count"] == 0
+    assert store.dashboard()[0].set_index("ean").loc[ean, "competitor_count"] == int(business_policy_present)
 
 
 def test_incompatible_market_is_rejected_by_the_importer(tmp_path):

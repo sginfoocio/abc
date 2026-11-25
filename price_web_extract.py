@@ -1262,17 +1262,27 @@ def _selector_stock(page: ProductPage, text: str) -> None:
 
 def resolve_market(page: ProductPage, config: dict) -> tuple[str, str, bool]:
     """Commercial country evidence, never locale/domain. Keep contradictions out of comparable offers."""
+    from competitor_requirements import business_market_policy_for
+
+    policy = business_market_policy_for(config.get("site_url") or page.url)
+    if policy and config.get("domain") and config["domain"].removeprefix("www.") != policy["domain"]:
+        policy = None
     configured = config.get("sales_market", "") if config.get("market_verified") \
         and config.get("market_evidence_url") and config.get("market_note") else ""
-    conflict = page.market_conflict or bool(page.market and configured and page.market != configured)
+    policy_market = policy["market"] if policy else ""
+    expected = configured or policy_market
+    conflict = page.market_conflict or bool(page.market and expected and page.market != expected)
     if conflict:
-        return page.market or configured, "Mercado contradictorio entre ficha y configuración; revisión obligatoria", True
+        return page.market or configured, "Mercado contradictorio entre ficha y política comercial; revisión obligatoria", True
     if page.market:
         return page.market, f"Mercado {page.market} según {page.market_source or 'ficha explícita'}", False
     if configured:
         return configured, (f"Mercado {configured} según configuración verificada; "
                             f"{config['market_evidence_url']}; {config['market_note']}; "
                             f"{config.get('market_verified_at') or ''}"), False
+    if policy:
+        return policy_market, (f"{policy['id']}: {policy['source']}; {policy['recorded_on']}; "
+                               f"{policy['statement']} Política comercial; no país observado en la ficha."), False
     return "", "Mercado sin evidencia comercial verificada", False
 
 

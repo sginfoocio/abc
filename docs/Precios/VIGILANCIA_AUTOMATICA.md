@@ -209,6 +209,41 @@ incluye el próximo intento. Su CSV exporta todas las filas.
 
 #### Recuperación supervisada después del despliegue
 
+Los pares `review` cuyo último check conserva exactamente «Piloto desactivado o
+con ejecución pendiente: no se inicia otra» tienen una reconciliación separada,
+por IDs y huella del estado vivo:
+
+```bash
+python price_recovery.py --database RUTA_BASE --retired-pilot-gate \
+  --continuity-id ID_CONTINUIDAD --pair-id ID_PAR --check-id ID_ULTIMO_CHECK
+```
+
+La vista previa no hace HTTP ni expira incidentes. Exige continuidad activa,
+piloto cerrado sin ejecuciones pendientes, recibo coherente del mismo par sin
+HTTP, trabajo reutilizable, identidad original y controles actuales. Para una
+ficha manual exige su aprobación original verificable; para `known_urls` o
+`auto_watch` exige el EAN literal verificado y mantiene esa procedencia separada
+de una aprobación humana. Una ficha verificada no acredita oferta vigente.
+Bloqueos propios del trabajo, intentos pendientes, leases, reservas inciertas,
+robots, Retry-After y presupuestos siguen bloqueando.
+
+Solo después de revisión y despliegue protegido:
+
+```bash
+python price_recovery.py --database RUTA_BASE --retired-pilot-gate \
+  --continuity-id ID_CONTINUIDAD --pair-id ID_PAR --check-id ID_ULTIMO_CHECK \
+  --plan-hash HUELLA_NUEVA --apply --approved \
+  --actor RESPONSABLE --note MOTIVO --commit COMMIT_COMPLETO
+```
+
+Los bloqueos de continuidad, competidor y par y la transacción inmediata
+rechazan un estado concurrente distinto. Se audita el cambio únicamente del
+estado/motivo del par; no se crean solicitudes, no se reinician intentos, no se
+adelanta `next_check_at`, ni se rejuvenece la muestra. Una segunda aplicación
+reconoce el recibo de recuperación. El trabajador existente conserva permisos,
+colas y recibos; solo una lectura gobernada real posterior puede acreditar una
+oferta nueva. No ejecutar en producción el candidato ni usar un plan histórico.
+
 No se aceptan de nuevo las fichas. Tras instalar la versión y sus migraciones, usar la base existente
 del comparador y generar una vista previa de las solicitudes y las aprobaciones actuales sin solicitud:
 
