@@ -11,6 +11,10 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def normalize_line_endings(content: bytes) -> bytes:
+    return content.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+
+
 def compile_lock(source: str, target: Path, constraints: tuple[str, ...]) -> None:
     arguments = ["pip", "compile", source]
     for constraint in constraints:
@@ -37,7 +41,9 @@ def main() -> int:
             committed = ROOT / filename
             generated = committed if write else Path(temporary) / filename
             compile_lock(source, generated, constraints)
-            if not write and committed.read_bytes() != generated.read_bytes():
+            if not write and normalize_line_endings(committed.read_bytes()) != normalize_line_endings(
+                generated.read_bytes()
+            ):
                 valid = False
                 sys.stdout.writelines(difflib.unified_diff(
                     committed.read_text(encoding="utf-8").splitlines(keepends=True),

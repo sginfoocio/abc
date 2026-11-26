@@ -3,7 +3,9 @@ import subprocess
 
 import pytest
 
-from scripts.ci_test_selection import ROOT_TESTS, changed_paths, comparison_base, select
+from scripts.ci_test_selection import (
+    ROOT_TESTS, SCOPED_DEPENDENCY_TESTS, changed_paths, comparison_base, select,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = (ROOT / ".github/workflows/deploy.yml").read_text(encoding="utf-8")
@@ -69,6 +71,8 @@ def test_production_deploy_is_only_triggered_by_a_successful_push_run_on_main():
     ([".github/workflows/deploy.yml", "scripts/ci_test_selection.py", "tests/test_ci_stacked_prs.py"],
      {"test_ci_stacked_prs.py", "test_cloud_production_deploy.py", "test_release_versioning.py",
       "test_dockerfile_provider_modules.py"}, set()),
+    (["gio_cloud.py"], {"test_gio.py"}, set()),
+    (["app_enhanced.py"], {"test_gio.py", "test_app_navigation.py"}, set()),
     (["app_pages/provider_orders_page.py"], {"test_provider_order_panel.py", "test_image_library.py"}, set()),
     (["kering_portal.py"], {"test_kering_images.py", "test_repository_storage.py"}, set()),
     (["poll_luxoptica_mail.py"], {"test_luxoptica_stop.py", "test_graph_mail_downloader.py"}, set()),
@@ -92,6 +96,7 @@ def test_production_deploy_is_only_triggered_by_a_successful_push_run_on_main():
     (["pytest.ini"], {"test_ci_stacked_prs.py", "test_price_monitor.py"}, set()),
     (["requirements.txt"], {"test_dockerfile_provider_modules.py", "test_prestashop_prices.py",
                             "test_vytria_price_sync.py"}, set()),
+    (["scripts/dependency_locks.py"], {"test_dependency_locks.py"}, set()),
     (["Dockerfile"], {"test_dockerfile_provider_modules.py"}, set()),
     (["price_comparator.py"], {"test_price_comparator.py", "test_price_analytics.py",
                                "test_price_analytics_dates.py", "test_prestashop_prices.py",
@@ -112,6 +117,23 @@ def test_impact_selection(files, included, root_tests):
     assert included <= {Path(p).name for p in targets}
     assert ("tests" in targets) == ("tests" in included)
     assert bool(targets) == bool(reasons) == bool(included)
+
+
+def test_scoped_dependency_keeps_overlapping_domain_tests(monkeypatch):
+    monkeypatch.setitem(
+        SCOPED_DEPENDENCY_TESTS,
+        "app_enhanced.py",
+        ("tests/test_provider_order_panel.py",),
+    )
+    inventory = {p.relative_to(ROOT).as_posix() for p in (ROOT / "tests").rglob("test_*.py")}
+
+    targets, _ = select(["app_enhanced.py"], inventory)
+
+    assert {
+        "tests/test_provider_order_panel.py",
+        "tests/test_gio.py",
+        "tests/test_app_navigation.py",
+    } <= set(targets)
 
 
 def test_price_module_selects_direct_regressions_instead_of_entire_price_suite():

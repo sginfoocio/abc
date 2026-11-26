@@ -119,6 +119,7 @@ jobs:
           import app_exports, app_navigation, app_pages.alerts, app_pages.luxoptica
           import provider_images, provider_images_ui, provider_odoo_orders, repository_catalog_readonly, marcolin_images, safilo_images, nuorder_images
           import cloud_dashboard, kering_images_ui, kering_portal, kering_jobs, graph_mail_downloader, abcd_snapshots, image_exports, luxoptica_auto_upload, repository_storage, market_publication
+          import gio_cloud, gio_reports, app_pages.gio
           import price_pilot, price_scheduler, price_web, price_monitor, price_url_candidates, app_pages.price_comparator
           import prestashop_prices, pymysql
           from urllib.parse import urlparse
@@ -194,6 +195,22 @@ jobs:
             docker volume rm "$VOLUME" >/dev/null || echo "ERROR cleaning isolated smoke volume" >&2
           }
           trap cleanup_smoke EXIT
+          docker run --rm --network none --read-only --user 1037:100 -e PYTHONPATH=/app \
+            "$IMAGE" python -c "
+          from gio_cloud import data_root
+          try:
+              data_root()
+          except OSError as exc:
+              assert 'volumen persistente' in str(exc)
+          else:
+              raise AssertionError('GIO must reject the missing persistent mount')
+          "
+          docker run --rm --network none --read-only --user 1037:100 -e PYTHONPATH=/app \
+            --mount "type=volume,source=$VOLUME,target=/app/data" \
+            "$IMAGE" python -c "
+          from gio_cloud import data_root
+          assert str(data_root()) == '/app/data/gio'
+          "
           docker run --rm --network none --read-only --user 0:0 --mount "type=volume,source=$VOLUME,target=/smoke" \
             "$IMAGE" sh -c 'mkdir /smoke/state; chown 1037:100 /smoke/state; chmod 0700 /smoke/state'
           docker run --rm --network none --read-only --user 1037:100 --tmpfs /tmp:size=536870912,mode=1777 \
@@ -326,6 +343,7 @@ jobs:
 
       - name: Lint with flake8
         run: |
+          flake8 gio_cloud.py gio_reports.py app_pages/gio.py tests/test_gio.py --count --select=E9,F63,F7,F82,F401,F841 --show-source --statistics
           flake8 scripts/ci_test_selection.py tests/test_ci_stacked_prs.py --select=E9,F63,F7,F82
           flake8 deployment/cloud/cloud_production_deploy.py deployment/cloud/validate_luxottica.py deployment/cloud/runner_job_gate.py deployment/cloud/verify_compose_transition.py tests/test_cloud_production_deploy.py tests/test_validate_luxottica.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 app_enhanced.py app_exports.py app_navigation.py app_pages db_loader.py engine.py abcd_snapshots.py save_abcd_weekly_snapshot.py auth_session.py order_alerts.py graph_mail_downloader.py tests/test_app_exports.py tests/test_app_navigation.py tests/test_abcd_snapshots.py tests/test_auth_session.py tests/test_order_alerts.py tests/test_graph_mail_downloader.py --count --select=E9,F63,F7,F82 --show-source --statistics
@@ -352,6 +370,7 @@ jobs:
 
       - name: Check syntax
         run: |
+          python -m py_compile gio_cloud.py gio_reports.py app_pages/gio.py tests/test_gio.py
           python -m py_compile scripts/ci_test_selection.py tests/test_ci_stacked_prs.py
           python -m py_compile deployment/cloud/cloud_production_deploy.py deployment/cloud/validate_luxottica.py deployment/cloud/runner_job_gate.py deployment/cloud/verify_compose_transition.py tests/test_cloud_production_deploy.py tests/test_validate_luxottica.py
           sh -n deployment/cloud/runner_job_gate.sh

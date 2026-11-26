@@ -15,6 +15,10 @@ RULES = {
         ("tests/test_ci_stacked_prs.py", "tests/test_cloud_production_deploy.py",
          "tests/test_release_versioning.py", "tests/test_dockerfile_provider_modules.py"),
     ),
+    "gio": (
+        ("gio_cloud.py", "gio_reports.py", "app_pages/gio.py", "app_enhanced.py"),
+        ("tests/test_gio.py", "tests/test_app_navigation.py"),
+    ),
     "images": (
         ("app_pages/*image*.py", "app_pages/provider*.py", "image*.py", "repository*.py", "bulk_image*.py",
          "provider*.py", "market_publication.py", "migrate_image*.py", "marcolin*.py", "safilo*.py", "nuorder*.py",
@@ -221,6 +225,7 @@ SCOPED_DEPENDENCY_TESTS = {
         "tests/test_prestashop_prices.py",
         "tests/test_vytria_price_sync.py",
     ),
+    "scripts/dependency_locks.py": ("tests/test_dependency_locks.py",),
 }
 GLOBAL_DEPENDENCIES = ("db_config.py", "pyproject.toml", "setup.cfg", "conftest.py",
                        "tests/conftest.py")
@@ -272,6 +277,12 @@ def select(paths, test_files):
             continue
         if path in SCOPED_DEPENDENCY_TESTS:
             group_tests = {test for test in SCOPED_DEPENDENCY_TESTS[path] if test in test_files}
+            groups = [name for name, (source, _) in RULES.items() if matches(path, source)]
+            for name in groups:
+                rule_tests = {test for test in test_files if matches(test, RULES[name][1])}
+                if rule_tests:
+                    group_tests.update(rule_tests)
+                    reasons.append(f"{name}: {path}")
             if group_tests:
                 tests.update(group_tests)
                 roots = {test for test, inputs in MASTERDATA_DEPENDENCIES.items() if path in inputs}

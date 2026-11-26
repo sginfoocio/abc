@@ -25,6 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 ENV TZ=Europe/Madrid
+ENV GIO_DATA_ROOT=/app/data/gio
 
 # Copiar dependencias instaladas desde el builder
 COPY --from=builder /opt/venv /opt/venv
@@ -65,6 +66,7 @@ COPY scripts/smoke_image_thumbnails.py ./scripts/smoke_image_thumbnails.py
 COPY scripts/regenerate_image_thumbnails.py ./scripts/regenerate_image_thumbnails.py
 COPY scripts/cloud_image_entrypoint.sh ./scripts/cloud_image_entrypoint.sh
 COPY cloud_dashboard.py process_activity.py build_info.py .
+COPY gio_cloud.py gio_reports.py .
 COPY price_comparator.py vytria_price_sync.py price_connectors.py price_scheduler.py price_analytics.py price_web.py price_web_extract.py price_web_fetch.py .
 COPY prestashop_prices.py .
 COPY price_references.py price_observations.py competitor_requirements.py price_known_urls.py .

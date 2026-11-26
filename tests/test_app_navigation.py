@@ -31,6 +31,7 @@ def _pages() -> dict[str, str]:
         "reconciliation",
         "price_comparator",
         "settings",
+        "gio",
     )}
 
 
@@ -62,9 +63,11 @@ def test_admin_navigation_keeps_all_existing_page_groups() -> None:
         "Alertas",
         "Conciliación",
         "Análisis comercial",
+        "Contabilidad",
         "Configuración",
     }
     assert streamlit.groups["Análisis comercial"] == ["price_comparator"]
+    assert streamlit.groups["Contabilidad"] == ["gio"]
 
 
 def test_bulk_image_search_is_in_admin_repository_only() -> None:
@@ -88,7 +91,7 @@ page_names = (
     "home", "master_import", "master_dictionary", "master_dryrun",
     "abc_home", "abc_search", "abc_reports", "abc_history", "abc_detail",
     "luxoptica_images", "luxoptica_pending", "kering_images", "alerts",
-    "reconciliation", "price_comparator", "settings",
+    "reconciliation", "price_comparator", "settings", "gio",
 )
 pages = {
     name: st.Page(render_page, title=name, url_path=name)

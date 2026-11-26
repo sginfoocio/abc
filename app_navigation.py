@@ -40,5 +40,7 @@ def build_navigation(st_module: Any, auth_role: str | None, pages: dict[str, Any
             groups["Conciliación"] = [pages["reconciliation"]]
         if "price_comparator" in pages:
             groups["Análisis comercial"] = [pages["price_comparator"]]
+        if auth_role == "admin" and "gio" in pages:
+            groups["Contabilidad"] = [pages["gio"]]
         groups["Configuración"] = [pages["settings"]]
     return st_module.navigation(groups, position="sidebar")
