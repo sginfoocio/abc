@@ -39,12 +39,14 @@ def snapshot():
     return config, [container]
 
 
-def test_changes_only_monitor_image_without_modifying_input(snapshot):
+def test_changes_only_monitor_image_and_paused_command_without_modifying_input(snapshot):
     config, containers = snapshot
     before = copy.deepcopy(config)
     updated = prepare_monitor_image_change(config, containers, NEW)
     assert config == before
     assert updated["services"]["abcd-app"] == before["services"]["abcd-app"]
+    assert updated["services"]["abcd-luxoptica-monitor"]["command"] == COMMAND + ["--paused"]
+    updated["services"]["abcd-luxoptica-monitor"]["command"] = COMMAND[:]
     updated["services"]["abcd-luxoptica-monitor"]["image"] = OLD
     assert updated == before
 

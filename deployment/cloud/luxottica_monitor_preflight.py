@@ -20,7 +20,7 @@ class MonitorPreflightError(ValueError):
 
 
 def prepare_monitor_image_change(config, containers, image):
-    """Return a copy changing only the monitor image; never perform a deployment."""
+    """Prepare a paused monitor configuration; never perform a deployment."""
     if not isinstance(image, str) or not IMAGE.fullmatch(image):
         raise MonitorPreflightError("candidate_image_not_immutable")
     if not isinstance(config, dict) or not isinstance(config.get("services"), dict):
@@ -86,4 +86,5 @@ def prepare_monitor_image_change(config, containers, image):
 
     result = copy.deepcopy(config)
     result["services"][SERVICE]["image"] = image
+    result["services"][SERVICE]["command"] = COMMAND + ["--paused"]
     return result

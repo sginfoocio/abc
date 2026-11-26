@@ -136,8 +136,8 @@ auditado; no debe hacerse durante el despliegue inicial.
 para una futura transaccion: exige digest inmutable, comando y UID esperados,
 origen, destino y modo de montajes bind acordes al contenedor activo, y un unico
 monitor activo con el nombre o las etiquetas Compose esperados. Devuelve una
-copia del Compose que solo cambia la imagen del monitor; no escribe archivos,
-no ejecuta Docker y no inicia ni detiene servicios.
+copia del Compose que cambia solo la imagen y anade `--paused` al comando del
+monitor; no escribe archivos, no ejecuta Docker y no inicia ni detiene servicios.
 
 Esta comprobacion no es un controlador ni autoriza un despliegue. No verifica
 opciones adicionales de montaje, procedencia del digest, aprobaciones, backups,
