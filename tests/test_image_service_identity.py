@@ -61,6 +61,27 @@ def test_luxottica_sender_mounts_entire_nfs_export_for_read_only_validation(tmp_
     assert service["environment"]["IMAGE_REPOSITORY_NFS_SOURCE"] == "nas:/export"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX entrypoint test")
+@pytest.mark.parametrize("command,read_only", [
+    (["python", "-B", "luxottica_order_scheduler.py"], True),
+    (["python", "poll_luxoptica_mail.py"], False),
+])
+def test_entrypoint_uses_read_only_guard_only_for_sender(tmp_path, command, read_only):
+    log = tmp_path / "calls"
+    python = tmp_path / "python"
+    python.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$CALLS"\n')
+    python.chmod(0o755)
+    env = {**os.environ, "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+           "CALLS": str(log), "IMAGE_REPOSITORY_NFS_SOURCE": "nas:/export"}
+    subprocess.run(["sh", str(ROOT / "scripts" / "cloud_image_entrypoint.sh"), *command],
+                   env=env, check=True, capture_output=True, text=True)
+    calls = log.read_text().splitlines()
+    assert len(calls) == 2 and calls[1] == " ".join(command[1:])
+    assert ("allow_read_only=True" in calls[0]) is read_only
+    assert ("check_backup_root" in calls[0]) is not read_only
+    assert ("open_catalog" in calls[0]) is read_only
+
+
 def test_only_image_writers_use_cloud_identity_in_preparation_override():
     config = compose_config("docker-compose.yml", "deployment/nfs/image-services.identity.compose.yml")
     production = compose_config("docker-compose.yml")

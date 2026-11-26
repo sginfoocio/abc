@@ -99,7 +99,8 @@ registra la acción declarada por el operador y requiere evidencia aparte.
   contenedor, `IMAGE_REPOSITORY_ROOT` con el directorio `images` dentro de ese montaje y
   `IMAGE_REPOSITORY_NFS_SOURCE` con la exportación esperada. El remitente monta la exportación
   completa en solo lectura; la validación de lecturas exige igualmente la exportación exacta y
-  NFS `hard`. Los servicios que escriben siguen requiriendo un montaje escribible.
+  NFS `hard`. El arranque del remitente verifica esa lectura y el catálogo sin inicializarlo;
+  los servicios que escriben siguen requiriendo un montaje escribible.
 
 ## Recepción y Graph
 
