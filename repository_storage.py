@@ -78,7 +78,7 @@ def require_local(path: Path):
         raise ValueError("El estado SQLite requiere almacenamiento local persistente")
 
 
-def check_production_directory(root: Path, role: str) -> bool:
+def check_production_directory(root: Path, role: str, *, allow_read_only: bool = False) -> bool:
     configured = os.getenv("IMAGE_REPOSITORY_MOUNT_ROOT", "").strip()
     if not configured:
         return False
@@ -95,7 +95,7 @@ def check_production_directory(root: Path, role: str) -> bool:
     specific = os.getenv(f"IMAGE_REPOSITORY_{'BACKUP' if role == 'backups' else 'WORK'}_NFS_SOURCE", "").strip()
     if role != "images" and specific and specific != expected:
         raise ValueError("Exportacion del almacenamiento productivo no coincide")
-    require_nfs_directory(root, mount, expected)
+    require_nfs_directory(root, mount, expected, allow_read_only=allow_read_only)
     return True
 
 
@@ -111,16 +111,16 @@ def require_distinct_storage(source: Path, target: Path) -> None:
     require_distinct_replica(source, target)
 
 
-def check_image_root(root: Path):
+def check_image_root(root: Path, *, allow_read_only: bool = False):
     if check_staging_role(root, "images"):
         return
     if excluded_staging_path(root):
         raise ValueError("Repositorio productivo no puede apuntar a staging")
-    if check_production_directory(root, "images"):
+    if check_production_directory(root, "images", allow_read_only=allow_read_only):
         return
     expected = os.getenv("IMAGE_REPOSITORY_NFS_SOURCE", "").strip()
     if expected:
-        require_nfs(root, expected)
+        require_nfs(root, expected, allow_read_only=allow_read_only)
     else:
         mount = filesystem_mount(root)
         if mount and mount[1] in {"nfs", "nfs4"}:

@@ -30,6 +30,8 @@ def test_luxottica_sender_reads_catalog_from_mounted_state(tmp_path, monkeypatch
     state = tmp_path / "state"
     monkeypatch.setenv("IMAGE_REPOSITORY_HOST_ROOT", str(images))
     monkeypatch.setenv("IMAGE_REPOSITORY_ROOT", "/app/repo/images")
+    monkeypatch.setenv("IMAGE_REPOSITORY_MOUNT_HOST_ROOT", "")
+    monkeypatch.setenv("IMAGE_REPOSITORY_MOUNT_ROOT", "")
     if separate_state:
         monkeypatch.setenv("IMAGE_REPOSITORY_STATE_HOST_ROOT", str(state))
     else:
@@ -43,6 +45,20 @@ def test_luxottica_sender_reads_catalog_from_mounted_state(tmp_path, monkeypatch
     assert catalog.get("bind", {}).get("create_host_path", False) is False
     image_volume = next(volume for volume in service["volumes"] if volume["target"] == "/app/repo/images")
     assert Path(image_volume["source"]) == images and image_volume["read_only"]
+
+
+def test_luxottica_sender_mounts_entire_nfs_export_for_read_only_validation(tmp_path, monkeypatch):
+    monkeypatch.setenv("IMAGE_REPOSITORY_MOUNT_HOST_ROOT", str(tmp_path / "nas"))
+    monkeypatch.setenv("IMAGE_REPOSITORY_MOUNT_ROOT", "/nas")
+    monkeypatch.setenv("IMAGE_REPOSITORY_ROOT", "/nas/images")
+    monkeypatch.setenv("IMAGE_REPOSITORY_NFS_SOURCE", "nas:/export")
+    service = compose_config("docker-compose.yml", profiles=("luxottica-sender",))["services"][
+        "abcd-luxottica-sender"]
+    nas = next(volume for volume in service["volumes"] if volume["target"] == "/nas")
+    assert Path(nas["source"]) == tmp_path / "nas" and nas["read_only"]
+    assert service["environment"]["IMAGE_REPOSITORY_MOUNT_ROOT"] == "/nas"
+    assert service["environment"]["IMAGE_REPOSITORY_ROOT"] == "/nas/images"
+    assert service["environment"]["IMAGE_REPOSITORY_NFS_SOURCE"] == "nas:/export"
 
 
 def test_only_image_writers_use_cloud_identity_in_preparation_override():

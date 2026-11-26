@@ -122,6 +122,7 @@ services:
       <<: [*odoo-env, *luxottica-env]
       IMAGE_REPOSITORY_ROOT: ${IMAGE_REPOSITORY_ROOT:-/app/repo/images}
       IMAGE_REPOSITORY_STATE_ROOT: /app/image-state
+      IMAGE_REPOSITORY_MOUNT_ROOT: ${IMAGE_REPOSITORY_MOUNT_ROOT:-}
       IMAGE_REPOSITORY_NFS_SOURCE: ${IMAGE_REPOSITORY_NFS_SOURCE:-}
       KERING_DATA_ROOT: /app/data/kering
       PROVIDER_DATA_ROOT: /app/data/providers
@@ -132,7 +133,7 @@ services:
       PYTHONUNBUFFERED: "1"
     volumes:
       - ./masterdata_data:/app/data
-      - ${IMAGE_REPOSITORY_HOST_ROOT:-./image_repository}:${IMAGE_REPOSITORY_ROOT:-/app/repo/images}:ro
+      - ${IMAGE_REPOSITORY_MOUNT_HOST_ROOT:-${IMAGE_REPOSITORY_HOST_ROOT:-./image_repository}}:${IMAGE_REPOSITORY_MOUNT_ROOT:-${IMAGE_REPOSITORY_ROOT:-/app/repo/images}}:ro
       - type: bind
         source: ${IMAGE_REPOSITORY_STATE_HOST_ROOT:-${IMAGE_REPOSITORY_HOST_ROOT:-./image_repository}}
         target: /app/image-state

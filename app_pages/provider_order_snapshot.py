@@ -169,7 +169,7 @@ def image_evidence(orders, catalog, root):
     if not codes:
         return {}, None
     try:
-        check_image_root(root)
+        check_image_root(root, allow_read_only=True)
         if not root.is_dir():
             raise OSError
         db, _ = open_catalog(catalog)
