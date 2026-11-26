@@ -147,6 +147,13 @@ aceptar configuraciones o identidades suministradas por el runner. Antes de
 usarla en produccion debe integrarse, probarse y revisarse una transaccion
 protegida completa, coordinada con el bloqueo del controlador app-only.
 
+El controlador incluye tambien `monitor_paused_regression`, una comprobacion
+aislada del archivo del monitor por SHA-256 y de su arranque pausado en la imagen
+por digest, sin red ni montajes productivos. Aun no esta conectada a ningun
+workflow o transaccion de despliegue. El SHA esperado debe derivarse del commit
+autorizado, no de datos del runner; los tests offline no sustituyen ejecutar la
+comprobacion sobre la imagen publicada.
+
 1. Exigir CI verde del commit exacto y nuevo build Docker completo con
    identidad, smoke1037:100 y pruebasSIGTERM/PID1. Una capa auxiliar o una
    prueba local Windows que omitePOSIX no autoriza actualizar.

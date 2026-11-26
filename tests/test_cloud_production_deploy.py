@@ -78,6 +78,42 @@ def test_policy_requires_administratively_pinned_controller(policy):
         DEPLOY.validate_policy(policy)
 
 
+def test_monitor_artifact_smoke_is_isolated_and_requires_verified_source(monkeypatch):
+    calls = []
+
+    def fake_run(arguments, **kwargs):
+        calls.append((arguments, kwargs))
+        return b"Recepcion pausada\ncloud-monitor-paused-ok\n"
+
+    monkeypatch.setattr(DEPLOY, "run", fake_run)
+    image = "ghcr.io/sginfoocio/abc@sha256:" + "d" * 64
+    result = DEPLOY.monitor_paused_regression(image, "a" * 64)
+    arguments, options = calls[0]
+    assert result == {"paused_start": "ok", "source_sha256": "a" * 64}
+    assert arguments[arguments.index("--network") + 1] == "none"
+    assert "--read-only" in arguments and "--user" in arguments
+    assert "--mount" not in arguments and "-v" not in arguments
+    assert arguments[-1] == "a" * 64
+    assert options["timeout"] == 120
+
+
+@pytest.mark.parametrize("image,digest", [
+    ("ghcr.io/sginfoocio/abc:latest", "a" * 64),
+    ("ghcr.io/other/abc@sha256:" + "d" * 64, "a" * 64),
+    ("ghcr.io/sginfoocio/abc@sha256:" + "d" * 64, "bad"),
+])
+def test_monitor_artifact_smoke_rejects_untrusted_identity(monkeypatch, image, digest):
+    monkeypatch.setattr(DEPLOY, "run", lambda *args, **kwargs: pytest.fail("must reject before Docker"))
+    with pytest.raises(DEPLOY.DeployError):
+        DEPLOY.monitor_paused_regression(image, digest)
+
+
+def test_monitor_artifact_smoke_rejects_missing_success_marker(monkeypatch):
+    monkeypatch.setattr(DEPLOY, "run", lambda *args, **kwargs: b"startup only")
+    with pytest.raises(DEPLOY.DeployError):
+        DEPLOY.monitor_paused_regression("ghcr.io/sginfoocio/abc@sha256:" + "d" * 64, "a" * 64)
+
+
 @pytest.mark.parametrize("uid,mode", [
     (1000, stat.S_IFREG | 0o600),
     (0, stat.S_IFREG | 0o620),
