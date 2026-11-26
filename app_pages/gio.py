@@ -1,6 +1,7 @@
 """Admin-only GIO configuration and operational history."""
 from datetime import datetime, time, timezone
 import json
+import os
 import sqlite3
 
 from cryptography.fernet import InvalidToken
@@ -8,6 +9,7 @@ from filelock import Timeout
 import streamlit as st
 
 from cloud_design import page_title
+from db_config import load_env_file
 from gio_cloud import (
     CENTRES, STATES, GioConfigStore, GioConnectionError, GioStore, TestMailUncertain,
     check_gio_connection, current_result, data_root, prepare_mail_payload, send_test_mail,
@@ -33,6 +35,9 @@ def render():
 
 
 def render_settings():
+    if st.session_state.get("auth_role") != "admin":
+        st.error("GIO requiere permisos de administrador.")
+        return
     st.subheader("GIO")
     st.caption("Configuración protegida con el almacén cifrado existente de proveedores.")
     try:
@@ -62,30 +67,30 @@ def render_settings():
                 value.strip() for value in st.session_state["gio_recipients"].split(";") if value.strip()
             ],
             "test_recipient": st.session_state["gio_test_recipient"].strip(),
-            "enabled": False,
-            "send_enabled": False,
+            "enabled": st.session_state["gio_automation_enabled"],
+            "send_enabled": st.session_state["gio_mail_enabled"],
             "mapping": mapping,
             "odoo_import_evidence": st.session_state["gio_odoo_evidence"].strip(),
             "operations_approved": st.session_state["gio_business_approved"],
             "business_evidence": st.session_state["gio_business_evidence"].strip(),
         }
-        credentials_changed = any(
-            updated[key] != config[key] for key in ("portal_url", "username", "password")
-        )
-        if credentials_changed:
-            updated["last_connection_status"] = "not_checked"
-            updated["last_connection_check"] = ""
         try:
-            config_store.save_for_user(updated, role=st.session_state.get("auth_role"))
-        except (ValueError, PermissionError) as exc:
+            config_store.save_for_user(
+                updated, role=st.session_state.get("auth_role"),
+                actor=st.session_state.get("auth_user", ""),
+                confirmed_automation=st.session_state["gio_confirm_automation"],
+                confirmed_mail=st.session_state["gio_confirm_mail"],
+                expected=config,
+            )
+        except (ValueError, PermissionError, Timeout) as exc:
             st.session_state["gio_settings_message"] = ("error", str(exc))
-        except (OSError, InvalidToken) as exc:
+        except (OSError, sqlite3.Error, InvalidToken) as exc:
             st.session_state["gio_settings_message"] = (
                 "error", f"No se pudo guardar la configuración cifrada de GIO: {exc}",
             )
         else:
             st.session_state["gio_settings_message"] = (
-                "success", "Configuración GIO guardada de forma cifrada. Automatización y envíos siguen desactivados.",
+                "success", "Configuración GIO guardada de forma cifrada.",
             )
         st.session_state["gio_password"] = ""
         st.session_state["gio_clear_credentials"] = False
@@ -114,19 +119,29 @@ def render_settings():
             key="gio_test_recipient",
             help="Solo recibe el envio manual de prueba; no cambia los destinatarios diarios.",
         )
+        load_env_file()
+        mailbox = os.getenv("M365_MAILBOX", "").strip()
+        st.caption(f"Remitente Graph explícito: {mailbox or 'no configurado'}")
         st.toggle(
             "Activar automatización diaria",
-            value=False,
-            disabled=True,
+            value=config["enabled"],
             key="gio_automation_enabled",
-            help="Bloqueado hasta validar la descarga autenticada, el CSV, Odoo y la operación completa.",
+            help="Requiere conexión y ejecución manual verificadas. No recupera fechas anteriores.",
         )
+        st.checkbox("Confirmo activar la automatización diaria", key="gio_confirm_automation")
         st.toggle(
             "Permitir envíos de correo",
-            value=False,
-            disabled=True,
+            value=config["send_enabled"],
             key="gio_mail_enabled",
-            help="Los envíos reales permanecerán desactivados hasta completar y autorizar su validación.",
+            help="Requiere una prueba aceptada y Graph verificado en el worker.",
+        )
+        st.checkbox(
+            "Confirmo el remitente, los destinatarios y la activación del correo",
+            key="gio_confirm_mail",
+        )
+        st.caption(
+            "Al activar correo no se envían solicitudes anteriores; vuelva a solicitarlas manualmente. "
+            "Desactivar impide nuevas operaciones, pero no cancela una petición ya iniciada."
         )
         st.subheader("Configuración contable de Odoo")
         st.caption("IDs técnicos de base de datos; no se escribe en Odoo.")
@@ -159,6 +174,35 @@ def render_settings():
     if save_message:
         level, message = save_message
         st.success(message) if level == "success" else st.error(message)
+    if config["activation_audit"]:
+        with st.expander("Cambios de configuración GIO"):
+            st.dataframe(config["activation_audit"], hide_index=True)
+
+    try:
+        store = GioStore(data_root())
+        graph_status = store.graph_status()
+        graph_label = {
+            "not_checked": "Sin comprobar", "pending": "Pendiente", "running": "En curso",
+            "ok": "Correcta", "failed": "Fallida; revise Graph y los permisos del buzón",
+        }
+        st.caption(
+            "Comprobación de Graph desde el worker: "
+            + graph_label.get(graph_status["check_state"] if graph_status else "not_checked", "Sin comprobar")
+        )
+        if graph_status and graph_status["checked"]:
+            checked = datetime.fromtimestamp(graph_status["checked"], timezone.utc)
+            st.caption(f"Última comprobación Graph: {checked.isoformat(timespec='seconds')}")
+        with st.form("gio_graph_check"):
+            confirmed_graph = st.checkbox(
+                "Autorizo obtener un token Graph desde el worker sin enviar correo",
+                key="gio_confirm_graph_check",
+            )
+            requested_graph = st.form_submit_button("Comprobar Graph en el worker", key="gio_check_worker_graph")
+        if requested_graph:
+            store.request_graph_check(confirmed=confirmed_graph, **identity())
+            st.success("Comprobación solicitada; actualice la página para ver el resultado.")
+    except (OSError, sqlite3.Error, ValueError, PermissionError, Timeout) as exc:
+        st.error(f"No se pudo consultar o solicitar la comprobación Graph: {exc}")
 
     status_text = {
         "ok": "Correcta: credenciales aceptadas",
@@ -181,6 +225,7 @@ def render_settings():
         key="gio_test_connection",
         disabled=not config["username"] or not config["password"],
     ):
+        previous = dict(config)
         try:
             with st.spinner("Comprobando acceso a GIO..."):
                 check_gio_connection(config)
@@ -194,8 +239,11 @@ def render_settings():
             success = True
         config["last_connection_check"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         try:
-            config_store.save_for_user(config, role=st.session_state.get("auth_role"))
-        except (OSError, InvalidToken, ValueError, PermissionError) as exc:
+            config_store.save_for_user(
+                config, role=st.session_state.get("auth_role"),
+                actor=st.session_state.get("auth_user", ""), expected=previous,
+            )
+        except (OSError, InvalidToken, ValueError, PermissionError, Timeout) as exc:
             st.error(f"No se pudo guardar el resultado de la comprobación: {exc}")
         else:
             if success:
@@ -324,6 +372,8 @@ def render_history(store, config):
                     "El original puede contener datos personales. El boton envia una sola prueba al destinatario "
                     "configurado y no activa la automatizacion diaria."
                 )
+                load_env_file()
+                st.caption(f"Remitente Graph explícito: {os.getenv('M365_MAILBOX', '').strip() or 'no configurado'}")
                 with st.form(f"gio_test_mail_{row['day']}"):
                     confirmed = st.checkbox(
                         "Confirmo enviar una unica prueba al destinatario configurado con estos adjuntos",

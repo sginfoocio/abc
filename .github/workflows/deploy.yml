@@ -195,6 +195,22 @@ jobs:
             docker volume rm "$VOLUME" >/dev/null || echo "ERROR cleaning isolated smoke volume" >&2
           }
           trap cleanup_smoke EXIT
+          docker run --rm --network none --read-only --user 1037:100 -e PYTHONPATH=/app \
+            "$IMAGE" python -c "
+          from gio_cloud import data_root
+          try:
+              data_root()
+          except OSError as exc:
+              assert 'volumen persistente' in str(exc)
+          else:
+              raise AssertionError('GIO must reject the missing persistent mount')
+          "
+          docker run --rm --network none --read-only --user 1037:100 -e PYTHONPATH=/app \
+            --mount "type=volume,source=$VOLUME,target=/app/data" \
+            "$IMAGE" python -c "
+          from gio_cloud import data_root
+          assert str(data_root()) == '/app/data/gio'
+          "
           docker run --rm --network none --read-only --user 0:0 --mount "type=volume,source=$VOLUME,target=/smoke" \
             "$IMAGE" sh -c 'mkdir /smoke/state; chown 1037:100 /smoke/state; chmod 0700 /smoke/state'
           docker run --rm --network none --read-only --user 1037:100 --tmpfs /tmp:size=536870912,mode=1777 \

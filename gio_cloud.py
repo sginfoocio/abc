@@ -1,10 +1,11 @@
 """Persistent GIO work queue, consumed by the existing Cloud provider worker."""
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import date, datetime, time, timezone
 from decimal import Decimal
 import hashlib
+import hmac
 from html import escape
 from itertools import groupby
 import json
@@ -46,6 +47,8 @@ DEFAULTS = {
     "send_enabled": False,
     "portal_url": PORTAL_URL, "username": "", "password": "",
     "last_connection_status": "not_checked", "last_connection_check": "",
+    "activation_version": 0, "activation_audit": [], "automation_activated_at": 0, "mail_activated_at": 0,
+    "mail_graph_identity": "",
     "operations_approved": False,
     "odoo_import_evidence": "", "business_evidence": "",
     "mapping": {"company": 0, "journals": dict.fromkeys(CENTRES, 0),
@@ -62,7 +65,10 @@ ERRORS = {
 
 
 def data_root() -> Path:
-    return Path(os.getenv("GIO_DATA_ROOT", str(Path(__file__).parent / "masterdata_data" / "gio")))
+    root = Path(os.getenv("GIO_DATA_ROOT", str(Path(__file__).parent / "masterdata_data" / "gio")))
+    if root == Path("/app/data/gio") and not Path("/app/data").is_mount():
+        raise OSError("GIO requiere el volumen persistente montado en /app/data")
+    return root
 
 
 def admin(role: str | None, actor: str) -> None:
@@ -85,11 +91,12 @@ class GioConfigStore(ConfigStore):
         result = json.loads(json.dumps(DEFAULTS))
         if path.exists():
             result.update(json.loads(self.cipher().decrypt(path.read_bytes())))
-        result["enabled"] = False
-        result["send_enabled"] = False
+        if result["activation_version"] != 1:
+            result["enabled"] = False
+            result["send_enabled"] = False
         return result
 
-    def save(self, config: dict) -> None:
+    def _save(self, config: dict) -> None:
         config = {**DEFAULTS, **config}
         if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", config["daily_time"]):
             raise ValueError("La hora debe tener formato HH:MM (Europe/Madrid)")
@@ -102,16 +109,64 @@ class GioConfigStore(ConfigStore):
         if (not isinstance(config["test_recipient"], str)
                 or (config["test_recipient"] and not RECIPIENT_PATTERN.fullmatch(config["test_recipient"]))):
             raise ValueError("Destinatario de prueba no valido")
-        if config["send_enabled"]:
-            raise ValueError("Envios reales bloqueados hasta validar el funcionamiento completo de GIO")
-        if config["enabled"]:
-            raise ValueError("Automatizacion bloqueada: falta verificar el adaptador autenticado GIO")
         if config["odoo_import_evidence"].strip():
             validate_mapping(config["mapping"])
         if config["operations_approved"] and not config["business_evidence"].strip():
             raise ValueError("Documente la aprobacion de operaciones y referencias")
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         atomic_write(self.root / "config.enc", self.cipher().encrypt(json.dumps(config).encode()))
+
+    def save(self, config: dict) -> None:
+        if config.get("enabled") or config.get("send_enabled"):
+            raise ValueError("La activacion requiere confirmacion administrativa")
+        self._save(config)
+
+    def save_for_user(self, config: dict, *, role: str | None, actor: str = "",
+                      confirmed_automation: bool = False, confirmed_mail: bool = False,
+                      expected: dict | None = None) -> None:
+        admin(role, actor)
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with FileLock(self.root / "config.lock", timeout=10):
+            previous = self.load()
+            if expected is not None and previous != expected:
+                raise ValueError("La configuracion cambio en otra sesion; vuelva a cargarla")
+            updated = {**previous, **config}
+            for name in ("enabled", "send_enabled"):
+                if type(updated[name]) is not bool:
+                    raise ValueError("Estado de activacion no valido")
+            credentials_changed = any(updated[key] != previous[key] for key in ("portal_url", "username", "password"))
+            if credentials_changed:
+                updated["last_connection_status"] = "not_checked"
+                updated["last_connection_check"] = ""
+                if updated["enabled"]:
+                    raise ValueError("Desactive la automatizacion antes de cambiar las credenciales")
+            if updated["send_enabled"] and any(updated[key] != previous[key] for key in ("recipients", "test_recipient")):
+                raise ValueError("Desactive el correo antes de cambiar los destinatarios")
+            if updated["enabled"] and not previous["enabled"]:
+                if not confirmed_automation:
+                    raise ValueError("Confirme la activacion de la automatizacion")
+                validate_automation_activation(self.root, updated)
+                updated["automation_activated_at"] = clock.time()
+            if updated["send_enabled"] and not previous["send_enabled"]:
+                if not confirmed_mail:
+                    raise ValueError("Confirme el remitente y la activacion del correo")
+                updated["mail_graph_identity"] = validate_mail_activation(self.root, updated)
+                updated["mail_activated_at"] = clock.time()
+            if not updated["send_enabled"]:
+                updated["mail_graph_identity"] = ""
+            updated["activation_version"] = 1
+            changed = [key for key in ("enabled", "send_enabled", "portal_url", "username", "password",
+                                        "daily_time", "recipients", "test_recipient", "mapping",
+                                        "operations_approved", "business_evidence", "odoo_import_evidence",
+                                        "last_connection_status", "last_connection_check")
+                       if updated[key] != previous[key]]
+            if changed:
+                updated["activation_audit"] = previous["activation_audit"] + [{
+                    "actor": actor, "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    "changes": changed, "enabled": updated["enabled"],
+                    "send_enabled": updated["send_enabled"],
+                }]
+            self._save(updated)
 
 
 class GioConnectionError(Exception):
@@ -316,6 +371,11 @@ class GioStore:
                     digest TEXT NOT NULL, created REAL NOT NULL,
                     PRIMARY KEY(day,centre,kind,digest)
                 );
+                CREATE TABLE IF NOT EXISTS worker_status (
+                    id INTEGER PRIMARY KEY CHECK(id=1), graph_identity TEXT NOT NULL,
+                    observed REAL NOT NULL, check_state TEXT NOT NULL DEFAULT 'not_checked',
+                    verified_identity TEXT NOT NULL DEFAULT '', checked REAL NOT NULL DEFAULT 0
+                );
             """)
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(batches)")}
             if "original" not in columns:
@@ -362,6 +422,33 @@ class GioStore:
             return conn.execute(
                 "SELECT 1 FROM events WHERE day=? AND stage LIKE 'test_mail_%' LIMIT 1", (day,),
             ).fetchone() is not None
+
+    def record_graph_status(self, identity: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "INSERT INTO worker_status(id,graph_identity,observed) VALUES(1,?,?) "
+                "ON CONFLICT(id) DO UPDATE SET graph_identity=excluded.graph_identity,observed=excluded.observed",
+                (identity, clock.time()),
+            )
+
+    def request_graph_check(self, *, role: str | None, actor: str, confirmed: bool) -> None:
+        admin(role, actor)
+        if not confirmed:
+            raise ValueError("Confirme la comprobacion de Graph desde el worker")
+        with self.connect() as conn:
+            row = conn.execute("SELECT check_state FROM worker_status WHERE id=1").fetchone()
+            if row and row["check_state"] in {"pending", "running"}:
+                raise ValueError("Ya hay una comprobacion Graph pendiente o en curso")
+            conn.execute(
+                "INSERT INTO worker_status(id,graph_identity,observed,check_state) VALUES(1,'',0,'pending') "
+                "ON CONFLICT(id) DO UPDATE SET check_state='pending',verified_identity='',checked=0"
+            )
+        self.event(datetime.now(MADRID).date().isoformat(), "", "graph_check_requested", "", actor)
+
+    def graph_status(self) -> dict | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM worker_status WHERE id=1").fetchone()
+            return dict(row) if row else None
 
     def update(self, day: str, centre: str, **values):
         allowed = {"state", "attempts", "next_attempt", "original", "result", "summary", "error"}
@@ -465,8 +552,8 @@ class GioStore:
             raise ValueError("Original corregido vacio o demasiado grande")
         with self.lock(), self.connect() as conn:
             row = conn.execute("SELECT * FROM centres WHERE day=? AND centre=?", (day, centre)).fetchone()
-            if not row or row["state"] not in TERMINAL:
-                raise ValueError("No hay un resultado final que reintentar")
+            if not row:
+                raise ValueError("No hay una ejecucion que reintentar")
             conn.execute("UPDATE centres SET state='pending',attempts=0,next_attempt=0,error='',result='',updated=? "
                          "WHERE day=? AND centre=?", (clock.time(), day, centre))
             conn.execute("INSERT INTO events(day,centre,stage,detail,actor,created) VALUES(?,?,?,?,?,?)",
@@ -491,6 +578,73 @@ class GioStore:
                          (day,))
             conn.execute("INSERT INTO events(day,centre,stage,detail,actor,created) VALUES(?,?,?,?,?,?)",
                          (day, "", "send_requested", "Confirmacion explicita", actor, clock.time()))
+
+
+def graph_identity(recipient: str = "") -> str:
+    from db_config import load_env_file
+
+    load_env_file()
+    names = ("M365_TENANT_ID", "M365_CLIENT_ID", "M365_MAILBOX", "M365_CLIENT_SECRET")
+    values = [os.getenv(name, "").strip() for name in names]
+    if not all(values):
+        return ""
+    payload = json.dumps([*values[:3], recipient], separators=(",", ":"), ensure_ascii=True)
+    return hmac.new(values[3].encode(), payload.encode(), hashlib.sha256).hexdigest()
+
+
+def check_worker_graph() -> None:
+    from graph_mail_downloader import _get_access_token, load_m365_config, validate_m365_config
+
+    config = load_m365_config()
+    if not graph_identity() or validate_m365_config(config):
+        raise ValueError("Configuracion Graph incompleta")
+    _get_access_token(config)
+
+
+def validate_automation_activation(root: Path, config: dict) -> None:
+    if (not config["username"].strip() or not config["password"]
+            or config["last_connection_status"] != "ok" or not config["last_connection_check"]):
+        raise ValueError("Compruebe las credenciales GIO antes de activar la automatizacion")
+    try:
+        checked = datetime.fromisoformat(config["last_connection_check"]).timestamp()
+    except ValueError:
+        raise ValueError("Fecha de comprobacion GIO invalida") from None
+    store = GioStore(root)
+    with store.connect() as conn:
+        batches = conn.execute(
+            "SELECT day,original FROM batches WHERE origin != 'automatic' AND original != '' AND created >= ?",
+            (checked,),
+        ).fetchall()
+        for batch in batches:
+            rows = conn.execute("SELECT centre,state,summary FROM centres WHERE day=?", (batch["day"],)).fetchall()
+            if ({row["centre"] for row in rows} == set(CENTRES)
+                    and all(row["state"] in {"blocked", "ready", "candidate", "no_movements"}
+                            and json.loads(row["summary"]).get("source_sha256") == batch["original"]
+                            for row in rows)):
+                return
+    raise ValueError("Complete una ejecucion manual de los tres centros despues de comprobar la conexion")
+
+
+def validate_mail_activation(root: Path, config: dict) -> str:
+    if not config["recipients"] or not config["test_recipient"]:
+        raise ValueError("Configure destinatarios diarios y de prueba antes de activar el correo")
+    identity = graph_identity()
+    proof = graph_identity(config["test_recipient"])
+    if not identity or not proof:
+        raise ValueError("Configure el remitente y las credenciales Graph explicitamente")
+    store = GioStore(root)
+    with store.connect() as conn:
+        status = conn.execute("SELECT * FROM worker_status WHERE id=1").fetchone()
+        accepted = conn.execute(
+            "SELECT 1 FROM events WHERE stage='test_mail_accepted' AND detail=? LIMIT 1", (proof,),
+        ).fetchone()
+    if not status or status["graph_identity"] != identity or not 0 <= clock.time() - status["observed"] <= 300:
+        raise ValueError("El worker no ha confirmado recientemente la misma configuracion Graph")
+    if status["check_state"] != "ok" or status["verified_identity"] != identity:
+        raise ValueError("Compruebe el acceso Graph desde el worker")
+    if not accepted:
+        raise ValueError("Realice una prueba de correo aceptada con el remitente y destinatario actuales")
+    return identity
 
 
 def release_allowed(config: dict) -> bool:
@@ -662,7 +816,10 @@ def send_test_mail(store: GioStore, batch: dict, config: dict, *, confirmed: boo
         )
         if _mail_payload_too_large(body, attachments):
             raise ValueError("Adjuntos demasiado grandes para envio simple Graph; descarguelos desde Cloud.")
+        proof = graph_identity(recipient)
         if sender is None:
+            if not proof:
+                raise ValueError("Configure explicitamente el remitente y las credenciales Graph")
             from graph_mail_downloader import send_alert_email
             sender = send_alert_email
 
@@ -678,7 +835,7 @@ def send_test_mail(store: GioStore, batch: dict, config: dict, *, confirmed: boo
             raise TestMailUncertain(
                 "Resultado de envio incierto; revise Elementos enviados antes de repetir."
             ) from None
-        store.event(day, "", "test_mail_accepted", "Aceptado por el servicio; entrega no confirmada", actor)
+        store.event(day, "", "test_mail_accepted", proof or "Aceptado; entrega no confirmada", actor)
 
 
 class GioWorker:
@@ -691,6 +848,36 @@ class GioWorker:
         self.sender = sender
         self.odoo_checker = odoo_checker
 
+    def config_lock(self):
+        if isinstance(self.config_store, GioConfigStore):
+            return FileLock(self.config_store.root / "config.lock", timeout=10)
+        return nullcontext()
+
+    def process_graph_check(self):
+        status = self.store.graph_status()
+        if not status or status["check_state"] not in {"pending", "running"}:
+            return
+        with self.store.connect() as conn:
+            conn.execute("UPDATE worker_status SET check_state='running' WHERE id=1")
+        identity = graph_identity()
+        try:
+            if not identity:
+                raise ValueError("Configuracion Graph incompleta")
+            check_worker_graph()
+            if graph_identity() != identity:
+                raise ValueError("La configuracion Graph cambio durante la comprobacion")
+        except (OSError, ValueError, RuntimeError, requests.RequestException) as exc:
+            LOGGER.error("gio stage=graph_check exception_type=%s", type(exc).__name__)
+            state, identity = "failed", ""
+        else:
+            state = "ok"
+        with self.store.connect() as conn:
+            conn.execute(
+                "UPDATE worker_status SET check_state=?,verified_identity=?,checked=? WHERE id=1",
+                (state, identity, clock.time()),
+            )
+        self.store.event(datetime.now(MADRID).date().isoformat(), "", "graph_check_" + state)
+
     def tick(self, now: datetime | None = None):
         now = now or datetime.now(timezone.utc)
         if now.tzinfo is None:
@@ -698,24 +885,57 @@ class GioWorker:
         try:
             with self.store.lock():
                 config = self.config_store.load()
+                self.store.record_graph_status(graph_identity())
+                self.process_graph_check()
                 # The lock guarantees no live sender can own a stale 'sending' state.
                 with self.store.connect() as conn:
                     conn.execute("UPDATE batches SET mail_state='uncertain',mail_detail=? WHERE mail_state='sending'",
                                  (ERRORS["mail_uncertain"],))
-                local = now.astimezone(MADRID)
-                due = time.fromisoformat(config["daily_time"])
-                if config["enabled"] and local.time().replace(tzinfo=None) >= due:
-                    self.store.enqueue_locked(previous_day(now), list(CENTRES), actor="automatic",
-                                              send=config["send_enabled"])
+                with self.config_lock():
+                    config = self.config_store.load()
+                    local = now.astimezone(MADRID)
+                    due = time.fromisoformat(config["daily_time"])
+                    activated = datetime.fromtimestamp(config.get("automation_activated_at", 0), MADRID)
+                    due_after_activation = (
+                        config.get("activation_version") != 1
+                        or local.date() > activated.date()
+                        or (local.date() == activated.date() and activated.time().replace(tzinfo=None) < due)
+                    )
+                    if config["enabled"] and due_after_activation and local.time().replace(tzinfo=None) >= due:
+                        self.store.enqueue_locked(previous_day(now), list(CENTRES), actor="automatic",
+                                                  send=config["send_enabled"])
                 with self.store.connect() as conn:
                     jobs = [dict(row) for row in conn.execute(
-                        "SELECT * FROM centres WHERE state NOT IN "
+                        "SELECT c.*,"
+                        "COALESCE((SELECT e.actor='automatic' FROM events e WHERE e.day=c.day "
+                        "AND e.centre=c.centre AND e.stage='queued' ORDER BY e.id LIMIT 1),1) AS automatic_job,"
+                        "COALESCE((SELECT e.created FROM events e WHERE e.day=c.day AND e.centre=c.centre "
+                        "AND e.stage='queued' ORDER BY e.id LIMIT 1),0) AS queued_at,"
+                        "EXISTS(SELECT 1 FROM events e WHERE e.day=c.day AND e.centre=c.centre "
+                        "AND e.stage='retry') AS manual_retry "
+                        "FROM centres c WHERE c.state NOT IN "
                         "('blocked','ready','candidate','no_movements','download_error','internal_error') "
-                        "AND next_attempt<=? ORDER BY day,centre LIMIT 30", (now.timestamp(),))]
+                        "AND c.next_attempt<=? ORDER BY c.day,c.centre LIMIT 30", (now.timestamp(),))]
                 for _, grouped_jobs in groupby(jobs, key=lambda job: job["day"]):
-                    self.process_day(list(grouped_jobs), config, now.timestamp())
+                    with self.config_lock():
+                        config = self.config_store.load()
+                        eligible = [
+                            job for job in grouped_jobs
+                            if not job["automatic_job"] or job["manual_retry"]
+                            or (config["enabled"] and
+                                (config.get("activation_version") != 1
+                                 or job["queued_at"] >= config["automation_activated_at"]))
+                        ]
+                        for job in eligible:
+                            if job["automatic_job"] and not job["original"]:
+                                self.store.update(job["day"], job["centre"], state="downloading")
+                    self.process_day(eligible, config, now.timestamp())
                 with self.store.connect() as conn:
-                    batches = [dict(row) for row in conn.execute("SELECT * FROM batches WHERE mail_state='pending'")]
+                    batches = [dict(row) for row in conn.execute(
+                        "SELECT b.*, COALESCE((SELECT MAX(e.created) FROM events e "
+                        "WHERE e.day=b.day AND e.stage='send_requested'),b.created) AS requested_at "
+                        "FROM batches b WHERE b.mail_state='pending'"
+                    )]
                 for batch in batches:
                     self.send(batch, config)
         except Timeout:
@@ -866,23 +1086,32 @@ class GioWorker:
 
     def send_prepared(self, batch: dict, config: dict):
         day = batch["day"]
-        if not config["send_enabled"] or not config["recipients"]:
-            return
-        payload = prepare_mail_payload(self.store, batch, config, require_terminal=True)
-        if not payload["terminal"]:
-            return
-        attachments = payload["attachments"]
-        subject, body = payload["subject"], payload["body"]
-        manifest = json.dumps({"recipients": payload["recipients"], "subject": subject,
-                               "files": [(name, hashlib.sha256(content).hexdigest()) for name, content in attachments]})
-        # Fail before marking 'sending' for the known Graph simple-message size limit.
-        if _mail_payload_too_large(body, attachments):
-            self.mail_state(day, "blocked", "Adjuntos demasiado grandes para envio simple Graph; descarguelos desde Cloud.")
-            self.store.event(day, "", "mail_blocked", "attachment_size")
-            return
-        with self.store.connect() as conn:
-            conn.execute("UPDATE batches SET mail_state='sending',mail_manifest=? WHERE day=?", (manifest, day))
-        self.store.event(day, "", "sending", manifest)
+        with self.config_lock():
+            config = self.config_store.load()
+            if not config["send_enabled"] or not config["recipients"]:
+                return
+            if config.get("activation_version") == 1:
+                if batch["requested_at"] <= config["mail_activated_at"]:
+                    return
+                identity = graph_identity()
+                if not identity or identity != config.get("mail_graph_identity"):
+                    self.mail_state(day, "blocked", "La configuracion Graph del worker no coincide con la aprobada")
+                    self.store.event(day, "", "mail_blocked", "graph_configuration_changed")
+                    return
+            payload = prepare_mail_payload(self.store, batch, config, require_terminal=True)
+            if not payload["terminal"]:
+                return
+            attachments = payload["attachments"]
+            subject, body = payload["subject"], payload["body"]
+            manifest = json.dumps({"recipients": payload["recipients"], "subject": subject,
+                                   "files": [(name, hashlib.sha256(content).hexdigest()) for name, content in attachments]})
+            if _mail_payload_too_large(body, attachments):
+                self.mail_state(day, "blocked", "Adjuntos demasiado grandes para envio simple Graph; descarguelos desde Cloud.")
+                self.store.event(day, "", "mail_blocked", "attachment_size")
+                return
+            with self.store.connect() as conn:
+                conn.execute("UPDATE batches SET mail_state='sending',mail_manifest=? WHERE day=?", (manifest, day))
+            self.store.event(day, "", "sending", manifest)
         try:
             self.sender(subject, body, payload["recipients"], attachments=attachments)
         except Exception as exc:

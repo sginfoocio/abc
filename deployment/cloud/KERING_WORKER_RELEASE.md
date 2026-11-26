@@ -24,6 +24,32 @@ permanezcan intactos. Por tanto, desplegar una nueva app no actualiza workers.
 No se debe eliminar esa proteccion ni incluir todos los servicios en un `up`
 para resolver este desfase.
 
+## Preparacion Graph para GIO
+
+GIO reutiliza el worker existente y la integracion Microsoft 365; no crea
+servicios ni credenciales. Si el worker no dispone de `M365_TENANT_ID`,
+`M365_CLIENT_ID`, `M365_CLIENT_SECRET` y `M365_MAILBOX`, la incorporacion de
+esas variables es un cambio adicional al paso que modifica solo la imagen y
+requiere autorizacion expresa de mantenimiento. No es requisito para dejar
+GIO instalado con el correo desactivado.
+
+El administrador debe verificar el Compose efectivo y, solo en una copia
+privada protegida, incorporar al servicio existente las mismas variables y
+valores autorizados de la app, sin imprimirlos ni pasarlos por comandos o logs.
+Comparar privadamente antes/despues y aceptar exclusivamente la imagen aprobada
+y las cuatro variables autorizadas; preservar usuario, nombre, mounts, red,
+clave Fernet y toda configuracion de Kering. Si no puede acreditarse el Compose
+efectivo, detenerse. La recreacion selectiva, backup y rollback siguen los pasos
+de este documento y necesitan su propia autorizacion; no ampliar el controlador
+app-only ni crear otro scheduler.
+
+Despues del mantenimiento, un admin puede solicitar desde Configuracion GIO
+una comprobacion de token del worker, sin correo ni lectura de buzon. La
+habilitacion del correo tambien requiere una prueba real aceptada y confirmada
+para el remitente y destinatario vigentes. Confirmar expresamente
+`images@diagonaleyewear.com` antes del primer envio; no deducirlo de un fallback.
+La comprobacion de token no sustituye la prueba de envio ni verifica entrega.
+
 Los Compose del repositorio comparten `ABCD_IMAGE_REF`, pero no son prueba del
 Compose expandido instalado. Dockerfile ya incluye `kering_images.py`,
 `kering_jobs.py`, `kering_portal.py`, sus dependencias y Chromium: no falta

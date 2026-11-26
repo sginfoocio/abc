@@ -4,6 +4,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from io import StringIO
 import json
+from pathlib import Path
 import sqlite3
 from unittest.mock import MagicMock, Mock
 
@@ -596,17 +597,17 @@ def test_config_encrypted_admin_only_and_unverified_automation_cannot_be_enabled
     config_store = cloud.GioConfigStore(tmp_path)
     config = config_store.load()
     config.update(username="SYNTHETIC_USER", password="SYNTHETIC_PASSWORD")
-    config_store.save_for_user(config, role="admin")
+    config_store.save_for_user(config, **ACTOR)
     assert b"SYNTHETIC" not in (tmp_path / "config.enc").read_bytes()
     assert config_store.load()["password"] == "SYNTHETIC_PASSWORD"
     with pytest.raises(PermissionError):
-        config_store.save_for_user(config, role="masterdata")
+        config_store.save_for_user(config, role="masterdata", actor="synthetic")
     config["enabled"] = True
-    with pytest.raises(ValueError, match="bloqueada"):
+    with pytest.raises(ValueError, match="confirmacion"):
         config_store.save(config)
     config["enabled"] = False
     config["send_enabled"] = True
-    with pytest.raises(ValueError, match="Envios reales bloqueados"):
+    with pytest.raises(ValueError, match="confirmacion"):
         config_store.save(config)
     config["send_enabled"] = False
     config["daily_time"] = "25:00"
@@ -627,6 +628,190 @@ def test_config_store_keeps_legacy_automation_and_mail_disabled(tmp_path, monkey
 
     assert loaded["enabled"] is False
     assert loaded["send_enabled"] is False
+
+
+def test_docker_data_root_requires_persistent_mount_but_local_override_is_supported(tmp_path, monkeypatch):
+    monkeypatch.setenv("GIO_DATA_ROOT", "/app/data/gio")
+    monkeypatch.setattr(type(Path()), "is_mount", lambda _: False)
+    with pytest.raises(OSError, match="volumen persistente"):
+        cloud.data_root()
+    monkeypatch.setenv("GIO_DATA_ROOT", str(tmp_path))
+    assert cloud.data_root() == tmp_path
+
+
+def test_automation_activation_requires_confirmation_and_manual_validation(tmp_path, monkeypatch):
+    monkeypatch.setenv("KERING_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    config_store = cloud.GioConfigStore(tmp_path)
+    config = config_store.load()
+    config.update(username="synthetic", password="secret")
+    config_store.save_for_user(config, **ACTOR)
+    config = config_store.load()
+    config.update(last_connection_status="ok",
+                  last_connection_check=(datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat())
+    config_store.save_for_user(config, **ACTOR)
+    config = config_store.load()
+    config["enabled"] = True
+    with pytest.raises(ValueError, match="Confirme"):
+        config_store.save_for_user(config, **ACTOR)
+    with pytest.raises(ValueError, match="ejecucion manual"):
+        config_store.save_for_user(config, confirmed_automation=True, **ACTOR)
+
+    store = cloud.GioStore(tmp_path)
+    store.enqueue(DAY, list(cloud.CENTRES), **ACTOR)
+    digest = store.set_batch_original(DAY.isoformat(), report())
+    for centre in cloud.CENTRES:
+        store.update(DAY.isoformat(), centre, state="no_movements",
+                     summary=json.dumps({"source_sha256": digest}))
+    config_store.save_for_user(config, confirmed_automation=True, **ACTOR)
+    active = config_store.load()
+    assert active["enabled"] is True and active["send_enabled"] is False
+    assert active["activation_audit"][-1]["actor"] == ACTOR["actor"]
+    assert "secret" not in json.dumps(active["activation_audit"])
+    active["enabled"] = False
+    config_store.save_for_user(active, **ACTOR)
+    assert config_store.load()["enabled"] is False
+
+
+def test_automatic_schedule_skips_missed_time_on_activation_day(tmp_path):
+    config = Config()
+    activated = datetime(2026, 11, 1, 8, tzinfo=timezone.utc)
+    config.value.update(enabled=True, send_enabled=False, daily_time="07:00",
+                        activation_version=1, automation_activated_at=activated.timestamp())
+    downloader = Mock()
+    downloader.fetch.return_value = report()
+    w = worker(tmp_path, config, downloader)
+    w.tick(activated)
+    assert not w.store.history() and not downloader.fetch.called
+    w.tick(activated + timedelta(days=1))
+    assert downloader.fetch.call_count == 1
+    assert {row["day"] for row in w.store.history()} == {"2026-11-01"}
+
+
+def test_disabled_and_previous_automatic_requests_do_not_run_without_manual_retry(tmp_path):
+    config = Config()
+    config.value.update(enabled=False, send_enabled=False, activation_version=1,
+                        automation_activated_at=0)
+    downloader = Mock()
+    downloader.fetch.return_value = report()
+    w = worker(tmp_path, config, downloader)
+    w.store.enqueue_locked(DAY, ["0"], actor="automatic")
+    w.tick(NOW)
+    assert not downloader.fetch.called
+    config.value["enabled"] = True
+    config.value["automation_activated_at"] = cloud.clock.time() + 1
+    w.tick(NOW)
+    assert not downloader.fetch.called
+    config.value["enabled"] = False
+    w.store.retry(DAY.isoformat(), "0", **ACTOR)
+    w.tick(NOW)
+    assert downloader.fetch.call_count == 1
+
+
+def test_automatic_centre_in_manual_batch_respects_disabled_automation(tmp_path):
+    config = Config()
+    config.value.update(enabled=False, send_enabled=False, activation_version=1,
+                        automation_activated_at=0)
+    downloader = Mock()
+    downloader.fetch.return_value = report()
+    w = worker(tmp_path, config, downloader)
+    w.store.enqueue(DAY, ["0"], **ACTOR)
+    w.store.enqueue_locked(DAY, ["1"], actor="automatic")
+    w.tick(NOW)
+    rows = {row["centre"]: row for row in w.store.history()}
+    assert rows["0"]["state"] in cloud.TERMINAL
+    assert rows["1"]["state"] == "pending"
+
+
+def test_mail_activation_requires_worker_and_accepted_test_and_skips_old_requests(tmp_path, monkeypatch):
+    monkeypatch.setenv("KERING_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    for name in ("M365_TENANT_ID", "M365_CLIENT_ID", "M365_MAILBOX", "M365_CLIENT_SECRET"):
+        monkeypatch.setenv(name, "synthetic-" + name)
+    config_store = cloud.GioConfigStore(tmp_path)
+    config = config_store.load()
+    config.update(recipients=["daily@example.test"], test_recipient="test@example.test")
+    config_store.save_for_user(config, **ACTOR)
+    store = cloud.GioStore(tmp_path)
+    store.enqueue(DAY, ["0"], send=True, **ACTOR)
+    store.set_batch_original(DAY.isoformat(), report())
+    store.update(DAY.isoformat(), "0", state="no_movements")
+    config = config_store.load()
+    config["send_enabled"] = True
+    with pytest.raises(ValueError, match="worker"):
+        config_store.save_for_user(config, confirmed_mail=True, **ACTOR)
+    store.record_graph_status(cloud.graph_identity())
+    with pytest.raises(ValueError, match="acceso Graph"):
+        config_store.save_for_user(config, confirmed_mail=True, **ACTOR)
+    graph_check = Mock()
+    monkeypatch.setattr(cloud, "check_worker_graph", graph_check)
+    w = cloud.GioWorker(store, config_store, sender=Mock(), downloader=Mock())
+    w.tick(NOW)
+    assert not graph_check.called
+    with pytest.raises(ValueError, match="Confirme"):
+        store.request_graph_check(confirmed=False, **ACTOR)
+    store.request_graph_check(confirmed=True, **ACTOR)
+    w.tick(NOW)
+    graph_check.assert_called_once()
+    assert store.graph_status()["check_state"] == "ok"
+    with pytest.raises(ValueError, match="prueba de correo"):
+        config_store.save_for_user(config, confirmed_mail=True, **ACTOR)
+    cloud.send_test_mail(store, store.batch(DAY.isoformat()), config_store.load(),
+                         confirmed=True, sender=Mock(), **ACTOR)
+    monkeypatch.setenv("M365_CLIENT_SECRET", "changed-synthetic-secret")
+    with pytest.raises(ValueError, match="worker"):
+        config_store.save_for_user(config, confirmed_mail=True, **ACTOR)
+    monkeypatch.setenv("M365_CLIENT_SECRET", "synthetic-M365_CLIENT_SECRET")
+    config_store.save_for_user(config, confirmed_mail=True, **ACTOR)
+    assert config_store.load()["send_enabled"] is True
+    assert config_store.load()["enabled"] is False
+    sender = Mock()
+    w = cloud.GioWorker(store, config_store, sender=sender, downloader=Mock())
+    w.tick(NOW)
+    assert not sender.called
+    store.request_send(DAY.isoformat(), **ACTOR)
+    w.tick(NOW)
+    assert sender.call_count == 1
+    assert store.history()[0]["mail_state"] == "accepted"
+    disabled = config_store.load()
+    disabled["send_enabled"] = False
+    config_store.save_for_user(disabled, **ACTOR)
+    assert config_store.load()["send_enabled"] is False
+    store.request_send(DAY.isoformat(), confirm_duplicate_risk=True, **ACTOR)
+    reactivated = config_store.load()
+    reactivated["send_enabled"] = True
+    config_store.save_for_user(reactivated, confirmed_mail=True, **ACTOR)
+    w.tick(NOW)
+    assert sender.call_count == 1
+    store.request_send(DAY.isoformat(), **ACTOR)
+    w.tick(NOW)
+    assert sender.call_count == 2
+
+
+def test_worker_graph_check_only_obtains_token(tmp_path, monkeypatch):
+    import graph_mail_downloader as graph
+    for name in ("M365_TENANT_ID", "M365_CLIENT_ID", "M365_MAILBOX", "M365_CLIENT_SECRET"):
+        monkeypatch.setenv(name, "synthetic-" + name)
+    token = Mock(return_value="synthetic-token")
+    monkeypatch.setattr(graph, "_get_access_token", token)
+    monkeypatch.setattr(cloud.requests, "get", Mock(side_effect=AssertionError("unexpected Graph GET")))
+    cloud.check_worker_graph()
+    token.assert_called_once()
+
+
+def test_worker_graph_failure_is_recorded_without_secret_and_can_be_retried(tmp_path, monkeypatch):
+    for name in ("M365_TENANT_ID", "M365_CLIENT_ID", "M365_MAILBOX", "M365_CLIENT_SECRET"):
+        monkeypatch.setenv(name, "synthetic-" + name)
+    monkeypatch.setattr(cloud, "check_worker_graph", Mock(side_effect=RuntimeError("secret detail")))
+    w = worker(tmp_path, Config({**settings(), "enabled": False, "send_enabled": False}))
+    with pytest.raises(PermissionError):
+        w.store.request_graph_check(role="masterdata", actor="synthetic", confirmed=True)
+    w.store.request_graph_check(confirmed=True, **ACTOR)
+    w.tick(NOW)
+    status = w.store.graph_status()
+    assert status["check_state"] == "failed"
+    assert status["checked"] and not status["verified_identity"]
+    assert "secret detail" not in json.dumps(status)
+    w.store.request_graph_check(confirmed=True, **ACTOR)
+    assert w.store.graph_status()["check_state"] == "pending"
 
 
 def test_existing_batch_schema_migrates_general_original_without_losing_rows(tmp_path):
@@ -872,8 +1057,8 @@ render_settings()
     assert b"SYNTHETIC_PASSWORD" not in (tmp_path / "config.enc").read_bytes()
     assert b"test@example.test" not in (tmp_path / "config.enc").read_bytes()
     assert app.text_input(key="gio_password").value == ""
-    assert app.toggle(key="gio_automation_enabled").disabled
-    assert app.toggle(key="gio_mail_enabled").disabled
+    assert not app.toggle(key="gio_automation_enabled").disabled
+    assert not app.toggle(key="gio_mail_enabled").disabled
     assert app.button(key="gio_test_connection").disabled is False
 
     app.button(key="gio_test_connection").click().run()
@@ -888,6 +1073,27 @@ render_settings()
     changed = config_store.load()
     assert changed["last_connection_status"] == "not_checked"
     assert changed["last_connection_check"] == ""
+
+
+def test_graph_check_ui_requires_admin_confirmation(tmp_path, monkeypatch):
+    monkeypatch.setenv("GIO_DATA_ROOT", str(tmp_path))
+    monkeypatch.setenv("KERING_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    source = """
+import streamlit as st
+st.session_state["auth_role"] = ROLE
+st.session_state["auth_user"] = "synthetic-admin"
+from app_pages.gio import render_settings
+render_settings()
+"""
+    denied = AppTest.from_string(source.replace("ROLE", '"masterdata"')).run()
+    assert denied.error and not denied.button
+    app = AppTest.from_string(source.replace("ROLE", '"admin"')).run()
+    app.button(key="gio_check_worker_graph").click().run()
+    assert app.error and cloud.GioStore(tmp_path).graph_status() is None
+    app.checkbox(key="gio_confirm_graph_check").check()
+    app.button(key="gio_check_worker_graph").click().run()
+    assert not app.exception
+    assert cloud.GioStore(tmp_path).graph_status()["check_state"] == "pending"
 
 
 def test_gio_config_rejects_invalid_test_recipient(tmp_path, monkeypatch):

@@ -2,7 +2,7 @@
 
 ## Estado de entrega
 
-**Desarrollo finalizado; no se ha fusionado ni desplegado.** La entrega se
+**Pendiente de validacion del SHA actual; no se ha fusionado ni desplegado.** La entrega se
 divide en tres puertas: integracion y despliegue tecnico con las funciones
 automaticas desactivadas; validacion funcional manual en produccion; y
 activacion posterior, con aprobacion expresa. La validacion del importador Odoo
@@ -112,8 +112,12 @@ La configuracion de GIO esta integrada en **Configuracion -> GIO**; la seccion
 La pagina operativa no accede al portal ni a Odoo al navegar. Utiliza
 componentes y tema Cloud existentes.
 
-- Persistencia: `GIO_DATA_ROOT`, por defecto `masterdata_data/gio`; en Compose,
-  `/app/data/gio` dentro del volumen persistente existente.
+- Persistencia: `GIO_DATA_ROOT`, por defecto `masterdata_data/gio` en desarrollo
+  y `/app/data/gio` en la imagen Docker. Esta ultima ruta exige que `/app/data`
+  sea un punto de montaje; si falta, GIO falla explicitamente sin usar otro
+  directorio. App y worker deben montar el mismo volumen persistente y conservar
+  la identidad y permisos existentes. Una ruta alternativa explicitamente
+  configurada permite aislar desarrollo y pruebas.
 - Configuracion: `config.enc`, cifrada con el mismo mecanismo Fernet de
   proveedores: `KERING_ENCRYPTION_KEY_FILE` o `KERING_ENCRYPTION_KEY` existente.
   No se genera otra clave ni se escribe un secreto en el repositorio. La clave
@@ -132,15 +136,31 @@ componentes y tema Cloud existentes.
   pantallas/exportaciones autenticadas, el importador Odoo ni el correo. Guarda
   estado y hora de comprobacion en el mismo `config.enc`; cambiar URL o
   credenciales invalida ese resultado.
-- Hora configurable HH:MM en **Europe/Madrid**, destinatarios y permiso de correo.
-  Los controles de automatizacion y correo permanecen bloqueados en esta fase,
-  incluso tras una comprobacion de acceso correcta. Los envios reales parten
-  **desactivados**; no basta con guardar destinatarios. Una solicitud de correo
-  queda pendiente mientras los envios esten deshabilitados.
+- Hora configurable HH:MM en **Europe/Madrid**, destinatarios y permisos de
+  automatizacion y correo independientes, ambos **desactivados por defecto**.
+  Solo un admin identificado puede activarlos, con confirmacion separada;
+  desactivarlos no requiere confirmacion. Los cambios se registran con actor,
+  fecha y campos modificados dentro de la configuracion cifrada, sin valores de
+  credenciales. Desactivar impide iniciar nuevas operaciones automaticas o
+  envios, pero no cancela una operacion ya iniciada.
+- La automatizacion exige conexion GIO comprobada y una ejecucion manual
+  posterior con el original general y resultados de los tres centros. No
+  recupera dias anteriores al activarse: las solicitudes automaticas antiguas
+  pendientes requieren un reintento manual. Si se activa despues de la hora
+  programada, espera al dia siguiente.
+- El correo exige destinatarios diarios y de prueba, confirmacion del remitente,
+  una prueba aceptada con la configuracion Graph y destinatario de prueba
+  actuales y comprobacion reciente del worker con la misma configuracion.
+  La accion confirmada **Comprobar Graph en el worker** obtiene un token sin
+  enviar correo ni leer el buzon; por si sola no acredita permiso de envio ni
+  entrega. La prueba real aceptada acredita aceptacion, no entrega. Al activar
+  o reactivar correo no se envian solicitudes antiguas: solicitarlas de nuevo
+  manualmente desde el historico.
 - Programacion: **worker `kering_jobs.py` existente**, no n8n, cron nuevo,
   servicio nuevo ni hilo ligado a Streamlit. Se incorpora un tick GIO antes del
   tick Kering; un fallo GIO se registra de forma saneada y no impide Kering.
-  La configuracion del correo Graph se comparte tambien con ese worker en Compose.
+  Graph debe configurarse explicitamente en ese worker mediante mantenimiento
+  privado autorizado; no se asume que ya este disponible.
 - La UI solo escribe solicitudes duraderas. El worker procesa etapas fuera
   de peticiones HTTP. Debe estar actualizado y en ejecucion para consumirlas.
 
@@ -352,7 +372,7 @@ demas proveedores conservan su estado previo antes de reanudar operaciones.
 
 ## Pruebas y controles
 
-Las 85 pruebas GIO cubren codificaciones y esquema, coma decimal, filas
+Las pruebas GIO cubren codificaciones y esquema, coma decimal, filas
 repetidas, fecha/centro, signos/abonos, equilibrio, descuadres, descarga general,
 centro sin movimientos, fallos parciales, limites de reintento, recuperacion,
 correo incierto/duplicado, comprobacion SQL readonly, permisos y UI. La prueba
