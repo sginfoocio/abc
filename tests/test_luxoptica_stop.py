@@ -59,6 +59,30 @@ def test_exceeded_drain_budget_never_reports_clean_stop(monkeypatch):
     assert monitor.main() == 1
 
 
+def test_paused_start_waits_for_stop_without_graph_or_receipts(monkeypatch):
+    handlers = {}
+    monkeypatch.setattr(monitor.signal, "signal", lambda sig, handler: handlers.setdefault(sig, handler))
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("A paused monitor must not contact Graph or create a receipt")
+
+    monkeypatch.setattr(monitor, "run_once", forbidden)
+    monkeypatch.setattr(monitor, "record_process", forbidden)
+    monkeypatch.setattr("sys.argv", ["poll_luxoptica_mail.py", "--paused"])
+    monkeypatch.setattr(
+        monitor.Event, "wait",
+        lambda self, timeout=None: handlers[monitor.signal.SIGTERM](monitor.signal.SIGTERM, None),
+    )
+    assert monitor.main() == 0
+
+
+def test_paused_once_is_rejected(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["poll_luxoptica_mail.py", "--paused", "--once"])
+    with pytest.raises(SystemExit) as exc:
+        monitor.main()
+    assert exc.value.code == 2
+
+
 @pytest.mark.skipif(os.name != "posix", reason="Real SIGTERM subprocess lifecycle requires POSIX")
 @pytest.mark.parametrize("scenario", ["idle", "download", "sqlite", "nfs"])
 def test_real_sigterm_drain_and_restart(tmp_path, scenario):

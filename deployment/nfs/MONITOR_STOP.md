@@ -123,6 +123,37 @@ presupuesto, tampoco se certifica parada limpia.
 
 ## Actualizacion controlada preparada, NO ejecutada
 
+El monitor acepta `--paused`: espera una parada drenada sin abrir Graph, crear
+recibos de ciclo ni procesar correo. Es una opcion explicita; sin ella se
+mantiene la programacion existente. `--paused` y `--once` son incompatibles.
+La pausa de recepcion no cambia la configuracion ni el estado del remitente
+comercial. Retirar la pausa requiere un cambio de servicio autorizado y
+auditado; no debe hacerse durante el despliegue inicial.
+
+### Preflight de configuracion para revision
+
+`deployment/cloud/luxottica_monitor_preflight.py` contiene comprobaciones puras
+para una futura transaccion: exige digest inmutable, comando y UID esperados,
+origen, destino y modo de montajes bind acordes al contenedor activo, y un unico
+monitor activo con el nombre o las etiquetas Compose esperados. Devuelve una
+copia del Compose que cambia solo la imagen y anade `--paused` al comando del
+monitor; no escribe archivos, no ejecuta Docker y no inicia ni detiene servicios.
+
+Esta comprobacion no es un controlador ni autoriza un despliegue. No verifica
+opciones adicionales de montaje, procedencia del digest, aprobaciones, backups,
+recepcion Graph, procesos sin esas etiquetas, ni rollback. La fuente privada
+del Compose y los datos de inspeccion deben proceder de rutas y comandos fijos controlados por root; no
+aceptar configuraciones o identidades suministradas por el runner. Antes de
+usarla en produccion debe integrarse, probarse y revisarse una transaccion
+protegida completa, coordinada con el bloqueo del controlador app-only.
+
+El controlador incluye tambien `monitor_paused_regression`, una comprobacion
+aislada del archivo del monitor por SHA-256 y de su arranque pausado en la imagen
+por digest, sin red ni montajes productivos. Aun no esta conectada a ningun
+workflow o transaccion de despliegue. El SHA esperado debe derivarse del commit
+autorizado, no de datos del runner; los tests offline no sustituyen ejecutar la
+comprobacion sobre la imagen publicada.
+
 1. Exigir CI verde del commit exacto y nuevo build Docker completo con
    identidad, smoke1037:100 y pruebasSIGTERM/PID1. Una capa auxiliar o una
    prueba local Windows que omitePOSIX no autoriza actualizar.

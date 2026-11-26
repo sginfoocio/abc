@@ -487,6 +487,45 @@ def regression(policy, production=False):
     return result
 
 
+def monitor_paused_regression(image, source_sha256):
+    """Verify the published monitor source and paused startup without production mounts."""
+    if not isinstance(image, str) or not re.fullmatch(
+        r"ghcr\.io/sginfoocio/abc@sha256:[0-9a-f]{64}", image,
+    ) or not is_sha(source_sha256, 64):
+        raise DeployError("Invalid monitor artifact identity")
+    script = """
+import hashlib,json,os,signal,socket,sys,threading
+if hashlib.sha256(open('/app/poll_luxoptica_mail.py','rb').read()).hexdigest()!=sys.argv[1]:
+    raise SystemExit('monitor_source_mismatch')
+def forbidden(*args, **kwargs):
+    raise AssertionError('paused_monitor_unexpected_io')
+socket.socket.connect=forbidden
+socket.socket.connect_ex=forbidden
+import process_activity
+process_activity.record_process=forbidden
+import poll_luxoptica_mail as monitor
+sys.argv=['poll_luxoptica_mail.py','--paused','--interval-minutes','10',
+          '--sender-hint','luxottica','--subject-hint','image',
+          '--lookback-days','30','--top-messages','100']
+timer=threading.Timer(1,lambda: os.kill(os.getpid(),signal.SIGTERM))
+timer.start()
+result=monitor.main()
+timer.join()
+if result != 0:
+    raise SystemExit('paused_monitor_stop_failed')
+print('cloud-monitor-paused-ok',flush=True)
+"""
+    output = run([
+        DOCKER, "run", "--rm", "--network", "none", "--read-only", "--user", "1037:100",
+        "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "128",
+        "--memory", "768m", "--cpus", "1", "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
+        "--entrypoint", "python", image, "-B", "-c", script, source_sha256,
+    ], timeout=120).decode("utf-8")
+    if "cloud-monitor-paused-ok" not in output.splitlines():
+        raise DeployError("Paused monitor regression failed")
+    return {"paused_start": "ok", "source_sha256": source_sha256}
+
+
 def interrupted(signum, frame):
     raise DeployError("Deployment interrupted")
 

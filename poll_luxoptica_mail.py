@@ -47,7 +47,10 @@ def main() -> int:
     parser.add_argument("--lookback-days", type=int, default=7, help="Días de ventana a revisar")
     parser.add_argument("--top-messages", type=int, default=100, help="Máximo número de mensajes por comprobación")
     parser.add_argument("--once", action="store_true", help="Ejecuta una sola comprobación y sale")
+    parser.add_argument("--paused", action="store_true", help="Mantiene el monitor detenido sin consultar Graph")
     args = parser.parse_args()
+    if args.paused and args.once:
+        parser.error("--paused y --once son incompatibles")
 
     interval_seconds = max(30, args.interval_minutes * 60)
     stopping = Event()
@@ -82,6 +85,12 @@ def monitor(args: argparse.Namespace, interval_seconds: int, stopping: Event) ->
     print(f"Ventana: {args.lookback_days} día(s)")
     print(f"Top mensajes: {args.top_messages}")
     print("=" * 80)
+
+    if args.paused:
+        print("Recepción pausada: no se consulta Graph ni se procesan mensajes.", flush=True)
+        stopping.wait()
+        LOGGER.info("Monitor pausado detenido sin trabajos activos")
+        return 0
 
     while not stopping.is_set():
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
