@@ -10,16 +10,39 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def compose_config(*files: str) -> dict:
+def compose_config(*files: str, profiles: tuple[str, ...] = ()) -> dict:
     if not shutil.which("docker"):
         pytest.skip("Docker Compose unavailable; parsed configuration validated in CI")
     command = ["docker", "compose"]
+    for profile in profiles:
+        command.extend(["--profile", profile])
     for file in files:
         command.extend(["-f", str(ROOT / file)])
     command.extend(["config", "--format", "json"])
     result = subprocess.run(command, cwd=ROOT, env={**os.environ, "STAGING_IMAGE": "synthetic:test"},
                             check=True, capture_output=True, text=True)
     return json.loads(result.stdout)
+
+
+@pytest.mark.parametrize("separate_state", [False, True])
+def test_luxottica_sender_reads_catalog_from_mounted_state(tmp_path, monkeypatch, separate_state):
+    images = tmp_path / "images"
+    state = tmp_path / "state"
+    monkeypatch.setenv("IMAGE_REPOSITORY_HOST_ROOT", str(images))
+    monkeypatch.setenv("IMAGE_REPOSITORY_ROOT", "/app/repo/images")
+    if separate_state:
+        monkeypatch.setenv("IMAGE_REPOSITORY_STATE_HOST_ROOT", str(state))
+    else:
+        monkeypatch.setenv("IMAGE_REPOSITORY_STATE_HOST_ROOT", "")
+    service = compose_config("docker-compose.yml", profiles=("luxottica-sender",))["services"][
+        "abcd-luxottica-sender"]
+    catalog = next(volume for volume in service["volumes"] if volume["target"] == "/app/image-state")
+    assert service["environment"]["IMAGE_REPOSITORY_STATE_ROOT"] == catalog["target"]
+    assert Path(catalog["source"]) == (state if separate_state else images)
+    assert catalog["read_only"]
+    assert catalog.get("bind", {}).get("create_host_path", False) is False
+    image_volume = next(volume for volume in service["volumes"] if volume["target"] == "/app/repo/images")
+    assert Path(image_volume["source"]) == images and image_volume["read_only"]
 
 
 def test_only_image_writers_use_cloud_identity_in_preparation_override():

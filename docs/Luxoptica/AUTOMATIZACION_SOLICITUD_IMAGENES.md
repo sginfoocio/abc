@@ -86,6 +86,14 @@ registra la acción declarada por el operador y requiere evidencia aparte.
   revisión, el almacén de proveedores compartido y los montajes verificados. Para detener nuevos
   envíos, desmarca la activación en **Configuración**. Comprueba en Cloud cualquier lote que
   hubiese iniciado el envío.
+- El remitente monta el directorio del catálogo en `/app/image-state`, en solo lectura.
+  Configura `IMAGE_REPOSITORY_STATE_HOST_ROOT` con el directorio local efectivo del catálogo
+  cuando esté separado de las imágenes; si se omite, usa `IMAGE_REPOSITORY_HOST_ROOT`
+  (por defecto `./image_repository`). El directorio debe existir: Compose no lo crea para
+  el montaje del catálogo.
+  Monta el directorio completo, no solo el SQLite, para incluir sus archivos WAL y SHM cuando
+  existan. Verifica una lectura coherente sin inicializar el catálogo antes de activarlo. El
+  Compose privado de producción requiere la misma configuración y comprobación por separado.
 
 ## Recepción y Graph
 
