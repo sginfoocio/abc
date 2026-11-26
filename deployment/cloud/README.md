@@ -1,5 +1,40 @@
 # Cloud production: approved, app-only releases
 
+## Main protection
+
+On 2026-11-26 GitHub reported ruleset `28156219` (`Protect main`) active for
+`refs/heads/main`. Its effective rules require a pull request, one approval by
+someone other than the author, dismissal of stale approvals, resolved review
+threads, and the `tests` and `build-and-push` checks from GitHub Actions (app
+ID `15368`). The branch must be up to date; force-push and deletion are
+blocked. The administrator reported that the bypass list is empty; the
+non-administrative identity used for the API check could not read that list.
+Requiring a pull request blocks direct pushes; the separate ruleset `update`
+rule restricts updates to bypass actors and must not replace that requirement.
+
+The PR workflow currently skips `build-and-push` for documentation-only
+changes. GitHub treats skipped required checks as passing, so requiring that
+check does not guarantee a successful image build for every PR. Review this
+limitation before relying on the rule; the workflow needs a separately reviewed
+change if a successful build must be required even for documentation-only PRs.
+
+The administrator confirmed through the API that the bypass list was empty.
+No destructive rejection test was performed; an existing PR without approval
+was observed blocked. Before changing the rules:
+
+1. An administrator reviews the reason and proposed changes, then inspects
+   `GET /repos/sginfoocio/abc/rulesets/28156219` and
+   `GET /repos/sginfoocio/abc/rules/branches/main`, including bypass actors.
+2. The administrator applies the approved change without disabling existing
+   requirements or adding bypass actors as a shortcut.
+3. Re-read the ruleset and effective branch rules, verify the checks are emitted
+   by the normal PR workflow, and record the rule ID, results and any limits in
+   release evidence. Update this document through a reviewed PR.
+
+Protection does not replace the `production` environment approval or the local
+validation policy. The protected controller deploys only `abcd-app`; monitor and
+sender releases require independently approved procedures.
+
 ## Kering worker: separate maintenance approval
 
 The app-only controller deliberately leaves workers unchanged. The live audit of
