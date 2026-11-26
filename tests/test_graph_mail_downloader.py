@@ -9,8 +9,38 @@ import time
 
 import requests
 import zipfile
+import pytest
 
 import graph_mail_downloader as graph
+
+
+@pytest.mark.parametrize(
+    ("products", "expected"),
+    [
+        ([{"modelo": "RB3547", "color": "00153", "ean": "8056262484005", "product_id": 45}],
+         {("RB3547", "00153"): "8056262484005"}),
+        ([{"modelo": "RB3547", "color": "00153", "ean": "8056262484005", "product_id": 45},
+          {"modelo": "RB3547", "color": "00153", "ean": "8056262484005", "product_id": 45}],
+         {("RB3547", "00153"): "8056262484005"}),
+        ([{"modelo": "RB3547", "color": "00153", "ean": "8056262484005", "product_id": 45},
+          {"modelo": "RB3547", "color": "00153", "ean": "8056262484005", "product_id": 46}], {}),
+        ([{"modelo": "RB3547", "color": "00153", "ean": "8056262484005", "product_id": 45},
+          {"modelo": "RB3547", "color": "00153", "ean": "8056262501023", "product_id": 46}], {}),
+        ([{"modelo": "RB3547", "color": "00153", "ean": "8056262484005", "product_id": None}], {}),
+    ],
+)
+def test_confirmed_order_mapping_requires_one_identified_variant_and_keeps_manifests(
+    tmp_path, monkeypatch, products, expected
+) -> None:
+    docs = tmp_path / "docs" / "Luxoptica"
+    docs.mkdir(parents=True)
+    (docs / "upc-products-images-request-old.manifest.json").write_text(json.dumps({
+        "products": [{"modelo": "legacy", "color": "01", "ean": "8056262501023"}]
+    }))
+    monkeypatch.setattr(graph, "__file__", str(tmp_path / "graph_mail_downloader.py"))
+    monkeypatch.setattr(graph, "_confirmed_order_products", lambda: iter(products))
+
+    assert graph._load_eans_by_image_key() == {("LEGACY", "01"): "8056262501023", **expected}
 
 
 class StubResponse:

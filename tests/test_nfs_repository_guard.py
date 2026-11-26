@@ -17,6 +17,22 @@ def test_exact_nfs_mount(tmp_path):
     assert require_nfs(root, mountinfo=info)["source"] == EXPECTED_SOURCE
 
 
+def test_read_only_bind_is_accepted_only_for_reads(tmp_path):
+    root = tmp_path / "mount"
+    root.mkdir()
+    info = tmp_path / "mountinfo"
+    info.write_text(mount_line(root).replace(" rw - nfs4", " ro - nfs4"))
+    assert require_nfs(root, mountinfo=info, allow_read_only=True)["source"] == EXPECTED_SOURCE
+    with pytest.raises(RuntimeError, match="Writable"):
+        require_nfs(root, mountinfo=info)
+    info.write_text(mount_line(root, options="rw,soft").replace(" rw - nfs4", " ro - nfs4"))
+    with pytest.raises(RuntimeError, match="Hard"):
+        require_nfs(root, mountinfo=info, allow_read_only=True)
+    info.write_text(mount_line(root, source="other:/export").replace(" rw - nfs4", " ro - nfs4"))
+    with pytest.raises(RuntimeError, match="Wrong filesystem"):
+        require_nfs(root, mountinfo=info, allow_read_only=True)
+
+
 @pytest.mark.parametrize("fs,source,options,mount_root", [
     ("ext4", "/dev/sda", "rw", "/"),
     ("nfs4", "192.168.1.32:/volume1/other", "rw,hard", "/"),

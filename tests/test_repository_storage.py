@@ -26,7 +26,7 @@ def production_nfs(tmp_path, monkeypatch):
     monkeypatch.setenv("IMAGE_REPOSITORY_MOUNT_ROOT", str(mount))
     monkeypatch.setenv("IMAGE_REPOSITORY_NFS_SOURCE", storage.EXPECTED_SOURCE)
     monkeypatch.delenv("IMAGE_REPOSITORY_STAGING_ROOT", raising=False)
-    monkeypatch.setattr(storage, "require_nfs_directory", lambda *args: {})
+    monkeypatch.setattr(storage, "require_nfs_directory", lambda *args, **kwargs: {})
     monkeypatch.setattr(storage, "filesystem_mount", lambda p: (mount, "nfs4", storage.EXPECTED_SOURCE))
     return mount
 
@@ -62,7 +62,7 @@ def test_production_missing_mount_and_same_path_fail_closed(production_nfs, monk
     root = production_nfs
     with pytest.raises(ValueError, match="distintos"):
         storage.require_distinct_storage(root / "images", root / "images")
-    def absent(*args):
+    def absent(*args, **kwargs):
         raise RuntimeError("NFS absent")
     monkeypatch.setattr(storage, "require_nfs_directory", absent)
     with pytest.raises(RuntimeError, match="absent"):

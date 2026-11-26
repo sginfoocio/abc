@@ -24,6 +24,7 @@ from kering_images_ui import render_kering_page, render_kering_settings
 from app_pages.gio import render as render_gio_page, render_settings as render_gio_settings
 from engine import run_abcd_engine
 from db_config import load_db_config, load_env_file
+from luxottica_config import LOGIN_HOST, PORTAL_HOST, LuxotticaConfig, validate_portal_url
 from transform_luxottica_masterdata import (
     build_brand_dictionary_from_db,
     build_color_dictionary_from_db,
@@ -126,9 +127,6 @@ LUXOPTICA_URL_ENV = "LUXOPTICA_URL"
 LUXOPTICA_USER_ENV = "LUXOPTICA_USERNAME"
 LUXOPTICA_PASSWORD_ENV = "LUXOPTICA_PASSWORD"
 LUXOPTICA_REQUEST_EMAIL_ENV = "LUXOPTICA_REQUEST_EMAIL"
-LEGACY_ESSILOR_URL_ENV = "ESSILOR_URL"
-LEGACY_ESSILOR_USER_ENV = "ESSILOR_USERNAME"
-LEGACY_ESSILOR_PASSWORD_ENV = "ESSILOR_PASSWORD"
 M365_TENANT_ID_ENV = "M365_TENANT_ID"
 M365_CLIENT_ID_ENV = "M365_CLIENT_ID"
 M365_CLIENT_SECRET_ENV = "M365_CLIENT_SECRET"
@@ -308,15 +306,6 @@ def _read_env_setting(key: str, default: str = "") -> str:
     return os.getenv(key, "").strip() or default
 
 
-def _read_env_setting_any(keys: list[str], default: str = "") -> str:
-    load_env_file()
-    for key in keys:
-        value = os.getenv(key, "").strip()
-        if value:
-            return value
-    return default
-
-
 def _upsert_env_settings(updates: dict[str, str], env_path: str | Path = ".env") -> None:
     path = Path(env_path)
     if not path.is_absolute():
@@ -359,8 +348,14 @@ def _first_available_selector(page, selectors: list[str]) -> str:
 
 
 def _attempt_essilor_auto_login(url: str, username: str, password: str) -> tuple[bool, str]:
+    from urllib.parse import urlsplit
+
     if not url.strip() or not username.strip() or not password.strip():
         return False, "Faltan URL, usuario o contraseña en la configuración."
+    try:
+        validate_portal_url(url)
+    except ValueError as error:
+        return False, str(error)
 
     try:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -391,6 +386,8 @@ def _attempt_essilor_auto_login(url: str, username: str, password: str) -> tuple
                 browser.close()
                 return False, "No se encontró el campo de usuario en la página de login."
 
+            if urlsplit(page.url).hostname != LOGIN_HOST:
+                return False, "El portal redirigió a un inicio de sesión inesperado."
             page.fill(user_selector, username)
 
             continue_selector = _first_available_selector(
@@ -427,6 +424,8 @@ def _attempt_essilor_auto_login(url: str, username: str, password: str) -> tuple
                 browser.close()
                 return False, "No se encontró el campo de contraseña tras enviar el usuario."
 
+            if urlsplit(page.url).hostname != LOGIN_HOST:
+                return False, "El portal redirigió a un inicio de sesión inesperado."
             page.fill(password_selector, password)
 
             sign_in_selector = _first_available_selector(
@@ -450,12 +449,12 @@ def _attempt_essilor_auto_login(url: str, username: str, password: str) -> tuple
             current_url = page.url
             browser.close()
 
-            if "b2clogin.com" in current_url.lower():
+            if urlsplit(current_url).hostname != PORTAL_HOST:
                 return False, (
                     "El login no se completó automáticamente (posible validación adicional/MFA o credenciales inválidas)."
                 )
 
-            return True, f"Login automático completado. URL actual: {current_url}"
+            return True, "Inicio de sesión completado en My EssilorLuxottica."
 
     except PlaywrightTimeoutError:
         return False, "Timeout durante el login automático."
@@ -912,12 +911,42 @@ def render_settings_page() -> None:
     st.divider()
     render_kering_settings(get_db_engine)
     st.divider()
-    st.caption("Los secretos se gestionan mediante la configuración segura del servicio, no desde este formulario.")
+    from cryptography.fernet import InvalidToken
+    from filelock import Timeout
 
-    current_url = _read_env_setting_any([LUXOPTICA_URL_ENV, LEGACY_ESSILOR_URL_ENV])
-    current_user = _read_env_setting_any([LUXOPTICA_USER_ENV, LEGACY_ESSILOR_USER_ENV])
-    password_configured = bool(_read_env_setting_any([LUXOPTICA_PASSWORD_ENV, LEGACY_ESSILOR_PASSWORD_ENV]))
-    current_request_email = _read_env_setting(LUXOPTICA_REQUEST_EMAIL_ENV, "images@diagonaleyewear.com")
+    luxottica = LuxotticaConfig()
+    try:
+        portal_settings = luxottica.load()
+    except (OSError, ValueError, TypeError, InvalidToken):
+        portal_settings = None
+        st.error("No se puede leer la configuración cifrada de Luxottica.")
+
+    if portal_settings is not None:
+        with st.form("luxottica_settings_form", clear_on_submit=True):
+            st.subheader("Essilor Luxottica")
+            url_value = st.text_input("URL del portal", value=portal_settings.url)
+            user_value = st.text_input("Usuario del portal", value=portal_settings.username)
+            password_value = st.text_input("Nueva contraseña del portal", type="password",
+                                           help="Déjala vacía para conservar la contraseña actual.")
+            st.caption("Contraseña: " + ("configurada" if portal_settings.password else "no configurada"))
+            request_email_value = st.text_input("Correo de recepción de imágenes", value=portal_settings.email)
+            enabled = st.checkbox("Activar el envío automático para los pedidos Luxottica (Odoo 570)",
+                                  value=portal_settings.enabled)
+            interval = st.number_input("Intervalo de envío (minutos)", min_value=15, max_value=1440,
+                                       value=portal_settings.interval_minutes, step=15)
+            st.caption("El servicio de envío procesa un lote por ciclo. La recepción por correo funciona por separado.")
+            save_luxottica = st.form_submit_button("Guardar configuración de Luxottica")
+        if save_luxottica:
+            try:
+                luxottica.save(url=url_value.strip(), username=user_value.strip(), password=password_value,
+                               email=request_email_value.strip(), enabled=enabled, interval_minutes=int(interval))
+            except (OSError, Timeout, InvalidToken):
+                st.error("No se pudo guardar la configuración cifrada de Luxottica.")
+            except ValueError as error:
+                st.error(str(error))
+            else:
+                st.success("Configuración de Luxottica guardada.")
+
     current_tenant_id = _read_env_setting(M365_TENANT_ID_ENV)
     current_client_id = _read_env_setting(M365_CLIENT_ID_ENV)
     graph_secret_configured = bool(_read_env_setting(M365_CLIENT_SECRET_ENV))
@@ -925,12 +954,6 @@ def render_settings_page() -> None:
     current_download_root = str(repository_root())
 
     with st.form("settings_form", clear_on_submit=False):
-        st.subheader("Essilor Luxottica")
-        url_value = st.text_input("URL", value=current_url, placeholder="https://...")
-        user_value = st.text_input("Usuario", value=current_user)
-        st.caption("Contraseña del portal: " + ("configurada" if password_configured else "no configurada"))
-        request_email_value = st.text_input("Email solicitud imágenes", value=current_request_email)
-
         st.subheader("Microsoft 365 (Graph)")
         tenant_id_value = st.text_input("Tenant ID", value=current_tenant_id)
         client_id_value = st.text_input("Client ID", value=current_client_id)
@@ -943,9 +966,6 @@ def render_settings_page() -> None:
 
     if submitted:
         updates = {
-            LUXOPTICA_URL_ENV: url_value.strip(),
-            LUXOPTICA_USER_ENV: user_value.strip(),
-            LUXOPTICA_REQUEST_EMAIL_ENV: request_email_value.strip(),
             M365_TENANT_ID_ENV: tenant_id_value.strip(),
             M365_CLIENT_ID_ENV: client_id_value.strip(),
             M365_MAILBOX_ENV: mailbox_value.strip(),
@@ -969,13 +989,11 @@ def render_settings_page() -> None:
 
     st.divider()
     st.subheader("Login automático")
-    st.caption("Usa las credenciales guardadas en .env para probar el acceso automático a la web.")
-    if st.button("Probar login automático", type="secondary"):
-        auto_url = _read_env_setting_any([LUXOPTICA_URL_ENV, LEGACY_ESSILOR_URL_ENV])
-        auto_user = _read_env_setting_any([LUXOPTICA_USER_ENV, LEGACY_ESSILOR_USER_ENV])
-        auto_password = _read_env_setting_any([LUXOPTICA_PASSWORD_ENV, LEGACY_ESSILOR_PASSWORD_ENV])
+    if portal_settings is not None and st.button("Probar login automático", type="secondary"):
+        portal_settings = luxottica.load()
         with st.spinner("Ejecutando login automático..."):
-            ok, message = _attempt_essilor_auto_login(auto_url, auto_user, auto_password)
+            ok, message = _attempt_essilor_auto_login(
+                portal_settings.url, portal_settings.username, portal_settings.password)
         if ok:
             st.success(message)
         else:

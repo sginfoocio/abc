@@ -19,7 +19,10 @@ import image_repository
 from kering_images import ConfigStore, data_root as kering_root
 from kering_images_ui import create_portal, service as kering_service
 from kering_jobs import prepare_selection
-from provider_images import FAILED, PARTIAL as REQUEST_PARTIAL, VALID_VIEWS, RequestStateError, ean_key, ean_valid
+from provider_images import (
+    FAILED, LUXOTTICA_CONFIRMATION_PREFIX, LUXOTTICA_ORDER_MODE, NEEDS_REVIEW, PENDING,
+    PARTIAL as REQUEST_PARTIAL, READY, VALID_VIEWS, RequestStateError, ean_key, ean_valid,
+)
 from provider_images_ui import STATE_LABELS, build_connector, data_root
 from provider_odoo_orders import OdooUnavailable, read_purchase_page
 from provider_order_policy import OrderPolicyUnavailable, get_order_start_date
@@ -106,10 +109,7 @@ def revalidate(engine_factory, order, selected, root, *, keep_order=False):
     return {**current, "selected_line_ids": [line["id"] for line in chosen]} if keep_order else scoped
 
 
-def prepare_assisted(order, reviewer):
-    if _order_date(order) < get_order_start_date(data_root()):
-        raise ValueError("Pedido anterior al inicio común de selección.")
-    connector = build_connector(order["provider"])
+def order_request_evidence(order):
     items = {}
     codes = {}
     for line in order["lines"]:
@@ -127,6 +127,14 @@ def prepare_assisted(order, reviewer):
             "model": line.get("model", ""), "color": line.get("color", ""),
             "caliber": line.get("caliber", ""), "barcode_conflict": line["barcode_conflict"],
         })
+    return items
+
+
+def prepare_assisted(order, reviewer):
+    if _order_date(order) < get_order_start_date(data_root()):
+        raise ValueError("Pedido anterior al inicio común de selección.")
+    connector = build_connector(order["provider"])
+    items = order_request_evidence(order)
     return connector.service.store.plan(connector.service.settings, items, mode="manual",
                                         order_evidence=items, reviewer=reviewer)
 
@@ -299,6 +307,27 @@ def _assisted_request(order, request, engine_factory, root, allowed):
         if not any(row["id"] == rid for row in linked_requests(current)):
             raise ValueError("La solicitud no está íntegramente vinculada al pedido.")
         return build_connector(provider)
+
+    if request["mode"] == LUXOTTICA_ORDER_MODE and request["state"] == NEEDS_REVIEW:
+        def reconciliation_fields():
+            status = st.radio("Resultado comprobado en Luxottica", ("Aceptada", "No enviada"), index=None)
+            reference = st.text_input("Referencia o evidencia observada en el portal")
+            return status, reference.strip()
+
+        def reconcile(reviewer, value):
+            status, reference = value
+            if status is None or not reference:
+                raise ValueError("Falta evidencia de la comprobación")
+            store = connector_checked().service.store
+            if status == "Aceptada":
+                store.transition(rid, PENDING, expect=NEEDS_REVIEW,
+                                 detail=f"{LUXOTTICA_CONFIRMATION_PREFIX}{reference} · {reviewer}")
+            else:
+                store.transition(rid, READY, expect=NEEDS_REVIEW,
+                                 detail=f"No enviada · {reference} · {reviewer}")
+            st.success("Resultado de Luxottica registrado.")
+
+        _confirm(f"luxottica_reconcile_{rid}", "Registrar resultado verificado", reconcile, reconciliation_fields)
 
     if st.button("Preparar listado de la solicitud", key=f"bulk_codes_{rid}"):
         connector = build_connector(provider)

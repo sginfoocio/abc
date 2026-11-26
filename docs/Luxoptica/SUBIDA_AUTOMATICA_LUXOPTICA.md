@@ -1,11 +1,9 @@
 # Envío de solicitudes Luxottica
 
-> **La subida automática no está habilitada ni debe utilizarse.** Esta guía sustituye las
-> instrucciones históricas de credenciales, Playwright y envío automático. No configures
-> credenciales del portal, no crees tareas de envío y no pruebes solicitudes reales sin
-> autorización específica.
+> Para el servicio de envío desde pedidos y sus verificaciones de puesta en marcha, consulta
+> [Envío programado desde pedidos de compra](./AUTOMATIZACION_SOLICITUD_IMAGENES.md#envío-programado-desde-pedidos-de-compra).
 
-## Flujo actual
+## Envío asistido desde Masterdata
 
 1. En MASTERDATA, revisa la vista previa de solicitudes y confirma únicamente EAN válidos,
    ausentes de imágenes y sin una solicitud activa.
@@ -18,5 +16,5 @@
    [guía del flujo actual](./AUTOMATIZACION_SOLICITUD_IMAGENES.md) y la
    [política de validación local Cloud](../CLOUD_LOCAL_VALIDATION.md).
 
-La app no envía lotes al portal. Si el resultado de un envío remoto es ambiguo, no lo reenvíes:
+Desde Masterdata el envío sigue siendo manual. Si el resultado de un envío remoto es ambiguo, no lo reenvíes:
 solicita reconciliación con evidencia antes de preparar otra solicitud.

@@ -104,6 +104,7 @@ COPY check_pedidos_vigilados.py .
 COPY run_alerta_pedidos.py .
 COPY order_alerts.py .
 COPY luxoptica_auto_upload.py .
+COPY luxottica_config.py luxottica_order_scheduler.py .
 COPY poll_luxoptica_mail.py .
 COPY service_stop.py .
 
