@@ -10,16 +10,76 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def compose_config(*files: str) -> dict:
+def compose_config(*files: str, profiles: tuple[str, ...] = ()) -> dict:
     if not shutil.which("docker"):
         pytest.skip("Docker Compose unavailable; parsed configuration validated in CI")
     command = ["docker", "compose"]
+    for profile in profiles:
+        command.extend(["--profile", profile])
     for file in files:
         command.extend(["-f", str(ROOT / file)])
     command.extend(["config", "--format", "json"])
     result = subprocess.run(command, cwd=ROOT, env={**os.environ, "STAGING_IMAGE": "synthetic:test"},
                             check=True, capture_output=True, text=True)
     return json.loads(result.stdout)
+
+
+@pytest.mark.parametrize("separate_state", [False, True])
+def test_luxottica_sender_reads_catalog_from_mounted_state(tmp_path, monkeypatch, separate_state):
+    images = tmp_path / "images"
+    state = tmp_path / "state"
+    monkeypatch.setenv("IMAGE_REPOSITORY_HOST_ROOT", str(images))
+    monkeypatch.setenv("IMAGE_REPOSITORY_ROOT", "/app/repo/images")
+    monkeypatch.setenv("IMAGE_REPOSITORY_MOUNT_HOST_ROOT", "")
+    monkeypatch.setenv("IMAGE_REPOSITORY_MOUNT_ROOT", "")
+    if separate_state:
+        monkeypatch.setenv("IMAGE_REPOSITORY_STATE_HOST_ROOT", str(state))
+    else:
+        monkeypatch.setenv("IMAGE_REPOSITORY_STATE_HOST_ROOT", "")
+    service = compose_config("docker-compose.yml", profiles=("luxottica-sender",))["services"][
+        "abcd-luxottica-sender"]
+    catalog = next(volume for volume in service["volumes"] if volume["target"] == "/app/image-state")
+    assert service["environment"]["IMAGE_REPOSITORY_STATE_ROOT"] == catalog["target"]
+    assert Path(catalog["source"]) == (state if separate_state else images)
+    assert catalog["read_only"]
+    assert catalog.get("bind", {}).get("create_host_path", False) is False
+    image_volume = next(volume for volume in service["volumes"] if volume["target"] == "/app/repo/images")
+    assert Path(image_volume["source"]) == images and image_volume["read_only"]
+
+
+def test_luxottica_sender_mounts_entire_nfs_export_for_read_only_validation(tmp_path, monkeypatch):
+    monkeypatch.setenv("IMAGE_REPOSITORY_MOUNT_HOST_ROOT", str(tmp_path / "nas"))
+    monkeypatch.setenv("IMAGE_REPOSITORY_MOUNT_ROOT", "/nas")
+    monkeypatch.setenv("IMAGE_REPOSITORY_ROOT", "/nas/images")
+    monkeypatch.setenv("IMAGE_REPOSITORY_NFS_SOURCE", "nas:/export")
+    service = compose_config("docker-compose.yml", profiles=("luxottica-sender",))["services"][
+        "abcd-luxottica-sender"]
+    nas = next(volume for volume in service["volumes"] if volume["target"] == "/nas")
+    assert Path(nas["source"]) == tmp_path / "nas" and nas["read_only"]
+    assert service["environment"]["IMAGE_REPOSITORY_MOUNT_ROOT"] == "/nas"
+    assert service["environment"]["IMAGE_REPOSITORY_ROOT"] == "/nas/images"
+    assert service["environment"]["IMAGE_REPOSITORY_NFS_SOURCE"] == "nas:/export"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX entrypoint test")
+@pytest.mark.parametrize("command,read_only", [
+    (["python", "-B", "luxottica_order_scheduler.py"], True),
+    (["python", "poll_luxoptica_mail.py"], False),
+])
+def test_entrypoint_uses_read_only_guard_only_for_sender(tmp_path, command, read_only):
+    log = tmp_path / "calls"
+    python = tmp_path / "python"
+    python.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$CALLS"\n')
+    python.chmod(0o755)
+    env = {**os.environ, "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+           "CALLS": str(log), "IMAGE_REPOSITORY_NFS_SOURCE": "nas:/export"}
+    subprocess.run(["sh", str(ROOT / "scripts" / "cloud_image_entrypoint.sh"), *command],
+                   env=env, check=True, capture_output=True, text=True)
+    calls = log.read_text().splitlines()
+    assert len(calls) == 2 and calls[1] == " ".join(command[1:])
+    assert ("allow_read_only=True" in calls[0]) is read_only
+    assert ("check_backup_root" in calls[0]) is not read_only
+    assert ("open_catalog" in calls[0]) is read_only
 
 
 def test_only_image_writers_use_cloud_identity_in_preparation_override():

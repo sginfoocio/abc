@@ -41,6 +41,16 @@ def test_compose_template_sets_the_provider_root_on_the_data_volume():
     assert "./masterdata_data:/app/data" in compose
 
 
+def test_sender_compose_mounts_configured_catalog_directory_read_only():
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    sender = compose.split("  abcd-luxottica-sender:", 1)[1].split("  abcd-luxoptica-monitor:", 1)[0]
+    assert "IMAGE_REPOSITORY_STATE_ROOT: /app/image-state" in sender
+    assert "source: ${IMAGE_REPOSITORY_STATE_HOST_ROOT:-${IMAGE_REPOSITORY_HOST_ROOT:-./image_repository}}" in sender
+    assert "target: /app/image-state" in sender
+    assert "read_only: true" in sender
+    assert "create_host_path: false" in sender
+
+
 def test_requests_survive_recreating_the_container(tmp_path, monkeypatch):
     volume = tmp_path / "app" / "data"  # the persistent volume survives; the container filesystem does not
     monkeypatch.setenv("PROVIDER_DATA_ROOT", str(volume / "providers"))

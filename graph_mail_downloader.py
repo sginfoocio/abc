@@ -5,11 +5,13 @@ from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
+from itertools import chain
 from pathlib import Path
 import tempfile
 import json
 import os
 import re
+import sqlite3
 import time
 import zipfile
 from typing import Any, Callable
@@ -28,7 +30,9 @@ import hashlib
 from image_naming import sanitize_filename as _sanitize_filename
 from image_naming import market_view_from_image_name as _market_view_from_image_name
 from image_work_storage import work_root, check_work_root, require_capacity, archive_limit, incoming_lock, positive_setting
+from provider_images import LUXOTTICA_CONFIRMATION_PREFIX, LUXOTTICA_ORDER_MODE
 from service_stop import checkpoint, request_timeout, acquire, database_options
+from provider_order_policy import provider_data_root
 
 
 M365_TENANT_ID_ENV = "M365_TENANT_ID"
@@ -482,24 +486,58 @@ def _image_model_color_key(file_name: str) -> tuple[str, str] | None:
     return model, color
 
 
+def _confirmed_order_products():
+    path = provider_data_root() / "provider_requests.sqlite"
+    if not path.is_file():
+        return
+    with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)) as connection:
+        connection.execute("PRAGMA query_only=ON")
+        if not connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='request_source_evidence'"
+        ).fetchone():
+            return
+        rows = connection.execute("""
+            SELECT DISTINCT s.evidence
+            FROM request_source_evidence s JOIN requests r ON r.id=s.request_id
+            WHERE s.source='odoo' AND r.provider='luxottica' AND r.mode=?
+              AND EXISTS (
+                SELECT 1 FROM events e WHERE e.request_id=r.id AND e.to_state IN ('submitted', 'pending')
+                  AND e.detail LIKE ?
+              )
+        """, (LUXOTTICA_ORDER_MODE, LUXOTTICA_CONFIRMATION_PREFIX + "%"))
+        for (payload,) in rows:
+            item = json.loads(payload)
+            yield {"modelo": item["model"], "color": item["color"], "ean": item["ean"],
+                   "product_id": item.get("product_id")}
+
+
 def _load_eans_by_image_key() -> dict[tuple[str, str], str]:
-    """Carga la relacion modelo/color/EAN de los manifiestos de solicitudes."""
+    """Carga la relación modelo/color/EAN de manifiestos y envíos confirmados."""
     manifest_root = Path(__file__).resolve().parent / "docs" / "Luxoptica"
     matches: dict[tuple[str, str], set[str]] = {}
-    for manifest_path in manifest_root.glob("upc-products-images-request-*.manifest.json"):
-        try:
-            products = json.loads(manifest_path.read_text(encoding="utf-8")).get("products", [])
-        except (OSError, json.JSONDecodeError):
-            continue
-        for product in products:
-            key = (
-                _normalize_image_key(product.get("modelo", ""), remove_initial_zero=True),
-                _normalize_image_key(product.get("color", "")),
-            )
-            ean = str(product.get("ean", "")).strip()
-            if key[0] and key[1] and ean:
-                matches.setdefault(key, set()).add(ean)
-    return {key: next(iter(eans)) for key, eans in matches.items() if len(eans) == 1}
+    variants: dict[tuple[str, str], set[str]] = {}
+    unverified: set[tuple[str, str]] = set()
+    def manifest_products():
+        for manifest_path in manifest_root.glob("upc-products-images-request-*.manifest.json"):
+            try:
+                yield from json.loads(manifest_path.read_text(encoding="utf-8")).get("products", [])
+            except (OSError, json.JSONDecodeError):
+                continue
+
+    for product in chain(manifest_products(), _confirmed_order_products()):
+        key = (_normalize_image_key(product.get("modelo", ""), remove_initial_zero=True),
+               _normalize_image_key(product.get("color", "")))
+        ean = str(product.get("ean", "")).strip()
+        if key[0] and key[1] and ean:
+            matches.setdefault(key, set()).add(ean)
+            if "product_id" in product:
+                product_id = product["product_id"]
+                if product_id:
+                    variants.setdefault(key, set()).add(str(product_id))
+                else:
+                    unverified.add(key)
+    return {key: next(iter(eans)) for key, eans in matches.items()
+            if len(eans) == 1 and len(variants.get(key, ())) <= 1 and key not in unverified}
 
 
 def _get_market_ids_by_ean(eans: set[str]) -> dict[str, dict[str, str]]:
@@ -521,7 +559,10 @@ def _get_market_ids_by_ean(eans: set[str]) -> dict[str, dict[str, str]]:
             port=config.port,
             database=config.database,
         ),
-        connect_args=database_options(),
+        connect_args={
+            **database_options(), "connect_timeout": 5,
+            "options": "-c default_transaction_read_only=on -c statement_timeout=5000",
+        },
     )
     query = text(
         """

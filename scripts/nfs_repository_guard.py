@@ -13,7 +13,7 @@ def _unescape(value: str) -> str:
 
 
 def require_nfs(root: Path, source: str = EXPECTED_SOURCE,
-                mountinfo: Path = Path("/proc/self/mountinfo")) -> dict:
+                mountinfo: Path = Path("/proc/self/mountinfo"), *, allow_read_only: bool = False) -> dict:
     root = Path(os.path.abspath(root))
     if not root.is_dir() or root.resolve() != root:
         raise RuntimeError("NFS repository missing or symlinked; local fallback forbidden")
@@ -37,7 +37,11 @@ def require_nfs(root: Path, source: str = EXPECTED_SOURCE,
     if fields[3] != "/" or Path(_unescape(fields[4])) != root:
         raise RuntimeError("Image root must be the exact export mount, not a subdirectory")
     options = set(fields[5].split(",")) | set(filesystem[2].split(","))
-    if "rw" not in options or "ro" in options or "soft" in options or "softerr" in options:
+    if "soft" in options or "softerr" in options:
+        raise RuntimeError("Hard NFS mount required")
+    if not ({"ro", "rw"} & set(fields[5].split(","))):
+        raise RuntimeError("NFS mount access mode missing")
+    if not allow_read_only and ("rw" not in options or "ro" in options):
         raise RuntimeError("Writable hard NFS mount required")
     if "hard" not in options:
         raise RuntimeError("NFS hard option missing")
@@ -45,10 +49,11 @@ def require_nfs(root: Path, source: str = EXPECTED_SOURCE,
 
 
 def require_nfs_directory(root: Path, mount: Path, source: str,
-                          mountinfo: Path = Path("/proc/self/mountinfo")) -> dict:
+                          mountinfo: Path = Path("/proc/self/mountinfo"), *,
+                          allow_read_only: bool = False) -> dict:
     """Allow a canonical child, but never a symlink or nested bind/overmount."""
     root, mount = Path(os.path.abspath(root)), Path(os.path.abspath(mount))
-    receipt = require_nfs(mount, source, mountinfo)
+    receipt = require_nfs(mount, source, mountinfo, allow_read_only=allow_read_only)
     if root.resolve() != root or not root.is_dir() or mount not in root.parents:
         raise RuntimeError("NFS child missing, aliased or outside the expected mount")
     for line in mountinfo.read_text(encoding="utf-8").splitlines():

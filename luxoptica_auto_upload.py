@@ -6,14 +6,130 @@ Automatiza: Login → Ir a Imágenes → Cargar fichero → Enviar solicitud
 
 from pathlib import Path
 from datetime import datetime
+from hashlib import sha256
 import sys
 import time
 import re
 from tempfile import TemporaryDirectory
 from image_repository import ImageRepository
+from luxottica_config import LOGIN_HOST, PORTAL_HOST, PORTAL_URL, validate_portal_url
+from provider_images import LUXOTTICA_CONFIRMATION_PREFIX
+from urllib.parse import urlsplit
+
+CONFIRMATION = re.compile(
+    r"^(?:tu solicitud se ha enviado|su solicitud se ha enviado|your request has been sent"
+    r"|solicitud enviada|request sent)(?:[.!]|\s|$)", re.I
+)
+REVIEWED_IMAGE_NOTICE_SHA256 = "8d52805679b5bc7fc1c6f20dda27b8cee030d32a131384e8ce20522d76a4490e"
+
+
+class ViewTypeUnavailable(Exception):
+    pass
+
+
+class CookieConsentUnavailable(Exception):
+    pass
+
+
+class ImageNoticeUnverified(Exception):
+    pass
+
+
+class RecipientNotConfigured(Exception):
+    pass
+
+
+def write_luxottica_upload_file(path: Path, codes: list[str]) -> None:
+    path.write_bytes(("\r\n".join(codes) + "\r\n").encode("ascii"))
+
+
+def _choose_all_views(page, ean_file, timeout_error):
+    views = page.get_by_text(re.compile(r"^todas las vistas$|^all views$", re.I))
+    page.locator("input[type='file']").set_input_files(str(ean_file.resolve()))
+    page.get_by_role("button", name=re.compile(r"^continuar$|^continue$", re.I)).click()
+    try:
+        views.wait_for(state="visible", timeout=15000)
+    except timeout_error as error:
+        raise ViewTypeUnavailable from error
+    views.click()
+    page.get_by_role("heading", name=re.compile(r"^enviar solicitud$|^send request$", re.I)).wait_for(timeout=15000)
+
+
+def _legal_notice(page):
+    return page.get_by_role("button", name=re.compile(r"^acepto$|^i agree$|^aceptar y continuar$", re.I)).first
+
+
+def _pending_documents(page):
+    sign_documents = page.get_by_role("button", name=re.compile(r"^firmar ahora$|^sign now$", re.I)).first
+    return sign_documents.is_visible()
+
+
+def _pending_conditions(page):
+    return _pending_documents(page) or _legal_notice(page).is_visible()
+
+
+def _accept_cookie_consent(page, timeout_error):
+    notice = page.get_by_text(re.compile(
+        r"(?:utilizamos cookies necesarias|we use necessary cookies).*"
+        r"(?:cookies opcionales|optional cookies)", re.I | re.S
+    )).first
+    if not notice.is_visible():
+        return
+
+    accept = notice.locator("xpath=../..").get_by_role(
+        "button", name=re.compile(r"^aceptar$|^accept$", re.I)
+    )
+    if accept.count() != 1 or not accept.is_visible():
+        raise CookieConsentUnavailable
+    try:
+        accept.click(timeout=10000)
+        notice.wait_for(state="hidden", timeout=10000)
+    except timeout_error as error:
+        raise CookieConsentUnavailable from error
+
+
+def _accept_reviewed_image_notice(page, timeout_error):
+    heading = page.get_by_role("heading", name="Aviso legal de descarga de recursos digitales", exact=True)
+    if heading.count() == 0:
+        return
+    if heading.count() != 1 or not heading.is_visible():
+        raise ImageNoticeUnverified
+    notice = heading.locator("xpath=../..")
+    text = " ".join(notice.inner_text().split())
+    if sha256(text.encode("utf-8")).hexdigest() != REVIEWED_IMAGE_NOTICE_SHA256:
+        raise ImageNoticeUnverified
+    accept = notice.get_by_role("button", name=re.compile(r"^acepto$", re.I))
+    if accept.count() != 1 or not accept.is_visible() or not accept.is_enabled():
+        raise ImageNoticeUnverified
+    try:
+        accept.click(timeout=10000)
+        heading.wait_for(state="hidden", timeout=10000)
+    except timeout_error as error:
+        raise ImageNoticeUnverified from error
+
+
+def _ensure_recipient(page, email_destino, timeout_error):
+    email_inputs = page.get_by_role("textbox", name=re.compile(r"dirección de email|email address", re.I))
+    add_email = page.get_by_role("button", name=re.compile(r"^añadir dirección de email$|^add email address$", re.I))
+    save = page.get_by_role("button", name=re.compile(r"^guardar$|^save$", re.I))
+    try:
+        if email_destino not in [field.input_value() for field in email_inputs.all()]:
+            add_email.click(timeout=15000)
+            editable = [field for field in email_inputs.all() if field.is_editable()]
+            if len(editable) != 1:
+                raise RecipientNotConfigured
+            editable[0].fill(email_destino)
+        if save.is_visible():
+            save.click(timeout=15000)
+        add_email.wait_for(state="visible", timeout=15000)
+    except timeout_error as error:
+        raise RecipientNotConfigured from error
+    if save.is_visible() or email_destino not in [field.input_value() for field in email_inputs.all()]:
+        raise RecipientNotConfigured
+
 
 def upload_to_luxoptica(
-    url: str = "https://portal.luxottica.com/",
+    url: str = PORTAL_URL,
     username: str = "",
     password: str = "",
     ean_file: Path | None = None,
@@ -30,7 +146,7 @@ def upload_to_luxoptica(
 
 
 def _prepare_luxoptica_upload(
-    url: str = "https://portal.luxottica.com/",
+    url: str = PORTAL_URL,
     username: str = "",
     password: str = "",
     ean_file: Path | None = None,
@@ -59,7 +175,7 @@ def _prepare_luxoptica_upload(
         return True, "Todas las vistas ya disponibles; solicitud reutilizada sin acceso al portal."
     with TemporaryDirectory(prefix="luxoptica-request-") as directory:
         request = Path(directory) / ean_file.name
-        request.write_text("\n".join(pending) + "\n", encoding="utf-8")
+        write_luxottica_upload_file(request, pending)
         return _upload_to_luxoptica(url, username, password, request, email_destino,
                                    headless, keep_browser_open)
 
@@ -72,6 +188,9 @@ def _upload_to_luxoptica(
     email_destino: str,
     headless: bool,
     keep_browser_open: bool,
+    *,
+    preview_only: bool = False,
+    before_send=None,
 ) -> tuple[bool, str]:
     """
     Automatiza la subida de fichero a Luxoptica.
@@ -111,11 +230,13 @@ def _upload_to_luxoptica(
     if not ean_file.exists():
         return False, f"Fichero no existe: {ean_file}"
     
+    clicked = False
     try:
+        validate_portal_url(url)
         with sync_playwright() as playwright:
             print(f"\n🌐 Iniciando navegador...")
             browser = playwright.chromium.launch(headless=headless)
-            page = browser.new_page()
+            page = browser.new_page(viewport={"width": 1600, "height": 1200})
 
             def _count(selector: str) -> int:
                 try:
@@ -161,6 +282,8 @@ def _upload_to_luxoptica(
                 browser.close()
                 return False, "No se encontró campo de usuario en el login"
             
+            if urlsplit(page.url).hostname != LOGIN_HOST:
+                return False, "dominio_de_autenticacion_inesperado"
             username_field.fill(username)
             
             # El portal muestra la contraseña después de CONTINUE.
@@ -190,6 +313,8 @@ def _upload_to_luxoptica(
                 browser.close()
                 return False, "No se encontró campo de contraseña después de CONTINUE"
 
+            if urlsplit(page.url).hostname != LOGIN_HOST:
+                return False, "dominio_de_autenticacion_inesperado"
             page.fill(password_field, password)
 
             # Enviar formulario una sola vez.
@@ -206,36 +331,12 @@ def _upload_to_luxoptica(
             except PlaywrightTimeoutError:
                 pass
             time.sleep(5)
-            print(f"   URL tras login: {page.url}")
+            if urlsplit(page.url).hostname != PORTAL_HOST:
+                return False, "sesion_no_verificada"
+            _accept_cookie_consent(page, PlaywrightTimeoutError)
+            if _pending_conditions(page):
+                return False, "condiciones_pendientes"
 
-            # El portal puede mostrar un aviso legal antes de habilitar el menú.
-            print("📜 Comprobando aviso legal...")
-            legal_labels = [
-                "Aceptar",
-                "Acepto",
-                "Aceptar y continuar",
-                "Accept",
-                "I agree",
-                "Agree",
-                "Continue",
-            ]
-            legal_accepted = False
-            for _ in range(10):
-                for label in legal_labels:
-                    try:
-                        target = page.get_by_role("button", name=re.compile(re.escape(label), re.I)).first
-                        if target.count() > 0 and target.is_visible():
-                            target.click(timeout=10000)
-                            legal_accepted = True
-                            time.sleep(3)
-                            break
-                    except Exception:
-                        continue
-                if legal_accepted:
-                    print("   Aviso legal aceptado")
-                    break
-                time.sleep(1)
-            
             # 3. Navegar a Imágenes de Producto
             print(f"📸 Navegando a sección de Imágenes...")
             
@@ -267,172 +368,53 @@ def _upload_to_luxoptica(
             page.wait_for_load_state("domcontentloaded", timeout=30000)
             time.sleep(3)
 
-            # La primera entrada en Imágenes de producto muestra este aviso legal.
-            legal_accept = page.get_by_role(
-                "button", name=re.compile(r"acepto|accept|i agree", re.I)
-            ).first
-            try:
-                if legal_accept.count() > 0 and legal_accept.is_visible():
-                    print("📜 Aceptando aviso legal de recursos digitales...")
-                    checkboxes = page.locator("input[type='checkbox']")
-                    if checkboxes.count() > 0 and not checkboxes.first.is_checked():
-                        checkboxes.first.check()
-                    legal_accept.click(timeout=15000)
-                    time.sleep(3)
-            except Exception as error:
-                browser.close()
-                return False, f"No se pudo aceptar el aviso legal de imágenes: {error}"
-            
-            # 4. Subir fichero
-            print(f"📤 Subiendo fichero: {ean_file.name}")
-            
-            # Buscar input file
-            file_inputs = page.locator("input[type='file']")
-            if _count("input[type='file']") > 0:
-                file_inputs.first.set_input_files(str(ean_file.absolute()))
-                time.sleep(2)
-            else:
-                print(f"⚠️  No se encontró campo de fichero")
-                print(f"   URL actual: {page.url}")
-                print(f"   Título: {page.title()}")
-                browser.close()
-                return False, (
-                    "Login correcto, pero no se encontró el formulario de carga "
-                    f"en {page.url}"
-                )
+            _accept_cookie_consent(page, PlaywrightTimeoutError)
+            if _pending_documents(page):
+                return False, "condiciones_pendientes"
+            _accept_reviewed_image_notice(page, PlaywrightTimeoutError)
+            if _pending_conditions(page):
+                return False, "condiciones_pendientes"
 
-            # Tras cargar el fichero, el portal exige avanzar al paso "Ver tipo".
-            continue_after_upload = page.get_by_role(
-                "button", name=re.compile(r"^continuar$|^continue$|^next$", re.I)
-            ).last
-            try:
-                continue_after_upload.click(timeout=15000)
-                time.sleep(4)
-            except Exception as error:
-                browser.close()
-                return False, f"No se pudo continuar después de cargar el fichero: {error}"
-            
-            # 5. Seleccionar "Todas las vistas"
-            print(f"✓ Seleccionando opciones...")
-            time.sleep(3)
-            all_views_candidates = [
-                page.get_by_text(re.compile(r"todas las vistas", re.I)).first,
-                page.locator("button:has-text('TODAS LAS VISTAS')").first,
-                page.locator("[role='button']:has-text('TODAS LAS VISTAS')").first,
-                page.locator("text=/todas las vistas/i").first,
-            ]
-            try:
-                all_views = next(
-                    candidate for candidate in all_views_candidates
-                    if candidate.count() > 0 and candidate.is_visible()
-                )
-                all_views.click(timeout=15000)
-                time.sleep(4)
-            except Exception as error:
-                browser.close()
-                return False, f"No se pudo seleccionar Todas las vistas: {error}"
-            
+            _choose_all_views(page, ean_file, PlaywrightTimeoutError)
+
             # 6. Especificar email
             print(f"📧 Configurando email: {email_destino}")
 
-            # El portal deja info@diagonaleyewear.com por defecto y exige
-            # añadir explícitamente cada dirección adicional.
-            if _count(f"text={email_destino}") == 0:
-                add_email = page.get_by_text(
-                    re.compile(r"añadir dirección de email|add email address", re.I)
-                ).first
-                try:
-                    add_email.click(timeout=15000)
-                    time.sleep(1)
-                except Exception as error:
-                    browser.close()
-                    return False, f"No se pudo añadir la dirección de email: {error}"
-
-                email_inputs = page.locator("input[type='email'], input[name*='email' i]")
-                if email_inputs.count() == 0:
-                    browser.close()
-                    return False, "No apareció el campo para añadir la dirección de email"
-                email_inputs.last.fill(email_destino)
-                time.sleep(1)
+            _ensure_recipient(page, email_destino, PlaywrightTimeoutError)
             
-            # 7. Enviar solicitud
-            print(f"🚀 Enviando solicitud...")
-
-            submit_candidates = [
-                page.locator("button:has-text('ENVIAR SOLICITUD')").last,
-                page.locator("button:has-text('Enviar solicitud')").last,
-                page.locator("button:has-text('Send request')").last,
-                page.locator("button, [role='button'], input[type='submit']").filter(
-                    has_text=re.compile(r"enviar solicitud|send request|submit", re.I)
-                ).last,
-                page.get_by_role("button", name=re.compile(r"enviar solicitud|send request|submit", re.I)).last,
-                page.get_by_text(re.compile(r"^enviar solicitud$|^send request$|^submit$", re.I)).last,
-            ]
-
-            submit_button = None
-            for candidate in submit_candidates:
-                try:
-                    if candidate.count() > 0:
-                        for i in range(candidate.count()):
-                            loc = candidate.nth(i)
-                            if loc.is_visible() and loc.is_enabled():
-                                submit_button = loc
-                                break
-                    if submit_button is not None:
-                        break
-                except Exception:
-                    continue
-
-            if submit_button is None:
-                browser.close()
-                return False, "No se encontró el botón Enviar solicitud"
-
-            print("   Pulsando ENVIAR SOLICITUD...")
-            submit_button.scroll_into_view_if_needed()
-            submit_button.click(timeout=25000, force=True)
-            time.sleep(3)
-            
-            # Verificar éxito
-            success_indicators = [
-                "text=/tu solicitud se ha enviado/i",
-                "text=/your request has been sent/i",
-                "text='solicitud enviada'",
-                "text='request sent'",
-                "text='éxito'",
-                "text='success'",
-            ]
-            
-            for indicator in success_indicators:
-                if _count(indicator) > 0:
-                    if keep_browser_open:
-                        print("\n✅ Confirmación visible en el portal.")
-                        print("   El navegador queda abierto para revisión. Pulsa Ctrl+C para terminar.")
-                        try:
-                            page.wait_for_event("close", timeout=600000)
-                        except KeyboardInterrupt:
-                            pass
-                        except PlaywrightTimeoutError:
-                            pass
-                    browser.close()
-                    return True, f"✅ Solicitud enviada exitosamente a {email_destino}"
-            
-            # Si no vemos confirmación clara, asumimos que funcionó
+            # Mark even a click timeout as uncertain; the click may already have reached the server.
+            send = page.get_by_role("button", name=re.compile(r"^enviar solicitud$|^send request$", re.I))
+            visible = [button for button in send.all() if button.is_visible() and button.is_enabled()]
+            if not visible or urlsplit(page.url).hostname != PORTAL_HOST:
+                return False, "boton_envio_no_identificado"
+            confirmation = page.get_by_text(CONFIRMATION).first
+            if confirmation.is_visible():
+                return False, "confirmacion_preexistente"
+            if preview_only:
+                return True, "Vista previa lista sin enviar"
+            if before_send is not None and not before_send():
+                return False, "configuracion_cambiada_antes_del_envio"
+            clicked = True
+            visible[-1].click(timeout=15000)
+            confirmation.wait_for(state="visible", timeout=20000)
+            if urlsplit(page.url).hostname != PORTAL_HOST:
+                return False, "envio_sin_confirmacion"
             if keep_browser_open:
-                print("\n⚠️  No se detectó texto de confirmación automáticamente.")
-                print("   El navegador queda abierto para comprobar el resultado. Pulsa Ctrl+C para terminar.")
                 try:
                     page.wait_for_event("close", timeout=600000)
-                except KeyboardInterrupt:
+                except (KeyboardInterrupt, PlaywrightTimeoutError):
                     pass
-                except PlaywrightTimeoutError:
-                    pass
-            browser.close()
-            return True, f"✅ Proceso completado. Verifica la confirmación en el portal."
-            
-    except PlaywrightTimeoutError as e:
-        return False, f"Timeout en la carga: {e}"
-    except Exception as e:
-        return False, f"Error: {e}"
+            return True, LUXOTTICA_CONFIRMATION_PREFIX + " ".join(confirmation.inner_text().split())[:200]
+    except ViewTypeUnavailable:
+        return False, "ver_tipo_sin_todas_las_vistas"
+    except CookieConsentUnavailable:
+        return False, "cookie_consent_no_resuelto"
+    except ImageNoticeUnverified:
+        return False, "condiciones_pendientes"
+    except RecipientNotConfigured:
+        return False, "correo_destino_no_configurable"
+    except Exception:
+        return False, "envio_sin_confirmacion" if clicked else "preparacion_portal_fallida"
 
 
 def main():
@@ -448,7 +430,7 @@ def main():
     
     username = os.getenv("LUXOPTICA_USERNAME", "").strip()
     password = os.getenv("LUXOPTICA_PASSWORD", "").strip()
-    url = os.getenv("LUXOPTICA_URL", "https://portal.luxottica.com/").strip()
+    url = os.getenv("LUXOPTICA_URL", PORTAL_URL).strip()
     email = os.getenv("LUXOPTICA_REQUEST_EMAIL", "images@diagonaleyewear.com").strip()
     headless = os.getenv("LUXOPTICA_HEADLESS", "true").strip().lower() not in {"0", "false", "no"}
     keep_browser_open = os.getenv("LUXOPTICA_KEEP_BROWSER_OPEN", "false").strip().lower() in {"1", "true", "yes"}
@@ -458,7 +440,7 @@ def main():
         print(f"\n   Configura en .env:")
         print(f"   LUXOPTICA_USERNAME=tu_usuario")
         print(f"   LUXOPTICA_PASSWORD=tu_contraseña")
-        print(f"   LUXOPTICA_URL=https://portal.luxottica.com/")
+        print(f"   LUXOPTICA_URL={PORTAL_URL}")
         print(f"   LUXOPTICA_REQUEST_EMAIL=images@diagonaleyewear.com")
         return 1
     

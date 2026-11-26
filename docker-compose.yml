@@ -21,6 +21,14 @@ x-graph-env: &graph-env
   M365_CLIENT_SECRET: ${M365_CLIENT_SECRET}
   M365_MAILBOX: ${M365_MAILBOX}
 
+x-luxottica-env: &luxottica-env
+  LUXOPTICA_URL: ${LUXOPTICA_URL:-}
+  LUXOPTICA_USERNAME: ${LUXOPTICA_USERNAME:-}
+  LUXOPTICA_PASSWORD: ${LUXOPTICA_PASSWORD:-}
+  LUXOPTICA_REQUEST_EMAIL: ${LUXOPTICA_REQUEST_EMAIL:-}
+  LUXOPTICA_ENCRYPTION_KEY: ${LUXOPTICA_ENCRYPTION_KEY:-}
+  LUXOPTICA_ENCRYPTION_KEY_FILE: ${LUXOPTICA_ENCRYPTION_KEY_FILE:-}
+
 x-order-alert-env: &order-alert-env
   ALERT_RECIPIENT_EMAIL: ${ALERT_RECIPIENT_EMAIL}
   ORDER_ALERT_STATE_PATH: ${ORDER_ALERT_STATE_PATH:-/app/data/order_alerts.sqlite3}
@@ -40,7 +48,7 @@ services:
     ports:
       - "8501:8501"
     environment:
-      <<: [*odoo-env, *graph-env, *order-alert-env]
+      <<: [*odoo-env, *graph-env, *order-alert-env, *luxottica-env]
       APP_USERNAME: ${APP_USERNAME}
       APP_PASSWORD: ${APP_PASSWORD}
       MASTERDATA_USERNAME: ${MASTERDATA_USERNAME}
@@ -61,12 +69,6 @@ services:
       PROVIDER_DATA_ROOT: /app/data/providers
       KERING_ENCRYPTION_KEY: ${KERING_ENCRYPTION_KEY:-}
       KERING_ENCRYPTION_KEY_FILE: ${KERING_ENCRYPTION_KEY_FILE:-}
-
-      # Luxoptica (subida/descarga automática)
-      LUXOPTICA_URL: ${LUXOPTICA_URL}
-      LUXOPTICA_USERNAME: ${LUXOPTICA_USERNAME}
-      LUXOPTICA_PASSWORD: ${LUXOPTICA_PASSWORD}
-      LUXOPTICA_REQUEST_EMAIL: ${LUXOPTICA_REQUEST_EMAIL}
 
       # Configuración de Streamlit
       STREAMLIT_SERVER_HEADLESS: "true"
@@ -112,6 +114,40 @@ services:
     networks:
       - abcd-network
 
+  abcd-luxottica-sender:
+    profiles: ["luxottica-sender"]
+    image: ${ABCD_IMAGE_REF:-abcd-control:local}
+    command: ["python", "-B", "luxottica_order_scheduler.py"]
+    environment:
+      <<: [*odoo-env, *luxottica-env]
+      IMAGE_REPOSITORY_ROOT: ${IMAGE_REPOSITORY_ROOT:-/app/repo/images}
+      IMAGE_REPOSITORY_STATE_ROOT: /app/image-state
+      IMAGE_REPOSITORY_MOUNT_ROOT: ${IMAGE_REPOSITORY_MOUNT_ROOT:-}
+      IMAGE_REPOSITORY_NFS_SOURCE: ${IMAGE_REPOSITORY_NFS_SOURCE:-}
+      KERING_DATA_ROOT: /app/data/kering
+      PROVIDER_DATA_ROOT: /app/data/providers
+      KERING_ENCRYPTION_KEY: ${KERING_ENCRYPTION_KEY:-}
+      KERING_ENCRYPTION_KEY_FILE: ${KERING_ENCRYPTION_KEY_FILE:-}
+      PROCESS_ACTIVITY_PATH: /app/data/process_activity.sqlite3
+      TZ: Europe/Madrid
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ./masterdata_data:/app/data
+      - ${IMAGE_REPOSITORY_MOUNT_HOST_ROOT:-${IMAGE_REPOSITORY_HOST_ROOT:-./image_repository}}:${IMAGE_REPOSITORY_MOUNT_ROOT:-${IMAGE_REPOSITORY_ROOT:-/app/repo/images}}:ro
+      - type: bind
+        source: ${IMAGE_REPOSITORY_STATE_HOST_ROOT:-${IMAGE_REPOSITORY_HOST_ROOT:-./image_repository}}
+        target: /app/image-state
+        read_only: true
+        bind:
+          create_host_path: false
+      - ./luxoptica_data:/app/docs/Luxoptica:ro
+    restart: unless-stopped
+    stop_grace_period: 2m
+    healthcheck:
+      disable: true
+    networks:
+      - abcd-network
+
   abcd-luxoptica-monitor:
     build: *cloud-build
     image: ${ABCD_IMAGE_REF:-abcd-control:local}
@@ -130,6 +166,7 @@ services:
       - IMAGE_REPOSITORY_ROOT=${IMAGE_REPOSITORY_ROOT:-/app/repo/images}
       - PROCESS_ACTIVITY_PATH=/app/data/process_activity.sqlite3
       - MASTERDATA_DICTIONARY_PATH=${MASTERDATA_DICTIONARY_PATH:-/app/data/masterdata_dictionary.json}
+      - PROVIDER_DATA_ROOT=/app/data/providers
       - TZ=Europe/Madrid
       - PYTHONUNBUFFERED=1
     volumes:

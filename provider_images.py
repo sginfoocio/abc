@@ -48,6 +48,8 @@ TRANSITIONS = {
     IMPORTED: set(), PARTIAL: set(), FAILED: set(), CANCELLED: set(),
 }
 PROVIDERS = ("marcolin", "nuorder", "safilo", "luxottica")
+LUXOTTICA_ORDER_MODE = "automatic_order"
+LUXOTTICA_CONFIRMATION_PREFIX = "Confirmación de Luxottica: "
 VALID_VIEWS = {*IMAGE_CLASSIFICATIONS, "unknown"}
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 MANIFEST_NAMES = {"manifest.csv", "manifest.json", "metadata.csv", "metadata.json"}
